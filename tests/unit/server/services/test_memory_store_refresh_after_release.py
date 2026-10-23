@@ -33,6 +33,19 @@ COARSE_ALIAS = "cidx-meta"
 REFRESH_ALIAS = "cidx-meta-global"
 
 
+class _HolderInfo:
+    """The write lock manager view of the double: get_lock_info names the
+    current holder, as WriteLockManager.get_lock_info does."""
+
+    def __init__(self, scheduler: "_LockingScheduler") -> None:
+        self._scheduler = scheduler
+
+    def get_lock_info(self, alias: str) -> Optional[Dict[str, Any]]:
+        assert alias == COARSE_ALIAS
+        holder = self._scheduler.holder
+        return {"owner": holder} if holder is not None else None
+
+
 class _LockingScheduler:
     """Scheduler double with real write-lock state; records whether the
     lock was held at each refresh request."""
@@ -41,6 +54,7 @@ class _LockingScheduler:
         self.holder: Optional[str] = None
         self.lock_held_at_trigger: List[bool] = []
         self._duplicate = duplicate
+        self.write_lock_manager: Any = _HolderInfo(self)
 
     def is_write_locked(self, alias: str) -> bool:
         assert alias == COARSE_ALIAS

@@ -24,7 +24,10 @@ from code_indexer.global_repos.alias_lock_coordinator import AliasLockCoordinato
 from code_indexer.global_repos.cleanup_manager import CleanupManager
 from code_indexer.global_repos.query_tracker import QueryTracker
 from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
-from code_indexer.server.services.alias_lock_store.base import local_holder_identity
+from code_indexer.server.services.alias_lock_store.base import (
+    LockOutcome,
+    local_holder_identity,
+)
 from code_indexer.server.services.alias_lock_store.sqlite_store import (
     SqliteAliasLockStore,
 )
@@ -37,7 +40,14 @@ _JOIN_TIMEOUT_SECONDS = 30
 
 
 class _ReleaseFails(SqliteAliasLockStore):
-    def release_owned(self, lock_key, operation, *, owner_token):
+    def release_owned(
+        self,
+        lock_key: str,
+        operation: str,
+        *,
+        owner_token: str,
+        only_if_stale: bool = False,
+    ) -> LockOutcome:
         raise sqlite3.OperationalError("disk I/O error")
 
 
