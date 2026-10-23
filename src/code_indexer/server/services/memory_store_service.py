@@ -178,6 +178,9 @@ class MemoryStoreService:
         owner = self._owner_name(username)
 
         def _body() -> Dict[str, Any]:
+            if not self._rate_limiter.consume(username):
+                raise RateLimitError(f"Rate limit exceeded for user {username!r}")
+
             now_str = self._clock().isoformat()
             full_payload: Dict[str, Any] = {
                 **payload,
@@ -192,13 +195,8 @@ class MemoryStoreService:
             path = self._memory_path(memory_id)
             content_hash = self._run_with_coarse_lock(
                 owner,
-                self._rate_limited(
-                    username,
-                    lambda: atomic_write_memory_file(
-                        path,
-                        full_payload,
-                        catalog_root=self._config.memories_dir.parent,
-                    ),
+                lambda: atomic_write_memory_file(
+                    path, full_payload, catalog_root=self._config.memories_dir.parent
                 ),
             )
             return {"id": memory_id, "content_hash": content_hash, "path": str(path)}
@@ -226,6 +224,9 @@ class MemoryStoreService:
                     f"expected {expected_content_hash!r}, got {current_hash!r}",
                 )
 
+            if not self._rate_limiter.consume(username):
+                raise RateLimitError(f"Rate limit exceeded for user {username!r}")
+
             now_str = self._clock().isoformat()
             edit_dict = {**payload, "edited_by": username, "edited_at": now_str}
             validate_edit_payload(edit_dict, current_fm, self._config.max_summary_chars)
@@ -233,11 +234,8 @@ class MemoryStoreService:
             merged: Dict[str, Any] = {**current_fm, **edit_dict}
             content_hash = self._run_with_coarse_lock(
                 owner,
-                self._rate_limited(
-                    username,
-                    lambda: atomic_write_memory_file(
-                        path, merged, catalog_root=self._config.memories_dir.parent
-                    ),
+                lambda: atomic_write_memory_file(
+                    path, merged, catalog_root=self._config.memories_dir.parent
                 ),
             )
             return {"id": memory_id, "content_hash": content_hash, "path": str(path)}
@@ -264,27 +262,16 @@ class MemoryStoreService:
                     f"expected {expected_content_hash!r}, got {current_hash!r}",
                 )
 
-            self._run_with_coarse_lock(
-                owner,
-                self._rate_limited(username, lambda: atomic_delete_memory_file(path)),
-            )
+            if not self._rate_limiter.consume(username):
+                raise RateLimitError(f"Rate limit exceeded for user {username!r}")
+
+            self._run_with_coarse_lock(owner, lambda: atomic_delete_memory_file(path))
 
         self._run_with_per_memory_lock(memory_id, owner, _body)
 
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
-
-    def _rate_limited(self, username: str, write: Callable[[], _T]) -> Callable[[], _T]:
-        """*write*, preceded by taking *username*'s rate-limit token; run it
-        under the catalog lock, so a refused write spends no token."""
-
-        def _take_token_then_write() -> _T:
-            if not self._rate_limiter.consume(username):
-                raise RateLimitError(f"Rate limit exceeded for user {username!r}")
-            return write()
-
-        return _take_token_then_write
 
     def _owner_name(self, username: str) -> str:
         return f"{MEMORY_LOCK_OWNER_PREFIX}{self._hostname}/{username}"

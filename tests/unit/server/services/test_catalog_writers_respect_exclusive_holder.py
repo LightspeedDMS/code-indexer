@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any, Dict, Iterator
+from typing import Any, Dict, Iterator, List
 from unittest.mock import MagicMock
 
 import pytest
@@ -35,6 +35,7 @@ from code_indexer.server.services.memory_store_service import (
     ConflictError,
     MemoryStoreConfig,
     MemoryStoreService,
+    RateLimitError,
 )
 from code_indexer.server.services.xray_pattern_service import XrayPatternService
 from tests.fixtures.refresh_scheduler_stores import real_metadata_store
@@ -224,10 +225,18 @@ def test_xray_pattern_store_respects_the_holder(
         assert debouncer.signals == 1, "the piggybacked write was not owed"
 
 
-def test_a_refused_memory_write_keeps_the_rate_limit_token(
+MEMORY_PAYLOAD = {
+    "type": "architectural-fact",
+    "scope": "global",
+    "summary": "example fact",
+    "evidence": [{"commit": "abc123"}],
+}
+
+
+def _one_token_service(
     tmp_path: Path, scheduler: RefreshScheduler, debouncer: _CountingDebouncer
-) -> None:
-    service = MemoryStoreService(
+) -> MemoryStoreService:
+    return MemoryStoreService(
         config=MemoryStoreConfig(memories_dir=tmp_path / "memories"),
         lock_manager=MemoryFileLockManager(tmp_path / "memory-locks"),
         refresh_scheduler=scheduler,
@@ -237,19 +246,42 @@ def test_a_refused_memory_write_keeps_the_rate_limit_token(
         ),
         hostname="testhost",
     )
-    payload = {
-        "type": "architectural-fact",
-        "scope": "global",
-        "summary": "example fact",
-        "evidence": [{"commit": "abc123"}],
-    }
+
+
+def test_an_over_limit_memory_write_never_reaches_the_catalog_lock(
+    tmp_path: Path,
+    scheduler: RefreshScheduler,
+    debouncer: _CountingDebouncer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _one_token_service(tmp_path, scheduler, debouncer)
+    service.create_memory(MEMORY_PAYLOAD, username="carol")
+    attempts: List[str] = []
+    real_acquire = scheduler.acquire_write_lock
+
+    def _counting_acquire(alias: str, *args: Any, **kwargs: Any) -> bool:
+        attempts.append(alias)
+        return bool(real_acquire(alias, *args, **kwargs))
+
+    monkeypatch.setattr(scheduler, "acquire_write_lock", _counting_acquire)
+
+    with pytest.raises(RateLimitError):
+        service.create_memory(MEMORY_PAYLOAD, username="carol")
+
+    assert CATALOG not in attempts, "an over-limit write reached the catalog lock"
+
+
+def test_a_refused_memory_write_still_spends_its_token(
+    tmp_path: Path, scheduler: RefreshScheduler, debouncer: _CountingDebouncer
+) -> None:
+    service = _one_token_service(tmp_path, scheduler, debouncer)
     locks = scheduler.write_lock_manager
     assert locks.acquire(CATALOG, owner_name="mcp_write_mode")
     try:
         with pytest.raises(ConflictError):
-            service.create_memory(payload, username="carol")
+            service.create_memory(MEMORY_PAYLOAD, username="carol")
     finally:
         assert locks.release(CATALOG, owner_name="mcp_write_mode")
 
-    created = service.create_memory(payload, username="carol")
-    assert (tmp_path / "memories" / f"{created['id']}.md").exists()
+    with pytest.raises(RateLimitError):
+        service.create_memory(MEMORY_PAYLOAD, username="carol")
