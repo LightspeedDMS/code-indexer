@@ -56,13 +56,29 @@ def _sweep_stale_staging(staging_dir: Path) -> None:
         )
 
 
+def _drop_staged_name(tmp_path: str) -> None:
+    """Remove the staged name of a file already linked into the catalog."""
+    try:
+        os.unlink(tmp_path)
+    except OSError as exc:
+        # ^ why the target is in place; the staging sweep removes the leftover
+        logger.debug("write_catalog_file: staged name not removed: %s", exc)
+
+
 def write_catalog_file(
-    catalog_root: Path, target_path: Path, content: str, *, mode: int
+    catalog_root: Path,
+    target_path: Path,
+    content: str,
+    *,
+    mode: int,
+    exclusive: bool = False,
 ) -> bool:
     """Stage *content* outside *catalog_root*, fsync, and move it over
     *target_path* (a file inside the catalog; missing parents are created)
     with exactly *mode* -- each writer states its own, e.g. owner-only for
     memories, SHARED_CATALOG_FILE_MODE for descriptions and X-Ray patterns.
+    With *exclusive* the file is linked in instead and never replaces an
+    existing target: FileExistsError is raised and nothing is written.
 
     Returns False when the content is in place but its directory could not
     be fsync'd (logged): the caller then owes the refresh. Any failure before
@@ -82,7 +98,11 @@ def write_catalog_file(
             fh.write(content)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp_path, str(target_dir / target_path.name))
+        if exclusive:
+            os.link(tmp_path, str(target_dir / target_path.name))
+            _drop_staged_name(tmp_path)
+        else:
+            os.replace(tmp_path, str(target_dir / target_path.name))
     except BaseException:
         try:
             os.unlink(tmp_path)

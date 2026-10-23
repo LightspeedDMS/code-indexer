@@ -509,6 +509,10 @@ class TestOnRepoRemovedLockDiscipline:
         mock_scheduler = MagicMock()
         mock_scheduler.acquire_write_lock.return_value = False
         mock_scheduler.release_write_lock.return_value = None
+        # A cooperative writer holds it (an exclusive one parks the removal).
+        mock_scheduler.write_lock_manager.get_lock_info.return_value = {
+            "owner": "refresh_scheduler"
+        }
 
         original = hook_module._refresh_scheduler
         try:

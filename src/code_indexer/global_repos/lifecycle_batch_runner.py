@@ -5,7 +5,7 @@ Implements the one-call-per-repo lifecycle detection rebuild:
   - write_meta_md: cooperative-lock writer for cidx-meta/<alias>.md
   - LifecycleLockUnavailableError: raised when write lock cannot be acquired
   - _validate_alias: path-traversal guard
-  - _do_write: atomic write via tempfile.mkstemp + os.rename
+  - _do_write: atomic write staged outside cidx-meta (catalog_staged_write)
 
 The LifecycleBatchRunner class and LifecycleFleetScanner will be added in
 subsequent increments.
@@ -15,7 +15,6 @@ import logging as _logging
 import math
 import os
 import re
-import tempfile
 from concurrent.futures import as_completed
 
 from code_indexer.server.services.jittered_dispatcher import (
@@ -198,9 +197,8 @@ def _do_write(
 
     Algorithm:
       1. Render YAML frontmatter from *lifecycle_frontmatter*.
-      2. Write to a temporary file in *cidx_meta_path/* (same filesystem as
-         destination — required for atomic rename to work on Linux).
-      3. Rename temp → *meta_md_path* (atomic on POSIX).
+      2. Put it in place through catalog_staged_write.write_catalog_file:
+         staged outside cidx-meta, fsync'd, moved in whole at mode 0644.
 
     Raises:
         yaml.YAMLError: if lifecycle_frontmatter cannot be serialised to YAML.
@@ -222,22 +220,15 @@ def _do_write(
 
     content = f"---\n{frontmatter_yaml}---\n\n{body}\n"
 
-    cidx_meta_path.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(dir=str(cidx_meta_path))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(content)
-    except Exception:
-        # Best-effort cleanup: the original write exception is the real failure.
-        # If unlink also fails we discard that secondary OSError intentionally —
-        # the orphaned temp file is harmless and the caller sees the root cause.
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass  # Discard: cleanup is best-effort; original exception propagates
-        raise
+    from code_indexer.global_repos.catalog_staged_write import (
+        SHARED_CATALOG_FILE_MODE,
+        write_catalog_file,
+    )
 
-    os.rename(tmp_path, str(meta_md_path))
+    if not write_catalog_file(
+        cidx_meta_path, meta_md_path, content, mode=SHARED_CATALOG_FILE_MODE
+    ):
+        _logger.warning(f"Description {meta_md_path} written, not yet durable")
 
 
 # ---------------------------------------------------------------------------
@@ -267,8 +258,8 @@ def write_meta_md(
       - already_locked=True: assumes the caller already holds the lock;
         neither acquires nor releases it.
 
-    Atomic write: uses tempfile.mkstemp(dir=cidx-meta/) + os.rename so
-    readers never see a partial file.
+    Atomic write: staged outside cidx-meta and moved in whole
+    (catalog_staged_write), so readers never see a partial or temp file.
 
     Does NOT call cidx_meta_refresh_debouncer.signal_dirty — that is the
     caller's responsibility (Messi Rule #12 — Anti-Orphan-Code: the signal

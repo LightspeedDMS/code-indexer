@@ -172,12 +172,26 @@ class MetaDirectoryUpdater(UpdateStrategy):
                 desc_file = self.meta_dir / f"{alias}.md"
                 if not desc_file.exists():
                     # INVARIANT: cidx-meta filenames use SHORT alias ({alias}.md), NOT {alias}-global.md
-                    # Exclusive create: a real description written since the
-                    # check (registration writes it without the catalog lock
-                    # when the lock is busy) is never overwritten by a stub.
+                    # Exclusive create, staged outside the catalog: a real
+                    # description written since the check (a piggybacked
+                    # registration) is never overwritten by a stub.
+                    from .catalog_staged_write import (
+                        SHARED_CATALOG_FILE_MODE,
+                        write_catalog_file,
+                    )
+
                     try:
-                        with desc_file.open("x", encoding="utf-8") as fh:
-                            fh.write(f"# {alias}\n\nGolden repository: {alias}\n")
+                        if not write_catalog_file(
+                            self.meta_dir,
+                            desc_file,
+                            f"# {alias}\n\nGolden repository: {alias}\n",
+                            mode=SHARED_CATALOG_FILE_MODE,
+                            exclusive=True,
+                        ):
+                            logger.warning(
+                                "MetaDirectoryUpdater: %s created, not yet durable",
+                                desc_file,
+                            )
                     except FileExistsError:
                         logger.debug(
                             "MetaDirectoryUpdater: %s appeared since the check; "
