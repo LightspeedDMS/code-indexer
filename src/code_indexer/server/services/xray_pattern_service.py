@@ -147,6 +147,7 @@ class XrayPatternService:
 
     PATTERNS_DIR = "xray-patterns"
     ANY_SCOPE = "__any__"
+    SEED_PATTERN_NAMES = ("catch-rethrow", "deep-nesting")
 
     def __init__(
         self,
@@ -617,9 +618,8 @@ class XrayPatternService:
         any_dir = self._patterns_root / self.ANY_SCOPE
         seeds = [
             (any_dir / f"{stem}.yaml", content)
-            for stem, content in (
-                ("catch-rethrow", _SEED_CATCH_RETHROW),
-                ("deep-nesting", _SEED_DEEP_NESTING),
+            for stem, content in zip(
+                self.SEED_PATTERN_NAMES, (_SEED_CATCH_RETHROW, _SEED_DEEP_NESTING)
             )
         ]
         if all(target.exists() for target, _content in seeds):

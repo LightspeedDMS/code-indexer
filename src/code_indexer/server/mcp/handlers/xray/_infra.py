@@ -264,9 +264,13 @@ def _resolve_evaluator_code(
     allow_default_evaluator: bool = False,
     expected_execution_mode: Optional[str] = None,
     cidx_meta_path: Optional[Path] = None,
+    # Any: the RefreshScheduler, untyped to keep global_repos out of this import
+    refresh_scheduler: Optional[Any] = None,
 ) -> "tuple[str, Optional[Dict[str, Any]]]":
     """Resolve evaluator_code from pattern_name or raw evaluator_code --
-    see the comment immediately above for the full rationale."""
+    see the comment immediately above for the full rationale. A captured
+    worker path (*cidx_meta_path*) brings its own *refresh_scheduler*, so
+    seed writes take the catalog lock there too."""
     global _seeds_ensured
 
     raw_evaluator_code: str = params.get("evaluator_code") or ""
@@ -294,15 +298,17 @@ def _resolve_evaluator_code(
         svc = XrayPatternService(
             cidx_meta,
             refresh_scheduler=(
-                None
+                refresh_scheduler
                 if cidx_meta_path is not None
                 else _utils._get_app_refresh_scheduler()
             ),
         )
+        seeds_refused = False
         try:
             if not _seeds_ensured:
                 # ^ why False = refused under an exclusive catalog holder; retried next call
                 _seeds_ensured = svc.ensure_seed_patterns()
+                seeds_refused = not _seeds_ensured
             if expected_execution_mode is not None:
                 declared_mode = svc.get_pattern_execution_mode(repo_alias, pattern_name)
                 if declared_mode != expected_execution_mode:
@@ -326,6 +332,20 @@ def _resolve_evaluator_code(
             )
         except ValueError as exc:
             error_key = str(exc).split(":")[0]
+            if (
+                seeds_refused
+                and error_key == "pattern_not_found"
+                and pattern_name in XrayPatternService.SEED_PATTERN_NAMES
+            ):
+                return "", _mcp_response(
+                    {
+                        "error": "catalog_locked",
+                        "message": (
+                            f"seed pattern {pattern_name!r} is not in place yet: the "
+                            "cidx-meta catalog is briefly exclusive; retry shortly"
+                        ),
+                    }
+                )
             return "", _mcp_response({"error": error_key, "message": str(exc)})
         return (evaluator_code, None)
 

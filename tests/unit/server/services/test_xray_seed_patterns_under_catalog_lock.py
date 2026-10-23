@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import subprocess
 from pathlib import Path
-from typing import Any, List
+from typing import Any, Dict, List
 from unittest.mock import MagicMock
 
 import pytest
@@ -29,6 +29,10 @@ from code_indexer.server.services.xray_pattern_service import (
     XrayPatternService,
 )
 from tests.fixtures.refresh_scheduler_stores import real_metadata_store
+from tests.utils.catalog_lock_schedulers import (
+    CATALOG_LOCK_KINDS,
+    catalog_lock_scheduler,
+)
 
 CATALOG = "cidx-meta"
 SEEDS = [
@@ -159,42 +163,124 @@ def test_seeds_piggyback_on_a_cooperative_holder_without_committing(
         assert locks.release(CATALOG, owner_name="refresh_scheduler")
 
 
-PATTERN_YAML = """\
-name: my-pattern
-description: "A test pattern"
-language: java
-evaluator_code: |
-  fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { vec![] }
-"""
+SEED_SCAN = {"driver_regex": r"catch", "pattern_name": "catch-rethrow"}
+REPOS = [{"alias": "example-repo-global", "path": Path("/nonexistent")}]
 
 
-def test_xray_search_retries_seeds_until_they_are_in_place(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+@pytest.fixture(params=CATALOG_LOCK_KINDS)
+def batch_scheduler(
+    request: pytest.FixtureRequest,
+    tmp_path: Path,
+    triggers: List[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> RefreshScheduler:
     from code_indexer.server.mcp.handlers.xray import _infra
 
-    meta = tmp_path / CATALOG
-    (meta / "xray-patterns" / "__any__").mkdir(parents=True)
-    (meta / "xray-patterns" / "__any__" / "my-pattern.yaml").write_text(PATTERN_YAML)
-    outcomes = [False, True]
-    attempts: List[bool] = []
-
-    def _seeds(self: Any) -> bool:
-        attempts.append(True)
-        return outcomes.pop(0)
-
-    monkeypatch.setattr(XrayPatternService, "ensure_seed_patterns", _seeds)
+    real = catalog_lock_scheduler(str(request.param), tmp_path)
+    meta = Path(real.golden_repos_dir) / CATALOG
+    _git(meta, "init", "-q")
+    _git(meta, "config", "user.email", "test@example.com")
+    _git(meta, "config", "user.name", "Test")
+    (meta / "README.md").write_text("cidx-meta\n")
+    _git(meta, "add", "README.md")
+    _git(meta, "commit", "-q", "-m", "initial")
     monkeypatch.setattr(_infra, "_seeds_ensured", False)
+    return real
 
-    def _search() -> None:
-        code, _error = _infra._resolve_evaluator_code(
-            {"pattern_name": "my-pattern"}, "example-repo-global", cidx_meta_path=meta
+
+class _RecordingJobManager:
+    def __init__(self) -> None:
+        self.funcs: List[Any] = []
+
+    def submit_job(self, **kwargs: Any) -> str:
+        self.funcs.append(kwargs["func"])
+        return "job-1"
+
+
+def test_the_batch_door_hands_the_app_scheduler_to_its_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import datetime, timezone
+
+    from code_indexer.server.auth.user_manager import User, UserRole
+    from code_indexer.server.mcp.handlers import _utils, xray_batch
+
+    scheduler = object()
+    jobs = _RecordingJobManager()
+    handed: List[Any] = []
+    access = MagicMock()
+    access.is_admin_user.return_value = True
+    monkeypatch.setattr(_utils, "_get_app_refresh_scheduler", lambda: scheduler)
+    monkeypatch.setattr(xray_batch, "_get_access_filtering_service", lambda: access)
+    monkeypatch.setattr(xray_batch, "_resolve_repo_path", lambda alias: "/repos/x")
+    monkeypatch.setattr(xray_batch, "_get_arm_and_grm", lambda: (None, None))
+    monkeypatch.setattr(xray_batch, "_get_background_job_manager", lambda: jobs)
+    monkeypatch.setattr(xray_batch, "_get_cidx_meta_path", lambda: tmp_path)
+
+    def _spy_job(**kwargs: Any) -> Dict[str, Any]:
+        handed.append(kwargs.get("refresh_scheduler"))
+        return {}
+
+    monkeypatch.setattr(xray_batch, "_run_xray_batch_job", _spy_job)
+    user = User(
+        username="example-user",
+        password_hash="x",
+        role=UserRole.NORMAL_USER,
+        created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+    )
+
+    xray_batch.handle_xray_search_batch(
+        {"repository_alias": "example-repo-global", "scans": [SEED_SCAN]}, user
+    )
+    jobs.funcs[0](lambda *a, **k: None)
+
+    assert handed == [scheduler], "the batch job runs without the catalog lock"
+
+
+def test_the_batch_job_refuses_seeds_under_write_mode(
+    batch_scheduler: RefreshScheduler,
+) -> None:
+    from code_indexer.server.mcp.handlers import xray_batch
+    from code_indexer.server.mcp.handlers.xray import _infra
+
+    meta = Path(batch_scheduler.golden_repos_dir) / CATALOG
+    head = _git(meta, "rev-parse", "HEAD")
+    locks = batch_scheduler.write_lock_manager
+    assert locks.acquire(CATALOG, owner_name="mcp_write_mode")
+    try:
+        resolved = xray_batch._resolve_batch_evaluators(
+            REPOS, [SEED_SCAN], meta, batch_scheduler
         )
-        assert "evaluate_node" in code
+    finally:
+        assert locks.release(CATALOG, owner_name="mcp_write_mode")
 
-    _search()
-    assert _infra._seeds_ensured is False, "a refused seed write was latched as done"
-    _search()
+    code, error = resolved[("example-repo-global", 0)]
+    assert code == "" and error is not None
+    assert error.get("error") == "catalog_locked", error
+    assert not [s for s in SEEDS if (meta / s).exists()], "seeds written"
+    assert _git(meta, "rev-parse", "HEAD") == head, "seeds committed"
+    assert _infra._seeds_ensured is False, "a refused seed write was latched"
+
+
+def test_the_batch_job_piggybacks_seeds_on_a_refresh(
+    batch_scheduler: RefreshScheduler,
+) -> None:
+    from code_indexer.server.mcp.handlers import xray_batch
+    from code_indexer.server.mcp.handlers.xray import _infra
+
+    meta = Path(batch_scheduler.golden_repos_dir) / CATALOG
+    head = _git(meta, "rev-parse", "HEAD")
+    locks = batch_scheduler.write_lock_manager
+    assert locks.acquire(CATALOG, owner_name="refresh_scheduler")
+    try:
+        resolved = xray_batch._resolve_batch_evaluators(
+            REPOS, [SEED_SCAN], meta, batch_scheduler
+        )
+    finally:
+        assert locks.release(CATALOG, owner_name="refresh_scheduler")
+
+    code, error = resolved[("example-repo-global", 0)]
+    assert error is None and "evaluate_node" in code
+    assert all((meta / s).exists() for s in SEEDS)
+    assert _git(meta, "rev-parse", "HEAD") == head, "committed under a refresh"
     assert _infra._seeds_ensured is True
-    _search()
-    assert len(attempts) == 2

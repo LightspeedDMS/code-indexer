@@ -81,6 +81,7 @@ def resolve_batch_evaluator(
     scan: Dict[str, Any],
     repo_alias: str,
     cidx_meta_path: Path,
+    refresh_scheduler: Optional[object] = None,
 ) -> Tuple[str, Optional[Dict[str, Any]]]:
     """Resolve evaluator code for one scan bundle without live app state.
 
@@ -113,6 +114,7 @@ def resolve_batch_evaluator(
             allow_default_evaluator=True,
             expected_execution_mode="legacy",
             cidx_meta_path=cidx_meta_path,
+            refresh_scheduler=refresh_scheduler,
         )
     except Exception as exc:  # noqa: BLE001
         return (
@@ -282,6 +284,7 @@ def _resolve_batch_evaluators(
     resolved_repos: List[Dict[str, Any]],
     scans: List[Dict[str, Any]],
     cidx_meta_path: Path,
+    refresh_scheduler: Optional[object] = None,
 ) -> Dict[Tuple[str, int], Tuple[str, Optional[Dict[str, Any]]]]:
     """Pre-resolve resolve_batch_evaluator() for every (repo, scan) cell.
 
@@ -304,7 +307,7 @@ def _resolve_batch_evaluators(
     for repo in resolved_repos:
         for scan_index, scan in enumerate(scans):
             resolved[(repo["alias"], scan_index)] = resolve_batch_evaluator(
-                scan, repo["alias"], cidx_meta_path
+                scan, repo["alias"], cidx_meta_path, refresh_scheduler
             )
     return resolved
 
@@ -319,6 +322,7 @@ def _run_xray_batch_job(
     job_id: str,
     bjm: Any,
     progress_callback: Any,
+    refresh_scheduler: Optional[object] = None,
 ) -> Dict[str, Any]:
     """Execute the repos × scans matrix.
 
@@ -332,6 +336,8 @@ def _run_xray_batch_job(
         job_id: Job ID for cancellation checks.
         bjm: BackgroundJobManager instance for cancellation checks.
         progress_callback: Injected by BackgroundJobManager.
+        refresh_scheduler: Captured app refresh scheduler, so seed pattern
+            writes take the catalog lock.
 
     Returns:
         Unified result dict with matches, errors, evaluation_errors, counters,
@@ -367,7 +373,7 @@ def _run_xray_batch_job(
     # occur before every cell has been processed, regardless of how many
     # repos carry their own pattern override.
     resolved_evaluators = _resolve_batch_evaluators(
-        resolved_repos, scans, cidx_meta_path
+        resolved_repos, scans, cidx_meta_path, refresh_scheduler
     )
     distinct_sources = {
         code for code, cell_err in resolved_evaluators.values() if cell_err is None
@@ -824,6 +830,8 @@ def handle_xray_search_batch(
     captured_max_results = max_results
     captured_timeout = timeout_seconds
     captured_cidx_meta = cidx_meta
+    # Seed pattern writes in the worker take the catalog lock through it.
+    captured_scheduler = _utils._get_app_refresh_scheduler()
 
     # Story #2107 / Bug #2111: the job records the batch when its result is
     # known -- one row per repository it resolved (an alias it could not
@@ -862,6 +870,7 @@ def handle_xray_search_batch(
                 job_id=_jid[0] if _jid else "",
                 bjm=bjm,
                 progress_callback=progress_callback,
+                refresh_scheduler=captured_scheduler,
             ),
             cancel_check,
         )
