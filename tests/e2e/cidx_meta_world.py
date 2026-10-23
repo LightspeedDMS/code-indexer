@@ -817,6 +817,22 @@ def wait_for_catalog_refresh_covering(
     raise TimeoutError(f"no catalog refresh covered the source after {since}")
 
 
+_REFRESH_IN_PROGRESS = re.compile(
+    rf"Failed to activate repository '{CATALOG}' for user '[^']+': Cannot "
+    rf"activate golden repository '{CATALOG}': a refresh is currently in "
+    rf"progress for it \(Duplicate job: global_repo_refresh for "
+    rf"{CATALOG_GLOBAL} \(existing: ([0-9a-f-]+)\)\)\. Retry activation once "
+    r"the refresh completes\."
+)
+
+
+def refresh_in_progress_refusal(error: str) -> Optional[str]:
+    """The id of the catalog refresh that made an activation job fail with
+    the server's retryable refresh-in-progress refusal, else None."""
+    match = _REFRESH_IN_PROGRESS.fullmatch(error)
+    return match.group(1) if match else None
+
+
 def web_session(world: CatalogWorld, username: str, password: str) -> httpx.Client:
     """A fresh client (own cookie jar) logged in to the Web UI."""
     client = world.web_client_factory()

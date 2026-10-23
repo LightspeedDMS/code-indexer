@@ -379,3 +379,39 @@ class TestCoveringCatalogRefresh:
             )
         ]
         assert not covering_catalog_refresh(jobs, _SINCE)
+
+
+_REFRESH_JOB = "a1861217-845e-4cc7-8ea7-0405006e8d04"
+_REFUSAL = (
+    "Failed to activate repository 'cidx-meta' for user 'admin': Cannot "
+    "activate golden repository 'cidx-meta': a refresh is currently in "
+    "progress for it (Duplicate job: global_repo_refresh for "
+    f"cidx-meta-global (existing: {_REFRESH_JOB})). Retry activation once "
+    "the refresh completes."
+)
+
+
+class TestCatalogRefreshRefusal:
+    """The one activation failure the suite retries: the server's documented
+    refusal while a catalog refresh runs (a debounced catalog refresh the
+    job listing cannot show in advance may start at any time)."""
+
+    def test_refusal_names_the_blocking_refresh_job(self) -> None:
+        from tests.e2e.cidx_meta_world import refresh_in_progress_refusal
+
+        assert refresh_in_progress_refusal(_REFUSAL) == _REFRESH_JOB
+
+    def test_other_activation_failure_is_not_retried(self) -> None:
+        from tests.e2e.cidx_meta_world import refresh_in_progress_refusal
+
+        other = (
+            "Failed to activate repository 'cidx-meta' for user 'admin': "
+            "Cannot clone golden repository 'cidx-meta': write lock is already "
+            "held by another writer. Retry activation once it completes."
+        )
+        assert refresh_in_progress_refusal(other) is None
+
+    def test_empty_error_is_not_retried(self) -> None:
+        from tests.e2e.cidx_meta_world import refresh_in_progress_refusal
+
+        assert refresh_in_progress_refusal("") is None
