@@ -528,9 +528,9 @@ def on_repo_added(
 
 def put_repo_description(golden_repos_dir: str, repo_name: str, content: str) -> None:
     """Put *repo_name*'s description in cidx-meta through catalog admission
-    (taking the cidx-meta write lock when free -- Bug #1506 7th-pass review:
-    the module-level _refresh_scheduler is forwarded -- else under a
-    cooperative holder, else parked until an exclusive holder releases),
+    (taking the cidx-meta write lock through the module-level
+    _refresh_scheduler when free, else under a cooperative holder, else
+    parked until an exclusive holder releases),
     then request or owe the catalog refresh."""
     from code_indexer.global_repos.lifecycle_batch_runner import (
         LifecycleLockUnavailableError,

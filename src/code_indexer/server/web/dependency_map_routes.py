@@ -1510,11 +1510,11 @@ def _repair_execute(dep_map_service, output_dir: Path, activity_journal) -> bool
     """Run repair executor against the health report. Returns True on success."""
     try:
         executor = _build_repair_executor(dep_map_service, output_dir, activity_journal)
-        from ..services.dep_map_health_detector import DepMapHealthDetector
+        from ..services.dep_map_repair_admission import repair_under_catalog_admission
 
-        detector = DepMapHealthDetector()
-        health_report = detector.detect(output_dir, known_repos=_get_known_repo_names())
-        result = executor.execute(output_dir, health_report)
+        result = repair_under_catalog_admission(
+            dep_map_service, executor, output_dir, _get_known_repo_names()
+        )
         logger.info("Repair completed: %s", result.status)
         return True
     except Exception as e:

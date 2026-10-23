@@ -70,7 +70,15 @@ class IndexRegenerator:
         )
 
         index_path = output_dir / "_index.md"
-        index_path.write_text(content, encoding="utf-8")
+        from code_indexer.global_repos.catalog_staged_write import (
+            SHARED_CATALOG_FILE_MODE,
+            write_catalog_file,
+        )
+
+        # ^ why a False return (in place, dir fsync failed) is logged by the writer; every caller requests the catalog refresh after releasing
+        write_catalog_file(
+            output_dir.parent, index_path, content, mode=SHARED_CATALOG_FILE_MODE
+        )
         logger.info("Wrote regenerated _index.md to %s", index_path)
         return index_path
 
