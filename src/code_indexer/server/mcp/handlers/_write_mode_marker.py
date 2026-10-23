@@ -195,7 +195,7 @@ def finish_write_mode(
         return {
             "success": False,
             "error": (
-                f"releasing the write lock failed ({type(exc).__name__}: {exc}); "
+                f"releasing the write lock failed ({type(exc).__name__}); "
                 f"write mode is still active, call exit_write_mode again"
             ),
         }

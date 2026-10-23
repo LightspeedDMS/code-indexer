@@ -446,7 +446,7 @@ class TestExitReleasesBeforeRemovingTheMarker:
 
         class ReleaseFails(type(original)):  # type: ignore[misc]
             def release_owned(self, *args: Any, **kwargs: Any) -> Any:
-                raise sqlite3.OperationalError("disk I/O error")
+                raise sqlite3.OperationalError("disk I/O error at db.example.com:5432")
 
         source = (
             original._lock_dir
@@ -458,6 +458,9 @@ class TestExitReleasesBeforeRemovingTheMarker:
         result = _call("handle_exit_write_mode", exit_worker, golden_repos_dir)
 
         assert result["success"] is False
+        assert "OperationalError" in result["error"]
+        assert "example.com" not in result["error"]
+        assert "disk I/O error" not in result["error"]
         assert (golden_repos_dir / ".write_mode" / f"{_ALIAS}.json").exists()
         assert _Worker(golden_repos_dir, original).write_lock_manager.is_locked(_ALIAS)
         assert exit_worker.refreshed == []
