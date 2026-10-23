@@ -82,7 +82,9 @@ class CatalogLockedExclusively(Exception):
 
 class CatalogBusy(CatalogLockedExclusively):
     """The catalog lock could be neither taken nor attributed to an owner
-    after every bounded attempt (another writer mid-acquire); retryable."""
+    after every bounded attempt (another writer mid-acquire), or a writer
+    that must hold it itself (the dependency-map repair) found another
+    owner holding it; retryable."""
 
     def __init__(self) -> None:
         self.category = "busy"

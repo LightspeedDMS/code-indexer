@@ -116,6 +116,26 @@ def test_repair_holds_the_catalog_lock_as_the_dependency_map(
     assert scheduler.triggered == ["cidx-meta-global"], "no catalog refresh"  # type: ignore[attr-defined]
 
 
+def test_repair_under_a_cooperative_holder_writes_nothing(
+    scheduler: RefreshScheduler, caplog: pytest.LogCaptureFixture
+) -> None:
+    import logging
+
+    output_dir = _dependency_map(scheduler)
+    locks = scheduler.write_lock_manager
+    assert locks.acquire(CATALOG, owner_name="refresh_scheduler")
+    try:
+        with caplog.at_level(logging.ERROR):
+            assert _repair(scheduler, output_dir) is False
+        assert not (output_dir / "_index.md").exists(), "piggybacked a repair"
+        assert "busy" in caplog.text, caplog.text
+        assert scheduler.triggered == []  # type: ignore[attr-defined]
+        info = locks.get_lock_info(CATALOG)
+        assert info and info["owner"] == "refresh_scheduler"
+    finally:
+        assert locks.release(CATALOG, owner_name="refresh_scheduler")
+
+
 def test_index_is_put_in_place_whole_at_the_catalog_mode(tmp_path: Path) -> None:
     output_dir = tmp_path / CATALOG / "dependency-map"
     output_dir.mkdir(parents=True)

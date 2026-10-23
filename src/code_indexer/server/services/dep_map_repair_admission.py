@@ -1,12 +1,13 @@
 """The dependency-map repair writes cidx-meta (domain files, _domains.json,
-_index.md) under catalog admission as the dependency map.
+_index.md) only while it holds the cidx-meta write lock itself.
 
 Both repair doors -- the Web repair route and the scheduled auto-repair --
 run through ``repair_under_catalog_admission``: it detects the map's health
-and repairs it while holding the cidx-meta write lock as the dependency map
-(or under a cooperative holder), refuses before writing anything while an
-exclusive owner (write mode, the catalog backup) holds it, and requests the
-catalog refresh once the repair is done.
+and repairs it while holding the cidx-meta write lock as the dependency map,
+and requests the catalog refresh once the repair is done. While any other
+owner holds the lock -- cooperative or exclusive -- it refuses (retryable)
+before writing anything: the repair rewrites map files in place, so unlike
+the staged catalog writers it never writes under another holder.
 """
 
 from __future__ import annotations
@@ -38,10 +39,14 @@ def repair_under_catalog_admission(
     output_dir: Path,
     known_repos: Optional[Set[str]],
 ) -> "RepairResult":
-    """Detect and repair the dependency map under catalog admission as the
-    dependency map. Raises CatalogLockedExclusively, before anything is
-    written, while an exclusive owner holds the catalog."""
-    from code_indexer.global_repos.catalog_lock_holder import admitted_catalog_write
+    """Detect and repair the dependency map while holding the cidx-meta
+    write lock as the dependency map. Raises, before anything is written,
+    CatalogLockedExclusively while an exclusive owner holds the catalog and
+    CatalogBusy while a cooperative one does (both retryable)."""
+    from code_indexer.global_repos.catalog_lock_holder import (
+        CatalogBusy,
+        admitted_catalog_write,
+    )
     from code_indexer.global_repos.meta_description_hook import (
         refresh_after_catalog_write,
     )
@@ -53,13 +58,16 @@ def repair_under_catalog_admission(
     if refresh_scheduler is None:
         # ^ why same rule as the dependency-map analyses: with no refresh scheduler wired nothing publishes the catalog, so there is no lock to coordinate
         return _detect_and_repair(executor, output_dir, known_repos)
-    admitted: Optional[bool] = None
+    wrote = False
     try:
         with admitted_catalog_write(
             refresh_scheduler, DEPENDENCY_MAP_LOCK_OWNER
         ) as held:
-            admitted = held
+            if not held:
+                # ^ why the repair rewrites map files in place (not staged), so it never piggybacks on another holder
+                raise CatalogBusy()
+            wrote = True
             return _detect_and_repair(executor, output_dir, known_repos)
     finally:
-        if admitted is not None:
-            refresh_after_catalog_write(refresh_scheduler, lock_still_held=not admitted)
+        if wrote:
+            refresh_after_catalog_write(refresh_scheduler, lock_still_held=False)
