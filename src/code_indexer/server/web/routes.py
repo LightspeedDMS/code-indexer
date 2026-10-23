@@ -9663,7 +9663,7 @@ async def update_cidx_meta_backup_config(
     csrf_token: Optional[str] = Form(None),
 ):
     """Update cidx-meta backup config with SSH validation and bootstrap."""
-    from ..services.cidx_meta_backup.bootstrap import CidxMetaBackupBootstrap
+    from ..services.cidx_meta_backup.save_settings import save_backup_settings
     from ..services.config_service import get_config_service
     from code_indexer.utils.git_remote_url import git_remote_host
 
@@ -9701,29 +9701,28 @@ async def update_cidx_meta_backup_config(
                 status_code=status.HTTP_400_BAD_REQUEST,
             )
 
-    def _save_and_bootstrap() -> None:
+    def _save_and_bootstrap() -> str:
         config_service = get_config_service()
-        config_service.update_settings_audited(
-            [
-                ("cidx_meta_backup", "enabled", enabled),
-                ("cidx_meta_backup", "remote_url", remote_url),
-            ],
-            actor=session.username,
+        return save_backup_settings(
+            lambda: config_service.update_settings_audited(
+                [
+                    ("cidx_meta_backup", "enabled", enabled),
+                    ("cidx_meta_backup", "remote_url", remote_url),
+                ],
+                actor=session.username,
+            ),
+            getattr(request.app.state, "global_lifecycle_manager", None),
+            config_service.config_manager.server_dir,
+            remote_url,
         )
-        if remote_url:
-            from ..services.cidx_meta_backup import get_cidx_meta_path
-
-            repo_root = get_cidx_meta_path(config_service.config_manager.server_dir)
-            CidxMetaBackupBootstrap().bootstrap(str(repo_root), remote_url)
 
     try:
         # One audited change plus the bootstrap, off the event loop.
-        await asyncio.to_thread(_save_and_bootstrap)
-
+        message = await asyncio.to_thread(_save_and_bootstrap)
         return _create_config_page_response(
             request,
             session,
-            success_message="cidx-meta backup configuration saved",
+            success_message=message,
         )
     except Exception as e:
         return _create_config_page_response(
