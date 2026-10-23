@@ -220,9 +220,13 @@ def test_the_per_door_check_reports_a_door_missing_its_entry_point() -> None:
     assert _missing_door_wiring(doors, sources) == ["refresh: b.py lacks x"]
 
 
-# Unaudited internal helper an internal caller may use instead of calling the
-# scheduler directly; its own body is checked so it cannot hide an audited call.
-_INTERNAL_REFRESH_HELPER = "request_cidx_meta_refresh"
+# Unaudited internal helpers an internal caller may use instead of calling the
+# scheduler directly, each with the unaudited call its own body must make; every
+# body is checked so no helper in the chain can hide an audited call.
+_INTERNAL_REFRESH_HELPERS: Dict[str, str] = {
+    "request_cidx_meta_refresh": "trigger_refresh_for_repo",
+    "refresh_after_catalog_write": "request_cidx_meta_refresh",
+}
 _INTERNAL_REFRESH_HELPER_FILE = (
     Path(code_indexer.__file__).parent / "global_repos" / "meta_description_hook.py"
 )
@@ -241,17 +245,20 @@ def _function_body(source: str, name: str) -> str:
 
 
 def _unaudited_refresh_violations(
-    callers: Dict[str, str], helper_body: str
+    callers: Dict[str, str], helper_bodies: Dict[str, str]
 ) -> List[str]:
     violations: List[str] = []
-    if not _uses(helper_body, {"trigger_refresh_for_repo"}):
-        violations.append(f"{_INTERNAL_REFRESH_HELPER} lacks trigger_refresh_for_repo")
-    violations.extend(
-        f"{_INTERNAL_REFRESH_HELPER} uses {use}"
-        for use in _uses(helper_body, {"request_golden_repo_refresh"})
-    )
+    for helper, required in _INTERNAL_REFRESH_HELPERS.items():
+        body = helper_bodies[helper]
+        if not _uses(body, {required}):
+            violations.append(f"{helper} lacks {required}")
+        violations.extend(
+            f"{helper} uses {use}"
+            for use in _uses(body, {"request_golden_repo_refresh"})
+        )
+    entry_points = {"trigger_refresh_for_repo", *_INTERNAL_REFRESH_HELPERS}
     for caller, source in callers.items():
-        if not _uses(source, {"trigger_refresh_for_repo", _INTERNAL_REFRESH_HELPER}):
+        if not _uses(source, entry_points):
             violations.append(f"{caller} reaches no unaudited refresh entry point")
         violations.extend(
             f"{caller} uses {use}"
@@ -260,35 +267,74 @@ def _unaudited_refresh_violations(
     return violations
 
 
+def _real_helper_bodies() -> Dict[str, str]:
+    source = _INTERNAL_REFRESH_HELPER_FILE.read_text()
+    return {
+        helper: _function_body(source, helper) for helper in _INTERNAL_REFRESH_HELPERS
+    }
+
+
 def test_internal_refresh_callers_stay_unaudited() -> None:
     callers = {str(path): path.read_text() for path in _INTERNAL_REFRESH_CALLERS}
-    helper_body = _function_body(
-        _INTERNAL_REFRESH_HELPER_FILE.read_text(), _INTERNAL_REFRESH_HELPER
-    )
-    assert _unaudited_refresh_violations(callers, helper_body) == []
+    assert _unaudited_refresh_violations(callers, _real_helper_bodies()) == []
 
 
 def test_the_internal_refresh_check_reports_an_unaudited_route_violation() -> None:
-    """Negative controls: a caller using neither unaudited entry point, and a
-    helper body that calls the audited front door, are both reported."""
-    good_helper = "def request_cidx_meta_refresh(s):\n    s.trigger_refresh_for_repo(a)"
+    """Negative controls: a caller using no unaudited entry point, a caller
+    also using the audited front door, and a helper body that calls the
+    audited front door instead of its unaudited link, are all reported."""
+    good_helpers = {
+        "request_cidx_meta_refresh": (
+            "def request_cidx_meta_refresh(s):\n    s.trigger_refresh_for_repo(a)"
+        ),
+        "refresh_after_catalog_write": (
+            "def refresh_after_catalog_write(s, held):\n"
+            "    request_cidx_meta_refresh(s)"
+        ),
+    }
     clean_callers = {
         "direct.py": "s.trigger_refresh_for_repo(a)",
         "helper.py": "request_cidx_meta_refresh(s)",
+        "writer.py": "refresh_after_catalog_write(s, False)",
     }
-    assert _unaudited_refresh_violations(clean_callers, good_helper) == []
-    assert _unaudited_refresh_violations({"c.py": "s.other(a)"}, good_helper) == [
+    assert _unaudited_refresh_violations(clean_callers, good_helpers) == []
+    assert _unaudited_refresh_violations({"c.py": "s.other(a)"}, good_helpers) == [
         "c.py reaches no unaudited refresh entry point"
     ]
-    audited_helper = (
-        "def request_cidx_meta_refresh(s):\n"
-        "    request_golden_repo_refresh(s, a, actor=u)"
-    )
     assert _unaudited_refresh_violations(
-        {"helper.py": "request_cidx_meta_refresh(s)"}, audited_helper
+        {
+            "m.py": (
+                "refresh_after_catalog_write(s, False)\n"
+                "request_golden_repo_refresh(s, a, actor=u)"
+            )
+        },
+        good_helpers,
+    ) == ["m.py uses 2: request_golden_repo_refresh"]
+    audited_request = {
+        **good_helpers,
+        "request_cidx_meta_refresh": (
+            "def request_cidx_meta_refresh(s):\n"
+            "    request_golden_repo_refresh(s, a, actor=u)"
+        ),
+    }
+    assert _unaudited_refresh_violations(
+        {"helper.py": "request_cidx_meta_refresh(s)"}, audited_request
     ) == [
         "request_cidx_meta_refresh lacks trigger_refresh_for_repo",
         "request_cidx_meta_refresh uses 2: request_golden_repo_refresh",
+    ]
+    audited_writer = {
+        **good_helpers,
+        "refresh_after_catalog_write": (
+            "def refresh_after_catalog_write(s, held):\n"
+            "    request_golden_repo_refresh(s, a, actor=u)"
+        ),
+    }
+    assert _unaudited_refresh_violations(
+        {"writer.py": "refresh_after_catalog_write(s, False)"}, audited_writer
+    ) == [
+        "refresh_after_catalog_write lacks request_cidx_meta_refresh",
+        "refresh_after_catalog_write uses 2: request_golden_repo_refresh",
     ]
 
 
