@@ -30,6 +30,8 @@ _WRITE_MODE_OWNER = "mcp_write_mode"
 CATALOG_BACKUP_LOCK_OWNER = "catalog_backup"
 # ^ why a backup push carries no timeout, so the lock must outlive a slow push
 CATALOG_BACKUP_LOCK_TTL_SECONDS = 24 * 60 * 60
+# ^ why a holder may release between our failed acquire and the holder read
+_ADMISSION_ATTEMPTS = 3
 
 
 class CatalogLockManager(Protocol):
@@ -135,11 +137,24 @@ def admitted_catalog_write(refresh_scheduler: Any, owner_name: str) -> Iterator[
     writer holds the lock (False: a piggyback, owed to a later refresh).
     Raises CatalogLockedExclusively, before anything is written, when an
     exclusive holder has it. A held lock is released on exit."""
-    acquired = bool(
-        refresh_scheduler.acquire_write_lock(CATALOG_LOCK_ALIAS, owner_name=owner_name)
-    )
-    if not acquired:
-        require_publishing_holder(refresh_scheduler)
+    acquired = False
+    for attempt in range(_ADMISSION_ATTEMPTS):
+        acquired = bool(
+            refresh_scheduler.acquire_write_lock(
+                CATALOG_LOCK_ALIAS, owner_name=owner_name
+            )
+        )
+        if acquired:
+            break
+        try:
+            require_publishing_holder(refresh_scheduler)
+            break
+        except CatalogLockedExclusively:
+            released = not refresh_scheduler.write_lock_manager.get_lock_info(
+                CATALOG_LOCK_ALIAS
+            )
+            if not released or attempt == _ADMISSION_ATTEMPTS - 1:
+                raise
     try:
         yield acquired
     finally:
