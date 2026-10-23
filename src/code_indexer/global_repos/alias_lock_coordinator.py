@@ -194,6 +194,11 @@ class AliasLockCoordinator:
             recorded = self._acquired_tokens.get(alias)
             if recorded is not None and recorded[1] == token:
                 del self._acquired_tokens[alias]
+        self._stop_heartbeat(alias, token)
+
+    def _stop_heartbeat(self, alias: str, token: str) -> None:
+        """End the lease renewal of the lock held under ``token``."""
+        with self._acquired_tokens_lock:
             heartbeat = self._heartbeats.get(alias)
             if heartbeat is not None and heartbeat.owner_token == token:
                 del self._heartbeats[alias]
@@ -305,6 +310,8 @@ class AliasLockCoordinator:
                 LockOutcome,
             )
 
+            # ^ invariant a release attempt ends renewal whatever its outcome: a failed one lapses
+            self._stop_heartbeat(alias, token)
             outcome = self._store_resolver().release_owned(
                 alias, owner_name, owner_token=token
             )

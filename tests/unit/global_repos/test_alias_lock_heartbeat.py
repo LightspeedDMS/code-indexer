@@ -25,7 +25,7 @@ from tests.shared.alias_lock_pg import postgres_lock_store_dsn
 
 _ALIAS = "example-repo"
 _OWNER = "dependency_map_service"
-_LEASE_SECONDS = 2
+_LEASE_SECONDS = 4
 _OUTLIVE_SECONDS = 3 * _LEASE_SECONDS
 _JOIN_TIMEOUT_SECONDS = 30
 
@@ -110,6 +110,43 @@ class TestDeadHolderFreesTheLock:
         taker = _coordinator(tmp_path, make_store())
         assert taker.acquire(_ALIAS, "other", ttl_seconds=_LEASE_SECONDS)
         taker.release(_ALIAS, "other")
+
+
+class TestFailedReleaseStopsTheRenewal:
+    def test_release_that_raises_still_lets_the_lease_lapse(
+        self, tmp_path: Path, make_store
+    ) -> None:
+        import sqlite3
+
+        original = make_store()
+
+        class ReleaseFailsOnce(type(original)):  # type: ignore[misc]
+            failed = False
+
+            def release_owned(self, *args: Any, **kwargs: Any) -> Any:
+                if not self.failed:
+                    self.failed = True
+                    raise sqlite3.OperationalError("database is locked")
+                return super().release_owned(*args, **kwargs)
+
+        # ^ why same constructor argument as the fixture's store: lock dir (SQLite) or DSN
+        source = (
+            original._lock_dir
+            if isinstance(original, SqliteAliasLockStore)
+            else original._dsn
+        )
+        before = set(_heartbeats())
+        holder = _coordinator(tmp_path, ReleaseFailsOnce(source))
+        assert holder.acquire(_ALIAS, _OWNER, ttl_seconds=_LEASE_SECONDS)
+
+        with pytest.raises(sqlite3.OperationalError):
+            holder.release(_ALIAS, _OWNER)
+
+        assert set(_heartbeats()) - before == set()
+        _work_for(_OUTLIVE_SECONDS)
+        successor = _coordinator(tmp_path, make_store())
+        assert successor.acquire(_ALIAS, "other", ttl_seconds=_LEASE_SECONDS)
+        assert successor.release(_ALIAS, "other")
 
 
 class TestWriteModeLeaseLapses:
