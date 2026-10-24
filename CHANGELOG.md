@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [12.95.0] - 2026-10-24
+
+### Upgrade notes
+
+- Server: a local golden repository refresh that finds removed files now reconciles the index with the source, as it already did for added and changed files. Files deleted before the upgrade that are still searchable are cleared at the first such refresh; the reconcile sends no embedding requests for unchanged content.
+
+### Fixed
+
+- Server: a file deleted from a local golden repository whose directory is itself a git repository (for example the `cidx-meta` catalog once its backup is configured) is removed from semantic and full-text search at the next refresh. Previously it stayed searchable, so a deleted memory kept being returned.
+- Server: a git-aware reconcile with nothing to index that hides removed files or restores returned ones republishes the semantic index, so a hidden file leaves semantic search and a restored file returns to it.
+- Server: a git-aware reconcile that removes a file and indexes another in the same run publishes the semantic index once, filtered by branch; the removed file previously stayed in semantic search.
+- Server: on a PostgreSQL cluster, full semantic index rebuilds apply branch visibility, so files hidden on the branch no longer return to semantic search.
+- Server: an interrupted git-aware reconcile (cancelled, killed or failed) no longer publishes an unfiltered semantic index; the next refresh republishes what it owes, including content it had added.
+- Server: changing a golden repository's branch no longer removes files with non-ASCII, quoted or non-UTF-8 names from semantic and full-text search.
+- Server: stored paths outside the repository root that a reconcile keeps stay in semantic search.
+- Server: a failure while aborting an indexing session no longer replaces the original error, so a fatal chunk-store failure keeps its exit code and its self-heal.
+
 ## [12.94.0] - 2026-10-23
 
 ### Upgrade notes

@@ -954,6 +954,10 @@ class FilesystemVectorStore:
         self._hnsw_sync_sessions: Dict[str, "HNSWSyncSession"] = {}
         self._hnsw_sync_sessions_lock = threading.Lock()
         self._hnsw_sync_epoch_enabled: bool = hnsw_sync_epoch_enabled
+        # ^ why a store-level dict, not HNSWSyncSession; a fail-closed rebuild must still filter by branch and never trust epochs (AC46, #2194)
+        self._fail_closed_branch_contexts: Dict[
+            str, Tuple[Optional[str], Set[str]]
+        ] = {}
 
         # Bug #1575 Part B: per-collection SHARDED_JSON scroll-session cache
         # -- the legacy scroll branch's id_to_file enumeration (rglob +
@@ -1232,6 +1236,7 @@ class FilesystemVectorStore:
         key = self._hnsw_sync_session_key(collection_path)
         with self._hnsw_sync_sessions_lock:
             self._hnsw_sync_sessions.pop(key, None)
+            self._fail_closed_branch_contexts.pop(key, None)
         if collection_name in self._indexing_session_changes:
             del self._indexing_session_changes[collection_name]
         if collection_name in self._active_subdirectories:
@@ -1929,19 +1934,53 @@ class FilesystemVectorStore:
         branch's -- because the comparison happens on ``current_branch``
         itself, never on a bare path-set fingerprint (AC48).
 
-        No-op when ``self._hnsw_sync_epoch_enabled`` is False (AC46 cluster
-        fail-closed gate) -- performs ZERO work in that case, including no
-        collection_path resolution.
+        When ``self._hnsw_sync_epoch_enabled`` is False (AC46 cluster
+        fail-closed gate) no sync session is created; the context is only
+        kept for the next full rebuild, which then filters by it (#2194).
         """
-        if not self._hnsw_sync_epoch_enabled:
-            return
         collection_path = self._get_collection_path(collection_name, subdirectory)
+        if not self._hnsw_sync_epoch_enabled:
+            key = self._hnsw_sync_session_key(collection_path)
+            with self._hnsw_sync_sessions_lock:
+                self._fail_closed_branch_contexts[key] = (
+                    current_branch,
+                    set(visible_files),
+                )
+            return
         session = self._get_or_create_hnsw_sync_session(
             collection_path, collection_name
         )
         session.current_branch = current_branch
         session.visible_files = set(visible_files)
         session.branch_context_set = True
+
+    def _hnsw_manager_for(self, collection_name: str) -> Any:
+        from .hnsw_index_manager import HNSWIndexManager
+
+        return HNSWIndexManager(
+            vector_dim=self._get_vector_size(collection_name),
+            space="cosine",
+            num_threads=self._hnsw_num_threads,
+        )
+
+    # ^ order call before the visibility mutation; a crash before the HNSW publish => hnsw_publish_pending stays True
+    def note_hnsw_visibility_change(self, collection_name: str) -> None:
+        # ^ why is_stale, not hnsw_sync epochs; epochs must never be written fail-closed (AC46)
+        if self._hnsw_sync_epoch_enabled:
+            return
+        self._hnsw_manager_for(collection_name).mark_stale(
+            self._get_collection_path(collection_name)
+        )
+
+    # ^ invariant epoch mode = durable hnsw_sync dirty state; fail-closed = HNSW is_stale (cleared by every rebuild)
+    def hnsw_publish_pending(self, collection_name: str) -> bool:
+        collection_path = self._get_collection_path(collection_name)
+        if not self._hnsw_sync_epoch_enabled:
+            return bool(
+                self._hnsw_manager_for(collection_name).is_stale(collection_path)
+            )
+        prior = read_hnsw_sync_state(collection_path)
+        return prior is not None and prior.mutation_epoch != prior.published_epoch
 
     def _resolve_hnsw_rebuild_reason(
         self,
@@ -2050,6 +2089,7 @@ class FilesystemVectorStore:
         key = self._hnsw_sync_session_key(collection_path)
         with self._hnsw_sync_sessions_lock:
             self._hnsw_sync_sessions.pop(key, None)
+            self._fail_closed_branch_contexts.pop(key, None)
 
     def _read_published_hnsw_vector_count(self, collection_path: Path) -> int:
         """Bug #1575 Part C: the vector count currently published in the
@@ -2107,6 +2147,12 @@ class FilesystemVectorStore:
         if session is not None and session.branch_context_set:
             visible_files = session.visible_files
             current_branch = session.current_branch
+        elif not self._hnsw_sync_epoch_enabled:
+            key = self._hnsw_sync_session_key(collection_path)
+            with self._hnsw_sync_sessions_lock:
+                context = self._fail_closed_branch_contexts.pop(key, None)
+            if context is not None:
+                current_branch, visible_files = context
         return int(
             hnsw_manager.rebuild_from_vectors(
                 collection_path=collection_path,

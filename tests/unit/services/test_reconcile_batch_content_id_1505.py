@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 from code_indexer.config import Config
 from code_indexer.services.high_throughput_processor import BranchIndexingResult
@@ -103,6 +105,14 @@ class FakeVectorStoreClient:
     def __init__(self) -> None:
         self.points: List[Dict[str, Any]] = []
         self.scroll_call_count = 0
+        self.ended: List[str] = []
+        self.aborted: List[str] = []
+        self.fail_branch_context = False
+        self.fail_begin = False
+        self.fail_end = False
+        self.fail_abort = False
+        self.fail_note = False
+        self.publish_pending = False
 
     def add_committed_point(
         self,
@@ -152,10 +162,41 @@ class FakeVectorStoreClient:
         return "test_collection"
 
     def begin_indexing(self, collection_name):
+        if self.fail_begin:
+            raise RuntimeError("injected begin failure")
         return None
 
     def end_indexing(self, collection_name, progress_callback=None):
+        if self.fail_end:
+            self.fail_end = False
+            raise RuntimeError("injected end failure")
+        self.ended.append(collection_name)
         return {"vectors_indexed": 0}
+
+    def abort_indexing(self, collection_name):
+        self.aborted.append(collection_name)
+        if self.fail_abort:
+            raise RuntimeError("injected abort failure")
+
+    def set_hnsw_branch_context(self, collection_name, current_branch, visible_files):
+        if self.fail_branch_context:
+            raise RuntimeError("injected branch-context failure")
+        self.hnsw_branch_context = (current_branch, set(visible_files))
+
+    def note_hnsw_visibility_change(self, collection_name):
+        if self.fail_note:
+            self.fail_note = False
+            raise RuntimeError("injected marker failure")
+        return None
+
+    def hnsw_publish_pending(self, collection_name):
+        return self.publish_pending
+
+    def _batch_update_payload_only(self, points, collection_name):
+        updates = {update["id"]: update["payload"] for update in points}
+        for point in self.points:
+            point["payload"].update(updates.get(point["id"], {}))
+        return True
 
     def collection_exists(self, collection_name):
         return False
@@ -431,6 +472,111 @@ class TestReconcileCorrectness:
             call.args[0] for call in mock_delete_branch_aware.call_args_list
         ]
         assert "deleted.py" in deleted_paths
+
+    @pytest.mark.parametrize("failing_step", ["begin", "branch_context"])
+    def test_failed_hnsw_republish_aborts_the_session(self, tmp_path, failing_step):
+        root = tmp_path / "repo"
+        root.mkdir()
+        _init_repo(root)
+        _write_file(root, "a.py", "print('a')\n")
+        _commit_all(root, "initial")
+        vector_store = FakeVectorStoreClient()
+        vector_store.add_committed_point("a.py", _blob_hash_at_head(root, "a.py"))
+        vector_store.add_committed_point("deleted.py", "0" * 40)
+        vector_store.fail_begin = failing_step == "begin"
+        vector_store.fail_branch_context = failing_step == "branch_context"
+        indexer = _make_indexer(root, vector_store)
+
+        with pytest.raises(RuntimeError, match="injected"):
+            _run_reconcile(indexer)
+
+        assert vector_store.aborted == ["test_collection"]
+        assert vector_store.ended == []
+        hidden = {
+            p["payload"]["path"]: p["payload"].get("hidden_branches")
+            for p in vector_store.points
+        }
+        assert hidden["deleted.py"] == ["master"], hidden
+
+    def test_failed_finalize_of_a_git_reconcile_aborts_the_session(self, tmp_path):
+        root = tmp_path / "repo"
+        root.mkdir()
+        _init_repo(root)
+        _write_file(root, "a.py", "print('a')\n")
+        _write_file(root, "b.py", "print('b')\n")
+        _commit_all(root, "initial")
+        vector_store = FakeVectorStoreClient()
+        vector_store.add_committed_point("a.py", _blob_hash_at_head(root, "a.py"))
+        vector_store.fail_end = True
+        indexer = _make_indexer(root, vector_store)
+
+        with pytest.raises(RuntimeError, match="injected end failure"):
+            _run_reconcile(indexer)
+
+        assert vector_store.aborted == ["test_collection"]
+
+    def test_failed_publish_keeps_its_error_when_abort_fails(self, tmp_path):
+        root = tmp_path / "repo"
+        root.mkdir()
+        _init_repo(root)
+        _write_file(root, "a.py", "print('a')\n")
+        _commit_all(root, "initial")
+        vector_store = FakeVectorStoreClient()
+        vector_store.add_committed_point("a.py", _blob_hash_at_head(root, "a.py"))
+        vector_store.add_committed_point("deleted.py", "0" * 40)
+        vector_store.fail_branch_context = True
+        vector_store.fail_abort = True
+        indexer = _make_indexer(root, vector_store)
+
+        with pytest.raises(RuntimeError, match="injected branch-context"):
+            _run_reconcile(indexer)
+
+        assert vector_store.aborted == ["test_collection"]
+
+    def test_fatal_store_error_keeps_its_exit_code_when_abort_fails(self, tmp_path):
+        from code_indexer.services.index_failure_exit_codes import (
+            EXIT_CODE_CHUNK_STORE_MISSING,
+            index_failure_exit_code,
+        )
+        from code_indexer.storage.sqlite_chunk_store import (
+            MissingEstablishedChunkStoreError,
+        )
+
+        root = tmp_path / "repo"
+        root.mkdir()
+        _init_repo(root)
+        vector_store = FakeVectorStoreClient()
+        vector_store.fail_abort = True
+        indexer = _make_indexer(root, vector_store)
+        fatal = MissingEstablishedChunkStoreError("example chunks.db is missing")
+
+        with pytest.raises(MissingEstablishedChunkStoreError) as raised:
+            try:
+                raise fatal
+            finally:
+                indexer._finalize_or_abort_indexing_session(
+                    "test_collection", fatal, None
+                )
+
+        assert vector_store.aborted == ["test_collection"]
+        assert index_failure_exit_code(raised.value) == EXIT_CODE_CHUNK_STORE_MISSING
+
+    def test_marker_failure_after_begin_aborts_the_session(self, tmp_path):
+        root = tmp_path / "repo"
+        root.mkdir()
+        _init_repo(root)
+        _write_file(root, "a.py", "print('a')\n")
+        _write_file(root, "b.py", "print('b')\n")
+        _commit_all(root, "initial")
+        vector_store = FakeVectorStoreClient()
+        vector_store.add_committed_point("a.py", _blob_hash_at_head(root, "a.py"))
+        vector_store.fail_note = True
+        indexer = _make_indexer(root, vector_store)
+
+        with pytest.raises(RuntimeError, match="injected marker failure"):
+            _run_reconcile(indexer)
+
+        assert vector_store.aborted == ["test_collection"]
 
 
 # ---------------------------------------------------------------------------

@@ -53,6 +53,17 @@ class _RaisingDeleteByFilterClient(FakeVectorStoreClient):
         self.end_indexing_call_count += 1
         return super().end_indexing(collection_name, progress_callback)
 
+    def get_existing_content_hashes(
+        self,
+        file_path: str,
+        collection_name: str,
+        *,
+        project_id: str,
+        file_hash: str,
+        chunk_count: int,
+    ) -> Dict[str, Dict[str, Any]]:
+        return {}
+
 
 def test_mid_section_exception_still_calls_end_indexing(tmp_path):
     """A genuine exception raised inside the non-git modified-file delete

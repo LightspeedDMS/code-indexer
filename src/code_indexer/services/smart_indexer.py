@@ -1000,8 +1000,8 @@ class SmartIndexer(HighThroughputProcessor):
                 f"{log_prefix}: fatal chunk-store failure -- aborting "
                 f"instead of finalizing: {fatal_chunk_store_error}"
             )
-            self.vector_store_client.abort_indexing(collection_name)
-            self._abort_multimodal_collections()
+            # ^ hazard an abort failure replacing the fatal error => wrong 86/87/89 exit code and self-heal routing
+            self._abort_session_keeping_error(collection_name, fatal_chunk_store_error)
             return
 
         if progress_callback:
@@ -1014,6 +1014,62 @@ class SmartIndexer(HighThroughputProcessor):
             f"{end_result.get('vectors_indexed', 0)} vectors indexed"
         )
         self._finalize_multimodal_collections(progress_callback)
+
+    def _close_git_reconcile_session(
+        self,
+        collection_name: str,
+        completed: bool,
+        in_flight: Optional[BaseException],
+        progress_callback: Optional[Callable],
+    ) -> None:
+        if not completed:
+            self._abort_session_keeping_error(collection_name, in_flight)
+            return
+        try:
+            self._finalize_or_abort_indexing_session(
+                collection_name, None, progress_callback, log_prefix="Index"
+            )
+        except BaseException as finalize_error:
+            self._abort_session_keeping_error(collection_name, finalize_error)
+            raise
+
+    def _abort_session_keeping_error(
+        self, collection_name: str, propagating: Optional[BaseException]
+    ) -> None:
+        # ^ invariant abort keeps hnsw_sync dirty and is_stale set => the next reconcile republishes (hnsw_publish_pending)
+        try:
+            self.vector_store_client.abort_indexing(collection_name)
+            self._abort_multimodal_collections()
+        except Exception as abort_error:
+            if propagating is None:
+                raise
+            # ^ security exception text can carry filesystem paths => log types only
+            logger.error(
+                "Aborting the indexing session failed (%s); "
+                "the original error %s propagates",
+                type(abort_error).__name__,
+                type(propagating).__name__,
+            )
+
+    def _republish_hnsw_visibility(
+        self,
+        collection_name: str,
+        current_branch: str,
+        visible_files: Set[str],
+        progress_callback: Optional[Callable],
+    ) -> None:
+        try:
+            self.vector_store_client.begin_indexing(collection_name)
+            self.vector_store_client.set_hnsw_branch_context(
+                collection_name, current_branch, visible_files
+            )
+            self._finalize_or_abort_indexing_session(
+                collection_name, None, progress_callback, log_prefix="Reconcile"
+            )
+        except BaseException as publish_error:
+            # ^ invariant a failed publish leaves no session open; durable dirty/stale => next reconcile republishes
+            self._abort_session_keeping_error(collection_name, publish_error)
+            raise
 
     def _fold_in_pending_self_heal_paths(
         self, collection_name: str, files: List[Path]
@@ -2575,6 +2631,10 @@ class SmartIndexer(HighThroughputProcessor):
                     )
                     if current_branch in hidden_branches:
                         # File exists on disk but is hidden for current branch - unhide it
+                        if files_unhidden == 0:
+                            self.vector_store_client.note_hnsw_visibility_change(
+                                collection_name
+                            )
                         self._ensure_file_visible_in_branch_thread_safe(
                             relative_file_path, current_branch, collection_name
                         )
@@ -2618,6 +2678,8 @@ class SmartIndexer(HighThroughputProcessor):
 
         # NEW: Detect files that exist in database but were deleted from filesystem
         deleted_files = []
+        # ^ coupled with the HNSW visible set (normal path unchanged_files, _republish_hnsw_visibility); kept => published (#2194)
+        preserved_outside_root: List[str] = []
         disk_files_set = {
             str(f.relative_to(self.config.codebase_dir)) for f in all_files_to_index
         }
@@ -2644,6 +2706,10 @@ class SmartIndexer(HighThroughputProcessor):
                 # really gone from its own absolute location.
                 if not Path(indexed_file_str).exists():
                     deleted_files.append(indexed_file_str)
+                elif current_branch not in self._reconcile_hidden_on_all_points.get(
+                    indexed_file_str, set()
+                ):
+                    preserved_outside_root.append(indexed_file_str)
             elif indexed_file_str not in disk_files_set:
                 # CRITICAL: Check if file genuinely deleted from filesystem vs just branch switch
                 if self.is_git_aware():
@@ -2677,6 +2743,8 @@ class SmartIndexer(HighThroughputProcessor):
             collection_name = self.vector_store_client.resolve_collection_name(
                 self.config, self.embedding_provider
             )
+            # ^ order note before the first hide; a crash before the HNSW publish => next reconcile sees it pending (#2194)
+            self.vector_store_client.note_hnsw_visibility_change(collection_name)
 
             for deleted_file in deleted_files:
                 self.delete_file_branch_aware(
@@ -2722,6 +2790,18 @@ class SmartIndexer(HighThroughputProcessor):
                 fts_manager,
                 progress_callback,
             )
+            # ^ hazard returning without end_indexing after a hide or un-hide => HNSW serves stale visibility (#2194)
+            if self.git_topology_service.is_git_available() and (
+                deleted_files
+                or files_unhidden
+                or self.vector_store_client.hnsw_publish_pending(collection_name)
+            ):
+                self._republish_hnsw_visibility(
+                    collection_name,
+                    current_branch,
+                    disk_files_set | set(preserved_outside_root),
+                    progress_callback,
+                )
             if progress_callback:
                 progress_callback(
                     0,
@@ -2832,7 +2912,13 @@ class SmartIndexer(HighThroughputProcessor):
 
         # Use BranchAwareIndexer for git-aware processing with parallel embeddings (SINGLE PROCESSING PATH)
         fatal_chunk_store_error: Optional[BaseException] = None
+        reconcile_completed = False
+        in_flight: Optional[BaseException] = None
         try:
+            # ^ order mark pending before the first mutation; an interrupted run => next reconcile republishes; finalize clears it (#2194)
+            if self.is_git_aware():
+                self.vector_store_client.note_hnsw_visibility_change(collection_name)
+
             # Convert absolute paths to relative paths for BranchAwareIndexer
             relative_files = []
             for file_path in files_to_index:
@@ -2870,7 +2956,11 @@ class SmartIndexer(HighThroughputProcessor):
                         # Path is not within codebase_dir, use as-is
                         unchanged_file_paths.append(str(file_path))
 
+            unchanged_file_paths.extend(preserved_outside_root)
+
             # Use high-throughput parallel processing for reconcile (4-8x faster)
+            # ^ hazard git-aware without defer_finalization => a second, context-less end_indexing re-publishes hidden vectors (#2194)
+            # ^ why non-git keeps the unfiltered final publish, not one finalize; gone rows a failed copy owes stay searchable (#2120)
             branch_result = self.process_branch_changes_high_throughput(
                 old_branch="",  # No old branch for reconcile
                 new_branch=current_branch,
@@ -2880,6 +2970,7 @@ class SmartIndexer(HighThroughputProcessor):
                 progress_callback=progress_callback,
                 vector_thread_count=vector_thread_count,
                 fts_manager=fts_manager,  # type: ignore[name-defined]  # noqa: F821 (lazy-loaded FTS manager)
+                defer_finalization=self.is_git_aware(),
             )
 
             # Convert BranchIndexingResult to ProcessingStats. Codex P1-1:
@@ -2906,6 +2997,7 @@ class SmartIndexer(HighThroughputProcessor):
                     fts_manager,
                     progress_callback,
                 )
+            reconcile_completed = not branch_result.cancelled
 
         except Exception as e:
             logger.error(
@@ -2915,21 +3007,33 @@ class SmartIndexer(HighThroughputProcessor):
                 # Bug #1746 Change 3 (extended): propagate unwrapped so
                 # finally aborts instead of finalizing.
                 fatal_chunk_store_error = e
+                in_flight = e
                 raise
             # NO FALLBACK - fail fast in git projects
-            raise RuntimeError(
+            wrapped = RuntimeError(
                 f"Git-aware reconcile failed and fallbacks are disabled. "
                 f"Original error: {e}"
-            ) from e
-        finally:
-            # CRITICAL: Always finalize (or abort) the session, even on
-            # exception (Bug #1746 Change 3).
-            self._finalize_or_abort_indexing_session(
-                collection_name,
-                fatal_chunk_store_error,
-                progress_callback,
-                log_prefix="Index",
             )
+            in_flight = wrapped
+            raise wrapped from e
+        except BaseException as interrupted:
+            in_flight = interrupted
+            raise
+        finally:
+            # ^ hazard finalizing an unfinished git-aware run => unfiltered publish clears the pending signal; hidden file stays (#2194)
+            if self.is_git_aware() and fatal_chunk_store_error is None:
+                self._close_git_reconcile_session(
+                    collection_name, reconcile_completed, in_flight, progress_callback
+                )
+            else:
+                # CRITICAL: Always finalize (or abort) the session, even on
+                # exception (Bug #1746 Change 3).
+                self._finalize_or_abort_indexing_session(
+                    collection_name,
+                    fatal_chunk_store_error,
+                    progress_callback,
+                    log_prefix="Index",
+                )
 
         # Update metadata with actual processing results
         if progress_callback:

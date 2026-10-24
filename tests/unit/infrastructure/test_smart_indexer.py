@@ -790,18 +790,14 @@ class TestIndexingExceptionHandling:
             if temp_file_path.exists():
                 temp_file_path.unlink()
 
-    def test_end_indexing_called_on_reconcile_exception(
+    # ^ why abort, not end_indexing; an unfinished git-aware reconcile must not publish an unfiltered HNSW (#2194)
+    def test_session_aborted_on_git_reconcile_exception(
         self,
         mock_config,
         mock_embedding_provider,
         mock_filesystem_client,
         temp_metadata_path,
     ):
-        """
-        CRITICAL TEST: Verify that end_indexing() is called even when exception occurs during reconcile.
-
-        This prevents FilesystemVectorStore from being left in unsearchable state.
-        """
         indexer = SmartIndexer(
             mock_config,
             mock_embedding_provider,
@@ -860,9 +856,9 @@ class TestIndexingExceptionHandling:
                         vector_thread_count=8,
                     )
 
-                # CRITICAL ASSERTION: end_indexing() MUST be called even when exception occurs
                 mock_filesystem_client.begin_indexing.assert_called()
-                mock_filesystem_client.end_indexing.assert_called()
+                mock_filesystem_client.abort_indexing.assert_any_call("test_collection")
+                mock_filesystem_client.end_indexing.assert_not_called()
         finally:
             if test_file.exists():
                 test_file.unlink()

@@ -3856,6 +3856,23 @@ class GoldenRepoManager:
             )
         return snapshot_path
 
+    def _cb_branch_files(self, snapshot_path: str, cleanup: str) -> Optional[set[str]]:
+        # ^ external git ls-files without -z C-quotes non-ASCII and quoted names => they never match stored paths (#2194)
+        # ^ why os.fsdecode, not text=True; a non-UTF-8 name => strict decode raises and both cleanups skip
+        result = subprocess.run(
+            ["git", "ls-files", "-z"],
+            cwd=snapshot_path,
+            capture_output=True,
+            timeout=60,
+        )
+        if result.returncode != 0:
+            logger.warning(
+                f"[change_branch] git ls-files failed on snapshot '{snapshot_path}': "
+                f"{os.fsdecode(result.stderr)} - skipping {cleanup} cleanup"
+            )
+            return None
+        return {os.fsdecode(name) for name in result.stdout.split(b"\0") if name}
+
     def _cb_fts_branch_cleanup(self, snapshot_path: str, target_branch: str) -> None:
         """Run FTS branch isolation cleanup on the versioned CoW snapshot (Bug #307).
 
@@ -3878,22 +3895,9 @@ class GoldenRepoManager:
             # Lazy import to keep cidx --help fast (per CLAUDE.md)
             from code_indexer.services.tantivy_index_manager import TantivyIndexManager
 
-            # Get list of files in target branch via git ls-files on the snapshot
-            result = subprocess.run(
-                ["git", "ls-files"],
-                cwd=snapshot_path,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            if result.returncode != 0:
-                logger.warning(
-                    f"[change_branch] git ls-files failed on snapshot '{snapshot_path}': "
-                    f"{result.stderr} - skipping FTS cleanup"
-                )
+            branch_files = self._cb_branch_files(snapshot_path, "FTS")
+            if branch_files is None:
                 return
-
-            branch_files = set(result.stdout.splitlines())
 
             # Open existing FTS index in snapshot (create_new=False to not wipe it)
             fts_manager = TantivyIndexManager(fts_index_dir)
@@ -3960,22 +3964,9 @@ class GoldenRepoManager:
                 is_postgres_storage_mode,
             )
 
-            # Get list of files in target branch via git ls-files on the snapshot
-            result = subprocess.run(
-                ["git", "ls-files"],
-                cwd=snapshot_path,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            if result.returncode != 0:
-                logger.warning(
-                    f"[change_branch] git ls-files failed on snapshot '{snapshot_path}': "
-                    f"{result.stderr} - skipping HNSW cleanup"
-                )
+            branch_files = self._cb_branch_files(snapshot_path, "HNSW")
+            if branch_files is None:
                 return
-
-            branch_files = set(result.stdout.splitlines())
 
             # Bug #1575 Part C review fix (Defect 3a bypass 1): thread the
             # postgres/cluster-mode signal, matching

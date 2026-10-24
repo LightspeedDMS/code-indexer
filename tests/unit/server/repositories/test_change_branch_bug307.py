@@ -114,6 +114,38 @@ class TestCbFtsBranchCleanup:
         # Should not raise - silently skips
         manager._cb_fts_branch_cleanup(snapshot_path, "master")
 
+    def test_fts_branch_cleanup_keeps_files_with_unusual_names(self, manager, tmp_path):
+        from code_indexer.services.tantivy_index_manager import TantivyIndexManager
+        from tests.utils.cidx_fake_provider_repo import (
+            FakeProviderRepo,
+            unique_python_text,
+        )
+        from tests.utils.fake_voyage_provider import running_fake_voyage_server
+
+        key = "change-branch-fts-fake-key"
+        git = ["git", "-c", "user.email=test@example.com", "-c", "user.name=test"]
+        names = ["plain", "café", 'quote"name']
+        with running_fake_voyage_server(key) as server:
+            repo = FakeProviderRepo(tmp_path / "indexed", server, key)
+            for i, name in enumerate(names):
+                (repo.repo / "src" / f"{name}.py").write_text(
+                    unique_python_text(f"unusual_fts_{i}", 40)
+                )
+            (repo.repo / ".gitignore").write_text(".code-indexer/\n")
+            for args in (["init", "-q", "-b", "master"], ["add", "."]):
+                subprocess.run([*git, *args], cwd=repo.repo, check=True)
+            subprocess.run([*git, "commit", "-qm", "base"], cwd=repo.repo, check=True)
+            indexed = repo.cidx(*repo.index_args(), "--fts")
+            assert indexed.returncode == 0, indexed.stderr[-3000:]
+
+        manager._cb_fts_branch_cleanup(str(repo.repo), "master")
+
+        fts = TantivyIndexManager(repo.repo / ".code-indexer" / "tantivy_index")
+        fts.initialize_index(create_new=False)
+        indexed_paths = set(fts.get_all_indexed_paths())
+        expected = {f"src/{name}.py" for name in names}
+        assert expected <= indexed_paths, expected - indexed_paths
+
     def test_fts_branch_cleanup_deletes_documents_not_in_branch(
         self, manager, tmp_path
     ):
@@ -124,7 +156,7 @@ class TestCbFtsBranchCleanup:
         fts_index_dir.mkdir(parents=True)
 
         # git ls-files returns 2 files on master
-        git_ls_output = "src/auth.py\nsrc/user.py\n"
+        git_ls_output = b"src/auth.py\0src/user.py\0"
         target_branch = "master"
 
         mock_fts_manager = MagicMock()
@@ -210,6 +242,49 @@ class TestCbHnswBranchCleanup:
         # Should not raise - silently skips
         manager._cb_hnsw_branch_cleanup(snapshot_path, "master")
 
+    @pytest.mark.parametrize("storage_mode", ["sqlite", "postgres"])
+    def test_cb_hnsw_branch_cleanup_keeps_files_with_unusual_names(
+        self, manager, tmp_path, storage_mode
+    ):
+        import json
+
+        from tests.utils.cidx_fake_provider_repo import (
+            FakeProviderRepo,
+            unique_python_text,
+        )
+        from tests.utils.fake_voyage_provider import running_fake_voyage_server
+
+        key = "change-branch-fake-key"
+        git = ["git", "-c", "user.email=test@example.com", "-c", "user.name=test"]
+        names = ["plain", "café", "with space", 'quote"name']
+        with running_fake_voyage_server(key) as server:
+            repo = FakeProviderRepo(tmp_path / "indexed", server, key)
+            for i, name in enumerate(names):
+                (repo.repo / "src" / f"{name}.py").write_text(
+                    unique_python_text(f"unusual_{i}", 40)
+                )
+            (repo.repo / ".gitignore").write_text(".code-indexer/\n")
+            for args in (["init", "-q", "-b", "master"], ["add", "."]):
+                subprocess.run([*git, *args], cwd=repo.repo, check=True)
+            subprocess.run([*git, "commit", "-qm", "base"], cwd=repo.repo, check=True)
+            indexed = repo.cidx(*repo.index_args(), "--fts")
+            assert indexed.returncode == 0, indexed.stderr[-3000:]
+        stored = repo.stored_rows()
+        assert len(set(stored.values())) == len(names), stored
+
+        mode = (
+            _app_state_storage_mode("postgres")
+            if storage_mode == "postgres"
+            else contextlib.nullcontext()
+        )
+        with mode:
+            manager._cb_hnsw_branch_cleanup(str(repo.repo), "master")
+
+        meta = json.loads((repo.collection_dir / "collection_meta.json").read_text())
+        published = set(meta["hnsw_index"]["id_mapping"].values())
+        missing = {stored[pid] for pid in stored if pid not in published}
+        assert not missing, missing
+
     def test_cb_hnsw_branch_cleanup_calls_rebuild_hnsw_filtered(
         self, manager, tmp_path
     ):
@@ -224,7 +299,7 @@ class TestCbHnswBranchCleanup:
         collection_dir.mkdir()
         (collection_dir / "collection_meta.json").write_text('{"vector_size": 1024}')
 
-        git_ls_output = "src/auth.py\nsrc/user.py\n"
+        git_ls_output = b"src/auth.py\0src/user.py\0"
         target_branch = "master"
 
         mock_store = MagicMock()
@@ -289,7 +364,7 @@ class TestCbHnswBranchCleanup:
             _app_state_storage_mode("postgres"),
         ):
             mock_run.return_value = MagicMock(
-                returncode=0, stdout="src/auth.py\n", stderr=""
+                returncode=0, stdout=b"src/auth.py\0", stderr=b""
             )
             manager._cb_hnsw_branch_cleanup(str(snapshot_path), "master")
 
@@ -342,3 +417,52 @@ class TestCbHnswBranchCleanup:
             f"_cb_hnsw_branch_cleanup (idx={hnsw_idx}) must be called BEFORE "
             f"_cb_swap_alias (idx={swap_idx})"
         )
+
+
+def test_branch_cleanups_handle_a_non_utf8_file_name(manager, tmp_path):
+    import json
+    import os
+
+    from code_indexer.services.tantivy_index_manager import TantivyIndexManager
+    from tests.utils.cidx_fake_provider_repo import (
+        FakeProviderRepo,
+        unique_python_text,
+    )
+    from tests.utils.fake_voyage_provider import running_fake_voyage_server
+
+    key = "change-branch-non-utf8-key"
+    git = ["git", "-c", "user.email=test@example.com", "-c", "user.name=test"]
+    with running_fake_voyage_server(key) as server:
+        repo = FakeProviderRepo(tmp_path / "indexed", server, key)
+        src = repo.repo / "src"
+        for name in ("plain", "gone"):
+            (src / f"{name}.py").write_text(unique_python_text(name, 40))
+        (repo.repo / ".gitignore").write_text(".code-indexer/\n")
+        for args in (["init", "-q", "-b", "master"], ["add", "."]):
+            subprocess.run([*git, *args], cwd=repo.repo, check=True)
+        subprocess.run([*git, "commit", "-qm", "base"], cwd=repo.repo, check=True)
+        # ^ why index before adding the non-UTF-8 file; the indexer cannot store such a name (exit 87)
+        indexed = repo.cidx(*repo.index_args(), "--fts")
+        assert indexed.returncode == 0, indexed.stderr[-3000:]
+    stored = repo.stored_rows()
+    try:
+        with open(os.path.join(os.fsencode(src), b"bad\xff.py"), "w") as handle:
+            handle.write(unique_python_text("non_utf8", 40))
+    except OSError:
+        pytest.skip("the filesystem refuses a non-UTF-8 file name")
+    (src / "gone.py").unlink()
+    subprocess.run([*git, "add", "-A"], cwd=repo.repo, check=True)
+    subprocess.run([*git, "commit", "-qm", "branch"], cwd=repo.repo, check=True)
+
+    manager._cb_fts_branch_cleanup(str(repo.repo), "master")
+    manager._cb_hnsw_branch_cleanup(str(repo.repo), "master")
+
+    fts = TantivyIndexManager(repo.repo / ".code-indexer" / "tantivy_index")
+    fts.initialize_index(create_new=False)
+    fts_paths = set(fts.get_all_indexed_paths())
+    meta = json.loads((repo.collection_dir / "collection_meta.json").read_text())
+    published = {stored[p] for p in meta["hnsw_index"]["id_mapping"].values()}
+    assert "src/gone.py" not in fts_paths, fts_paths
+    assert "src/gone.py" not in published, published
+    assert "src/plain.py" in fts_paths, fts_paths
+    assert "src/plain.py" in published, published

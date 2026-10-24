@@ -3209,11 +3209,6 @@ class RefreshScheduler:
                             if is_local_repo
                             else None
                         )
-                        _deletion_kwargs: Dict[str, Any] = (
-                            {"detect_deletions": True}
-                            if _delta is not None and _delta.removed
-                            else {}
-                        )
                         try:
                             run_spend = self._index_source(
                                 alias_name=alias_name,
@@ -3222,11 +3217,14 @@ class RefreshScheduler:
                                 orphan_event_callback=_make_hnsw_orphan_event_logger(
                                     alias_name
                                 ),
+                                # ^ why removals reconcile, not --detect-deletions; a git-aware child skips detection => gone file stays (#2194)
                                 force_reconcile=force_reconcile
-                                or (_delta is not None and _delta.reconcile),
+                                or (
+                                    _delta is not None
+                                    and (_delta.reconcile or _delta.removed)
+                                ),
                                 cancel_check=cancel_check,
                                 job_id=job_id,
-                                **_deletion_kwargs,
                             )
                         except FatalChunkStoreIndexError as fatal_exc:
                             # Bug #2022: self-heal under the lock; stay failed.
@@ -3822,14 +3820,9 @@ class RefreshScheduler:
         orphan_event_callback: Optional[Any] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
         job_id: Optional[str] = None,
-        detect_deletions: bool = False,
     ) -> Optional[Dict[str, int]]:
         """
         Index the golden repo source in place (Story #229: index-source-first).
-
-        ``detect_deletions``: the run removes points of gone paths (a
-        non-git incremental leaves them otherwise); a reconcile does so
-        already.
 
         Returns the semantic child's metered provider spend (Story #2122):
         ``{"inputs_sent": N, "attempts": M}`` from its final
@@ -3888,14 +3881,6 @@ class RefreshScheduler:
 
         if needs_reconcile:
             index_command = ["cidx", "index", "--fts", "--reconcile", "--progress-json"]
-        elif detect_deletions:
-            index_command = [
-                "cidx",
-                "index",
-                "--fts",
-                "--detect-deletions",
-                "--progress-json",
-            ]
         else:
             index_command = ["cidx", "index", "--fts", "--progress-json"]
 
