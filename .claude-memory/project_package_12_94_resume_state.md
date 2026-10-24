@@ -1,35 +1,36 @@
 ---
 name: project-package-12-94-resume-state
-description: "READ FIRST after a reset during the 12.94 package - reviewed, all gates green, bump committed; waiting for the owner's push"
+description: "READ FIRST after a reset - 12.94.0 validated on staging; 12.95.0 (local-source removal + HNSW visibility fix) committed on development, staging push/validation next"
 metadata:
   node_type: memory
   type: project
   originSessionId: 469b8128-2710-4307-9c15-5e1dfb0f1a0b
-  modified: 2026-10-23T15:09:05.911Z
+  modified: 2026-10-24T08:39:27.220Z
 ---
 
-Package after v12.93.0 on development (2026-10-22/23). Scope: change detection for local catalog
-sources and the catalog refresh debouncer, catalog writer coordination, the golden-repo write lock
-lease and write-mode ownership, reader leases, Groups bulk repository access, the Rust lockfile
-build, test-suite hygiene, plus fixes found by the gates (reconcile exit codes, search-event flush).
+12.94.0 (package after v12.93.0): pushed to development and staging on 2026-10-23 and validated
+through the front doors on both staging environments (solo and cluster). Production stays on 12.93.0;
+the owner decides promotion.
 
-State 2026-10-23 ~10:10: every lane done, dual-reviewed (Codex + Claude) and manually tested
-through the front doors. All gates green on the final code: lint; server-fast 29,808 passed;
-fast 20,156 passed (its only failures were stale tests since fixed and re-run, plus one load flake
-re-run green); e2e phases 1-7 all passed (phases 4-7 run individually after intermittent
-environment trips: a test-harness throttle gap and an external provider latency warning).
-CHANGELOG committed; MINOR bump to 12.94.0 committed as the push tip. NOTHING PUSHED.
-
-12.93.0 was promoted to production on 2026-10-22 with the owner's phrase and both confirmations;
-the owner confirmed the production health check.
+12.95.0 (2026-10-24): the owner approved fixing dev issue 2194 (a deleted file in a git-aware local
+golden repo stayed searchable; the catalog is git-aware once its backup is configured). Fix: removals
+in the local-source manifest route the refresh to `--reconcile`; git-aware reconciles keep HNSW
+visibility convergent on every exit (republish after hide/unhide, single filtered publish, abort plus
+durable publish-pending marker on interruption, cluster fail-closed rebuilds filtered by branch);
+change-branch cleanups use `git ls-files -z`. Six review rounds (Claude + Codex) ended with both
+approving. Gates: lint green; fast 20,193 passed, server-fast 29,808 passed; e2e phases 1-5 green,
+6 and 7 green when run alone. Every remaining gate failure was a 15 s timeout flake under load,
+re-run green alone, or the full-run phase 6 environmental stall (a slow external Claude CLI call held
+the single claim slot). Manual front-door test on an isolated working-tree server passed all
+scenarios. Fix and CHANGELOG committed; the version bump goes last as the push tip.
 
 **How to apply (remaining steps):**
-- Wait for the owner. On the owner's word: push origin development (the bump must stay the tip);
-  also back-merge public/master into origin/development (content-free); merge development into
-  staging and push; validate solo + cluster staging through the front doors; STOP again.
-- Never push master without the phrase + two confirmations.
-- If anything else is committed before the push, the bump must be redone as the new tip.
-- Follow-ups to file live in the gitignored reports/package_12_94_followups.md.
+- Bump to 12.95.0 as the push tip, push development (CI tags), merge into staging and push.
+- Validate on staging solo and cluster through the front door: create a memory, delete it, wait for
+  the catalog refresh, confirm it is gone from semantic and FTS search (cluster has the backup).
+- Then STOP and report. Never offer or ask about production promotion.
+- Follow-ups (filed: dev 2195 watermark, dev 2196 non-UTF-8 names) and others are listed in the
+  gitignored reports/package_12_94_followups.md.
 
-Related: [[feedback-commit-issue-refs-overlap]], [[feedback-dispatch-cap-by-tier]],
-[[feedback-version-bump-must-be-push-tip]].
+Related: [[feedback-commit-issue-refs-overlap]], [[feedback-version-bump-must-be-push-tip]],
+[[feedback_dont_reask_deferred_promotion]].

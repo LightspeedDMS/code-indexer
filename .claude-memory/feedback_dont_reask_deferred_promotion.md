@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: feedback
   originSessionId: 469b8128-2710-4307-9c15-5e1dfb0f1a0b
-  modified: 2026-10-19T02:21:39.558Z
+  modified: 2026-10-23T18:55:33.349Z
 ---
 
 When the owner says a validated release will be promoted "later", stop listing it as an open
@@ -14,6 +14,12 @@ decision or reminder in status updates. They will raise it themselves.
 **Why:** 2026-10-18 the owner deferred 12.91.0's promotion; it was then repeated as an "open
 decision" in several status messages, and the owner said "don't ask again about 12.91 promp".
 
+2026-10-23 broadened: after the 12.94.0 staging validation a question offering "promote now vs fix
+first" was rejected; the owner said "don't offer to promote to prod" and "do your staging testing,
+wait there".
+
 **How to apply:** record the deferral once (tracker/plan), then omit it from every later summary.
+The release flow ends at staging validation: report the results and WAIT. Never offer, recommend
+or ask about production promotion, and never put it in a question's options; the owner raises it.
 The push-to-master protocol still applies in full when the owner does raise it. Related:
 [[feedback_no_unnecessary_questions]].
