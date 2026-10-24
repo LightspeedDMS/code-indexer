@@ -341,21 +341,22 @@ class TestReconcileAbortsOnFatalError:
         mock_vector_store.abort_indexing.assert_called_once_with("test_collection")
         mock_vector_store.end_indexing.assert_not_called()
 
-    def test_non_fatal_failure_still_calls_end_not_abort(
+    # ^ why abort, not end_indexing; an unfinished git-aware reconcile must not publish an unfiltered HNSW (#2194)
+    def test_non_fatal_failure_of_a_git_reconcile_aborts_not_ends(
         self, tmp_path: Path, git_repo: Path, mock_vector_store: MagicMock
     ) -> None:
-        """Regression: an ordinary (non-storage) failure must be
-        byte-identical to pre-#1746 behavior."""
         indexer = _make_indexer(git_repo, tmp_path, mock_vector_store)
+        assert indexer.is_git_aware()
         mock_vector_store.scroll_points.return_value = ([], None)
+        provider_error = RuntimeError("embedding provider exploded")
 
-        with pytest.raises(RuntimeError):
-            _run_reconcile_with_side_effect(
-                indexer, RuntimeError("embedding provider exploded")
-            )
+        with pytest.raises(RuntimeError) as raised:
+            _run_reconcile_with_side_effect(indexer, provider_error)
 
-        mock_vector_store.end_indexing.assert_called_once()
-        mock_vector_store.abort_indexing.assert_not_called()
+        assert raised.value.__cause__ is provider_error
+        mock_vector_store.abort_indexing.assert_called_once_with("test_collection")
+        mock_vector_store.end_indexing.assert_not_called()
+        assert indexer.progressive_metadata.metadata.get("status") != "completed"
 
 
 class TestProcessFilesIncrementallyDoesNotSwallowFatalError:
