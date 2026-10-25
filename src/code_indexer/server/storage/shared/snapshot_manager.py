@@ -22,6 +22,7 @@ which storage backend was used.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import subprocess
 import threading
@@ -100,24 +101,32 @@ _GROUP_ONLY_FOR_DAEMON = [
 # ^ security catalog=True => catalog private paths are owner + group only; test:test_catalog_memory_gains_group_read_and_no_other_bits
 # ^ why chmod g+r, not X; X would set execute on files that already carry an execute bit
 def _ensure_source_tree_readable_for_clone(source_path: str, *, catalog: bool) -> None:
+    from .catalog_tree_permissions import (
+        CatalogPermissionError,
+        catalog_private_find_test,
+        owned_by_service_user_test,
+        printed_entries,
+        report_entries_not_owned,
+        report_symlinked_private_roots,
+        unmanageable_directory_prune,
+    )
+
+    # ^ perf one find pass per tree, never a per-entry chmod; #1511
     command = ["find", "."]
     if catalog:
-        from .catalog_tree_permissions import (
-            catalog_private_find_test,
-            report_symlinked_private_roots,
-        )
-
         report_symlinked_private_roots(source_path)
         # ^ invariant private-path branch is evaluated before the widening branch for every entry
-        command += [*catalog_private_find_test(), *_GROUP_ONLY_FOR_DAEMON, "-o"]
-    # ^ perf one find pass per tree, never a per-entry chmod; #1511
-    command += _WIDEN_FOR_DAEMON
-    from .catalog_tree_permissions import CatalogPermissionError
+        owned = [*catalog_private_find_test(), *_GROUP_ONLY_FOR_DAEMON]
+        owned += ["-o", *_WIDEN_FOR_DAEMON]
+        # ^ invariant catalog=True => only entries owned by the service user are named to chmod; test:test_not_owned_private_root_is_reported_and_owned_entries_closed
+        command += [*unmanageable_directory_prune()]
+        command += ["(", *owned_by_service_user_test(), "(", *owned, ")"]
+        command += ["-o", "(", "-type", "d", "-o", "-type", "f", ")", "-print0", ")"]
+    else:
+        command += _WIDEN_FOR_DAEMON
 
     try:
-        result = subprocess.run(
-            command, cwd=source_path, capture_output=True, text=True
-        )
+        result = subprocess.run(command, cwd=source_path, capture_output=True)
     except OSError as exc:
         if catalog:
             raise CatalogPermissionError(
@@ -130,12 +139,15 @@ def _ensure_source_tree_readable_for_clone(source_path: str, *, catalog: bool) -
             exc,
         )
         return
+    if catalog:
+        report_entries_not_owned(source_path, printed_entries(result.stdout))
+    errors = os.fsdecode(result.stderr).strip()
     if result.returncode != 0:
         # ^ invariant catalog=True and modes not established => no copy is made
         if catalog:
             raise CatalogPermissionError(
                 f"Could not set catalog private modes under '{source_path}' "
-                f"(exit {result.returncode}): {result.stderr.strip()}"
+                f"(exit {result.returncode}): {errors}"
             )
         # ^ why log, not raise; the daemon copy fails loudly on any entry it still cannot read
         logger.warning(
@@ -143,7 +155,7 @@ def _ensure_source_tree_readable_for_clone(source_path: str, *, catalog: bool) -
             "(exit %d); continuing: %s",
             source_path,
             result.returncode,
-            result.stderr.strip(),
+            errors,
         )
 
 

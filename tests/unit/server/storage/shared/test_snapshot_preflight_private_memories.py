@@ -2,13 +2,15 @@
 across CoW-daemon copies; every other repository keeps group and other read.
 Snapshots still contain the catalog files."""
 
+import json
 import logging
 import os
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Dict, List, Optional, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -16,9 +18,13 @@ import pytest
 from code_indexer.server.repositories.activated_repo_manager import (
     ActivatedRepoManager,
 )
+from code_indexer.server.storage.shared.catalog_tree_permissions import (
+    close_catalog_private_tree,
+)
 from code_indexer.server.storage.shared.clone_backend import LocalCloneBackend
 from code_indexer.server.storage.shared.snapshot_manager import (
     VersionedSnapshotManager,
+    _ensure_source_tree_readable_for_clone,
 )
 from code_indexer.server.utils.config_manager import ServerResourceConfig
 
@@ -328,6 +334,208 @@ class TestSymlinkedCatalogPrivateRoot:
         ]
         assert len(errors) == 1, errors
         assert "'memories'" in errors[0] and "not managed" in errors[0]
+
+
+_UNSHARE = shutil.which("unshare")
+_MOUNT = shutil.which("mount")
+_SRC_ROOT = Path(__file__).resolve().parents[5] / "src"
+_NAMESPACE_RUNNER = """
+import json, logging, subprocess, sys
+from pathlib import Path
+source, setup, mode, foreign, mount = sys.argv[1:6]
+if setup == "foreign":
+    subprocess.run([mount, "--bind", foreign, source + "/memories"], check=True)
+elif setup == "unreadable":
+    for target in ("/.code-indexer/locked", "/docs/locked"):
+        subprocess.run([mount, "--bind", foreign, source + target], check=True)
+else:
+    index = source + "/.code-indexer"
+    subprocess.run([mount, "--bind", index, index], check=True)
+    subprocess.run([mount, "-o", "remount,ro,bind", index], check=True)
+records = []
+class Keep(logging.Handler):
+    def emit(self, record):
+        records.append([record.levelname, record.getMessage()])
+logging.getLogger().addHandler(Keep())
+logging.getLogger().setLevel(logging.INFO)
+from code_indexer.server.storage.shared import catalog_tree_permissions as ctp
+from code_indexer.server.storage.shared.snapshot_manager import (
+    _ensure_source_tree_readable_for_clone,
+)
+error = None
+try:
+    if mode == "local":
+        ctp.close_catalog_private_tree(source)
+    elif mode == "cow":
+        _ensure_source_tree_readable_for_clone(source, catalog=True)
+    else:
+        ctp.close_catalog_private_dirs(Path(source))
+except Exception as exc:
+    error = type(exc).__name__
+print(json.dumps({"error": error, "records": records}))
+"""
+
+
+def _empty_root_owned_dir() -> Optional[str]:
+    for candidate in ("/srv", "/media", "/usr/local/src", "/usr/local/games"):
+        path = Path(candidate)
+        try:
+            if path.is_dir() and not path.is_symlink() and path.stat().st_uid == 0:
+                if not any(path.iterdir()):
+                    return candidate
+        except OSError:
+            continue
+    return None
+
+
+def _untraversable_root_owned_dir() -> Optional[str]:
+    for candidate in ("/var/cache/ldconfig", "/var/db/sudo", "/var/lib/private"):
+        path = Path(candidate)
+        try:
+            owned_by_root = path.is_dir() and path.stat().st_uid == 0
+        except OSError:
+            continue
+        if owned_by_root and not os.access(path, os.R_OK | os.X_OK):
+            return candidate
+    return None
+
+
+def _run_in_user_namespace(source: Path, setup: str, mode: str) -> Dict[str, Any]:
+    if setup == "unreadable":
+        foreign = _untraversable_root_owned_dir()
+    else:
+        foreign = _empty_root_owned_dir()
+    if _UNSHARE is None or _MOUNT is None or foreign is None:
+        pytest.skip("unshare, mount or an empty root-owned directory is unavailable")
+    probe = subprocess.run([_UNSHARE, "-rm", "true"], capture_output=True)
+    if probe.returncode != 0:
+        pytest.skip("unprivileged user and mount namespaces are unavailable")
+    argv = [str(source), setup, mode, foreign, _MOUNT]
+    result = subprocess.run(
+        [_UNSHARE, "-rm", sys.executable, "-c", _NAMESPACE_RUNNER, *argv],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": str(_SRC_ROOT)},
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+    return cast(Dict[str, Any], json.loads(result.stdout.strip().splitlines()[-1]))
+
+
+def _not_owned_warnings(records: List[List[str]]) -> List[str]:
+    return [
+        message
+        for level, message in records
+        if level == "WARNING" and "not owned by the service user" in message
+    ]
+
+
+class TestEntriesNotOwnedByServiceUser:
+    # ^ why user namespace, not chown; a host root-owned bind mount is really not owned by the mapped service user
+    @pytest.mark.parametrize("mode", ["local", "cow", "startup"])
+    def test_not_owned_private_root_is_reported_and_owned_entries_closed(
+        self, tmp_path: Path, mode: str
+    ) -> None:
+        source = _build_tree(tmp_path, memory_mode=0o644, memories_dir_mode=0o755)
+        _add_index_tree_at_default_umask(source)
+
+        outcome = _run_in_user_namespace(source, "foreign", mode)
+
+        assert outcome["error"] is None, outcome
+        assert all(level != "ERROR" for level, _ in outcome["records"]), outcome
+        warnings = _not_owned_warnings(outcome["records"])
+        assert len(warnings) == 1, outcome["records"]
+        assert "memories" in warnings[0]
+        if mode == "startup":
+            assert _mode(source / ".code-indexer") & _OTHER_BITS == 0
+        else:
+            assert _entries_with_other_bits(source / ".code-indexer") == []
+
+    @pytest.mark.parametrize("mode", ["local", "cow"])
+    def test_untraversable_directory_of_another_owner_is_pruned_and_reported(
+        self, tmp_path: Path, mode: str
+    ) -> None:
+        source = _build_tree(tmp_path, memory_mode=0o644, memories_dir_mode=0o755)
+        chunks = _add_index_tree_at_default_umask(source)
+        for target in (".code-indexer/locked", "docs/locked"):
+            (source / target).mkdir(parents=True)
+
+        outcome = _run_in_user_namespace(source, "unreadable", mode)
+
+        assert outcome["error"] is None, outcome
+        assert all(level != "ERROR" for level, _ in outcome["records"]), outcome
+        warnings = _not_owned_warnings(outcome["records"])
+        assert len(warnings) == 1, outcome["records"]
+        assert ".code-indexer/locked" in warnings[0]
+        assert "docs/locked" in warnings[0]
+        assert _mode(chunks) & _OTHER_BITS == 0
+        assert _mode(source / ".code-indexer") & _OTHER_BITS == 0
+
+    @pytest.mark.parametrize("mode", ["local", "cow"])
+    def test_owned_entry_that_cannot_be_changed_stops_catalog_snapshot(
+        self, tmp_path: Path, mode: str
+    ) -> None:
+        source = _build_tree(tmp_path, memory_mode=0o644, memories_dir_mode=0o755)
+        _add_index_tree_at_default_umask(source)
+
+        outcome = _run_in_user_namespace(source, "readonly", mode)
+
+        assert outcome["error"] == "CatalogPermissionError", outcome
+
+    @pytest.mark.parametrize("kind", ["cow", "local"])
+    def test_entries_of_another_owner_are_left_and_reported_once(
+        self,
+        tmp_path: Path,
+        kind: str,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        source = _build_tree(tmp_path, memory_mode=0o644, memories_dir_mode=0o755)
+        monkeypatch.setattr(os, "geteuid", lambda: os.getuid() + 1)
+
+        with caplog.at_level(logging.WARNING):
+            _SNAPSHOTTERS[kind](tmp_path, "cidx-meta", source)
+
+        assert _mode(source / "memories" / "mem-0001.md") == 0o644
+        records = [[r.levelname, r.getMessage()] for r in caplog.records]
+        warnings = _not_owned_warnings(records)
+        assert len(warnings) == 1, records
+        assert "memories" in warnings[0]
+
+    @pytest.mark.parametrize("mode", ["local", "cow"])
+    def test_unreadable_directories_and_root_reported_without_raising(
+        self,
+        tmp_path: Path,
+        mode: str,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        source = _build_tree(tmp_path, memory_mode=0o644, memories_dir_mode=0o755)
+        locked = [source / ".code-indexer" / "locked", source / "docs" / "locked"]
+        for directory in locked:
+            directory.mkdir(parents=True)
+            os.chmod(directory, 0)
+        monkeypatch.setattr(os, "geteuid", lambda: os.getuid() + 1)
+        try:
+            with caplog.at_level(logging.WARNING):
+                if mode == "local":
+                    close_catalog_private_tree(str(source))
+                else:
+                    _ensure_source_tree_readable_for_clone(str(source), catalog=True)
+        finally:
+            for directory in locked:
+                os.chmod(directory, 0o700)
+
+        records = [[r.levelname, r.getMessage()] for r in caplog.records]
+        warnings = _not_owned_warnings(records)
+        assert len(warnings) == 1, records
+        listed = warnings[0].rsplit(": ", 1)[1].split(", ")
+        if mode == "local":
+            assert warnings[0].startswith("5 "), warnings[0]
+            assert ".code-indexer/locked" in listed and "docs/locked" in listed
+        else:
+            assert warnings[0].startswith("8 "), warnings[0]
+            assert listed[0] == "source" and "." not in listed, listed
 
 
 class TestNonCatalogRepositoriesKeepWidening:

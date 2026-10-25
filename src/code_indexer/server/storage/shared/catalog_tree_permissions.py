@@ -8,12 +8,14 @@ import os
 import stat
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Tuple
+from typing import TYPE_CHECKING, List, Sequence, Tuple
 
 if TYPE_CHECKING:
     from .snapshot_manager import VersionedSnapshotManager  # pragma: no cover
 
 logger = logging.getLogger(__name__)
+
+_NOT_OWNED_SAMPLE_SIZE = 5
 
 
 class CatalogPermissionError(RuntimeError):
@@ -50,21 +52,60 @@ def _report_symlinked_private_root(catalog_root: object, name: str) -> None:
 
 
 # ^ invariant mode is set through an O_NOFOLLOW descriptor, never by path; test:test_private_root_swapped_for_symlink_after_check_is_not_followed
-def _close_private_dir(directory: Path) -> None:
+def _close_private_dir(directory: Path) -> bool:
     fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        os.fchmod(fd, stat.S_IMODE(os.fstat(fd).st_mode) & ~stat.S_IRWXO)
+        info = os.fstat(fd)
+        if info.st_uid != os.geteuid():
+            return False
+        os.fchmod(fd, stat.S_IMODE(info.st_mode) & ~stat.S_IRWXO)
+        return True
     finally:
         os.close(fd)
+
+
+def owned_by_service_user_test() -> List[str]:
+    return ["-user", str(os.geteuid())]
+
+
+def printed_entries(find_stdout: bytes) -> List[str]:
+    entries = [os.fsdecode(raw) for raw in find_stdout.split(b"\0") if raw]
+    return [entry[2:] if entry.startswith("./") else entry for entry in entries]
+
+
+# ^ invariant evaluated before every other test; a directory owned by the service user is never pruned
+# ^ external GNU find -readable/-executable = access(2) result for the current user
+def unmanageable_directory_prune() -> List[str]:
+    prune = ["(", "-type", "d", "!", *owned_by_service_user_test()]
+    prune += ["(", "!", "-readable", "-o", "!", "-executable", ")"]
+    return [*prune, "-prune", "-print0", ")", "-o"]
+
+
+# ^ invariant one WARNING per pass, never ERROR, never raise; the catalog keeps publishing
+def report_entries_not_owned(catalog_root: object, entries: Sequence[str]) -> None:
+    if not entries:
+        return
+    root_name = os.path.basename(os.path.normpath(str(catalog_root)))
+    shown = [root_name if entry == "." else entry for entry in entries]
+    logger.warning(
+        "%d catalog entries under '%s' are not owned by the service user or not "
+        "readable by it and their mode cannot be managed by it; ownership should be "
+        "the service user: %s",
+        len(entries),
+        catalog_root,
+        ", ".join(shown[:_NOT_OWNED_SAMPLE_SIZE]),
+    )
 
 
 # ^ security private dir without other-class bits => no entry beneath it is reachable by other users
 # ^ perf one chmod per private dir; no tree walk on the startup path
 def close_catalog_private_dirs(catalog_root: Path) -> None:
+    not_owned: List[str] = []
     for name in catalog_private_dirs():
         directory = catalog_root / name
         try:
-            _close_private_dir(directory)
+            if not _close_private_dir(directory):
+                not_owned.append(name)
         except FileNotFoundError:
             continue
         except OSError as exc:
@@ -81,33 +122,36 @@ def close_catalog_private_dirs(catalog_root: Path) -> None:
                 directory,
                 type(exc).__name__,
             )
+    report_entries_not_owned(catalog_root, not_owned)
 
 
-# ^ security catalog private paths => no other-class bits; test:test_local_snapshot_of_catalog_converges_private_paths_in_place
 def report_symlinked_private_roots(catalog_root: str) -> None:
     for name in catalog_private_dirs():
         if os.path.islink(os.path.join(catalog_root, name)):
             _report_symlinked_private_root(catalog_root, name)
 
 
+# ^ security catalog private paths => no other-class bits; test:test_local_snapshot_of_catalog_converges_private_paths_in_place
 # ^ invariant symlinks under the private roots are never named to chmod; test:test_catalog_snapshot_skips_symlinks_and_restricts_real_entries
+# ^ invariant only entries owned by the service user are named to chmod; test:test_not_owned_private_root_is_reported_and_owned_entries_closed
 def close_catalog_private_tree(catalog_root: str) -> None:
     report_symlinked_private_roots(catalog_root)
-    command = ["find", ".", *catalog_private_find_test()]
+    command = ["find", ".", *unmanageable_directory_prune()]
+    command += catalog_private_find_test()
     command += ["(", "-type", "d", "-o", "-type", "f", ")"]
-    command += ["-exec", "chmod", "o-rwx", "{}", "+"]
+    command += ["(", *owned_by_service_user_test(), "-exec", "chmod", "o-rwx", "{}"]
+    command += ["+", "-o", "-print0", ")"]
     try:
-        result = subprocess.run(
-            command, cwd=catalog_root, capture_output=True, text=True
-        )
+        result = subprocess.run(command, cwd=catalog_root, capture_output=True)
     except OSError as exc:
         raise CatalogPermissionError(
             f"Could not set catalog private modes under '{catalog_root}': {exc}"
         ) from exc
+    report_entries_not_owned(catalog_root, printed_entries(result.stdout))
     if result.returncode != 0:
         raise CatalogPermissionError(
             f"Could not set catalog private modes under '{catalog_root}' "
-            f"(exit {result.returncode}): {result.stderr.strip()}"
+            f"(exit {result.returncode}): {os.fsdecode(result.stderr).strip()}"
         )
 
 
