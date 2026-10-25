@@ -57,78 +57,94 @@ _V_TIMESTAMP_CAPTURE_RE = re.compile(r"^v_(\d+)$")
 logger = logging.getLogger(__name__)
 
 
-def _ensure_source_tree_readable_for_clone(source_path: str) -> None:
-    """Best-effort widen *source_path*'s permissions so a different-OS-user,
-    remote-executing clone backend (the CoW daemon, Issue #1511) can read it.
+_WIDEN_FOR_DAEMON = [
+    "-type",
+    "d",
+    "-exec",
+    "chmod",
+    "g+rx,o+rx",
+    "{}",
+    "+",
+    "-o",
+    "-type",
+    "f",
+    "-exec",
+    "chmod",
+    "g+r,o+r",
+    "{}",
+    "+",
+]
 
-    The CoW daemon runs `cp --reflink=auto -a` as its own OS user, which is
-    typically NOT the OS user (`cidx index`) that wrote the golden-repo's
-    index files -- those files commonly end up at restrictive mode 600 from
-    that process's ambient umask, causing "Permission denied" for every
-    clone attempt. This preflight defensively ensures group+other can at
-    least read (and, for directories, traverse) every entry under
-    *source_path* before handing it to such a backend.
+_GROUP_ONLY_FOR_DAEMON = [
+    "(",
+    "-type",
+    "d",
+    "-exec",
+    "chmod",
+    "g+rx,o-rwx",
+    "{}",
+    "+",
+    "-o",
+    "-type",
+    "f",
+    "-exec",
+    "chmod",
+    "g+r,o-rwx",
+    "{}",
+    "+",
+    ")",
+]
 
-    Bug #1511 follow-up: the original implementation walked the tree in
-    Python (`os.walk` + a separate `os.stat`/`os.chmod` pair per entry). For
-    a golden repo with hundreds of thousands of small index/shard files over
-    NFS (e.g. evolution's temporal quarter-shard directories), that is one
-    or two network round trips PER FILE and measurably hung repository
-    activation for 30+ minutes in production (proven live via py-spy). Two
-    batched `find ... -exec chmod ... {} +` calls -- one scoped to
-    directories, one to files -- do the equivalent additive-only widening
-    in one native traversal each, instead of a Python-level round trip per
-    entry. Directories get `g+rx,o+rx` (read+traverse); files get
-    `g+r,o+r` ONLY (never execute -- a single combined `chmod ... X` pass
-    would risk setting the execute bit on a plain file that already had
-    some other execute bit set, which this project's contract forbids).
 
-    Never strips existing permissions -- only ADDS bits. Resilient to
-    partial failures: `find -exec chmod ... +` batches many paths per
-    invoked `chmod`, and GNU chmod continues past an individual failing
-    path within a batch rather than aborting -- a non-zero overall exit is
-    logged as a WARNING, never raised (the downstream `cp` call will
-    surface a loud, clear error if something still can't be read after this
-    preflight runs).
-    """
+# ^ security CoW daemon user is in the service user's primary group => group read suffices; doc:cow-storage-setup#service-group
+# ^ security catalog=True => catalog private paths are owner + group only; test:test_catalog_memory_gains_group_read_and_no_other_bits
+# ^ why chmod g+r, not X; X would set execute on files that already carry an execute bit
+def _ensure_source_tree_readable_for_clone(source_path: str, *, catalog: bool) -> None:
+    command = ["find", "."]
+    if catalog:
+        from .catalog_tree_permissions import (
+            catalog_private_find_test,
+            report_symlinked_private_roots,
+        )
 
-    def _run_chmod(entry_type: str, mode: str) -> None:
-        try:
-            result = subprocess.run(
-                [
-                    "find",
-                    source_path,
-                    "-type",
-                    entry_type,
-                    "-exec",
-                    "chmod",
-                    mode,
-                    "{}",
-                    "+",
-                ],
-                capture_output=True,
-                text=True,
+        report_symlinked_private_roots(source_path)
+        # ^ invariant private-path branch is evaluated before the widening branch for every entry
+        command += [*catalog_private_find_test(), *_GROUP_ONLY_FOR_DAEMON, "-o"]
+    # ^ perf one find pass per tree, never a per-entry chmod; #1511
+    command += _WIDEN_FOR_DAEMON
+    from .catalog_tree_permissions import CatalogPermissionError
+
+    try:
+        result = subprocess.run(
+            command, cwd=source_path, capture_output=True, text=True
+        )
+    except OSError as exc:
+        if catalog:
+            raise CatalogPermissionError(
+                f"Could not set catalog private modes under '{source_path}': {exc}"
+            ) from exc
+        logger.warning(
+            "Failed to run the CoW-daemon clone readability preflight on '%s'; "
+            "continuing: %s",
+            source_path,
+            exc,
+        )
+        return
+    if result.returncode != 0:
+        # ^ invariant catalog=True and modes not established => no copy is made
+        if catalog:
+            raise CatalogPermissionError(
+                f"Could not set catalog private modes under '{source_path}' "
+                f"(exit {result.returncode}): {result.stderr.strip()}"
             )
-            if result.returncode != 0:
-                logger.warning(
-                    "CoW-daemon clone readability preflight (%s) on '%s' "
-                    "reported errors (exit %d); continuing: %s",
-                    entry_type,
-                    source_path,
-                    result.returncode,
-                    result.stderr.strip(),
-                )
-        except OSError as exc:
-            logger.warning(
-                "Failed to run permission-widening preflight (%s) on '%s' "
-                "for CoW-daemon clone readability; continuing: %s",
-                entry_type,
-                source_path,
-                exc,
-            )
-
-    _run_chmod("d", "g+rx,o+rx")
-    _run_chmod("f", "g+r,o+r")
+        # ^ why log, not raise; the daemon copy fails loudly on any entry it still cannot read
+        logger.warning(
+            "CoW-daemon clone readability preflight on '%s' reported errors "
+            "(exit %d); continuing: %s",
+            source_path,
+            result.returncode,
+            result.stderr.strip(),
+        )
 
 
 #: Default timeout in seconds for the filesystem CoW ``cp`` command.
@@ -244,6 +260,7 @@ class VersionedSnapshotManager:
             attributes={"alias": alias},
         ):
             self._remove_source_trigram_build_leftovers(source_path)
+            self._restrict_catalog_source(alias, source_path)
             if self._clone_backend is not None:
                 return self._create_clone_backend_snapshot(
                     alias, source_path, timestamp
@@ -252,6 +269,25 @@ class VersionedSnapshotManager:
             if self._flexclone is not None:
                 return self._create_flexclone_snapshot(alias, timestamp)
             return self._create_cow_snapshot(alias, source_path, timestamp)
+
+    def _restrict_catalog_source(self, alias: str, source_path: str) -> None:
+        from code_indexer.server.services.constants import is_internal_meta_repo
+
+        if not is_internal_meta_repo(alias):
+            return
+        # ^ coupled with _ensure_source_tree_readable_for_clone; the CoW-daemon preflight applies the catalog rule
+        if type(self._clone_backend).__name__ == "CowDaemonBackend":
+            return
+        if (
+            resolve_versioned_snapshot_root(
+                source_path, mount_point=self._backend_mount_point()
+            )
+            is not None
+        ):
+            return
+        from .catalog_tree_permissions import close_catalog_private_tree
+
+        close_catalog_private_tree(source_path)
 
     def _remove_source_trigram_build_leftovers(self, source_path: str) -> None:
         """Keep leftover trigram build temps out of the snapshot being created.
@@ -329,7 +365,11 @@ class VersionedSnapshotManager:
         # (same OS user) and OntapCloneBackend (different mechanism
         # entirely) are intentionally left untouched.
         if type(self._clone_backend).__name__ == "CowDaemonBackend":
-            _ensure_source_tree_readable_for_clone(source_path)
+            from code_indexer.server.services.constants import is_internal_meta_repo
+
+            _ensure_source_tree_readable_for_clone(
+                source_path, catalog=is_internal_meta_repo(alias)
+            )
 
         backend_versioned_base = getattr(self._clone_backend, "_versioned_base", None)
         if backend_versioned_base is None:

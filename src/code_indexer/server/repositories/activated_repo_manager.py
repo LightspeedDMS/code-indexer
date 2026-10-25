@@ -3889,7 +3889,15 @@ class ActivatedRepoManager:
             # identically by class name (LocalCloneBackend / OntapCloneBackend
             # are intentionally left untouched).
             if type(self._clone_backend).__name__ == "CowDaemonBackend":
-                _ensure_source_tree_readable_for_clone(source_path)
+                from code_indexer.server.services.constants import (
+                    is_internal_meta_repo,
+                )
+
+                _ensure_source_tree_readable_for_clone(
+                    source_path,
+                    catalog=golden_repo_alias is not None
+                    and is_internal_meta_repo(golden_repo_alias),
+                )
             self._clone_backend.create_clone_at_path(
                 source_path,
                 dest_path,

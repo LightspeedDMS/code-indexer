@@ -663,6 +663,63 @@ def _start_account_orphan_sweep(app: FastAPI, user_manager: Any) -> None:
     )
 
 
+# ^ invariant repair runs on a worker thread after startup; never on the event loop or the readiness path
+def _start_catalog_snapshot_mode_repair(snapshot_manager: Any) -> "asyncio.Task[None]":
+    async def _run() -> None:
+        from code_indexer.server.storage.shared import catalog_tree_permissions
+
+        try:
+            await anyio.to_thread.run_sync(
+                lambda: catalog_tree_permissions.repair_retained_catalog_snapshots(
+                    snapshot_manager
+                ),
+                abandon_on_cancel=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - background repair never fails startup
+            logger.warning(
+                "Catalog snapshot mode repair did not complete: %s",
+                type(exc).__name__,
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+    return asyncio.create_task(_run())
+
+
+# ^ why abandon_on_cancel, not a join; a worker thread blocked on storage cannot be interrupted
+async def _stop_catalog_snapshot_mode_repair(app: Any) -> None:
+    task = getattr(app.state, "catalog_snapshot_mode_repair_task", None)
+    if task is None:
+        return
+    if not task.done():
+        logger.info(
+            "Catalog snapshot mode repair was still running at shutdown; "
+            "its worker thread is abandoned",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
+async def _build_memory_store_bundle(
+    *,
+    golden_repos_dir: Path,
+    server_data_dir: Path,
+    refresh_scheduler: Any,
+    refresh_debouncer: Any,
+) -> Any:
+    from code_indexer.server.services import memory_store_service_factory
+
+    # ^ why worker thread, not inline; the factory creates and chmods catalog directories
+    return await anyio.to_thread.run_sync(
+        lambda: memory_store_service_factory.build_memory_store_service(
+            golden_repos_dir=golden_repos_dir,
+            server_data_dir=server_data_dir,
+            refresh_scheduler=refresh_scheduler,
+            refresh_debouncer=refresh_debouncer,
+        )
+    )
+
+
 def make_lifespan(
     background_job_manager: Any,
     job_tracker: Any,
@@ -1571,6 +1628,9 @@ def make_lifespan(
                     activated_repos_dir=activated_repos_dir_for_check,
                 )
                 app.state.snapshot_manager = snapshot_manager
+                app.state.catalog_snapshot_mode_repair_task = (
+                    _start_catalog_snapshot_mode_repair(snapshot_manager)
+                )
                 logger.info(
                     "Story #510: VersionedSnapshotManager initialized "
                     "(clone_backend=%r, versioned_base=%s)",
@@ -2402,14 +2462,11 @@ def make_lifespan(
 
                 run_nfs_atomic_create_self_check(Path(golden_repos_dir) / "cidx-meta")
 
-                from code_indexer.server.services.memory_store_service_factory import (
-                    build_memory_store_service as _build_memory_store_service,
-                )
                 from code_indexer.server.services.access_filtering_service import (
                     AccessFilteringService as _AccessFilteringService,
                 )
 
-                _memory_bundle = _build_memory_store_service(
+                _memory_bundle = await _build_memory_store_bundle(
                     golden_repos_dir=Path(golden_repos_dir),
                     server_data_dir=Path(server_data_dir),
                     refresh_scheduler=refresh_scheduler,
@@ -5369,6 +5426,7 @@ def make_lifespan(
         yield  # Server is now running
 
         await _stop_analysis_agent_credential_migration(app)
+        await _stop_catalog_snapshot_mode_repair(app)
 
         try:
             await stop_stored_secret_sweep(app)

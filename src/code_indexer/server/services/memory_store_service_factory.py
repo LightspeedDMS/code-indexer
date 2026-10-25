@@ -75,6 +75,11 @@ def build_memory_store_service(
     """
     memories_dir = Path(golden_repos_dir) / "cidx-meta" / "memories"
     memories_dir.mkdir(parents=True, exist_ok=True)
+    from code_indexer.server.storage.shared.catalog_tree_permissions import (
+        close_catalog_private_dirs,
+    )
+
+    close_catalog_private_dirs(memories_dir.parent)
 
     locks_root = Path(server_data_dir) / "locks"
     locks_root.mkdir(parents=True, exist_ok=True)

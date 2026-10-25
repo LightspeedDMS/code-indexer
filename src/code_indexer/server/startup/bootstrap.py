@@ -365,6 +365,11 @@ def bootstrap_cidx_meta(
 
     # Always patch excludes — runs on fresh installs and on already-registered upgrades.
     _patch_cidx_meta_override_yaml(cidx_meta_path)
+    from code_indexer.server.storage.shared.catalog_tree_permissions import (
+        close_catalog_private_dirs,
+    )
+
+    close_catalog_private_dirs(cidx_meta_path)
 
 
 # Self-heal for a confirmed bootstrap-timing gap: bootstrap_cidx_meta() above
