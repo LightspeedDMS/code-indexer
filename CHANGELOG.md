@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [12.97.0] - 2026-10-25
+
+### Upgrade notes
+
+- Server: catalog entries owned by an account other than the service user keep their mode and are listed in one WARNING per catalog snapshot ("not owned by the service user or not readable by it"); correct their ownership to the service user so their mode can be managed. They never block a catalog snapshot.
+
+### Fixed
+
+- Server: on 12.96.0, a catalog (`cidx-meta`) whose shared storage held entries owned by another account failed every catalog snapshot, so no memory, description, X-Ray pattern or dependency-map change was published. The catalog permission pass now changes only entries owned by the service user, skips directories of another owner that it cannot read, and reports both; a failure on an entry the service user owns still fails the snapshot. Server start logs one WARNING for such entries instead of an ERROR on every worker start.
+
 ## [12.96.0] - 2026-10-25
 
 ### Upgrade notes
