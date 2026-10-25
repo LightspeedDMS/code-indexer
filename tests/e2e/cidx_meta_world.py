@@ -25,6 +25,7 @@ import re
 import secrets
 import subprocess
 import time
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -44,7 +45,20 @@ from typing import (
 
 import httpx
 
-from code_indexer.global_repos.write_lock_manager import WriteLockManager
+from code_indexer.global_repos.alias_lock_coordinator import AliasLockCoordinator
+from code_indexer.server.services.alias_lock_store.base import (
+    AliasLockStore,
+    LockOutcome,
+)
+from code_indexer.server.services.alias_lock_store.factory import (
+    default_sqlite_lock_dir,
+)
+from code_indexer.server.services.alias_lock_store.postgres_store import (
+    PostgresAliasLockStore,
+)
+from code_indexer.server.services.alias_lock_store.sqlite_store import (
+    SqliteAliasLockStore,
+)
 from tests.e2e.helpers import GIT_SUBPROCESS_TIMEOUT, wait_for_job
 from tests.e2e.server.conftest import AdminTokenProvider
 from tests.shared.cidx_meta_visibility_fixture import (
@@ -270,6 +284,8 @@ class WorldLedger:
     client: httpx.Client
     admin: HeaderSource
     catalog_root: Path
+    # The server's alias lock store, where the teardown takes the catalog lock.
+    lock_store: AliasLockStore
     snapshot: Optional[Dict[str, bytes]] = None
     # The catalog repository's HEAD when the snapshot was taken (None: the
     # catalog is not a git repository).
@@ -399,17 +415,46 @@ def catalog_head(catalog_root: Path) -> Optional[str]:
     return _catalog_git(catalog_root, "rev-parse", "HEAD").stdout.strip()
 
 
+def sqlite_alias_lock_store(cidx_data_dir: Optional[Path]) -> AliasLockStore:
+    """The alias lock store of a solo server process whose CIDX_DATA_DIR is
+    *cidx_data_dir*, located by the server's own rule; None reads THIS
+    process's environment, as the in-process server (Phase 3) does."""
+    data_dir = None if cidx_data_dir is None else str(cidx_data_dir)
+    return SqliteAliasLockStore(default_sqlite_lock_dir(data_dir))
+
+
+def postgres_alias_lock_store(server_data_dir: Path) -> AliasLockStore:
+    """The alias lock store of the PostgreSQL-mode server whose bootstrap
+    ``config.json`` is in *server_data_dir* (Phase 6)."""
+    config = json.loads((server_data_dir / "config.json").read_text(encoding="utf-8"))
+    mode = config.get("storage_mode")
+    assert mode == "postgres", f"server storage_mode is {mode!r}, not postgres"
+    return PostgresAliasLockStore(str(config["postgres_dsn"]))
+
+
 @contextmanager
 def catalog_write_lock(
-    catalog_root: Path, wait_seconds: float = JOB_TIMEOUT_SECONDS
+    catalog_root: Path,
+    lock_store: AliasLockStore,
+    wait_seconds: float = JOB_TIMEOUT_SECONDS,
 ) -> Iterator[None]:
-    """Hold the server's write lock on the catalog (the file lock its
-    refresh and catalog writers take), taken as any external writer takes
-    it; waits at most *wait_seconds* for the current holder."""
-    locks = WriteLockManager(catalog_root.parent)
+    """Hold the server's write lock on the catalog in the server's own alias
+    lock store (*lock_store*), so its refresh and catalog writers wait for
+    this holder and this holder waits for theirs; waits at most
+    *wait_seconds* for the current holder and releases by its exact token."""
+    # ^ hazard a file lock here => the server's DB acquire rolls back + logs a cross-mechanism WARNING; test:test_held_catalog_lock_refuses_the_server_without_a_file_lock
+    locks = AliasLockCoordinator(
+        catalog_root.parent,
+        db_backed_enabled_getter=lambda: True,
+        store_resolver=lambda: lock_store,
+    )
+    token = uuid.uuid4().hex
     deadline = time.monotonic() + wait_seconds
     while not locks.acquire(
-        CATALOG, owner_name=_WORLD_LOCK_OWNER, ttl_seconds=_WORLD_LOCK_TTL_SECONDS
+        CATALOG,
+        owner_name=_WORLD_LOCK_OWNER,
+        ttl_seconds=_WORLD_LOCK_TTL_SECONDS,
+        owner_token=token,
     ):
         if time.monotonic() >= deadline:
             raise TimeoutError(
@@ -420,21 +465,34 @@ def catalog_write_lock(
     try:
         yield
     finally:
-        if not locks.release(CATALOG, owner_name=_WORLD_LOCK_OWNER):
-            raise RuntimeError("catalog write lock was taken over during the restore")
+        # ^ why renew by token first: the coordinator's release reports a vanished row (NOT_HELD) as released
+        owned = lock_store.renew_owned(
+            CATALOG,
+            _WORLD_LOCK_OWNER,
+            owner_token=token,
+            ttl_seconds=_WORLD_LOCK_TTL_SECONDS,
+        )
+        if owned is not LockOutcome.RENEWED:
+            raise RuntimeError(
+                f"catalog write lock was lost during the restore ({owned.value})"
+            )
+        if not locks.release(CATALOG, owner_name=_WORLD_LOCK_OWNER, owner_token=token):
+            raise RuntimeError("catalog write lock was lost during the restore")
 
 
 def restore_catalog(
     catalog_root: Path,
+    lock_store: AliasLockStore,
     snapshot: Dict[str, bytes],
     base_head: Optional[str] = None,
     lock_wait_seconds: float = JOB_TIMEOUT_SECONDS,
 ) -> None:
     """Put the catalog clone back to *snapshot* under the server's catalog
-    write lock: files added since are removed, changed or removed ones
-    rewritten, and what the server committed to those paths since
-    *base_head* is committed back (``_commit_world_paths``)."""
-    with catalog_write_lock(catalog_root, lock_wait_seconds):
+    write lock (``catalog_write_lock``): files added since are removed,
+    changed or removed ones rewritten, and what the server committed to
+    those paths since *base_head* is committed back
+    (``_commit_world_paths``)."""
+    with catalog_write_lock(catalog_root, lock_store, lock_wait_seconds):
         touched = _restore_files(catalog_root, snapshot)
         _commit_world_paths(catalog_root, base_head, touched)
 
@@ -605,11 +663,14 @@ def provision_catalog_world(
     catalog_root: Path,
     work_dir: Path,
     web_client_factory: Callable[[], httpx.Client],
+    lock_store: AliasLockStore,
 ) -> CatalogWorld:
     """Build the world through the front door on a server that does not
     hold it yet; ``teardown_catalog_world`` removes it again.  A failing
-    step rolls back everything created before it."""
-    ledger = WorldLedger(client, admin, catalog_root)
+    step rolls back everything created before it.  *lock_store* is the
+    server's own alias lock store (``sqlite_alias_lock_store`` /
+    ``postgres_alias_lock_store``), where the catalog restore locks."""
+    ledger = WorldLedger(client, admin, catalog_root, lock_store)
     try:
         ledger.catalog_head = catalog_head(catalog_root)
         ledger.snapshot = snapshot_catalog(catalog_root)
@@ -683,7 +744,9 @@ def _restore_and_refresh(ledger: WorldLedger, snapshot: Dict[str, bytes]) -> Non
     # starting after the restore released it counts.
     client, admin = ledger.client, ledger.admin
     wait_for_idle_catalog_refreshes(client, admin)
-    restore_catalog(ledger.catalog_root, snapshot, ledger.catalog_head)
+    restore_catalog(
+        ledger.catalog_root, ledger.lock_store, snapshot, ledger.catalog_head
+    )
     restored_at = datetime.now(timezone.utc)
     if not _catalog_refreshed_after(
         client, admin, restored_at, CATALOG_DEBOUNCE_GRACE_SECONDS

@@ -28,6 +28,27 @@ class _VectorStore:
     def collection_exists(self, collection_name):
         return True
 
+    # ^ coupled smart_indexer.py:SmartIndexer._close_git_session closes the branch-change session; filesystem_vector_store.py:end_indexing
+    def end_indexing(
+        self,
+        collection_name,
+        progress_callback=None,
+        skip_hnsw_rebuild=False,
+        subdirectory=None,
+        force_full_rebuild=False,
+        clear_stale=True,
+    ):
+        return {
+            "status": "ok",
+            "vectors_indexed": 0,
+            "unique_files": 0,
+            "collection": collection_name,
+            "hnsw_skipped": skip_hnsw_rebuild,
+        }
+
+    def abort_indexing(self, collection_name, subdirectory=None):
+        return None
+
 
 class _Provider:
     def get_provider_name(self):

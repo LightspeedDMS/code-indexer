@@ -195,7 +195,7 @@ class TestFTSBranchIsolationNoOpsWhenManagerNone:
 
         content_points = _make_content_points(all_files)
         _configure_content_points_mock(processor, content_points)
-        processor.vector_store_client._batch_update_payload_only.return_value = None
+        processor.vector_store_client._batch_update_payload_only.return_value = True
 
         processor.hide_files_not_in_branch_thread_safe(
             branch="feature-branch",

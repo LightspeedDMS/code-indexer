@@ -1,5 +1,6 @@
 """File discovery and filtering for indexing."""
 
+import logging
 import os
 from pathlib import Path
 from typing import Iterator, Dict
@@ -7,8 +8,17 @@ import pathspec
 
 from ..config import Config
 from ..services.override_filter_service import OverrideFilterService
+from ..utils.never_indexed_paths import (
+    SkippedPathReporter,
+    escaped_path,
+    has_unstorable_name,
+    in_never_indexed_directory,
+    never_indexed_reason,
+)
 from ..utils.path_confinement import is_indexable_location
 from ..utils.source_text_decoding import decode_source_bytes
+
+logger = logging.getLogger(__name__)
 
 
 class FileFinder:
@@ -16,6 +26,13 @@ class FileFinder:
 
     def __init__(self, config: Config):
         self.config = config
+        # ^ invariant skipped-name state is per instance; a watch event's new FileFinder resets the cap
+        self._unstorable_reporter = SkippedPathReporter(
+            logger,
+            where="",
+            noun="file(s)",
+            summary_subject="file(s) in this run whose names are not valid UTF-8",
+        )
         # Resolved ONCE per FileFinder instance (i.e. once per indexing
         # run), never per candidate file -- every containment check below
         # reuses this same value.
@@ -265,6 +282,13 @@ class FileFinder:
         reuse this SAME canonical exclusion source find_files() applies,
         rather than reimplementing a divergent, incomplete subset of it.
         """
+        if has_unstorable_name(relative_path):
+            self._unstorable_reporter.report(
+                relative_path, never_indexed_reason(relative_path)
+            )
+            return True
+        if in_never_indexed_directory(relative_path):
+            return True
         return bool(self.exclude_spec.match_file(relative_path))
 
     def _get_base_filtering_result(self, file_path: Path) -> bool:
@@ -277,7 +301,7 @@ class FileFinder:
 
             # Check against exclude patterns
             relative_path = file_path.relative_to(self.config.codebase_dir)
-            if self.exclude_spec.match_file(str(relative_path)):
+            if self.matches_exclude_pattern(str(relative_path)):
                 return False
 
             # Check if it's a text file
@@ -285,6 +309,9 @@ class FileFinder:
 
         except (OSError, ValueError):
             return False
+
+    def summarize_skipped_paths(self) -> None:
+        self._unstorable_reporter.summarize()
 
     def find_files(self) -> Iterator[Path]:
         """Find all files that should be indexed."""
@@ -296,7 +323,7 @@ class FileFinder:
 
         with open(debug_file, "a") as f:
             f.write(
-                f"[{datetime.datetime.now().isoformat()}] FileFinder.find_files started for {self.config.codebase_dir}\n"
+                f"[{datetime.datetime.now().isoformat()}] FileFinder.find_files started for {escaped_path(str(self.config.codebase_dir))}\n"
             )
             f.flush()
 
@@ -368,12 +395,14 @@ class FileFinder:
                 if file_is_large_or_named:
                     with open(debug_file, "a") as f:
                         f.write(
-                            f"[{datetime.datetime.now().isoformat()}] Checking large file: {file_path} ({file_path.stat().st_size} bytes)\n"
+                            f"[{datetime.datetime.now().isoformat()}] Checking large file: {escaped_path(str(file_path))} ({file_path.stat().st_size} bytes)\n"
                         )
                         f.flush()
 
                 if self._should_include_file(file_path):
                     yield file_path
+
+        self.summarize_skipped_paths()
 
     def find_modified_files(self, since_timestamp: float) -> Iterator[Path]:
         """Find files modified since the given timestamp."""

@@ -27,6 +27,7 @@ from tests.e2e.cidx_meta_suite import (
 )
 from tests.e2e.cidx_meta_world import (
     CATALOG_GLOBAL,
+    postgres_alias_lock_store,
     provision_catalog_world,
     teardown_catalog_world,
 )
@@ -70,6 +71,7 @@ def catalog_callers(
             lambda: httpx.Client(
                 base_url=pg_server_url, timeout=CLIENT_TIMEOUT_SECONDS
             ),
+            postgres_alias_lock_store(Path(data_dir)),
         )
         callers = (
             Caller(

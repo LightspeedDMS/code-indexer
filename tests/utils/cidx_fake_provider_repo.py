@@ -159,6 +159,8 @@ class FakeProviderRepo:
             env=self.env,
             capture_output=True,
             text=True,
+            # ^ why surrogateescape, not strict; a raw non-UTF-8 byte stays distinct from an escaped one; #2196
+            errors="surrogateescape",
             timeout=timeout,
         )
         blocked = (

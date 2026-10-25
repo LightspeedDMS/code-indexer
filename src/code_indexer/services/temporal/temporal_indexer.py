@@ -28,7 +28,11 @@ from ...services.file_identifier import FileIdentifier
 from ...storage.filesystem_vector_store import FilesystemVectorStore
 
 from .models import CommitInfo
-from .commit_aggregator import build_aggregated_document, get_file_changes
+from .commit_aggregator import (
+    build_aggregated_document,
+    get_file_changes,
+    new_temporal_skip_reporter,
+)
 from .embedders.base import TemporalEmbedder
 from .contextual_chunker import chunk_aggregated_document
 from .embedders import registry as _embedder_registry_module  # noqa: F401  (self-registers adapters)
@@ -1137,6 +1141,7 @@ class TemporalIndexer:
         diff_context_lines = getattr(self.config.temporal, "diff_context_lines", 5)
         chunk_chars = getattr(self.config.temporal, "aggregation_chunk_chars", 4096)
         shard_progress = self._get_progress(self.collection_name)
+        skipped_paths = new_temporal_skip_reporter()
 
         def worker():
             nonlocal total_bytes_processed
@@ -1168,7 +1173,10 @@ class TemporalIndexer:
                     )
 
                     file_changes = get_file_changes(
-                        self.codebase_dir, commit, diff_context_lines
+                        self.codebase_dir,
+                        commit,
+                        diff_context_lines,
+                        skipped_paths=skipped_paths,
                     )
                     doc = build_aggregated_document(commit, file_changes)
                     if self._active_embedder is None:
@@ -1322,6 +1330,7 @@ class TemporalIndexer:
 
         # Flush any staged commits that didn't hit the _FLUSH_INTERVAL boundary.
         shard_progress.flush_pending()
+        skipped_paths.summarize()
 
         return (
             completed_count[0],

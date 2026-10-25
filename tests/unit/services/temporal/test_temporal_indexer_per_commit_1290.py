@@ -395,6 +395,37 @@ class TestPerCommitPipelineWiring:
         )
 
 
+class TestNeverIndexedPathReporting:
+    def test_shard_batch_names_five_skipped_paths_then_counts_the_rest(
+        self, tmp_path, fake_embedder, caplog
+    ):
+        import logging
+        import os
+
+        repo = _init_repo(tmp_path)
+        (repo / "a.txt").write_text("hello world\n")
+        _run_git(["add", "."], repo)
+        _run_git(["commit", "-q", "-m", "Initial commit"], repo)
+        for i in range(7):
+            target = os.path.join(os.fsencode(repo), f"bad{i}\xff.py".encode("latin-1"))
+            try:
+                with open(target, "wb") as handle:
+                    handle.write(b"x = 1\n")
+            except OSError as exc:
+                pytest.skip(f"filesystem refuses a non-UTF-8 file name: {exc}")
+            _run_git(["add", "-A"], repo)
+            _run_git(["commit", "-q", "-m", f"bad {i}"], repo)
+
+        indexer, _ = _make_indexer(repo, tmp_path / "index")
+        logger_name = "code_indexer.services.temporal.commit_aggregator"
+        with caplog.at_level(logging.WARNING, logger=logger_name):
+            indexer.index_commits()
+
+        messages = [r.getMessage() for r in caplog.records if r.name == logger_name]
+        assert len(messages) == 6, messages
+        assert "Skipped 7 never-indexed path(s) in this commit batch" in messages[5]
+
+
 class TestDeterministicFixtureCounts:
     """Code-review Finding 2 (Story #1290): dedicated deterministic fixtures
     for the headline file-count claim, locking EXACT expected values (not

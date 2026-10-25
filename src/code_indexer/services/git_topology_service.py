@@ -6,11 +6,18 @@ that understands branch relationships, file changes, and working directory state
 """
 
 import logging
+import os
 import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Set, Tuple
+
+from code_indexer.utils.never_indexed_paths import (
+    SkippedPathReporter,
+    is_never_indexed,
+    never_indexed_reason,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -220,10 +227,22 @@ class GitTopologyService:
 
         # Get all files in target branch for metadata updates
         all_files = self._get_all_tracked_files(new_branch)
+        skipped_paths = SkippedPathReporter(
+            logger,
+            where=" in the branch change",
+            noun="path(s)",
+            summary_subject="never-indexed path(s) in this branch change",
+        )
+        indexable_files: Set[str] = set()
+        for tracked in all_files:
+            if is_never_indexed(tracked):
+                skipped_paths.report(tracked, never_indexed_reason(tracked))
+            else:
+                indexable_files.add(tracked)
 
         # Filter changed files to only include files that exist in the target branch
         # Files that don't exist in target branch should be hidden, not processed as "changed"
-        changed_files = [f for f in raw_changed_files if f in all_files]
+        changed_files = [f for f in raw_changed_files if f in indexable_files]
 
         # Bug #469: Filter by file_extensions to exclude binary files (.jar, .zip, .exe, etc.)
         # Without this, raw git diff output sends ALL changed files to the embedding pipeline.
@@ -239,7 +258,9 @@ class GitTopologyService:
                 if Path(f).suffix.lower().lstrip(".") in allowed_extensions
             ]
 
-        unchanged_files = [f for f in all_files if f not in changed_files]
+        unchanged_files = [
+            f for f in all_files if f not in changed_files and f in indexable_files
+        ]
 
         # Get working directory changes
         staged_files = self._get_staged_files()
@@ -248,6 +269,7 @@ class GitTopologyService:
         # Get branch ancestry for topology filtering
         branch_ancestry = self._get_branch_ancestry(new_branch)
 
+        skipped_paths.summarize()
         analysis_time = time.time() - start_time
         logger.info(
             f"Branch analysis completed in {analysis_time:.3f}s: "
@@ -307,31 +329,37 @@ class GitTopologyService:
             old_git_ref = "HEAD" if old_branch.startswith("detached-") else old_branch
             new_git_ref = "HEAD" if new_branch.startswith("detached-") else new_branch
 
-            # Use git diff with name-only to get just the file names
-            result = subprocess.run(
-                ["git", "diff", "--name-only", f"{old_git_ref}..{new_git_ref}"],
-                cwd=self.codebase_dir,
-                capture_output=True,
-                text=True,
-                timeout=30,
+            files, stderr = self._git_path_list(
+                ["diff", "--name-only", f"{old_git_ref}..{new_git_ref}"], timeout=30
             )
-
-            if result.returncode == 0:
-                files = [
-                    f.strip() for f in result.stdout.strip().split("\n") if f.strip()
-                ]
+            if files is not None:
                 logger.debug(
                     f"Found {len(files)} changed files between {old_branch}..{new_branch}"
                 )
                 return files
             else:
-                logger.warning(f"Git diff failed: {result.stderr}")
+                logger.warning(f"Git diff failed: {stderr}")
                 # If git diff fails, fall back to returning all tracked files
                 return self._get_all_tracked_files()
 
         except (subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
             logger.warning(f"Failed to get changed files: {e}")
             return []
+
+    # ^ why -z bytes + os.fsdecode, not text; git C-quotes a non-UTF-8 name, which is not its path
+    def _git_path_list(
+        self, args: List[str], timeout: float
+    ) -> Tuple[Optional[List[str]], str]:
+        result = subprocess.run(
+            ["git", args[0], "-z", *args[1:]],
+            cwd=self.codebase_dir,
+            capture_output=True,
+            timeout=timeout,
+        )
+        stderr = result.stderr.decode("utf-8", "replace")
+        if result.returncode != 0:
+            return None, stderr
+        return [os.fsdecode(p) for p in result.stdout.split(b"\0") if p], stderr
 
     def _is_valid_git_ref(self, ref: str) -> bool:
         """Check if a string is a valid git reference."""
@@ -359,25 +387,17 @@ class GitTopologyService:
             # and are not valid git references
             git_ref = "HEAD" if branch.startswith("detached-") else branch
 
-            result = subprocess.run(
-                ["git", "ls-tree", "-r", "--name-only", "--full-tree", git_ref],
-                cwd=self.codebase_dir,
-                capture_output=True,
-                text=True,
-                timeout=30,
+            files, stderr = self._git_path_list(
+                ["ls-tree", "-r", "--name-only", "--full-tree", git_ref], timeout=30
             )
-
-            if result.returncode == 0:
-                files = [
-                    f.strip() for f in result.stdout.strip().split("\n") if f.strip()
-                ]
+            if files is not None:
                 logger.debug(
                     f"Found {len(files)} tracked files in {branch} (git ref: {git_ref})"
                 )
                 return files
             else:
                 logger.warning(
-                    f"git ls-tree failed for branch '{branch}' (git ref: {git_ref}): {result.stderr}"
+                    f"git ls-tree failed for branch '{branch}' (git ref: {git_ref}): {stderr}"
                 )
                 return []
 
@@ -388,21 +408,8 @@ class GitTopologyService:
     def _get_staged_files(self) -> List[str]:
         """Get files that are staged in the working directory."""
         try:
-            result = subprocess.run(
-                ["git", "diff", "--name-only", "--cached"],
-                cwd=self.codebase_dir,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-
-            if result.returncode == 0:
-                files = [
-                    f.strip() for f in result.stdout.strip().split("\n") if f.strip()
-                ]
-                return files
-            else:
-                return []
+            files, _ = self._git_path_list(["diff", "--name-only", "--cached"], 10)
+            return files if files is not None else []
 
         except (subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
             logger.warning(f"Failed to get staged files: {e}")
@@ -411,21 +418,8 @@ class GitTopologyService:
     def _get_unstaged_files(self) -> List[str]:
         """Get files that have unstaged changes in the working directory."""
         try:
-            result = subprocess.run(
-                ["git", "diff", "--name-only"],
-                cwd=self.codebase_dir,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-
-            if result.returncode == 0:
-                files = [
-                    f.strip() for f in result.stdout.strip().split("\n") if f.strip()
-                ]
-                return files
-            else:
-                return []
+            files, _ = self._git_path_list(["diff", "--name-only"], 10)
+            return files if files is not None else []
 
         except (subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
             logger.warning(f"Failed to get unstaged files: {e}")

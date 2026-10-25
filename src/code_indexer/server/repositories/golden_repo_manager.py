@@ -3856,21 +3856,120 @@ class GoldenRepoManager:
             )
         return snapshot_path
 
-    def _cb_branch_files(self, snapshot_path: str, cleanup: str) -> Optional[set[str]]:
+    def _cb_versioned_root(self) -> Optional[Path]:
+        manager = self._snapshot_manager
+        if manager is None:
+            return Path(self.golden_repos_dir) / ".versioned"
+        # ^ coupled with clone_backend.py:LocalCloneBackend._clone_path and CowDaemonBackend.create_clone; same .versioned base
+        # ^ coupled with snapshot_manager.py:VersionedSnapshotManager._create_cow_snapshot; no backend base => manager _versioned_base
+        backend = getattr(manager, "_clone_backend", None)
+        base: Optional[str] = None
+        if backend is not None:
+            base = getattr(backend, "_versioned_base", None) or getattr(
+                backend, "_mount_point", None
+            )
+        if not base:
+            base = getattr(manager, "_versioned_base", None)
+        return Path(str(base)) / ".versioned" if base else None
+
+    def _cb_unpublished_snapshot_refusal(
+        self, alias: str, snapshot_path: str
+    ) -> Optional[str]:
+        from code_indexer.global_repos.alias_manager import read_alias_pointer_strict
+        from code_indexer.server.storage.shared.clone_backend import CowDaemonBackend
+
+        if not self._is_versioned_snapshot(snapshot_path):
+            return "it is not a versioned snapshot"
+        parts = Path(snapshot_path).parts
+        namespaces = {alias, CowDaemonBackend._sanitize_identifier(alias)}
+        if len(parts) < 3 or parts[-3] != ".versioned" or parts[-2] not in namespaces:
+            return f"it is not under .versioned/{alias}/"
+        root = self._cb_versioned_root()
+        if root is None:
+            return "no versioned snapshot root is configured"
+        if os.path.islink(snapshot_path):
+            return "it is a symbolic link"
+        resolved = Path(os.path.realpath(snapshot_path))
+        if resolved.parent.parent != Path(os.path.realpath(root)):
+            return f"it is not inside the configured snapshot root {root}"
+        try:
+            published = read_alias_pointer_strict(
+                Path(self.golden_repos_dir) / "aliases", f"{alias}-global"
+            )
+        except Exception as exc:
+            return f"the published target could not be read: {exc}"
+        if published and os.path.normpath(published) == os.path.normpath(snapshot_path):
+            return "it is the published alias target"
+        return None
+
+    def _cb_discard_unpublished_snapshot(self, alias: str, snapshot_path: str) -> None:
+        refusal = self._cb_unpublished_snapshot_refusal(alias, snapshot_path)
+        if refusal is not None:
+            logger.error(
+                "[change_branch] Not discarding '%s' for '%s': %s",
+                snapshot_path,
+                alias,
+                refusal,
+            )
+            return
+        try:
+            if self._snapshot_manager is not None:
+                deleted = bool(
+                    self._snapshot_manager.delete_snapshot(alias, snapshot_path)
+                )
+            else:
+                shutil.rmtree(snapshot_path)
+                deleted = True
+        except Exception as exc:
+            logger.error(
+                "[change_branch] Failed to discard unpublished snapshot '%s' for "
+                "'%s': %s",
+                snapshot_path,
+                alias,
+                exc,
+            )
+            deleted = False
+        if deleted:
+            return
+        scheduler = getattr(self, "_refresh_scheduler", None)
+        cleanup = None
+        if scheduler is not None:
+            cleanup = getattr(scheduler, "cleanup_manager", None)
+        if cleanup is None:
+            logger.error(
+                "[change_branch] Unpublished snapshot '%s' for '%s' was not deleted "
+                "and no cleanup manager is wired to retry it",
+                snapshot_path,
+                alias,
+            )
+            return
+        try:
+            cleanup.schedule_cleanup(snapshot_path)
+        except Exception as exc:
+            logger.error(
+                "[change_branch] Failed to schedule cleanup of unpublished snapshot "
+                "'%s' for '%s': %s",
+                snapshot_path,
+                alias,
+                exc,
+            )
+
+    def _cb_branch_files(self, snapshot_path: str, cleanup: str) -> set[str]:
         # ^ external git ls-files without -z C-quotes non-ASCII and quoted names => they never match stored paths (#2194)
-        # ^ why os.fsdecode, not text=True; a non-UTF-8 name => strict decode raises and both cleanups skip
+        # ^ why os.fsdecode, not text=True; a non-UTF-8 name => strict decode fails the branch change
+        # ^ why no timeout; listing time grows with repo size; #1218
         result = subprocess.run(
             ["git", "ls-files", "-z"],
             cwd=snapshot_path,
             capture_output=True,
-            timeout=60,
         )
         if result.returncode != 0:
-            logger.warning(
-                f"[change_branch] git ls-files failed on snapshot '{snapshot_path}': "
-                f"{os.fsdecode(result.stderr)} - skipping {cleanup} cleanup"
+            # ^ invariant failed listing => raise before the swap; test:test_failed_listing_raises_before_swap
+            raise RuntimeError(
+                f"[change_branch] git ls-files failed on snapshot '{snapshot_path}' "
+                f"(exit {result.returncode}) before {cleanup} cleanup: "
+                f"{os.fsdecode(result.stderr).strip()}"
             )
-            return None
         return {os.fsdecode(name) for name in result.stdout.split(b"\0") if name}
 
     def _cb_fts_branch_cleanup(self, snapshot_path: str, target_branch: str) -> None:
@@ -3891,13 +3990,10 @@ class GoldenRepoManager:
             )
             return
 
+        branch_files = self._cb_branch_files(snapshot_path, "FTS")
         try:
             # Lazy import to keep cidx --help fast (per CLAUDE.md)
             from code_indexer.services.tantivy_index_manager import TantivyIndexManager
-
-            branch_files = self._cb_branch_files(snapshot_path, "FTS")
-            if branch_files is None:
-                return
 
             # Open existing FTS index in snapshot (create_new=False to not wipe it)
             fts_manager = TantivyIndexManager(fts_index_dir)
@@ -3955,6 +4051,7 @@ class GoldenRepoManager:
             )
             return
 
+        branch_files = self._cb_branch_files(snapshot_path, "HNSW")
         try:
             # Lazy import to keep cidx --help fast (per CLAUDE.md)
             from code_indexer.storage.filesystem_vector_store import (
@@ -3963,10 +4060,6 @@ class GoldenRepoManager:
             from code_indexer.server.utils.registry_factory import (
                 is_postgres_storage_mode,
             )
-
-            branch_files = self._cb_branch_files(snapshot_path, "HNSW")
-            if branch_files is None:
-                return
 
             # Bug #1575 Part C review fix (Defect 3a bypass 1): thread the
             # postgres/cluster-mode signal, matching
@@ -4172,6 +4265,8 @@ class GoldenRepoManager:
             self._cb_checkout_and_pull(
                 base, target_branch, git_t, credentials_url=golden_repo.repo_url
             )
+            snapshot: Optional[str] = None
+            swap_started = False
             try:
                 # Story #482 PATH D: coarse progress markers around each major step.
                 # _cb_cidx_index/_cb_cow_snapshot are shared callbacks used elsewhere;
@@ -4212,6 +4307,8 @@ class GoldenRepoManager:
                     scheduler.raise_if_write_lock_ownership_lost(
                         alias, owner_name="branch_change"
                     )
+                # ^ hazard discarding after the swap started => deletes the published snapshot
+                swap_started = True
                 self._cb_swap_alias(alias, snapshot)
                 if progress_callback is not None:
                     progress_callback(
@@ -4220,6 +4317,8 @@ class GoldenRepoManager:
                         detail=f"branch change: switched to '{target_branch}'",
                     )
             except Exception as exc:
+                if snapshot is not None and not swap_started:
+                    self._cb_discard_unpublished_snapshot(alias, snapshot)
                 # Bug #469: Rollback git HEAD to previous branch on partial failure.
                 try:
                     subprocess.run(

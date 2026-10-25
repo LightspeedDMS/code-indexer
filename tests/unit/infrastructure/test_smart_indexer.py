@@ -718,18 +718,14 @@ class TestIndexingExceptionHandling:
             mock_filesystem_client.begin_indexing.assert_called()
             mock_filesystem_client.end_indexing.assert_called()
 
-    def test_end_indexing_called_on_incremental_index_exception(
+    # ^ why abort, not end_indexing; an unfinished git-aware incremental must not publish an unfiltered HNSW
+    def test_session_aborted_on_git_incremental_exception(
         self,
         mock_config,
         mock_embedding_provider,
         mock_filesystem_client,
         temp_metadata_path,
     ):
-        """
-        CRITICAL TEST: Verify that end_indexing() is called even when exception occurs during incremental indexing.
-
-        This prevents FilesystemVectorStore from being left in unsearchable state.
-        """
         # Pre-populate metadata to enable incremental indexing
         metadata = ProgressiveMetadata(temp_metadata_path)
         git_status = {"git_available": False, "project_id": "test"}
@@ -783,9 +779,9 @@ class TestIndexingExceptionHandling:
                 ):
                     indexer.smart_index(force_full=False)
 
-                # CRITICAL ASSERTION: end_indexing() MUST be called even when exception occurs
                 mock_filesystem_client.begin_indexing.assert_called()
-                mock_filesystem_client.end_indexing.assert_called()
+                mock_filesystem_client.abort_indexing.assert_any_call("test_collection")
+                mock_filesystem_client.end_indexing.assert_not_called()
         finally:
             if temp_file_path.exists():
                 temp_file_path.unlink()

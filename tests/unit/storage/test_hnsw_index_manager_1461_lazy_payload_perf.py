@@ -11,9 +11,9 @@ This is the consumer-side wiring proof that the fix
 (``ChunkStore.stream_for_index_rebuild``) is actually used, with the correct
 ``need_payload`` decision per mode:
   - full unfiltered rebuild -> need_payload=False -> 0 decompress calls
-  - visible_files-filtered rebuild -> need_payload=False -> 0 decompress
-    calls (visible_files always takes priority over hidden_branches, so the
-    payload is never needed when it is set)
+  - visible_files-filtered rebuild without a current_branch ->
+    need_payload=False -> 0 decompress calls (with a current_branch the
+    payload is decoded: a point hidden on the branch is never loaded)
   - branch-aware rebuild (Bug #306 hidden_branches) -> need_payload=True ->
     exactly one decompress call per row (the payload must be inspected for
     every row to decide hidden_branches membership)
@@ -163,13 +163,10 @@ class TestVisibleFilesFilteredRebuildSkipsPayloadDecode:
 
         assert count == len(expected_ids) == 3
 
-    def test_visible_files_takes_priority_over_hidden_branches_zero_decompress(
+    # ^ why decode with visible_files too, not skip; a path-visible point hidden on the branch must never be published
+    def test_hidden_branches_apply_together_with_visible_files(
         self, tmp_path: Path, monkeypatch
     ) -> None:
-        """When BOTH visible_files and current_branch are supplied,
-        visible_files wins (matches the pre-existing elif semantics) --
-        need_payload must still resolve False, since hidden_branches is
-        never consulted in this mode."""
         collection_path = tmp_path / "test_coll"
         records = [
             _record("v0", "a.py", 128, hidden_branches=["feature-x"]),
@@ -186,8 +183,8 @@ class TestVisibleFilesFilteredRebuildSkipsPayloadDecode:
             current_branch="feature-x",
         )
 
-        assert count == 2
-        assert call_count["n"] == 0
+        assert count == 1
+        assert call_count["n"] == 2
 
 
 class TestBranchAwareRebuildStillDecodesPayload:
