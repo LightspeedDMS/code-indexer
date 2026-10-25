@@ -34,6 +34,7 @@ from tests.e2e.cidx_meta_suite import (
 from tests.e2e.cidx_meta_world import (
     WORLD_REPOS,
     provision_catalog_world,
+    sqlite_alias_lock_store,
     teardown_catalog_world,
 )
 from tests.e2e.helpers import require_voyage_key
@@ -71,6 +72,8 @@ def catalog_callers(
             test_client_data_dir / "data" / "golden-repos" / "cidx-meta",
             tmp_path_factory.mktemp("catalog-repos"),
             _web_client,
+            # ^ why None: the in-process server locates its locks from this process's CIDX_DATA_DIR, not test_client_data_dir
+            sqlite_alias_lock_store(None),
         )
     creds = (os.environ["E2E_ADMIN_USER"], os.environ["E2E_ADMIN_PASS"])
     callers = (Caller(world, True, *creds), Caller(world, False, *creds))

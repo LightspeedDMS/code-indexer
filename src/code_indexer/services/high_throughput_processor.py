@@ -41,12 +41,24 @@ from ..services.git_aware_processor import GitAwareDocumentProcessor
 from .vector_calculation_manager import VectorCalculationManager
 from .clean_slot_tracker import CleanSlotTracker, FileStatus, FileData
 from .file_chunking_manager import FileChunkingManager, FileProcessingResult
-from ..storage.sqlite_chunk_store import ChunkStoreUnavailableError
+from ..storage.sqlite_chunk_store import (
+    ChunkStoreUnavailableError,
+    is_fatal_chunk_store_write_error,
+)
 from ..storage.filesystem_vector_store import FilesystemVectorStore
 
 # SURGICAL FIX: Remove RealTimeFeedbackManager import - causes individual callback spam
 
 logger = logging.getLogger(__name__)
+
+
+def _raise_if_fatal_store_error(exc: BaseException, what: str) -> None:
+    # ^ invariant fatal chunk-store failure => typed ChunkStoreUnavailableError => exit 86/87/89; lock contention returns to the caller
+    if isinstance(exc, ChunkStoreUnavailableError):
+        raise exc
+    if is_fatal_chunk_store_write_error(exc):
+        raise ChunkStoreUnavailableError(f"{what} failed: {exc}") from exc
+
 
 if TYPE_CHECKING:
     from .fts_file_documents import FtsWriteFailures
@@ -1171,17 +1183,12 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                         slot_tracker=slot_tracker,
                     )
 
-                try:
-                    self._batch_ensure_files_visible_in_branch(
-                        file_paths=unchanged_files,
-                        branch=new_branch,
-                        collection_name=collection_name,
-                        all_content_points=all_content_points,
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"Batch visibility update failed for branch '{new_branch}': {e}"
-                    )
+                self._batch_ensure_files_visible_in_branch(
+                    file_paths=unchanged_files,
+                    branch=new_branch,
+                    collection_name=collection_name,
+                    all_content_points=all_content_points,
+                )
 
             # Hide files that don't exist in the new branch (branch isolation)
             # Apply branch isolation unless explicitly skipped
@@ -1483,6 +1490,7 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                     self_heal=True,
                 )
             except Exception as e:
+                _raise_if_fatal_store_error(e, f"Reading the points of {file_path}")
                 logger.error(f"Failed to get content points for {file_path}: {e}")
                 return None
             if not isinstance(page, list):
@@ -1501,6 +1509,18 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                 return None
             offset = next_offset
 
+    # ^ invariant a failed visibility write raises => the run fails before publishing; a stale hidden tag drops a visible file from HNSW
+    def _apply_visibility_updates(
+        self, points_to_update: List[Dict[str, Any]], collection_name: str, action: str
+    ) -> None:
+        if not self.vector_store_client._batch_update_payload_only(
+            points_to_update, collection_name
+        ):
+            raise RuntimeError(
+                f"Could not {action} {len(points_to_update)} point(s) in "
+                f"{collection_name!r}"
+            )
+
     def _hide_file_in_branch_thread_safe(
         self, file_path: str, branch: str, collection_name: str
     ):
@@ -1510,7 +1530,9 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
         with self._visibility_lock:
             content_points = self._fetch_file_content_points(file_path, collection_name)
             if content_points is None:
-                return False
+                raise RuntimeError(
+                    f"Could not read the points of {file_path!r} to hide them"
+                )
 
             # Update each content point to add branch to hidden_branches if not already present
             points_to_update = []
@@ -1527,8 +1549,8 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
             # each upsert drops the file's OTHER chunk points as orphans, so a
             # multi-chunk file would collapse to one point.
             if points_to_update:
-                return self.vector_store_client._batch_update_payload_only(
-                    points_to_update, collection_name
+                self._apply_visibility_updates(
+                    points_to_update, collection_name, "hide"
                 )
 
             return True
@@ -1644,8 +1666,8 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                     )
 
             if points_to_update:
-                self.vector_store_client._batch_update_payload_only(
-                    points_to_update, collection_name
+                self._apply_visibility_updates(
+                    points_to_update, collection_name, "un-hide"
                 )
                 logger.info(
                     f"Batch updated {len(points_to_update)} points for visibility ensure "
@@ -1659,7 +1681,9 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
         with self._visibility_lock:
             content_points = self._fetch_file_content_points(file_path, collection_name)
             if content_points is None:
-                return False
+                raise RuntimeError(
+                    f"Could not read the points of {file_path!r} to un-hide them"
+                )
 
             # Update each content point to remove branch from hidden_branches if present
             points_to_update = []
@@ -1674,8 +1698,8 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
             # Batch update the points with new hidden_branches arrays
             # (payload-only, see _hide_file_in_branch_thread_safe).
             if points_to_update:
-                return self.vector_store_client._batch_update_payload_only(
-                    points_to_update, collection_name
+                self._apply_visibility_updates(
+                    points_to_update, collection_name, "un-hide"
                 )
 
             return True
@@ -1754,73 +1778,69 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
         with self._visibility_lock:
             all_points_to_update = []
 
-            try:
-                # Show info message before processing starts
+            # Show info message before processing starts
+            if progress_callback:
+                progress_callback(
+                    0,
+                    0,
+                    Path(""),
+                    info="🔒 Branch isolation • Updating database visibility...",
+                    slot_tracker=slot_tracker,
+                )
+
+            # Build set of file paths for fast lookup
+            files_to_hide_set = set(file_paths)
+
+            # IN-MEMORY FILTERING: Filter all_content_points instead of making N HTTP requests
+            for point in all_content_points:
+                raw_path = point.get("payload", {}).get("path")
+
+                # Bug #1575 AC6: normalize BEFORE comparing -- files_to_hide_set
+                # is always the relative/normalized form (see
+                # hide_files_not_in_branch_thread_safe's discovery loop), but
+                # a stored payload.path may be absolute. Comparing the raw
+                # value directly silently never matched an absolute stored
+                # path, so it was never hidden despite being correctly
+                # identified as removed from the current branch.
+                file_path = (
+                    self._normalize_stored_path(raw_path)
+                    if raw_path is not None
+                    else raw_path
+                )
+
+                # Skip points that aren't in our files_to_hide list
+                if file_path not in files_to_hide_set:
+                    continue
+
+                # Collect points that need updating
+                current_hidden = point.get("payload", {}).get("hidden_branches", [])
+                if branch not in current_hidden:
+                    new_hidden = current_hidden + [branch]
+                    all_points_to_update.append(
+                        {
+                            "id": point["id"],
+                            "payload": {"hidden_branches": new_hidden},
+                        }
+                    )
+
+            # Batch update all points at once instead of individual updates
+            if all_points_to_update:
+                self._apply_visibility_updates(
+                    all_points_to_update, collection_name, "hide"
+                )
+                logger.info(
+                    f"Batch updated {len(all_points_to_update)} points for branch hiding"
+                )
+
+                # Report completion
                 if progress_callback:
                     progress_callback(
                         0,
                         0,
                         Path(""),
-                        info="🔒 Branch isolation • Updating database visibility...",
+                        info="🔒 Branch isolation • Database visibility updated ✓",
                         slot_tracker=slot_tracker,
                     )
-
-                # Build set of file paths for fast lookup
-                files_to_hide_set = set(file_paths)
-
-                # IN-MEMORY FILTERING: Filter all_content_points instead of making N HTTP requests
-                for point in all_content_points:
-                    raw_path = point.get("payload", {}).get("path")
-
-                    # Bug #1575 AC6: normalize BEFORE comparing -- files_to_hide_set
-                    # is always the relative/normalized form (see
-                    # hide_files_not_in_branch_thread_safe's discovery loop), but
-                    # a stored payload.path may be absolute. Comparing the raw
-                    # value directly silently never matched an absolute stored
-                    # path, so it was never hidden despite being correctly
-                    # identified as removed from the current branch.
-                    file_path = (
-                        self._normalize_stored_path(raw_path)
-                        if raw_path is not None
-                        else raw_path
-                    )
-
-                    # Skip points that aren't in our files_to_hide list
-                    if file_path not in files_to_hide_set:
-                        continue
-
-                    # Collect points that need updating
-                    current_hidden = point.get("payload", {}).get("hidden_branches", [])
-                    if branch not in current_hidden:
-                        new_hidden = current_hidden + [branch]
-                        all_points_to_update.append(
-                            {
-                                "id": point["id"],
-                                "payload": {"hidden_branches": new_hidden},
-                            }
-                        )
-
-                # Batch update all points at once instead of individual updates
-                if all_points_to_update:
-                    self.vector_store_client._batch_update_payload_only(
-                        all_points_to_update, collection_name
-                    )
-                    logger.info(
-                        f"Batch updated {len(all_points_to_update)} points for branch hiding"
-                    )
-
-                    # Report completion
-                    if progress_callback:
-                        progress_callback(
-                            0,
-                            0,
-                            Path(""),
-                            info="🔒 Branch isolation • Database visibility updated ✓",
-                            slot_tracker=slot_tracker,
-                        )
-
-            except Exception as e:
-                logger.error(f"Batch hide operation failed: {e}")
 
     def _resolve_normalized_to_raw_paths(
         self,
@@ -1863,6 +1883,7 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                         )
                         return None
                 except Exception as e:
+                    _raise_if_fatal_store_error(e, "Listing the stored content paths")
                     logger.error(
                         f"Failed to get distinct content paths from database: {e}"
                     )
@@ -2007,7 +2028,9 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
             collection_name, current_files, all_content_points
         )
         if not success:
-            return False
+            raise RuntimeError(
+                f"Branch isolation for {branch!r} could not list the stored paths"
+            )
 
         # Used both for the hide-decision above and by rebuild_hnsw_filtered
         # further below.
@@ -2026,7 +2049,9 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                 collection_name, files_to_hide, normalized_to_raw, all_content_points
             )
             if points_for_hide is None:
-                return False
+                raise RuntimeError(
+                    f"Branch isolation for {branch!r} could not read the points to hide"
+                )
 
             self._batch_hide_files_in_branch(
                 file_paths=list(files_to_hide),

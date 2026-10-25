@@ -1012,8 +1012,8 @@ class TestHeadBlobHashMapFailureLogging:
         failing_result = subprocess_module.CompletedProcess(
             args=["git", "ls-tree", "-r", "-z", "HEAD"],
             returncode=128,
-            stdout="",
-            stderr="fatal: not a valid object name HEAD\n",
+            stdout=b"",
+            stderr=b"fatal: not a valid object name HEAD\n",
         )
 
         with caplog.at_level(
@@ -1064,13 +1064,15 @@ class TestHeadBlobHashMapMalformedEntryLogging:
         valid_entry = "100644 blob abc123def456\ta.py"
         malformed_no_tab = "this-line-has-no-tab-separator"
         malformed_short_meta = "100644\tb.py"  # only 2 whitespace-separated meta parts
-        stdout = "\0".join([valid_entry, malformed_no_tab, malformed_short_meta]) + "\0"
+        stdout = (
+            "\0".join([valid_entry, malformed_no_tab, malformed_short_meta]) + "\0"
+        ).encode()
 
         fake_result = subprocess_module.CompletedProcess(
             args=["git", "ls-tree", "-r", "-z", "HEAD"],
             returncode=0,
             stdout=stdout,
-            stderr="",
+            stderr=b"",
         )
 
         with caplog.at_level(

@@ -74,9 +74,9 @@ class TestGetModifiedFilesSet:
             result = MagicMock()
             result.returncode = 0
             if "--staged" in cmd:
-                result.stdout = ""
+                result.stdout = b""
             else:
-                result.stdout = "src/foo.py\nsrc/bar.py\n"
+                result.stdout = b"src/foo.py\0src/bar.py\0"
             return result
 
         with patch("subprocess.run", side_effect=fake_run):
@@ -93,9 +93,9 @@ class TestGetModifiedFilesSet:
             result = MagicMock()
             result.returncode = 0
             if "--staged" in cmd:
-                result.stdout = "src/staged_only.py\n"
+                result.stdout = b"src/staged_only.py\0"
             else:
-                result.stdout = ""
+                result.stdout = b""
             return result
 
         with patch("subprocess.run", side_effect=fake_run):
@@ -111,9 +111,9 @@ class TestGetModifiedFilesSet:
             result = MagicMock()
             result.returncode = 0
             if "--staged" in cmd:
-                result.stdout = "src/staged.py\n"
+                result.stdout = b"src/staged.py\0"
             else:
-                result.stdout = "src/unstaged.py\n"
+                result.stdout = b"src/unstaged.py\0"
             return result
 
         with patch("subprocess.run", side_effect=fake_run):
@@ -130,7 +130,7 @@ class TestGetModifiedFilesSet:
         def fake_run(cmd, **kwargs):
             result = MagicMock()
             result.returncode = 0
-            result.stdout = ""
+            result.stdout = b""
             return result
 
         with patch("subprocess.run", side_effect=fake_run):
@@ -160,10 +160,10 @@ class TestGetModifiedFilesSet:
         def fake_run(cmd, **kwargs):
             if cmd[:2] == ["git", "rev-parse"]:
                 return subprocess.CompletedProcess(cmd, 0, "abc123\n", "")
-            return subprocess.CompletedProcess(cmd, 128, "", "fatal: index broken\n")
+            return subprocess.CompletedProcess(cmd, 128, b"", b"fatal: index broken\n")
 
         with patch("subprocess.run", side_effect=fake_run):
-            with pytest.raises(RuntimeError, match="git diff --name-only HEAD"):
+            with pytest.raises(RuntimeError, match="git diff -z --name-only HEAD"):
                 indexer._get_modified_files_set()
 
     def test_returns_empty_set_for_a_repository_without_commits(self, tmp_path):
@@ -244,9 +244,9 @@ class TestGetModifiedFilesSet:
             result = MagicMock()
             result.returncode = 0
             if "--staged" in cmd:
-                result.stdout = ""
+                result.stdout = b""
             else:
-                result.stdout = "\nsrc/real.py\n\n"
+                result.stdout = b"\0src/real.py\0\0"
             return result
 
         with patch("subprocess.run", side_effect=fake_run):

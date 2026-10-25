@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 import datetime
 import subprocess
@@ -83,6 +84,15 @@ _RACY_MTIME_CLOCK_SKEW_MARGIN_SECONDS = 2
 # (5 s), so three attempts ride out ~15 s of contention; past that the run
 # fails loudly instead of reconciling against an empty snapshot.
 _SNAPSHOT_LOCK_MAX_ATTEMPTS = 3
+
+
+# ^ external git text output C-quotes non-ASCII names; -z gives raw bytes => os.fsdecode keeps the real path
+def _nul_separated_paths(stdout: bytes) -> List[str]:
+    return [os.fsdecode(path) for path in stdout.split(b"\0") if path]
+
+
+def _is_full_commit_id(value: object) -> bool:
+    return re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", str(value)) is not None
 
 
 def working_dir_content_id(relative_path: str, mtime: int, size: int) -> str:
@@ -214,59 +224,63 @@ class SmartIndexer(HighThroughputProcessor):
             GitDelta with lists of added, modified, deleted, and renamed files
         """
         try:
-            # Use git diff --name-status to get file changes
-            cmd = ["git", "diff", "--name-status", f"{last_commit}..{current_commit}"]
+            # ^ external `git diff --name-status -z` = STATUS NUL path NUL; R*/C* records carry old NUL new NUL
+            cmd = [
+                "git",
+                "diff",
+                "--name-status",
+                "-z",
+                # ^ invariant revisions follow --end-of-options; only a full commit id is stored as watermark (_advance_commit_watermark)
+                "--end-of-options",
+                f"{last_commit}..{current_commit}",
+            ]
 
             result = subprocess.run(
                 cmd,
                 cwd=self.config.codebase_dir,
                 capture_output=True,
-                text=True,
                 timeout=30,
             )
 
+            # ^ hazard an empty delta on failure => the quiet exit advances the watermark and the deletions are lost
             if result.returncode != 0:
-                logger.error(f"Git diff failed: {result.stderr}")
-                return GitDelta(added=[], modified=[], deleted=[], renamed=[])
+                raise RuntimeError(
+                    f"git diff {last_commit}..{current_commit} exited "
+                    f"{result.returncode}: "
+                    f"{result.stderr.decode('utf-8', 'replace').strip()}"
+                )
 
             added = []
             modified = []
             deleted = []
             renamed = []
 
-            for line in result.stdout.strip().split("\n"):
-                if not line:
-                    continue
+            tokens = _nul_separated_paths(result.stdout)
+            index = 0
+            while index < len(tokens):
+                status = tokens[index]
+                width = 3 if status[:1] in ("R", "C") else 2
+                record = tokens[index : index + width]
+                index += width
+                if len(record) < width:
+                    break
 
-                parts = line.strip().split("\t")
-                if len(parts) < 2:
-                    continue
-
-                status = parts[0]
-
-                # Codex round-6 MEDIUM finding (Bug #1467 follow-up):
-                # classify a RENAME record's old and new paths
-                # INDEPENDENTLY, before the common exclude-filter check
-                # below -- never after. parts[1] for a rename is the OLD
-                # path; applying the common filter to it FIRST would
-                # `continue` past the whole line (dropping new_path too)
-                # whenever the old path happens to be excluded, even if
-                # the new path is genuinely included and should be
-                # indexed as new.
+                # ^ hazard filtering a rename's old path first => its new path is dropped too (#1467)
                 if status.startswith("R"):
-                    # Renamed file: R100\told_path\tnew_path
-                    if len(parts) >= 3:
-                        old_path = parts[1]
-                        new_path = parts[2]
-                        renamed.append((old_path, new_path))
-                        # Treat rename as delete old + add new for indexing
-                        if self._should_index_file(old_path):
-                            deleted.append(old_path)
-                        if self._should_index_file(new_path):
-                            added.append(new_path)
+                    old_path, new_path = record[1], record[2]
+                    renamed.append((old_path, new_path))
+                    # Treat rename as delete old + add new for indexing
+                    if self._should_index_file(old_path):
+                        deleted.append(old_path)
+                    if self._should_index_file(new_path):
+                        added.append(new_path)
+                    continue
+                if status.startswith("C"):
+                    if self._should_index_file(record[2]):
+                        added.append(record[2])
                     continue
 
-                file_path = parts[1]
+                file_path = record[1]
 
                 # Filter files based on our indexing criteria
                 if not self._should_index_file(file_path):
@@ -286,9 +300,11 @@ class SmartIndexer(HighThroughputProcessor):
                 added=added, modified=modified, deleted=deleted, renamed=renamed
             )
 
-        except Exception as e:
-            logger.error(f"Failed to get git deltas: {e}")
-            return GitDelta(added=[], modified=[], deleted=[], renamed=[])
+        except (OSError, subprocess.SubprocessError) as e:
+            raise RuntimeError(
+                f"git diff {last_commit}..{current_commit} could not run: "
+                f"{type(e).__name__}: {e}"
+            ) from e
 
     def _should_index_file(self, file_path: str) -> bool:
         """Check if a file should be indexed based on configuration."""
@@ -590,22 +606,37 @@ class SmartIndexer(HighThroughputProcessor):
                         )
 
                         # Use high-throughput parallel branch processing (4-8x faster)
-                        branch_result = self.process_branch_changes_high_throughput(
-                            old_branch=old_branch,
-                            new_branch=current_branch,
-                            changed_files=analysis.files_to_reindex,
-                            unchanged_files=analysis.files_to_update_metadata,
-                            collection_name=collection_name,
-                            progress_callback=progress_callback,
-                            vector_thread_count=vector_thread_count,
-                            fts_manager=fts_manager,
+                        # ^ hazard finalizing a failed branch change => unfiltered publish clears the pending signal; abort keeps it owed
+                        try:
+                            branch_result = self.process_branch_changes_high_throughput(
+                                old_branch=old_branch,
+                                new_branch=current_branch,
+                                changed_files=analysis.files_to_reindex,
+                                unchanged_files=analysis.files_to_update_metadata,
+                                collection_name=collection_name,
+                                progress_callback=progress_callback,
+                                vector_thread_count=vector_thread_count,
+                                fts_manager=fts_manager,
+                                defer_finalization=True,
+                            )
+                        except BaseException as failure:
+                            self._close_git_session(
+                                collection_name, False, failure, progress_callback
+                            )
+                            raise
+                        self._close_git_session(
+                            collection_name,
+                            not branch_result.cancelled,
+                            None,
+                            progress_callback,
                         )
 
                         # Convert to ProcessingStats format
                         stats = ProcessingStats()
                         stats.files_processed = branch_result.files_processed
                         stats.chunks_created = branch_result.content_points_created
-                        stats.failed_files = 0  # BranchAwareIndexer doesn't track failures in the same way
+                        stats.failed_files = branch_result.failed_files
+                        stats.failed_paths = branch_result.failed_paths
                         stats.start_time = time.time() - branch_result.processing_time
                         stats.end_time = time.time()
                         stats.cancelled = branch_result.cancelled
@@ -619,6 +650,8 @@ class SmartIndexer(HighThroughputProcessor):
 
                         # Mark as completed only if not cancelled
                         if not stats.cancelled:
+                            # ^ invariant per-file failures => recorded, retried next run (_merge_recorded_failures); never verified here
+                            self._record_failures_of_run(stats, [], [])
                             self.progressive_metadata.complete_indexing(listing_started)
                             logger.info(
                                 f"Graph-optimized branch indexing completed: "
@@ -1015,7 +1048,7 @@ class SmartIndexer(HighThroughputProcessor):
         )
         self._finalize_multimodal_collections(progress_callback)
 
-    def _close_git_reconcile_session(
+    def _close_git_session(
         self,
         collection_name: str,
         completed: bool,
@@ -1051,18 +1084,99 @@ class SmartIndexer(HighThroughputProcessor):
                 type(propagating).__name__,
             )
 
+    def _advance_commit_watermark(self, git_status: Dict[str, Any]) -> None:
+        # ^ why the HEAD smart_index read before listing, not HEAD at completion; a commit made mid-run => the next delta covers it
+        # ^ invariant watermark = HEAD also with uncommitted edits; the reconcile indexed working content, later commits re-enter the delta
+        current_commit = git_status.get("current_commit")
+        if not (git_status.get("git_available", False) and current_commit):
+            return
+        branch = git_status.get("current_branch", "master")
+        # ^ invariant watermark = a real object id; "unknown" stored => every later delta fails empty and deletions are lost
+        if not _is_full_commit_id(current_commit):
+            # ^ external git_aware_processor.py:GitAwareDocumentProcessor.get_git_status reports "unknown" for an unborn HEAD
+            level = logging.DEBUG if current_commit == "unknown" else logging.WARNING
+            logger.log(
+                level,
+                "Not advancing the commit watermark of branch %r: the indexed "
+                "commit could not be read (%r)",
+                branch,
+                current_commit,
+            )
+            return
+        self.progressive_metadata.update_commit_watermark(branch, current_commit)
+
+    def _commit_object_exists(self, commit: str) -> bool:
+        if not _is_full_commit_id(commit):
+            return False
+        try:
+            # ^ external cat-file -e exits 1 for a missing object, 128 for a fatal error; a ^{commit} peel makes a missing object 128 too
+            result = subprocess.run(
+                ["git", "cat-file", "-e", "--end-of-options", commit],
+                cwd=self.config.codebase_dir,
+                capture_output=True,
+                timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError) as e:
+            raise RuntimeError(
+                f"Could not check the last indexed commit: {type(e).__name__}: {e}"
+            ) from e
+        if result.returncode in (0, 1):
+            return result.returncode == 0
+        raise RuntimeError(
+            f"Could not check the last indexed commit: git cat-file exited "
+            f"{result.returncode}: {result.stderr.decode('utf-8', 'replace').strip()}"
+        )
+
+    def _branch_visible_files(self) -> List[str]:
+        relative_files: List[str] = []
+        for file_path in self.file_finder.find_files():
+            try:
+                if file_path.is_absolute():
+                    relative_files.append(
+                        str(file_path.relative_to(self.config.codebase_dir))
+                    )
+                else:
+                    relative_files.append(str(file_path))
+            except ValueError:
+                relative_files.append(str(file_path))
+        return relative_files
+
     def _republish_hnsw_visibility(
         self,
         collection_name: str,
         current_branch: str,
         visible_files: Set[str],
         progress_callback: Optional[Callable],
+        before_publish: Optional[Callable[[], None]] = None,
+    ) -> None:
+        self._publish_in_session(
+            collection_name,
+            progress_callback,
+            (current_branch, visible_files),
+            before_publish=before_publish,
+        )
+
+    def _commit_new_empty_collection(
+        self, collection_name: str, progress_callback: Optional[Callable]
+    ) -> None:
+        # ^ external end_indexing commits the chunks_db layout marker; a created collection never finalized => later runs write sharded_json (#2199)
+        self._publish_in_session(collection_name, progress_callback, None)
+
+    def _publish_in_session(
+        self,
+        collection_name: str,
+        progress_callback: Optional[Callable],
+        branch_context: Optional[Tuple[str, Set[str]]],
+        before_publish: Optional[Callable[[], None]] = None,
     ) -> None:
         try:
             self.vector_store_client.begin_indexing(collection_name)
-            self.vector_store_client.set_hnsw_branch_context(
-                collection_name, current_branch, visible_files
-            )
+            if branch_context is not None:
+                self.vector_store_client.set_hnsw_branch_context(
+                    collection_name, *branch_context
+                )
+            if before_publish is not None:
+                before_publish()
             self._finalize_or_abort_indexing_session(
                 collection_name, None, progress_callback, log_prefix="Reconcile"
             )
@@ -1070,6 +1184,54 @@ class SmartIndexer(HighThroughputProcessor):
             # ^ invariant a failed publish leaves no session open; durable dirty/stale => next reconcile republishes
             self._abort_session_keeping_error(collection_name, publish_error)
             raise
+
+    def _republish_owed_hnsw_publish(
+        self, progress_callback: Optional[Callable]
+    ) -> bool:
+        if not self.git_topology_service.is_git_available():
+            return False
+        collection_name = self.vector_store_client.resolve_collection_name(
+            self.config, self.embedding_provider
+        )
+        # ^ perf clean quiet run = one durable pending read; the visible-set walk runs only when a publish is owed
+        if not (
+            self.vector_store_client.collection_exists(collection_name)
+            and self.vector_store_client.hnsw_publish_pending(collection_name)
+        ):
+            return False
+        branch = self.git_topology_service.get_current_branch() or "master"
+        # ^ invariant an owed publish always runs the duplicate cleanup first; publishing without it clears the owed signal
+        self._republish_hnsw_visibility(
+            collection_name,
+            branch,
+            set(self._branch_visible_files())
+            | self._preserved_outside_root_paths(collection_name, branch),
+            progress_callback,
+            before_publish=lambda: self._cleanup_multiple_visible_content_points(
+                collection_name, branch, progress_callback
+            ),
+        )
+        return True
+
+    # ^ coupled with _do_reconcile_with_database preserved_outside_root; both publishes keep the same outside-root paths
+    def _preserved_outside_root_paths(
+        self, collection_name: str, current_branch: str
+    ) -> Set[str]:
+        root = Path(self.config.codebase_dir)
+        kept: Set[str] = set()
+        for indexed in self._get_indexed_files_snapshot(collection_name):
+            stored = Path(indexed)
+            if not stored.is_absolute():
+                continue
+            try:
+                stored.relative_to(root)
+                continue
+            except ValueError:
+                pass
+            hidden = self._reconcile_hidden_on_all_points.get(str(indexed), set())
+            if stored.exists() and current_branch not in hidden:
+                kept.add(str(indexed))
+        return kept
 
     def _fold_in_pending_self_heal_paths(
         self, collection_name: str, files: List[Path]
@@ -1586,18 +1748,7 @@ class SmartIndexer(HighThroughputProcessor):
             # For full indexing, hide all files that don't exist in current branch
             # This ensures proper branch isolation
             # IMPORTANT: Use ALL files in current branch, not just the ones being processed
-            all_files_in_branch = list(self.file_finder.find_files())
-            all_relative_files = []
-            for file_path in all_files_in_branch:
-                try:
-                    if file_path.is_absolute():
-                        all_relative_files.append(
-                            str(file_path.relative_to(self.config.codebase_dir))
-                        )
-                    else:
-                        all_relative_files.append(str(file_path))
-                except ValueError:
-                    all_relative_files.append(str(file_path))
+            all_relative_files = self._branch_visible_files()
 
             # Use thread-safe branch isolation directly from high-throughput processor
             # Only apply branch isolation for git repositories
@@ -1655,25 +1806,11 @@ class SmartIndexer(HighThroughputProcessor):
             failed_files=stats.failed_files,
         )
 
-        # Update commit watermark AFTER successful processing
-        current_branch = git_status.get("current_branch", "master")
-        current_commit = git_status.get("current_commit")
-        if git_status.get("git_available", False) and current_commit:
-            if progress_callback:
-                progress_callback(
-                    0, 0, Path(""), info="Updating git commit watermark..."
-                )
-            self.progressive_metadata.update_commit_watermark(
-                current_branch, current_commit
-            )
-            logger.info(
-                f"✅ Updated commit watermark: {current_branch} -> {current_commit[:8]}"
-            )
-
         # Mark as completed only if not cancelled
         if not stats.cancelled:
             if progress_callback:
                 progress_callback(0, 0, Path(""), info="Finalizing indexing session...")
+            self._advance_commit_watermark(git_status)
             self.progressive_metadata.complete_indexing(listing_started)
             self.progress_log.complete_session()
         else:
@@ -1749,10 +1886,35 @@ class SmartIndexer(HighThroughputProcessor):
         deleted_files = []
 
         # TRACK 1: Git log for committed changes (handles deletions!)
-        if git_status.get("git_available", False) and current_commit:
+        if git_status.get("git_available", False) and _is_full_commit_id(
+            current_commit
+        ):
             last_indexed_commit = self.progressive_metadata.get_last_indexed_commit(
                 current_branch
             )
+
+            # ^ why reconcile, not fail; a rewritten history never brings the commit back => the run would fail forever
+            if (
+                last_indexed_commit
+                and last_indexed_commit != current_commit
+                and not self._commit_object_exists(last_indexed_commit)
+            ):
+                logger.warning(
+                    "The last indexed commit of branch %r is no longer in the "
+                    "repository; reconciling the index against disk",
+                    current_branch,
+                )
+                return self._reconcile_and_verify(
+                    batch_size,
+                    progress_callback,
+                    git_status,
+                    provider_name,
+                    model_name,
+                    None,
+                    quiet,
+                    vector_thread_count,
+                    fts_manager,
+                )
 
             if last_indexed_commit and last_indexed_commit != current_commit:
                 logger.info(
@@ -1784,6 +1946,10 @@ class SmartIndexer(HighThroughputProcessor):
                             Path(""),
                             info=f"Cleaning up {len(git_delta.deleted)} deleted files...",
                         )
+                    # ^ order note before the hide; fail-closed has no epoch => without it an interrupted publish is never owed (#2197)
+                    self.vector_store_client.note_hnsw_visibility_change(
+                        collection_name
+                    )
                     deleted_count = self._delete_files_from_backend(
                         git_delta.deleted, collection_name, progress_callback
                     )
@@ -1894,14 +2060,6 @@ class SmartIndexer(HighThroughputProcessor):
                     vector_thread_count,
                     fts_manager,
                 )
-                if (
-                    not reconcile_stats.cancelled
-                    and git_status.get("git_available", False)
-                    and current_commit
-                ):
-                    self.progressive_metadata.update_commit_watermark(
-                        current_branch, current_commit
-                    )
                 return reconcile_stats
 
             # No changes at all - system is up-to-date, don't touch metadata
@@ -1912,11 +2070,10 @@ class SmartIndexer(HighThroughputProcessor):
                     Path(""),
                     info="No files modified since last index - nothing to do",
                 )
+            # ^ hazard returning without the owed publish => an interrupted hide or upsert stays in HNSW (#2197)
+            republished = self._republish_owed_hnsw_publish(progress_callback)
             # Update commit watermark even if no files to index
-            if git_status.get("git_available", False) and current_commit:
-                self.progressive_metadata.update_commit_watermark(
-                    current_branch, current_commit
-                )
+            self._advance_commit_watermark(git_status)
             # FTS bootstrap: NOTE, #1763 code review (CRITICAL-1) -- the
             # full-from-disk repopulation for a brand-new/rebuilt FTS
             # index now happens EAGERLY and UNCONDITIONALLY in
@@ -1930,7 +2087,7 @@ class SmartIndexer(HighThroughputProcessor):
             # again.
             # CRITICAL: Don't call complete_indexing() here as no indexing session was started
             # This preserves existing metadata when system is already up-to-date
-            return ProcessingStats()
+            return ProcessingStats(index_entries_changed=1 if republished else 0)
 
         # A zero-change run must not create a collection that will never reach
         # end_indexing(), which commits a fresh CHUNKS_DB layout on disk.
@@ -1982,6 +2139,8 @@ class SmartIndexer(HighThroughputProcessor):
 
         # Use HighThroughputProcessor directly for git-aware processing (STORY 3 MIGRATION)
         fatal_chunk_store_error: Optional[BaseException] = None
+        incremental_completed = False
+        in_flight: Optional[BaseException] = None
         try:
             # Get current branch for indexing
             current_branch = self.git_topology_service.get_current_branch() or "master"
@@ -1993,6 +2152,9 @@ class SmartIndexer(HighThroughputProcessor):
 
             # BEGIN INDEXING SESSION (O(n) optimization - defer index rebuilding)
             self.vector_store_client.begin_indexing(collection_name)
+            # ^ order mark pending before the first in-session mutation; an aborted git run => the next run republishes
+            if self.is_git_aware():
+                self.vector_store_client.note_hnsw_visibility_change(collection_name)
 
             # Use direct high-throughput parallel processing for incremental indexing (4-8x faster)
             # STORY 3: Use process_files_high_throughput() directly instead of branch wrapper
@@ -2034,18 +2196,7 @@ class SmartIndexer(HighThroughputProcessor):
             # For incremental indexing, also hide files that don't exist in current branch
             # This ensures proper branch isolation even during incremental updates
             # IMPORTANT: Use ALL files in current branch, not just the ones being processed
-            all_files_in_branch = list(self.file_finder.find_files())
-            all_relative_files = []
-            for file_path in all_files_in_branch:
-                try:
-                    if file_path.is_absolute():
-                        all_relative_files.append(
-                            str(file_path.relative_to(self.config.codebase_dir))
-                        )
-                    else:
-                        all_relative_files.append(str(file_path))
-                except ValueError:
-                    all_relative_files.append(str(file_path))
+            all_relative_files = self._branch_visible_files()
 
             # Use thread-safe branch isolation directly from high-throughput processor
             # Only apply branch isolation for git repositories
@@ -2060,6 +2211,7 @@ class SmartIndexer(HighThroughputProcessor):
 
             # Use ProcessingStats directly from high-throughput processor
             stats = high_throughput_stats
+            incremental_completed = not stats.cancelled
 
         except Exception as e:
             logger.error(
@@ -2069,21 +2221,36 @@ class SmartIndexer(HighThroughputProcessor):
                 # Bug #1746 Change 3: propagate unwrapped so finally aborts
                 # instead of finalizing.
                 fatal_chunk_store_error = e
+                in_flight = e
                 raise
             # NO FALLBACK - fail fast in git projects
-            raise RuntimeError(
+            wrapped = RuntimeError(
                 f"Git-aware incremental indexing failed and fallbacks are disabled. "
                 f"Original error: {e}"
-            ) from e
-        finally:
-            # CRITICAL: Always finalize (or abort) the session, even on
-            # exception (Bug #1746 Change 3).
-            self._finalize_or_abort_indexing_session(
-                collection_name,
-                fatal_chunk_store_error,
-                progress_callback,
-                log_prefix="Incremental index",
             )
+            in_flight = wrapped
+            raise wrapped from e
+        except BaseException as interrupted:
+            in_flight = interrupted
+            raise
+        finally:
+            # ^ hazard finalizing an unfinished git-aware run => unfiltered publish clears the pending signal; hidden file stays
+            if self.is_git_aware() and fatal_chunk_store_error is None:
+                self._close_git_session(
+                    collection_name,
+                    incremental_completed,
+                    in_flight,
+                    progress_callback,
+                )
+            else:
+                # CRITICAL: Always finalize (or abort) the session, even on
+                # exception (Bug #1746 Change 3).
+                self._finalize_or_abort_indexing_session(
+                    collection_name,
+                    fatal_chunk_store_error,
+                    progress_callback,
+                    log_prefix="Incremental index",
+                )
 
         # Update metadata with actual processing results
         if progress_callback:
@@ -2096,21 +2263,10 @@ class SmartIndexer(HighThroughputProcessor):
             failed_files=stats.failed_files,
         )
 
-        # Update commit watermark AFTER successful processing
-        current_branch = git_status.get("current_branch", "master")
-        current_commit = git_status.get("current_commit")
-
-        if git_status.get("git_available", False) and current_commit:
-            self.progressive_metadata.update_commit_watermark(
-                current_branch, current_commit
-            )
-            logger.info(
-                f"✅ Updated commit watermark: {current_branch} -> {current_commit[:8]}"
-            )
-
         # Mark as completed only if not cancelled
         if not stats.cancelled:
             self._record_failures_of_run(stats, retried_failures, [])
+            self._advance_commit_watermark(git_status)
             self.progressive_metadata.complete_indexing(listing_started)
             self.progress_log.complete_session()
         else:
@@ -2390,6 +2546,11 @@ class SmartIndexer(HighThroughputProcessor):
         FTS update being silently dropped.
         """
 
+        collection_created = not self.vector_store_client.collection_exists(
+            self.vector_store_client.resolve_collection_name(
+                self.config, self.embedding_provider
+            )
+        )
         # Ensure provider-aware collection exists
         collection_name = self.vector_store_client.ensure_provider_aware_collection(
             self.config, self.embedding_provider, quiet
@@ -2796,12 +2957,21 @@ class SmartIndexer(HighThroughputProcessor):
                 or files_unhidden
                 or self.vector_store_client.hnsw_publish_pending(collection_name)
             ):
+                # ^ invariant cleanup runs only when a publish is owed; a failure aborts and keeps it owed => the next reconcile or quiet incremental retries
                 self._republish_hnsw_visibility(
                     collection_name,
                     current_branch,
                     disk_files_set | set(preserved_outside_root),
                     progress_callback,
+                    before_publish=lambda: self._cleanup_multiple_visible_content_points(
+                        collection_name, current_branch, progress_callback
+                    ),
                 )
+                # ^ coupled with server/services/metadata_reader.py:index_unchanged_since; 0 => the refresh skips the snapshot
+                visibility_changes = max(visibility_changes, 1)
+            elif collection_created and not indexed_files_with_timestamps:
+                # ^ invariant only a collection this run created with zero points is committed; an existing unmarked one is never re-labelled
+                self._commit_new_empty_collection(collection_name, progress_callback)
             if progress_callback:
                 progress_callback(
                     0,
@@ -2825,6 +2995,7 @@ class SmartIndexer(HighThroughputProcessor):
                 self.progressive_metadata.set_failed_file_paths(
                     analysis_failed_paths, failed_count=len(analysis_failed_paths)
                 )
+                self._advance_commit_watermark(git_status)
                 self.progressive_metadata.complete_indexing(listing_started)
                 failure_stats = self._analysis_failure_stats(analysis_failed_paths)
                 failure_stats.index_entries_changed = visibility_changes
@@ -2834,6 +3005,7 @@ class SmartIndexer(HighThroughputProcessor):
             # the operation completed. Every file was verified, so no
             # recorded failure remains.
             self.progressive_metadata.set_failed_file_paths([], failed_count=0)
+            self._advance_commit_watermark(git_status)
             self.progressive_metadata.complete_indexing(listing_started)
             # Nothing to reprocess -- but any pending self-heal entries
             # were, by construction (reconcile's own full disk/DB
@@ -2997,6 +3169,11 @@ class SmartIndexer(HighThroughputProcessor):
                     fts_manager,
                     progress_callback,
                 )
+                # ^ hazard hiding duplicates after the session closes => the publish never sees them; HNSW keeps serving them
+                if self.is_git_aware():
+                    self._cleanup_multiple_visible_content_points(
+                        collection_name, current_branch, progress_callback
+                    )
             reconcile_completed = not branch_result.cancelled
 
         except Exception as e:
@@ -3022,7 +3199,7 @@ class SmartIndexer(HighThroughputProcessor):
         finally:
             # ^ hazard finalizing an unfinished git-aware run => unfiltered publish clears the pending signal; hidden file stays (#2194)
             if self.is_git_aware() and fatal_chunk_store_error is None:
-                self._close_git_reconcile_session(
+                self._close_git_session(
                     collection_name, reconcile_completed, in_flight, progress_callback
                 )
             else:
@@ -3046,19 +3223,10 @@ class SmartIndexer(HighThroughputProcessor):
             failed_files=stats.failed_files,
         )
 
-        # CRITICAL FIX: After reconcile indexing is complete, clean up multiple visible content points
-        # This fixes the git restore scenario where both working_dir and committed content are visible
-        if self.is_git_aware():
-            collection_name = self.vector_store_client.resolve_collection_name(
-                self.config, self.embedding_provider
-            )
-            self._cleanup_multiple_visible_content_points(
-                collection_name, current_branch, progress_callback
-            )
-
         # Mark as completed only if not cancelled
         if not stats.cancelled:
             self._record_failures_of_run(stats, [], analysis_failed_paths)
+            self._advance_commit_watermark(git_status)
             self.progressive_metadata.complete_indexing(listing_started)
             self.progress_log.complete_session()
         else:
@@ -3269,75 +3437,6 @@ class SmartIndexer(HighThroughputProcessor):
         """Clear progress metadata (for fresh start)."""
         self.progressive_metadata.clear()
 
-    def cleanup_branch_data(self, branch: str) -> Dict[str, int]:
-        """
-        Clean up branch data by hiding content points that don't exist in the branch.
-
-        Returns a dictionary with cleanup statistics.
-        """
-        try:
-            collection_name = self.vector_store_client.resolve_collection_name(
-                self.config, self.embedding_provider
-            )
-
-            # Get all content points for this branch
-            content_points, _ = self.vector_store_client.scroll_points(
-                collection_name=collection_name,
-                filter_conditions={
-                    "must": [{"key": "visible_branches", "match": {"value": branch}}]
-                },
-                limit=10000,  # Process in batches if needed
-                self_heal=True,
-            )
-
-            content_points_hidden = 0
-            content_points_preserved = 0
-
-            # Get current files in branch from git
-            try:
-                result = subprocess.run(
-                    ["git", "ls-tree", "-r", "--name-only", branch],
-                    cwd=self.config.root_path,
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                )
-                current_files_in_branch = set(result.stdout.strip().split("\n"))
-            except subprocess.CalledProcessError:
-                logger.warning(
-                    f"Could not get files for branch {branch}, skipping cleanup"
-                )
-                return {"content_points_hidden": 0, "content_points_preserved": 0}
-
-            # Check each content point
-            for point in content_points:
-                file_path = point.get("payload", {}).get("file_path", "")
-                if file_path and file_path not in current_files_in_branch:
-                    # Hide this file from the branch
-                    self._hide_file_in_branch_thread_safe(
-                        file_path, branch, collection_name
-                    )
-                    content_points_hidden += 1
-                else:
-                    content_points_preserved += 1
-
-            cleanup_result = {
-                "content_points_hidden": content_points_hidden,
-                "content_points_preserved": content_points_preserved,
-            }
-
-            logger.info(
-                f"Branch cleanup completed for {branch}: "
-                f"{cleanup_result['content_points_hidden']} content points hidden, "
-                f"{cleanup_result['content_points_preserved']} preserved"
-            )
-
-            return cleanup_result
-
-        except Exception as e:
-            logger.error(f"Failed to cleanup branch {branch}: {e}")
-            return {"content_points_hidden": 0, "content_points_preserved": 0}
-
     def process_files_incrementally(
         self,
         file_paths: List[str],
@@ -3367,6 +3466,7 @@ class SmartIndexer(HighThroughputProcessor):
         try:
             # Convert relative paths to absolute paths
             absolute_paths = []
+            failed_deletions: List[str] = []
             for file_path in file_paths:
                 abs_path = self.config.codebase_dir / file_path
                 if abs_path.exists():
@@ -3379,14 +3479,18 @@ class SmartIndexer(HighThroughputProcessor):
                     collection_name = self.vector_store_client.resolve_collection_name(
                         self.config, self.embedding_provider
                     )
-                    success = self.delete_file_branch_aware(
-                        file_path, collection_name, watch_mode
-                    )
-                    if not success and watch_mode:
-                        logger.error(
-                            f"Watch mode deletion verification failed for {file_path}"
+                    # ^ invariant one failed deletion => reported in failed_paths, the batch goes on; fatal store errors propagate
+                    try:
+                        success = self.delete_file_branch_aware(
+                            file_path, collection_name, watch_mode
                         )
-                        # Continue processing other files even if one deletion fails
+                    except ChunkStoreUnavailableError:
+                        raise
+                    except Exception as e:
+                        logger.error(f"Deleting {file_path} from the index failed: {e}")
+                        success = False
+                    if not success:
+                        failed_deletions.append(file_path)
 
             # NOTE: absolute_paths is re-joined onto codebase_dir and
             # re-filtered for containment inside
@@ -3395,6 +3499,8 @@ class SmartIndexer(HighThroughputProcessor):
             # no separate check is needed here.
 
             if not absolute_paths:
+                stats.failed_files = len(failed_deletions)
+                stats.failed_paths = frozenset(failed_deletions)
                 stats.end_time = time.time()
                 return stats
 
@@ -3461,18 +3567,7 @@ class SmartIndexer(HighThroughputProcessor):
 
                     # For incremental file processing, also ensure branch isolation
                     # IMPORTANT: Use ALL files in current branch, not just the ones being processed
-                    all_files_in_branch = list(self.file_finder.find_files())
-                    all_relative_files = []
-                    for f in all_files_in_branch:
-                        try:
-                            if f.is_absolute():
-                                all_relative_files.append(
-                                    str(f.relative_to(self.config.codebase_dir))
-                                )
-                            else:
-                                all_relative_files.append(str(f))
-                        except ValueError:
-                            all_relative_files.append(str(f))
+                    all_relative_files = self._branch_visible_files()
 
                     # Only apply branch isolation for git repositories
                     if self.git_topology_service.is_git_available():
@@ -3486,7 +3581,12 @@ class SmartIndexer(HighThroughputProcessor):
                     # Convert BranchIndexingResult to ProcessingStats
                     stats.files_processed = branch_result.files_processed
                     stats.chunks_created = branch_result.content_points_created
-                    stats.failed_files = 0
+                    stats.failed_files = branch_result.failed_files + len(
+                        failed_deletions
+                    )
+                    stats.failed_paths = branch_result.failed_paths | frozenset(
+                        failed_deletions
+                    )
 
                 except Exception as e:
                     logger.error(
@@ -3539,6 +3639,7 @@ class SmartIndexer(HighThroughputProcessor):
         except Exception as e:
             logger.error(f"Incremental processing failed: {e}")
             stats.failed_files = len(file_paths)
+            stats.failed_paths = frozenset(file_paths)
 
         stats.end_time = time.time()
         return stats
@@ -3755,9 +3856,19 @@ class SmartIndexer(HighThroughputProcessor):
         This method uses only content points (not metadata) and excludes vectors
         for maximum memory efficiency.
         """
-        all_points = []
+        return [
+            point
+            for page in self._iter_content_point_pages(collection_name)
+            for point in page
+        ]
+
+    def _iter_content_point_pages(
+        self, collection_name: str
+    ) -> Iterable[List[Dict[str, Any]]]:
+        seen_ids: Set[str] = set()
         offset = None
 
+        # ^ invariant every page adds >= 1 unseen id from a finite store => at most point-count iterations
         while True:
             # Bug #1969 Round 6 (P1-1 caller audit): the sole caller of
             # this method is _get_indexed_files_snapshot ->
@@ -3780,7 +3891,14 @@ class SmartIndexer(HighThroughputProcessor):
             if not points:
                 break
 
-            all_points.extend(points)
+            new_points = [p for p in points if str(p["id"]) not in seen_ids]
+            if not new_points:
+                raise RuntimeError(
+                    f"Pagination returned no new points at offset {offset} while "
+                    f"reading the content points of {collection_name!r}"
+                )
+            seen_ids.update(str(p["id"]) for p in new_points)
+            yield new_points
 
             # Bug #1971: the stuck-pagination safety check MUST compare
             # `next_offset` against the PREVIOUS `offset` BEFORE it is
@@ -3801,8 +3919,6 @@ class SmartIndexer(HighThroughputProcessor):
             if offset is None:
                 # Normal completion - no more data
                 break
-
-        return all_points
 
     def _extract_best_timestamp(self, payload: Dict[str, Any]) -> float:
         """Extract the best available timestamp from payload."""
@@ -3832,123 +3948,59 @@ class SmartIndexer(HighThroughputProcessor):
         current_branch: str,
         progress_callback: Optional[Callable] = None,
     ) -> None:
-        """
-        Clean up situations where multiple content points are visible for the same file.
-
-        This handles the git restore scenario where both working_dir and committed content
-        are visible in the current branch, which should not happen.
-        """
-        try:
-            # Get all content points visible in current branch
-            all_points, _ = self.vector_store_client.scroll_points(
-                filter_conditions={
-                    "must": [
-                        {"key": "type", "match": {"value": "content"}},
-                    ],
-                    "must_not": [
-                        {"key": "hidden_branches", "match": {"any": [current_branch]}}
-                    ],
-                },
-                limit=10000,  # Get all visible content points
-                collection_name=collection_name,
-                self_heal=True,
-            )
-
-            if not all_points:
-                return
-
-            # Group points by file path
-            files_with_points: Dict[str, List[Dict[str, Any]]] = {}
-            for point in all_points:
+        # ^ why every page, not one capped scroll; a duplicate past the cap stayed visible
+        # ^ invariant a failed hide raises => the reconcile session aborts, publish stays owed (_close_git_session)
+        # ^ perf one page of full payloads held at a time; per point only (id, hidden_branches, working_dir?) is kept
+        files_with_points: Dict[str, List[Tuple[Any, List[str], bool]]] = {}
+        for page in self._iter_content_point_pages(collection_name):
+            for point in page:
                 payload = point.get("payload", {})
                 file_path = payload.get("path", "")
-                if file_path:
-                    if file_path not in files_with_points:
-                        files_with_points[file_path] = []
-                    files_with_points[file_path].append(point)
-
-            # Find files with multiple visible content points
-            files_to_cleanup = []
-            for file_path, points in files_with_points.items():
-                if len(points) > 1:
-                    files_to_cleanup.append((file_path, points))
-
-            if not files_to_cleanup:
-                logger.debug(
-                    "No multiple visible content points found - cleanup not needed"
-                )
-                return
-
-            logger.info(
-                f"Found {len(files_to_cleanup)} files with multiple visible content points - cleaning up"
-            )
-
-            # Clean up each file with multiple content points
-            hidden_count = 0
-            for file_path, points in files_to_cleanup:
-                # Separate working_dir and committed content
-                working_dir_points = []
-                committed_points = []
-
-                for point in points:
-                    payload = point.get("payload", {})
-                    git_commit_hash = payload.get("git_commit_hash", "")
-
-                    if git_commit_hash.startswith("working_dir_"):
-                        working_dir_points.append(point)
-                    else:
-                        committed_points.append(point)
-
-                # If we have both types, hide working_dir content and keep committed content
-                if working_dir_points and committed_points:
-                    logger.info(
-                        f"Hiding {len(working_dir_points)} working_dir points for {file_path} (keeping {len(committed_points)} committed)"
+                hidden = list(payload.get("hidden_branches") or [])
+                if file_path and current_branch not in hidden:
+                    is_working_dir = str(payload.get("git_commit_hash", "")).startswith(
+                        "working_dir_"
+                    )
+                    files_with_points.setdefault(file_path, []).append(
+                        (point["id"], hidden, is_working_dir)
                     )
 
-                    # Hide working directory content points
-                    points_to_update = []
-                    for point in working_dir_points:
-                        point_id = point["id"]
-                        payload = point.get("payload", {})
-                        hidden_branches = payload.get("hidden_branches", [])
-
-                        if current_branch not in hidden_branches:
-                            new_hidden = hidden_branches + [current_branch]
-                            points_to_update.append(
-                                {
-                                    "id": point_id,
-                                    "payload": {"hidden_branches": new_hidden},
-                                }
-                            )
-
-                    # Apply the updates. Payload-only: _batch_update_points
-                    # upserts point by point and each upsert drops the
-                    # file's other chunk points as orphans.
-                    if points_to_update:
-                        success = self.vector_store_client._batch_update_payload_only(
-                            points_to_update,
-                            collection_name,
-                        )
-                        if success:
-                            hidden_count += len(points_to_update)
-                            logger.debug(
-                                f"Successfully hid {len(points_to_update)} working_dir points for {file_path}"
-                            )
-                        else:
-                            logger.warning(
-                                f"Failed to hide working_dir points for {file_path}"
-                            )
-
-            if progress_callback and hidden_count > 0:
-                progress_callback(
-                    0,
-                    0,
-                    Path(""),
-                    info=f"🧹 Hidden {hidden_count} obsolete working directory content points",
+        hidden_count = 0
+        for file_path, points in files_with_points.items():
+            if len(points) < 2:
+                continue
+            working_dir_points = [p for p in points if p[2]]
+            if not working_dir_points or len(working_dir_points) == len(points):
+                continue
+            # Payload-only: _batch_update_points upserts point by point and each
+            # upsert drops the file's other chunk points as orphans.
+            points_to_update = [
+                {
+                    "id": point_id,
+                    "payload": {"hidden_branches": hidden + [current_branch]},
+                }
+                for point_id, hidden, _ in working_dir_points
+            ]
+            if not self.vector_store_client._batch_update_payload_only(
+                points_to_update, collection_name
+            ):
+                raise RuntimeError(
+                    f"Could not hide the working-directory points of {file_path!r} "
+                    f"on branch {current_branch!r}"
                 )
+            hidden_count += len(points_to_update)
+            logger.info(
+                f"Hid {len(points_to_update)} working_dir points for {file_path} "
+                f"(keeping {len(points) - len(points_to_update)} committed)"
+            )
 
-        except Exception as e:
-            logger.warning(f"Failed to cleanup multiple visible content points: {e}")
+        if progress_callback and hidden_count > 0:
+            progress_callback(
+                0,
+                0,
+                Path(""),
+                info=f"🧹 Hidden {hidden_count} obsolete working directory content points",
+            )
 
     def delete_file_branch_aware(
         self, file_path: str, collection_name: str, watch_mode: bool = False
@@ -4344,11 +4396,11 @@ class SmartIndexer(HighThroughputProcessor):
             missing from the map -- never silently skip a file).
         """
         try:
+            # ^ hazard text=True here => one non-UTF-8 committed name raises, the map is {} and every file takes the slow path
             result = subprocess.run(
                 ["git", "ls-tree", "-r", "-z", "HEAD"],
                 cwd=self.config.codebase_dir,
                 capture_output=True,
-                text=True,
                 timeout=60,
             )
             if result.returncode != 0:
@@ -4357,13 +4409,14 @@ class SmartIndexer(HighThroughputProcessor):
                 # path with NO indication why -- log LOUDLY (return code +
                 # stderr) so this failure mode is diagnosable instead of
                 # silently reintroducing Issue #1505's O(N) stall.
+                stderr = result.stderr.decode("utf-8", "replace").strip()
                 logger.warning(
                     "_get_head_blob_hash_map: `git ls-tree -r HEAD` failed "
                     "(return code %s): %s; reconcile will fall back to the "
                     "slow per-file `git log` content-id lookup for every "
                     "committed file in this run",
                     result.returncode,
-                    result.stderr.strip() if result.stderr else "(no stderr)",
+                    stderr or "(no stderr)",
                 )
                 return {}
 
@@ -4371,20 +4424,19 @@ class SmartIndexer(HighThroughputProcessor):
             # Codex #1505 review, Finding 5: count malformed/unparsable
             # entries instead of silently skipping them.
             malformed_count = 0
-            for entry in result.stdout.split("\0"):
+            for entry in result.stdout.split(b"\0"):
                 if not entry:
                     continue
                 try:
-                    meta, path = entry.split("\t", 1)
-                except ValueError:
+                    raw_meta, raw_path = entry.split(b"\t", 1)
+                    meta_parts = raw_meta.decode("ascii").split(" ")
+                except (ValueError, UnicodeDecodeError):
                     malformed_count += 1
                     continue
-                meta_parts = meta.split(" ")
                 if len(meta_parts) < 3:
                     malformed_count += 1
                     continue
-                blob_sha = meta_parts[2]
-                mapping[path] = blob_sha
+                mapping[os.fsdecode(raw_path)] = meta_parts[2]
             if malformed_count:
                 logger.warning(
                     "_get_head_blob_hash_map: skipped %d malformed `git "
@@ -4394,7 +4446,12 @@ class SmartIndexer(HighThroughputProcessor):
                 )
             return mapping
         except Exception as e:
-            logger.warning(f"Failed to batch-fetch HEAD blob hashes: {e}")
+            logger.warning(
+                "Failed to batch-fetch HEAD blob hashes (%s: %s); reconcile "
+                "will fall back to the slow per-file `git log` content-id lookup",
+                type(e).__name__,
+                e,
+            )
             return {}
 
     def _get_modified_files_set(self) -> set:
@@ -4418,14 +4475,12 @@ class SmartIndexer(HighThroughputProcessor):
         self._raise_if_git_failed(head)
         modified: set = set()
         for cmd in (
-            ["git", "diff", "--name-only", "HEAD"],
-            ["git", "diff", "--name-only", "--staged", "HEAD"],
+            ["git", "diff", "-z", "--name-only", "HEAD"],
+            ["git", "diff", "-z", "--name-only", "--staged", "HEAD"],
         ):
-            result = self._run_git_for_modified_files(cmd)
+            result = self._run_git_for_modified_files(cmd, text=False)
             self._raise_if_git_failed(result)
-            modified.update(
-                line.strip() for line in result.stdout.splitlines() if line.strip()
-            )
+            modified.update(_nul_separated_paths(result.stdout))
         return modified
 
     def _head_is_provably_unborn(self) -> bool:
@@ -4452,8 +4507,8 @@ class SmartIndexer(HighThroughputProcessor):
         )
 
     def _run_git_for_modified_files(
-        self, cmd: List[str]
-    ) -> "subprocess.CompletedProcess[str]":
+        self, cmd: List[str], *, text: bool = True
+    ) -> "subprocess.CompletedProcess[Any]":
         """Run one git command of the modified-file check; a git that cannot
         be started or does not answer in time raises RuntimeError."""
         try:
@@ -4461,7 +4516,7 @@ class SmartIndexer(HighThroughputProcessor):
                 cmd,
                 cwd=self.config.codebase_dir,
                 capture_output=True,
-                text=True,
+                text=text,
                 timeout=30,
             )
         except (OSError, subprocess.SubprocessError) as e:
@@ -4471,12 +4526,15 @@ class SmartIndexer(HighThroughputProcessor):
             ) from e
 
     @staticmethod
-    def _raise_if_git_failed(result: "subprocess.CompletedProcess[str]") -> None:
+    def _raise_if_git_failed(result: "subprocess.CompletedProcess[Any]") -> None:
         if result.returncode != 0:
+            stderr = result.stderr
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode("utf-8", "replace")
             raise RuntimeError(
                 f"Reconcile could not list the files with working changes: "
                 f"`{' '.join(result.args)}` exited {result.returncode}: "
-                f"{result.stderr.strip()}"
+                f"{stderr.strip()}"
             )
 
     def _file_differs_from_committed_version(self, file_path: str) -> bool:

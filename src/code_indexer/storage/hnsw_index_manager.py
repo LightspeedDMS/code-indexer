@@ -1100,7 +1100,8 @@ class HNSWIndexManager:
             vectors_list: List[np.ndarray] = []
             ids_list: List[str] = []
 
-            need_payload = visible_files is None and current_branch is not None
+            # ^ invariant a point hidden on current_branch is never loaded, visible_files or not; hidden_branches lives only in the payload
+            need_payload = current_branch is not None
 
             for point_id, vector, path, payload in store.stream_for_index_rebuild(
                 need_payload=need_payload
@@ -1120,7 +1121,7 @@ class HNSWIndexManager:
                     )
                     if normalized_path not in visible_files:
                         continue  # Skip vectors not in visible set
-                elif current_branch is not None:
+                if current_branch is not None:
                     # Bug #306: branch-aware filter, identical semantics to
                     # the legacy sharded-JSON path.
                     hidden_branches = (payload or {}).get("hidden_branches", [])
@@ -1173,7 +1174,7 @@ class HNSWIndexManager:
                     )
                     if normalized_path not in visible_files:
                         continue  # Skip vectors not in visible set
-                elif current_branch is not None:
+                if current_branch is not None:
                     # Branch-aware filter: skip vectors hidden for current_branch
                     # (Bug #306: makes ALL rebuilds branch-aware via hidden_branches metadata)
                     payload = data.get("payload", {})

@@ -19,13 +19,17 @@ from typing import List
 
 import pytest
 
+from code_indexer.global_repos.alias_lock_coordinator import AliasLockCoordinator
 from code_indexer.global_repos.write_lock_manager import WriteLockManager
+from code_indexer.server.services.alias_lock_store.base import AliasLockStore
 from tests.e2e.cidx_meta_world import (
     CATALOG,
     catalog_head,
+    catalog_write_lock,
     restore_catalog,
     seed_catalog,
     snapshot_catalog,
+    sqlite_alias_lock_store,
 )
 
 _IDENTITY = ["-c", "user.name=e2e", "-c", "user.email=e2e@example.com"]
@@ -83,6 +87,144 @@ def _server_commit(root: Path, relative: Path, content: str, message: str) -> No
     _git(root, *_IDENTITY, "commit", "-qm", message, "--", str(relative))
 
 
+def _lock_store(tmp_path: Path) -> AliasLockStore:
+    """The alias lock store of a solo server whose CIDX_DATA_DIR is in tmp."""
+    return sqlite_alias_lock_store(tmp_path / "server-home")
+
+
+def _server_locks(root: Path, store: AliasLockStore) -> AliasLockCoordinator:
+    """The live server's catalog lock: DB-backed, the AliasLockConfig default."""
+    return AliasLockCoordinator(
+        root.parent, db_backed_enabled_getter=lambda: True, store_resolver=lambda: store
+    )
+
+
+def test_sqlite_store_sees_the_lock_of_a_server_with_that_data_dir(
+    tmp_path: Path,
+) -> None:
+    from code_indexer.server.services.alias_lock_store.sqlite_store import (
+        SqliteAliasLockStore,
+    )
+
+    home = tmp_path / "server-home"
+    # What a solo server with CIDX_DATA_DIR=home builds (factory rule).
+    server_store = SqliteAliasLockStore(home / "data" / "alias_locks")
+    handle = server_store.try_acquire(
+        CATALOG, operation=_WRITER, owner_token="server-token", ttl_seconds=60
+    )
+    assert handle is not None
+
+    assert sqlite_alias_lock_store(home).is_held(CATALOG)
+    server_store.release(handle)
+    assert not sqlite_alias_lock_store(home).is_held(CATALOG)
+
+
+def test_postgres_store_refuses_a_server_not_in_postgres_mode(
+    tmp_path: Path,
+) -> None:
+    import json
+
+    from code_indexer.server.services.alias_lock_store.postgres_store import (
+        PostgresAliasLockStore,
+    )
+    from tests.e2e.cidx_meta_world import postgres_alias_lock_store
+
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"storage_mode": "sqlite"}), encoding="utf-8")
+    with pytest.raises(AssertionError, match="postgres"):
+        postgres_alias_lock_store(tmp_path)
+
+    config.write_text(
+        json.dumps(
+            {"storage_mode": "postgres", "postgres_dsn": "postgresql:///example"}
+        ),
+        encoding="utf-8",
+    )
+    assert isinstance(postgres_alias_lock_store(tmp_path), PostgresAliasLockStore)
+
+
+def test_held_catalog_lock_refuses_the_server_without_a_file_lock(
+    tmp_path: Path,
+) -> None:
+    root = _tracked_catalog(tmp_path)
+    store = _lock_store(tmp_path)
+    server = _server_locks(root, store)
+
+    with catalog_write_lock(root, store):
+        assert not server.acquire(CATALOG, owner_name=_WRITER, heartbeat=False)
+        # A file lock makes the server's DB acquire roll back with a WARNING.
+        assert not WriteLockManager(root.parent).is_locked(CATALOG)
+        holder = store.get_holder(CATALOG)
+        assert holder is not None and holder["owner"] == "e2e_catalog_world"
+
+    assert not store.is_held(CATALOG)
+    assert server.acquire(CATALOG, owner_name=_WRITER, heartbeat=False)
+    assert server.release(CATALOG, owner_name=_WRITER)
+
+
+def test_teardown_fails_loudly_when_the_lock_row_vanished(tmp_path: Path) -> None:
+    import sqlite3
+
+    from code_indexer.server.services.alias_lock_store.sqlite_store import (
+        SqliteAliasLockStore,
+        _db_path_for_lock_key,
+    )
+
+    root = _tracked_catalog(tmp_path)
+    store = _lock_store(tmp_path)
+    assert isinstance(store, SqliteAliasLockStore)
+    lock_db = _db_path_for_lock_key(
+        tmp_path / "server-home" / "data" / "alias_locks", CATALOG
+    )
+
+    with pytest.raises(RuntimeError, match="lost"):
+        with catalog_write_lock(root, store):
+            assert store.is_held(CATALOG)
+            conn = sqlite3.connect(str(lock_db))
+            try:
+                with conn:
+                    conn.execute("DELETE FROM golden_repo_alias_locks")
+            finally:
+                conn.close()
+
+    assert not store.is_held(CATALOG)
+
+
+def test_restore_waits_for_a_db_backed_writer_holding_the_catalog_lock(
+    tmp_path: Path,
+) -> None:
+    root = _tracked_catalog(tmp_path)
+    head = catalog_head(root)
+    snapshot = snapshot_catalog(root)
+    seed_catalog(root)
+    store = _lock_store(tmp_path)
+    writer = _server_locks(root, store)
+    assert writer.acquire(CATALOG, owner_name=_WRITER, heartbeat=False)
+    errors: List[BaseException] = []
+
+    def _teardown() -> None:
+        try:
+            restore_catalog(root, store, snapshot, head)
+        except BaseException as exc:  # reported by the assertion below
+            errors.append(exc)
+
+    teardown = threading.Thread(target=_teardown, daemon=True)
+    try:
+        _server_commit(root, _SERVER_PATTERN, "name: sample\n", "xray-patterns: add")
+        teardown.start()
+        teardown.join(timeout=_BLOCKED_PROBE_SECONDS)
+        assert teardown.is_alive(), f"teardown ran under the writer's lock: {errors}"
+        assert (root / _SERVER_PATTERN).exists()
+    finally:
+        assert writer.release(CATALOG, owner_name=_WRITER)
+    teardown.join(timeout=_JOIN_SECONDS)
+
+    assert not teardown.is_alive() and errors == []
+    assert not (root / _SERVER_PATTERN).exists()
+    assert snapshot_catalog(root) == snapshot
+    assert not store.is_held(CATALOG)
+
+
 def test_seeding_changes_no_tracked_catalog_file(tmp_path: Path) -> None:
     root = _tracked_catalog(tmp_path)
 
@@ -111,7 +253,7 @@ def test_restore_after_a_server_commit_leaves_no_tracked_change(
     seed_catalog(root)
     _server_commit(root, _SERVER_PATTERN, "name: sample\n", "xray-patterns: add")
 
-    restore_catalog(root, snapshot, head)
+    restore_catalog(root, _lock_store(tmp_path), snapshot, head)
 
     assert not (root / _SERVER_PATTERN).exists()
     assert _tracked_changes(root) == []
@@ -129,7 +271,7 @@ def test_restore_after_a_server_update_to_a_snapshot_file_leaves_no_tracked_chan
         root, Path("_domains.json"), '[{"name": "billing"}]\n', "auto: refresh"
     )
 
-    restore_catalog(root, snapshot, head)
+    restore_catalog(root, _lock_store(tmp_path), snapshot, head)
 
     assert _tracked_changes(root) == []
     assert snapshot_catalog(root) == snapshot
@@ -146,7 +288,7 @@ def test_restore_commits_no_tracked_change_the_world_did_not_make(
     seed_catalog(root)
     _server_commit(root, _SERVER_PATTERN, "name: sample\n", "xray-patterns: add")
 
-    restore_catalog(root, snapshot, head)
+    restore_catalog(root, _lock_store(tmp_path), snapshot, head)
 
     assert _tracked_changes(root) == [" M cidx-meta.md"]
     assert _git(root, "show", "HEAD:cidx-meta.md") == "# cidx-meta\n"
@@ -164,7 +306,7 @@ def test_restore_waits_for_a_writer_holding_the_catalog_lock(tmp_path: Path) -> 
 
     def _teardown() -> None:
         try:
-            restore_catalog(root, snapshot, head)
+            restore_catalog(root, _lock_store(tmp_path), snapshot, head)
         except BaseException as exc:  # reported by the assertion below
             errors.append(exc)
 
@@ -196,11 +338,12 @@ def test_restore_refuses_loudly_when_the_catalog_lock_stays_held(
     snapshot = snapshot_catalog(root)
     seed_catalog(root)
     seeded = snapshot_catalog(root)
-    writer = WriteLockManager(root.parent)
-    assert writer.acquire(CATALOG, owner_name=_WRITER)
+    store = _lock_store(tmp_path)
+    writer = _server_locks(root, store)
+    assert writer.acquire(CATALOG, owner_name=_WRITER, heartbeat=False)
     try:
         with pytest.raises(TimeoutError, match=_WRITER):
-            restore_catalog(root, snapshot, head, lock_wait_seconds=0.0)
+            restore_catalog(root, store, snapshot, head, lock_wait_seconds=0.0)
         assert snapshot_catalog(root) == seeded
         assert catalog_head(root) == head
         assert writer.is_locked(CATALOG)
@@ -217,7 +360,7 @@ def test_restore_of_an_untracked_catalog_needs_no_git(tmp_path: Path) -> None:
     snapshot = snapshot_catalog(root)
     seed_catalog(root)
 
-    restore_catalog(root, snapshot, head)
+    restore_catalog(root, _lock_store(tmp_path), snapshot, head)
 
     assert head is None
     assert snapshot_catalog(root) == snapshot

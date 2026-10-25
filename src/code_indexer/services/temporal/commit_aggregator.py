@@ -17,12 +17,22 @@ text can attribute each chunk's overlapping file paths (see
 contextual_chunker.py).
 """
 
+import logging
+import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
+from ...utils.never_indexed_paths import (
+    SkippedPathReporter,
+    escaped_path,
+    is_never_indexed,
+    never_indexed_reason,
+)
 from .models import CommitInfo
+
+logger = logging.getLogger(__name__)
 
 # Git's well-known empty-tree object hash -- diffing against it yields the
 # full initial tree for a root commit (no special-casing needed vs a normal
@@ -90,7 +100,11 @@ def _diff_base_ref(commit: CommitInfo) -> str:
 
 
 def get_file_changes(
-    codebase_dir: Path, commit: CommitInfo, diff_context_lines: int = 5
+    codebase_dir: Path,
+    commit: CommitInfo,
+    diff_context_lines: int = 5,
+    *,
+    skipped_paths: Optional[SkippedPathReporter] = None,
 ) -> List[FileChange]:
     """Retrieve the changed files for `commit` via a single `git diff` call.
 
@@ -110,20 +124,120 @@ def get_file_changes(
     result = subprocess.run(
         [
             "git",
+            "-c",
+            "core.quotePath=false",
             "diff",
             "-M",  # plain `git diff` does not detect renames by default (AC24)
             f"-U{diff_context_lines}",
             "--full-index",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
             base_ref,
             commit.hash,
         ],
         cwd=codebase_dir,
         capture_output=True,
-        text=True,
-        errors="replace",
         check=True,
     )
-    return _parse_diff_output(result.stdout)
+    reporter = skipped_paths or new_temporal_skip_reporter()
+    kept: List[FileChange] = []
+    for change in _parse_diff_output(_decode_diff_output(result.stdout)):
+        if is_never_indexed(change.path):
+            reporter.report(change.path, never_indexed_reason(change.path))
+        else:
+            kept.append(change)
+    if skipped_paths is None:
+        reporter.summarize()
+    return kept
+
+
+def new_temporal_skip_reporter() -> SkippedPathReporter:
+    return SkippedPathReporter(
+        logger,
+        where=" in commit history",
+        noun="path(s)",
+        summary_subject="never-indexed path(s) in this commit batch",
+    )
+
+
+_PATH_LINE_PREFIXES = (b"diff --git ", b"rename from ", b"rename to ")
+
+
+# ^ why paths via os.fsdecode, not errors="replace"; a replaced byte names no real file and dodges is_never_indexed
+def _decode_diff_output(raw: bytes) -> str:
+    lines = raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n")
+    return "\n".join(
+        os.fsdecode(line)
+        if line.startswith(_PATH_LINE_PREFIXES)
+        else line.decode("utf-8", "replace")
+        for line in lines
+    )
+
+
+_DIFF_PREFIX_LEN = len(b"a/")
+_HEADER_SEPARATOR = b" b/"
+_OCTAL_ESCAPE_LEN = len(b"\\303")
+_C_ESCAPES = {
+    ord("a"): 7,
+    ord("b"): 8,
+    ord("t"): 9,
+    ord("n"): 10,
+    ord("v"): 11,
+    ord("f"): 12,
+    ord("r"): 13,
+}
+
+
+# ^ external git C-quotes a path holding '"', '\\' or control chars even with core.quotePath=false
+def _read_quoted(raw: bytes) -> Tuple[bytes, bytes]:
+    out = bytearray()
+    index = 1
+    while index < len(raw):
+        byte = raw[index]
+        if byte == ord('"'):
+            return bytes(out), raw[index + 1 :]
+        if byte == ord("\\") and index + 1 < len(raw):
+            escaped = raw[index + 1]
+            if ord("0") <= escaped <= ord("7"):
+                out.append(int(raw[index + 1 : index + _OCTAL_ESCAPE_LEN], 8))
+                index += _OCTAL_ESCAPE_LEN
+                continue
+            out.append(_C_ESCAPES.get(escaped, escaped))
+            index += 2
+            continue
+        out.append(byte)
+        index += 1
+    raise ValueError(f"unterminated quoted path in git diff: {raw!r}")
+
+
+def _git_path(field_text: str) -> str:
+    raw = os.fsencode(field_text)
+    return os.fsdecode(_read_quoted(raw)[0] if raw.startswith(b'"') else raw)
+
+
+# ^ external git-diff(1) "a/ and b/ filenames are the same unless rename/copy"; renames carry rename from/to lines
+# ^ hazard splitting an unquoted header on whitespace or " b/" => a path with spaces is cut; test:test_temporal_paths_with_spaces_are_parsed_whole
+def _header_paths(rest_text: str) -> Tuple[Optional[str], Optional[str]]:
+    rest = os.fsencode(rest_text)
+    if rest.startswith(b'"'):
+        old, tail = _read_quoted(rest)
+        tail = tail[1:]
+        new = _read_quoted(tail)[0] if tail.startswith(b'"') else tail
+        return (
+            os.fsdecode(old[_DIFF_PREFIX_LEN:]),
+            os.fsdecode(new[_DIFF_PREFIX_LEN:]),
+        )
+    half = (len(rest) - 1) // 2
+    separator_end = half + len(_HEADER_SEPARATOR)
+    if (
+        len(rest) % 2 == 1
+        and rest.startswith(b"a/")
+        and rest[half:separator_end] == _HEADER_SEPARATOR
+        and rest[_DIFF_PREFIX_LEN:half] == rest[separator_end:]
+    ):
+        path = os.fsdecode(rest[_DIFF_PREFIX_LEN:half])
+        return path, path
+    return None, None
 
 
 def _parse_diff_output(diff_output: str) -> List[FileChange]:
@@ -143,8 +257,13 @@ def _parse_diff_output(diff_output: str) -> List[FileChange]:
     in_hunk = False
 
     def _flush() -> None:
-        if current_path is None or current_diff_type is None:
+        if current_diff_type is None:
             return
+        if current_path is None:
+            raise ValueError(
+                f"git diff section without a parseable path (old path "
+                f"{escaped_path(current_old_path or '')!r})"
+            )
         changes.append(
             FileChange(
                 path=current_path,
@@ -157,9 +276,7 @@ def _parse_diff_output(diff_output: str) -> List[FileChange]:
     for line in diff_output.split("\n"):
         if line.startswith("diff --git "):
             _flush()
-            parts = line.split()
-            old_path = parts[2][2:] if parts[2].startswith("a/") else parts[2]
-            new_path = parts[3][2:] if parts[3].startswith("b/") else parts[3]
+            old_path, new_path = _header_paths(line[len("diff --git ") :])
             current_path = new_path
             current_old_path = old_path if old_path != new_path else None
             current_diff_type = "modified"
@@ -171,10 +288,10 @@ def _parse_diff_output(diff_output: str) -> List[FileChange]:
             current_diff_type = "deleted"
         elif line.startswith("rename from "):
             current_diff_type = "renamed"
-            current_old_path = line.split("rename from ", 1)[1]
+            current_old_path = _git_path(line[len("rename from ") :])
         elif line.startswith("rename to "):
             current_diff_type = "renamed"
-            current_path = line.split("rename to ", 1)[1]
+            current_path = _git_path(line[len("rename to ") :])
         elif line.startswith("Binary files"):
             current_diff_type = "binary"
             current_hunks = []

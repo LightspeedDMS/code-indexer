@@ -105,6 +105,8 @@ def mock_vector_store() -> MagicMock:
     store.collection_exists.return_value = False
     # delete_by_filter used by delete_file_branch_aware in non-git-aware mode
     store.delete_by_filter.return_value = True
+    # branch isolation lists stored paths; the real store returns a set
+    store.distinct_content_paths.return_value = set()
     return store
 
 

@@ -25,6 +25,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Iterable, List, Optional, Set, Tuple
 
+from ..utils.never_indexed_paths import SkippedPathReporter, has_unstorable_name
 from .regex_trigram import trigrams
 
 logger = logging.getLogger(__name__)
@@ -174,6 +175,8 @@ _TEMP_SUFFIX = ".db.building"
 # swapped the alias to a snapshot indexed by an older build) yields a clean
 # full-scan + rebuild instead of a caught "no such column" query error.
 _SCHEMA_VERSION = 1
+# ^ why hex of the name bytes, not TEXT; sqlite refuses a surrogate-escaped str. An older index lacks the table = no such names
+_UNSTORABLE_TABLE = "unstorable_names"
 # Skip trigram extraction for files larger than this (still recorded as an
 # always-candidate so matches inside them are never missed). Keeps build I/O and
 # db size bounded; large files are rare and ripgrep handles them in the pass.
@@ -196,6 +199,19 @@ _COMMIT_EVERY_FILES = 2000
 # build's temp (up to tens of GB per killed build) until the threshold passes
 # lets repeated deploy restarts refill the disk before cleanup can run.
 _STALE_BUILD_FILE_AGE_SECONDS = 6 * 60 * 60
+
+
+def _unstorable_names(conn: "sqlite3.Connection") -> List[str]:
+    present = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (_UNSTORABLE_TABLE,),
+    ).fetchone()
+    if present is None:
+        return []
+    return [
+        os.fsdecode(bytes.fromhex(row[0]))
+        for row in conn.execute(f"SELECT name_hex FROM {_UNSTORABLE_TABLE}")
+    ]
 
 
 def trigram_index_dir(repo_path: Path) -> Path:
@@ -388,11 +404,29 @@ class TrigramIndexManager:
         Returns the number of files recorded.
         """
         repo_path = Path(repo_path)
-        rel_files = (
+        listed = (
             list(file_list)
             if file_list is not None
             else self._enumerate_files(repo_path)
         )
+        skipped = SkippedPathReporter(
+            logger,
+            where=" in the trigram index",
+            noun="file(s)",
+            summary_subject="file(s) whose names are not valid UTF-8 in this trigram build",
+        )
+        rel_files: List[str] = []
+        unstorable: List[str] = []
+        for rel in listed:
+            if has_unstorable_name(rel):
+                unstorable.append(rel)
+                skipped.report(
+                    rel,
+                    "its name is not valid UTF-8, so it is searched without the index",
+                )
+            else:
+                rel_files.append(rel)
+        skipped.summarize()
 
         self._dir.mkdir(parents=True, exist_ok=True)
         # Build into a UNIQUE temp file (not a fixed ".db.building" name): in
@@ -482,6 +516,11 @@ class TrigramIndexManager:
                 "SELECT trigram, COUNT(*) AS df FROM postings GROUP BY trigram"
             )
             conn.execute("CREATE INDEX idx_trigram_df ON trigram_df(trigram)")
+            conn.execute(f"CREATE TABLE {_UNSTORABLE_TABLE} (name_hex TEXT NOT NULL)")
+            conn.executemany(
+                f"INSERT INTO {_UNSTORABLE_TABLE} (name_hex) VALUES (?)",
+                [(os.fsencode(rel).hex(),) for rel in unstorable],
+            )
             conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value INTEGER)")
             conn.executemany(
                 "INSERT INTO meta (key, value) VALUES (?, ?)",
@@ -514,10 +553,9 @@ class TrigramIndexManager:
         """List repo-relative files ripgrep would search (gitignore-aware)."""
         try:
             proc = subprocess.run(
-                ["rg", "--files"],
+                ["rg", "--files", "--null"],
                 cwd=str(repo_path),
                 capture_output=True,
-                text=True,
                 timeout=300,
             )
             if proc.returncode not in (0, 1):
@@ -525,7 +563,8 @@ class TrigramIndexManager:
                     "rg --files failed (%s); trigram build empty", proc.returncode
                 )
                 return []
-            return [line for line in proc.stdout.splitlines() if line]
+            # ^ hazard strict UTF-8 decode => one non-UTF-8 name fails the whole build; test:test_build_skips_non_utf8_name_and_indexes_the_rest
+            return [os.fsdecode(name) for name in proc.stdout.split(b"\0") if name]
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
             logger.warning("rg --files unavailable (%s); trigram build empty", exc)
             return []
@@ -615,7 +654,7 @@ class TrigramIndexManager:
                 always = [
                     r[0]
                     for r in conn.execute("SELECT path FROM files WHERE indexed = 0")
-                ]
+                ] + _unstorable_names(conn)
                 # A required trigram present in no file -> no indexed file can
                 # contain the literal; only always-candidates remain.
                 if df_map[ordered[0]] == 0:

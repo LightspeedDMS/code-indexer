@@ -13,6 +13,7 @@ from pathlib import Path
 import pathspec
 
 from code_indexer.config import OverrideConfig
+from code_indexer.utils.never_indexed_paths import is_never_indexed
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,9 @@ class OverrideFilterService:
         """
         # Convert to string for pattern matching
         path_str = str(file_path)
+
+        if is_never_indexed(path_str):
+            return False
 
         # 1. force_exclude_patterns have absolute priority
         if self._force_exclude_spec and self._force_exclude_spec.match_file(path_str):

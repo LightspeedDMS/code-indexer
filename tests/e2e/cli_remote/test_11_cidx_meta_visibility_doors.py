@@ -19,7 +19,11 @@ from tests.e2e.cidx_meta_suite import (
     close_catalog_doors,
     open_catalog_doors,
 )
-from tests.e2e.cidx_meta_world import provision_catalog_world, teardown_catalog_world
+from tests.e2e.cidx_meta_world import (
+    provision_catalog_world,
+    sqlite_alias_lock_store,
+    teardown_catalog_world,
+)
 from tests.e2e.conftest import E2EConfig
 from tests.e2e.helpers import require_voyage_key
 from tests.e2e.server.conftest import AdminTokenProvider
@@ -47,6 +51,8 @@ def catalog_callers(
             e2e_config.server_data_dir / "data" / "golden-repos" / "cidx-meta",
             tmp_path_factory.mktemp("catalog-repos"),
             _web_client,
+            # ^ coupled e2e-automation.sh uvicorn launch: CIDX_DATA_DIR = E2E_SERVER_DATA_DIR
+            sqlite_alias_lock_store(e2e_config.server_data_dir),
         )
         user, password = e2e_config.admin_user, e2e_config.admin_pass
         callers = (

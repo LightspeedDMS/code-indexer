@@ -6,8 +6,8 @@ in with `self_heal=True`, or it regresses to hard-failing (or silently
 masking a failure) on a pre-existing corrupt-duplicate collection instead
 of self-healing it.
 
-This module covers four indexing call sites, the live reconcile
-visibility-cleanup scan, and branch cleanup. Other store and service
+This module covers four indexing call sites and the live reconcile
+visibility-cleanup scan. Other store and service
 callers require separate classification; a call in indexing code is not
 automatically safe to mutate.
 
@@ -19,7 +19,6 @@ automatically safe to mutate.
    non-git `detect_deletions=True` path; formerly
    `_detect_and_handle_deletions`)
 5. `SmartIndexer._cleanup_multiple_visible_content_points` (reconcile)
-6. `SmartIndexer.cleanup_branch_data` (branch cleanup)
 
 The contract seam below makes an unopted read-only scroll raise, including
 when these tests run against committed HEAD (where scroll's gate is itself
@@ -134,6 +133,9 @@ class _VectorStoreClientStandIn:
     (heavy git/config/embedding-provider wiring irrelevant to this
     method) while still calling the REAL, unbound production method
     against a REAL `FilesystemVectorStore`."""
+
+    _scroll_all_content_points = SmartIndexer._scroll_all_content_points
+    _iter_content_point_pages = SmartIndexer._iter_content_point_pages
 
     def __init__(self, vector_store_client):
         self.vector_store_client = vector_store_client
@@ -296,53 +298,4 @@ class TestDetectAndHandleDeletionsCallerAudit:
             "currently just logs 'Database query failed during deletion "
             "detection' and returns, leaving the corruption in place "
             "forever)."
-        )
-
-
-class TestCleanupBranchDataCallerAudit:
-    def test_branch_cleanup_opts_in_before_hiding_points(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A branch-cleanup write must not turn a duplicate into a silent no-op."""
-        repo = tmp_path / "repo"
-        repo.mkdir()
-        _init_repo(repo)
-        (repo / "victim.py").write_text("# indexed victim\n")
-        _run_git(repo, "add", ".")
-        _run_git(repo, "commit", "-m", "add example file")
-        branch = _run_git(repo, "branch", "--show-current").stdout.strip()
-
-        metadata_path = tmp_path / "metadata.json"
-        first_indexer = _make_smart_indexer(repo, metadata_path)
-        assert first_indexer.smart_index().files_processed >= 1
-        collection_name = first_indexer.vector_store_client.resolve_collection_name(
-            first_indexer.config, first_indexer.embedding_provider
-        )
-        collection_path = repo / ".code-indexer" / "index" / collection_name
-        _duplicate_indexed_record(collection_path, "victim.py")
-        victim_files = [
-            path
-            for path in collection_path.rglob("vector_*.json")
-            if json.loads(path.read_text()).get("payload", {}).get("path")
-            == "victim.py"
-        ]
-        assert len(victim_files) >= 2, "fixture did not create a real duplicate"
-        _corrupt_id_index_bin_e2e(collection_path)
-
-        indexer = _make_smart_indexer(repo, metadata_path)
-        _require_explicit_self_heal(monkeypatch, indexer.vector_store_client)
-        indexer.cleanup_branch_data(branch)
-
-        pending_paths = (
-            indexer.vector_store_client.get_pending_self_heal_reprocess_paths(
-                collection_name
-            )
-        )
-        assert "victim.py" in pending_paths, (
-            "cleanup_branch_data silently returned zero counts without repairing "
-            "the corrupt duplicate or recording its wiped file for replay"
-        )
-        assert not any(path.exists() for path in victim_files), (
-            "cleanup_branch_data left the duplicate records on disk; its "
-            "read-only scroll must explicitly opt in before branch cleanup"
         )

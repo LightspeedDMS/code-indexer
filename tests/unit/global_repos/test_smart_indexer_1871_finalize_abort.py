@@ -1,65 +1,3 @@
-"""Bug #1871 ALSO IN SCOPE item 5: finalize-vs-abort classification for an
-ordinary FileNotFoundError -- the exact exception type the incremental
-filesystem walk raises when a concurrent reader deletes a snapshot-reader
-lease file between enumeration and stat (Bug #1871's root defect #2: "the
-incremental filesystem walk enumerates a lease file that a concurrent
-reader deletes before it is stat'd, raising FileNotFoundError, which
-hard-aborts the entire golden-repo refresh").
-
-``smart_indexer.py``'s ``_do_incremental_index`` sets
-``fatal_chunk_store_error`` ONLY for ``ChunkStoreUnavailableError`` (Bug
-#1746 Change 3) -- deliberately, per that bug's own regression test
-(``test_non_fatal_failure_still_calls_end_not_abort``,
-``tests/unit/services/test_smart_indexer_1746_abort_on_fatal_error.py``).
-An ordinary ``FileNotFoundError`` therefore reaches the method's
-``finally`` block with ``fatal_chunk_store_error=None`` and calls
-``end_indexing()`` (finalize, watermark advances), NOT
-``abort_indexing()``.
-
-INVESTIGATIVE ONLY per the mission: ``smart_indexer.py`` is outside this
-bug's owned file list. This test proves the CURRENT behavior with an
-assertion, not prose, and states a verdict below -- it does not change
-``smart_indexer.py``.
-
-Why ``process_files_high_throughput`` is patched (not the actual
-FileFinder walk): this mirrors, verbatim, the technique the existing,
-already-reviewed Bug #1746 test suite established for testing this exact
-class of behavior. That suite's own module docstring states the
-rationale directly: "process_files_high_throughput being patched here...
-is a collaborator of the methods under test (_do_full_index et al.), not
-the SUT itself -- the SUT is these methods' own exception-handling/
-finalization decision (abort vs. end)." The same reasoning applies here:
-the mission asks only to prove that "an ordinary FileNotFoundError after
-begin_indexing()" is classified non-fatal -- not to reproduce the exact
-unowned internal call site (a later, separate ``self.file_finder.
-find_files()`` walk used for branch-isolation housekeeping) where the
-real production race happens. Patching the collaborator lets the
-FileNotFoundError arrive at the SAME point in the method's control flow
-(inside the `try`, after `begin_indexing()`, before the `finally`) that
-the real race would reach it at, without re-testing FileFinder/glob
-internals this pair does not own.
-
-VERDICT (full reasoning restated in the pair's final handoff): CORRECT AS
-DESIGNED, not a defect requiring escalation. `process_files_high_
-throughput(...)` is batched via `begin_indexing()`, and the real
-production race (per Bug #1871's own defect description) occurs in the
-LATER branch-isolation `find_files()` walk, which runs only AFTER that
-processing has already committed its progress. If that second walk is
-what a lease-file race interrupts, the already-processed vectors are
-genuine and complete; calling `abort_indexing()` there would discard
-valid work over an unrelated, transient, retriable housekeeping race.
-`end_indexing()` is the correct choice for that failure shape, and the
-exception still propagates to the caller regardless (the golden-repo
-refresh still reports failure -- this test's assertion on
-`exc_info.value.__cause__` confirms visibility is unaffected; only the
-finalize/abort CHOICE differs).
-
-Placed under ``tests/unit/global_repos/`` (an owned test directory)
-rather than ``tests/unit/services/`` (not owned for this bug; see
-negotiation turns 3-5) -- pytest does not require a test file's location
-to mirror the module under test.
-"""
-
 from __future__ import annotations
 
 import subprocess
@@ -70,6 +8,9 @@ import pytest
 
 from code_indexer.config import Config
 from code_indexer.services.smart_indexer import SmartIndexer
+
+# ^ see tests/unit/services/test_indexing_session_and_watermark_integrity.py; the real-CLI proof of the abort rule
+# ^ why process_files_high_throughput is patched; the error must arrive after begin_indexing, as a lease-file race does
 
 
 def _create_git_repo(path: Path) -> str:
@@ -140,15 +81,7 @@ def git_repo(tmp_path: Path):
 GIT_STATUS = {"git_available": True, "current_branch": "master", "current_commit": None}
 
 
-class TestFileNotFoundErrorDuringIncrementalIndexFinalizesNotAborts:
-    """AC (Bug #1871 item 5, investigative): given an ordinary
-    FileNotFoundError -- the exact type a snapshot-reader-lease race
-    produces -- interrupts incremental indexing after begin_indexing(),
-    end_indexing() is called and abort_indexing() is NOT called, and the
-    exception still propagates to the caller (the golden-repo refresh
-    still reports failure -- only the finalize/abort CHOICE is under
-    test, not whether the failure is surfaced at all)."""
-
+class TestFileNotFoundErrorDuringGitIncrementalAbortsKeepingThePublishOwed:
     def _seed_for_incremental(self, indexer: SmartIndexer) -> None:
         meta = indexer.progressive_metadata.metadata
         meta["status"] = "completed"
@@ -159,7 +92,8 @@ class TestFileNotFoundErrorDuringIncrementalIndexFinalizesNotAborts:
         meta["current_file_index"] = 0
         indexer.progressive_metadata._save_metadata()
 
-    def test_ordinary_file_not_found_error_calls_end_not_abort(
+    # ^ why abort, not end_indexing; committed rows stay in chunks.db and the owed publish => next run republishes them filtered
+    def test_ordinary_file_not_found_error_aborts_not_finalizes(
         self, tmp_path: Path, git_repo: Path, mock_vector_store: MagicMock
     ) -> None:
         indexer = _make_indexer(git_repo, tmp_path, mock_vector_store)
@@ -194,16 +128,6 @@ class TestFileNotFoundErrorDuringIncrementalIndexFinalizesNotAborts:
                     safety_buffer_seconds=0,
                 )
 
-        # The failure still propagates to the caller (the golden-repo
-        # refresh still reports failure) -- confirming the finalize
-        # decision below is orthogonal to whether the error is surfaced.
         assert exc_info.value.__cause__ is lease_race_error
-
-        # THE ACTUAL VERDICT UNDER TEST: end_indexing() (finalize), never
-        # abort_indexing(), for this exception type -- matching Bug
-        # #1746's deliberate "fatal == ChunkStoreUnavailableError only"
-        # scoping. See the module docstring's VERDICT section for why
-        # this is correct behavior for this specific failure shape, not
-        # an oversight this pair is escalating.
-        mock_vector_store.end_indexing.assert_called_once_with("test_collection", None)
-        mock_vector_store.abort_indexing.assert_not_called()
+        mock_vector_store.abort_indexing.assert_any_call("test_collection")
+        mock_vector_store.end_indexing.assert_not_called()

@@ -110,6 +110,19 @@ group permissions). Therefore:
 - The daemon's OS user must be a member of that group, and the running daemon must have started after the
   membership existed.
 
+Before each daemon copy the server makes the source tree readable to the daemon
+(`_ensure_source_tree_readable_for_clone` in `server/storage/shared/snapshot_manager.py`): group and other read for
+every repository except the catalog. The catalog's memory files (`cidx-meta/memories/`) and index tree
+(`cidx-meta/.code-indexer/`) are readable by the owner and the service group only, in every clone-backend mode:
+server start closes both directories to other users, and every catalog snapshot brings every entry beneath them to
+that mode (`server/storage/shared/catalog_tree_permissions.py`). Only directories and regular files are changed;
+symbolic links beneath them are neither followed nor changed. A catalog snapshot is not created when those modes
+cannot be set; the refresh fails and is retried. Each server start also brings the retained catalog snapshots owned by
+the service user to that mode, on a worker thread. Catalog snapshots created by the CoW daemon before the
+upgrade converge to that mode when retention rotates them out: every catalog publish creates a new snapshot readable
+by the owner and the service group only (keep-last-N retention). Use a
+primary group for the cidx service user that only the service user and the daemon user belong to.
+
 On the daemon host (the node where `/etc/cow-storage-daemon/config.json` exists), both the installer
 (`ensure_cow_daemon_service_group_membership`) and the auto-updater (`_ensure_cow_daemon_user_in_service_group`)
 add the daemon user to the group when missing and restart `cow-storage-daemon` when its running process lacks the

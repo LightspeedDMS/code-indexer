@@ -12,6 +12,8 @@ import uuid
 from pathlib import Path
 from typing import Tuple
 
+from code_indexer.utils.never_indexed_paths import LEGACY_LEASE_DIRECTORY_NAME
+
 SNAPSHOT_READER_LEASE_TTL_SECONDS = 120.0
 
 
@@ -84,7 +86,7 @@ def _legacy_lease_directory(lease_root: Path) -> Path:
     removed (see ``snapshot_has_live_reader`` and
     ``sweep_expired_lease_files``).
     """
-    return Path(lease_root) / ".snapshot-reader-leases"
+    return Path(lease_root) / LEGACY_LEASE_DIRECTORY_NAME
 
 
 def _lease_directory(

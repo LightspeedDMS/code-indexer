@@ -8731,6 +8731,7 @@ class FilesystemVectorStore:
                 open_chunk_store_for_path,
             )
 
+            # ^ invariant only chunks.db open/update/close sit in this try; HNSW bookkeeping errors propagate as themselves
             try:
                 chunk_store = open_chunk_store_for_path(
                     collection_path / "chunks.db", str(collection_path)
@@ -8744,19 +8745,6 @@ class FilesystemVectorStore:
                     changes = chunk_store.update_payload_fields_batch_with_diff(updates)
                 finally:
                     chunk_store.close()
-
-                if self._hnsw_sync_epoch_enabled:
-                    session = self._get_or_create_hnsw_sync_session(
-                        collection_path, collection_name
-                    )
-                    for change in changes:
-                        if (
-                            change.old_path != change.new_path
-                            or change.old_hidden_branches != change.new_hidden_branches
-                        ):
-                            session.visibility_changed.add(change.point_id)
-
-                return True
             except Exception as e:
                 self.logger.warning(
                     "Failed to batch update payload (CHUNKS_DB) for collection %s: %s",
@@ -8769,7 +8757,32 @@ class FilesystemVectorStore:
                         collection_path, collection_name
                     )
                     session.complete_change_tracking = False
+                from code_indexer.storage.sqlite_chunk_store import (
+                    ChunkStoreUnavailableError,
+                    is_fatal_chunk_store_write_error,
+                )
+
+                # ^ invariant fatal store failure => typed => exit 86/87/89; only lock contention returns False (callers raise on False)
+                if isinstance(e, ChunkStoreUnavailableError):
+                    raise
+                if is_fatal_chunk_store_write_error(e):
+                    raise ChunkStoreUnavailableError(
+                        f"Updating payloads in {collection_name!r} failed: {e}"
+                    ) from e
                 return False
+
+            if self._hnsw_sync_epoch_enabled:
+                session = self._get_or_create_hnsw_sync_session(
+                    collection_path, collection_name
+                )
+                for change in changes:
+                    if (
+                        change.old_path != change.new_path
+                        or change.old_hidden_branches != change.new_hidden_branches
+                    ):
+                        session.visibility_changed.add(change.point_id)
+
+            return True
 
         try:
             # Ensure id_index is loaded for O(1) file resolution. Resolved

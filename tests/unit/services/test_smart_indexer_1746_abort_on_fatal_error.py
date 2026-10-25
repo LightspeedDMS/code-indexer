@@ -127,6 +127,8 @@ def mock_vector_store() -> MagicMock:
     # simulates a SUCCESSFUL clear -- these tests are about fatal
     # chunk-store-error abort-vs-end handling, not clear failure.
     store.clear_collection.return_value = True
+    # branch isolation lists stored paths; the real store returns a set
+    store.distinct_content_paths.return_value = set()
     return store
 
 
