@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [12.96.0] - 2026-10-25
+
+### Upgrade notes
+
+- Server: the catalog (`cidx-meta`) `memories/` and `.code-indexer/` directories are kept accessible to the service user and its group only. Existing directories and retained catalog snapshots are brought to that mode at startup and at each catalog publish, with no manual step. Catalog snapshots created by the CoW daemon before the upgrade converge when retention rotates them out. A private directory that is itself a symbolic link is reported with one ERROR and left unmanaged.
+- Server: branch-aware semantic index rebuilds (every publish on a PostgreSQL cluster) now read each stored chunk's branch visibility, adding about 20 microseconds per vector to the rebuild (a few seconds per publish for a collection of a few hundred thousand vectors).
+
+### Fixed
+
+- Indexing: a git-aware reconcile records the commit it indexed, so the next incremental compares against it. Previously a deletion committed before a reconcile could be missed by every later incremental. Only a full commit id is stored; a cancelled or failed run keeps the previous one.
+- Indexing: when the recorded commit no longer exists (for example after rewritten history), the next run reconciles against the stored index instead of treating the change list as empty; any other failure to list changes fails the run.
+- Indexing: a file whose name is not valid UTF-8 is skipped with a warning instead of failing the whole run (previously exit 87). Warnings are capped and end with one count.
+- Indexing: snapshot reader lease files (`.snapshot-reader-leases/`) are never indexed; rows indexed by an earlier release are removed at the next reconcile.
+- Indexing: an incremental with nothing to index republishes the semantic index when an earlier publish never landed, so an interrupted run converges without new changes.
+- Indexing: a reconcile of an empty repository on a fresh collection records the chunk storage layout, so the collection is not built in the legacy layout.
+- Indexing: a git-aware incremental, reconcile or branch change that is cancelled or fails abandons its semantic index publish and leaves it owed, instead of publishing an unfiltered index.
+- Indexing: semantic index rebuilds never include a point hidden on the current branch; on a PostgreSQL cluster an older duplicate of a file could previously remain searchable.
+- Indexing: the duplicate-content cleanup runs inside the publish, covers the whole collection, fails the run when it cannot apply its change, and is retried by the next run that owes a publish.
+- Indexing: a failure to hide or restore a file's visibility on a branch fails the run instead of being logged and skipped, so a valid file never silently leaves semantic search; a damaged, missing or unusable chunk store found during that step exits with its chunk-store code (86/87/89), so the server's self-heal runs.
+- Indexing: git file listings handle names with non-ASCII, quoted or non-UTF-8 characters; the content-id batch path no longer degrades on such a name.
+- Regex search: a file whose name is not valid UTF-8 no longer disables the trigram index for the whole repository; the index is built for every other file and the file is still searched.
+- Server: changing a golden repository's branch fails before the swap, keeping the published snapshot, when the new branch's file list cannot be read; the listing is no longer cut off by a fixed timeout.
+- Watch: deleting a never-indexed file (non-UTF-8 name, lease file) no longer queues a removal.
+- Watch: a change, deletion or branch-change visibility update that fails is retried with a per-file backoff (doubling up to 5 minutes) instead of being dropped or retried on every cycle; one failure no longer drops the rest of its batch, and a branch change is recorded only after every file it owes is visible.
+
+### Removed
+
+- `SmartIndexer.cleanup_branch_data`, which had no caller.
+
 ## [12.95.0] - 2026-10-24
 
 ### Upgrade notes
