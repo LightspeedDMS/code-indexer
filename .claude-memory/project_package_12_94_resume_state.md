@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 469b8128-2710-4307-9c15-5e1dfb0f1a0b
-  modified: 2026-10-25T19:23:47.921Z
+  modified: 2026-10-25T21:48:10.345Z
 ---
 
 12.94.0 (package after v12.93.0): pushed to development and staging on 2026-10-23 and validated
@@ -29,6 +29,15 @@ passed. Gates (2026-10-25): lint green; fast 20,355 passed (one stale test doubl
 flake); server-fast 29,861 passed (one timing flake); e2e all 7 phases green (phase 4 log audit caught
 a harness lock race, harness fixed, phases 3-7 re-run green). Committed on development: security change
 alone (0a56a22a7), indexing/server/watch fixes (f5e6843d0), then docs (CHANGELOG, CLAUDE.md).
+
+Update 2026-10-25 ~20:30 UTC: 12.96.0 bumped (tag v12.96.0), pushed to development and staging. Cluster
+staging validation FAILED: every catalog refresh fails at snapshot creation because some catalog entries
+on the shared storage are owned by another account and the catalog permission pass made chmod failures
+fatal (dev 2202). Fix (dev 2202): change only entries the service user owns, prune unreadable
+directories of another owner, report the rest once, never block a catalog publish. Dual review approved;
+server-fast (two timing flakes, pass alone) and e2e phases 3/4/6 green. Committed alone (9a60c2dd7),
+shipping as 12.97.0, then re-validate both staging environments and stop. Production is unaffected
+(still 12.93.0).
 
 **How to apply (remaining steps):**
 - Bump 12.96.0 as the push tip, push development, merge to staging, validate both staging environments

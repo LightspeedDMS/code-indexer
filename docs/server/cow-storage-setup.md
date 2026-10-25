@@ -116,8 +116,10 @@ every repository except the catalog. The catalog's memory files (`cidx-meta/memo
 (`cidx-meta/.code-indexer/`) are readable by the owner and the service group only, in every clone-backend mode:
 server start closes both directories to other users, and every catalog snapshot brings every entry beneath them to
 that mode (`server/storage/shared/catalog_tree_permissions.py`). Only directories and regular files are changed;
-symbolic links beneath them are neither followed nor changed. A catalog snapshot is not created when those modes
-cannot be set; the refresh fails and is retried. Each server start also brings the retained catalog snapshots owned by
+symbolic links beneath them are neither followed nor changed. Only entries owned by the service user are changed: an
+entry owned by another account keeps its mode and is listed in one WARNING per snapshot (and one at server start) so
+its ownership can be corrected to the service user; it never blocks a catalog snapshot. A catalog snapshot is not
+created when the mode of an entry the service user owns cannot be set; the refresh fails and is retried. Each server start also brings the retained catalog snapshots owned by
 the service user to that mode, on a worker thread. Catalog snapshots created by the CoW daemon before the
 upgrade converge to that mode when retention rotates them out: every catalog publish creates a new snapshot readable
 by the owner and the service group only (keep-last-N retention). Use a

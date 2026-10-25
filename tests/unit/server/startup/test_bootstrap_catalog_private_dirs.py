@@ -135,6 +135,33 @@ def test_private_root_swapped_for_symlink_after_check_is_not_followed(
     assert _mode(outside) == 0o755
 
 
+def test_private_dirs_of_another_owner_are_left_and_reported_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    catalog = tmp_path / "cidx-meta"
+    for name in ("memories", ".code-indexer"):
+        (catalog / name).mkdir(parents=True)
+        os.chmod(catalog / name, 0o755)
+    monkeypatch.setattr(os, "geteuid", lambda: os.getuid() + 1)
+
+    with caplog.at_level(logging.WARNING):
+        bootstrap_cidx_meta(_registered_catalog(), str(tmp_path))
+
+    assert _mode(catalog / "memories") == 0o755
+    assert _mode(catalog / ".code-indexer") == 0o755
+    assert [r for r in caplog.records if r.levelname == "ERROR"] == []
+    warnings = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelname == "WARNING"
+        and "not owned by the service user" in r.getMessage()
+    ]
+    assert len(warnings) == 1, warnings
+    assert "memories" in warnings[0] and ".code-indexer" in warnings[0]
+
+
 def test_bootstrap_without_private_dirs_creates_nothing(tmp_path: Path) -> None:
     catalog = tmp_path / "cidx-meta"
     catalog.mkdir()
