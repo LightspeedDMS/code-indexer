@@ -33,80 +33,91 @@
 pub(crate) const GRAPH_PREAMBLE_EXTRA_1: &str = r#"
 pub type SymbolId = u64;
 
+// ^ why crate-root PhantomData import, not module-only; evaluator docs promise bare `PhantomData`
+#[allow(unused_imports)]
 use std::marker::PhantomData;
 
-type CtxPtr = *const ();
+pub use xray_host_handles::{FactsHandle, GraphHandle};
 
-#[derive(Clone, Copy)]
-pub struct GraphHandle<'graph> {
-    ctx: CtxPtr,
-    callees_of_fn: fn(*const (), u32) -> Vec<u32>,
-    callers_of_fn: fn(*const (), u32) -> Vec<u32>,
-    reachable_from_fn: fn(*const (), &[u32], usize) -> Vec<u32>,
-    reachable_to_fn: fn(*const (), &[u32], usize) -> Vec<u32>,
-    shortest_path_to_any_fn: fn(*const (), u32, &[u32], usize) -> Option<Vec<u32>>,
-    strongly_connected_components_fn: fn(*const ()) -> Vec<Vec<u32>>,
-    resolve_symbol_fn: fn(*const (), u32) -> Option<u64>,
-    resolve_string_raw_fn: fn(*const (), u32) -> Option<(*const u8, usize)>,
-    is_symbol_referenced_fn: fn(*const (), u32) -> bool,
-    is_definitely_dead_code_fn: fn(*const (), u32) -> Option<bool>,
-    signature_for_raw_fn: fn(*const (), u32) -> Option<(*const u8, usize)>,
-    symbol_count_fn: fn(*const ()) -> usize,
-    dense_id_for_fn: fn(*const (), u64) -> Option<u32>,
-    location_for_raw_fn: fn(*const (), u32) -> Option<(*const u8, usize, usize)>,
-    declaration_kind_fn: fn(*const (), u32) -> Option<DeclarationKind>,
-    visibility_of_fn: fn(*const (), u32) -> Visibility,
-    edge_reason_fn: fn(*const (), u32, u32) -> Option<EdgeReason>,
-    edge_evidence_fn: fn(*const (), u32, u32) -> Option<u16>,
-    callees_of_filtered_fn: fn(*const (), u32, u16, u16) -> Vec<u32>,
-    callers_of_filtered_fn: fn(*const (), u32, u16, u16) -> Vec<u32>,
-    reachable_from_filtered_fn: fn(*const (), &[u32], usize, u16, u16) -> Vec<u32>,
-    reachable_to_filtered_fn: fn(*const (), &[u32], usize, u16, u16) -> Vec<u32>,
-    strongly_connected_components_filtered_fn: fn(*const (), u16, u16) -> Vec<Vec<u32>>,
-    shortest_path_to_any_filtered_fn: fn(*const (), u32, &[u32], usize, u16, u16) -> Option<Vec<u32>>,
-    _graph: PhantomData<&'graph ()>,
-}
+// ^ invariant evaluator access to handles = pub methods only; CtxPtr, fields = private; test:evaluator_cannot_read_handle_fields
+// ^ hazard `use super::*` here => user-code names shadow the prelude inside the handle types
+// ^ coupled module open here with rust/xray-core/src/compiler/graph_preamble.rs:GRAPH_PREAMBLE_EXTRA_3; closes after FactsHandle
+mod xray_host_handles {
+    use super::{DeclarationKind, EdgeReason, SymbolId, UserFact, Visibility};
+    use std::marker::PhantomData;
 
-impl<'graph> GraphHandle<'graph> {
-    pub fn callees_of(&self, symbol: u32) -> Vec<u32> {
-        (self.callees_of_fn)(self.ctx, symbol)
+    type CtxPtr = *const ();
+
+    #[derive(Clone, Copy)]
+    pub struct GraphHandle<'graph> {
+        ctx: CtxPtr,
+        callees_of_fn: fn(*const (), u32) -> Vec<u32>,
+        callers_of_fn: fn(*const (), u32) -> Vec<u32>,
+        reachable_from_fn: fn(*const (), &[u32], usize) -> Vec<u32>,
+        reachable_to_fn: fn(*const (), &[u32], usize) -> Vec<u32>,
+        shortest_path_to_any_fn: fn(*const (), u32, &[u32], usize) -> Option<Vec<u32>>,
+        strongly_connected_components_fn: fn(*const ()) -> Vec<Vec<u32>>,
+        resolve_symbol_fn: fn(*const (), u32) -> Option<u64>,
+        resolve_string_raw_fn: fn(*const (), u32) -> Option<(*const u8, usize)>,
+        is_symbol_referenced_fn: fn(*const (), u32) -> bool,
+        is_definitely_dead_code_fn: fn(*const (), u32) -> Option<bool>,
+        signature_for_raw_fn: fn(*const (), u32) -> Option<(*const u8, usize)>,
+        symbol_count_fn: fn(*const ()) -> usize,
+        dense_id_for_fn: fn(*const (), u64) -> Option<u32>,
+        location_for_raw_fn: fn(*const (), u32) -> Option<(*const u8, usize, usize)>,
+        declaration_kind_fn: fn(*const (), u32) -> Option<DeclarationKind>,
+        visibility_of_fn: fn(*const (), u32) -> Visibility,
+        edge_reason_fn: fn(*const (), u32, u32) -> Option<EdgeReason>,
+        edge_evidence_fn: fn(*const (), u32, u32) -> Option<u16>,
+        callees_of_filtered_fn: fn(*const (), u32, u16, u16) -> Vec<u32>,
+        callers_of_filtered_fn: fn(*const (), u32, u16, u16) -> Vec<u32>,
+        reachable_from_filtered_fn: fn(*const (), &[u32], usize, u16, u16) -> Vec<u32>,
+        reachable_to_filtered_fn: fn(*const (), &[u32], usize, u16, u16) -> Vec<u32>,
+        strongly_connected_components_filtered_fn: fn(*const (), u16, u16) -> Vec<Vec<u32>>,
+        shortest_path_to_any_filtered_fn: fn(*const (), u32, &[u32], usize, u16, u16) -> Option<Vec<u32>>,
+        _graph: PhantomData<&'graph ()>,
     }
 
-    pub fn callers_of(&self, symbol: u32) -> Vec<u32> {
-        (self.callers_of_fn)(self.ctx, symbol)
-    }
+    impl<'graph> GraphHandle<'graph> {
+        pub fn callees_of(&self, symbol: u32) -> Vec<u32> {
+            (self.callees_of_fn)(self.ctx, symbol)
+        }
 
-    pub fn reachable_from(&self, roots: &[u32], max_depth: usize) -> Vec<u32> {
-        (self.reachable_from_fn)(self.ctx, roots, max_depth)
-    }
+        pub fn callers_of(&self, symbol: u32) -> Vec<u32> {
+            (self.callers_of_fn)(self.ctx, symbol)
+        }
 
-    pub fn reachable_to(&self, targets: &[u32], max_depth: usize) -> Vec<u32> {
-        (self.reachable_to_fn)(self.ctx, targets, max_depth)
-    }
+        pub fn reachable_from(&self, roots: &[u32], max_depth: usize) -> Vec<u32> {
+            (self.reachable_from_fn)(self.ctx, roots, max_depth)
+        }
+
+        pub fn reachable_to(&self, targets: &[u32], max_depth: usize) -> Vec<u32> {
+            (self.reachable_to_fn)(self.ctx, targets, max_depth)
+        }
 "#;
 
 /// Continues `GRAPH_PREAMBLE_EXTRA_1` -- see its doc comment. Holds
 /// `GraphHandle`'s next 3 accessor methods.
 pub(crate) const GRAPH_PREAMBLE_EXTRA_2: &str = r#"
-    pub fn shortest_path_to_any(&self, from: u32, targets: &[u32], max_depth: usize) -> Option<Vec<u32>> {
-        (self.shortest_path_to_any_fn)(self.ctx, from, targets, max_depth)
-    }
+        pub fn shortest_path_to_any(&self, from: u32, targets: &[u32], max_depth: usize) -> Option<Vec<u32>> {
+            (self.shortest_path_to_any_fn)(self.ctx, from, targets, max_depth)
+        }
 
-    pub fn strongly_connected_components(&self) -> Vec<Vec<u32>> {
-        (self.strongly_connected_components_fn)(self.ctx)
-    }
+        pub fn strongly_connected_components(&self) -> Vec<Vec<u32>> {
+            (self.strongly_connected_components_fn)(self.ctx)
+        }
 
-    pub fn resolve_symbol(&self, dense_id: u32) -> Option<u64> {
-        (self.resolve_symbol_fn)(self.ctx, dense_id)
-    }
+        pub fn resolve_symbol(&self, dense_id: u32) -> Option<u64> {
+            (self.resolve_symbol_fn)(self.ctx, dense_id)
+        }
 
-    pub fn symbol_count(&self) -> usize {
-        (self.symbol_count_fn)(self.ctx)
-    }
+        pub fn symbol_count(&self) -> usize {
+            (self.symbol_count_fn)(self.ctx)
+        }
 
-    pub fn dense_id_for(&self, symbol: SymbolId) -> Option<u32> {
-        (self.dense_id_for_fn)(self.ctx, symbol)
-    }
+        pub fn dense_id_for(&self, symbol: SymbolId) -> Option<u32> {
+            (self.dense_id_for_fn)(self.ctx, symbol)
+        }
 "#;
 
 /// Continues `GRAPH_PREAMBLE_EXTRA_1`/`_2` -- see the first's doc comment.
@@ -118,67 +129,86 @@ pub(crate) const GRAPH_PREAMBLE_EXTRA_2: &str = r#"
 /// `HashMap`/`StringTable` layout (the same ADR-002 principle extended
 /// from `CodeGraph` to `FactIndex`).
 pub(crate) const GRAPH_PREAMBLE_EXTRA_3: &str = r#"
-    pub fn resolve_string(&self, string_id: u32) -> Option<&str> {
-        let (ptr, len) = (self.resolve_string_raw_fn)(self.ctx, string_id)?;
-        Some(unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len)) })
+        pub fn resolve_string(&self, string_id: u32) -> Option<&str> {
+            let (ptr, len) = (self.resolve_string_raw_fn)(self.ctx, string_id)?;
+            Some(unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len)) })
+        }
+
+        pub fn is_symbol_referenced(&self, dense_id: u32) -> bool {
+            (self.is_symbol_referenced_fn)(self.ctx, dense_id)
+        }
+
+        pub fn is_definitely_dead_code(&self, dense_id: u32) -> Option<bool> {
+            (self.is_definitely_dead_code_fn)(self.ctx, dense_id)
+        }
+
+        pub fn signature_for(&self, dense_id: u32) -> Option<&str> {
+            let (ptr, len) = (self.signature_for_raw_fn)(self.ctx, dense_id)?;
+            Some(unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len)) })
+        }
+
+        pub fn location_for(&self, dense_id: u32) -> Option<(&str, usize)> {
+            let (ptr, len, line) = (self.location_for_raw_fn)(self.ctx, dense_id)?;
+            Some((unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len)) }, line))
+        }
+
+        pub fn declaration_kind(&self, dense_id: u32) -> Option<DeclarationKind> {
+            (self.declaration_kind_fn)(self.ctx, dense_id)
+        }
+
+        pub fn visibility_of(&self, dense_id: u32) -> Visibility {
+            (self.visibility_of_fn)(self.ctx, dense_id)
+        }
+
+        pub fn edge_reason(&self, from: u32, to: u32) -> Option<EdgeReason> {
+            (self.edge_reason_fn)(self.ctx, from, to)
+        }
+
+        pub fn edge_evidence(&self, from: u32, to: u32) -> Option<u16> {
+            (self.edge_evidence_fn)(self.ctx, from, to)
+        }
+
+        pub fn callees_of_filtered(&self, symbol: u32, required_bits: u16, forbidden_bits: u16) -> Vec<u32> {
+            (self.callees_of_filtered_fn)(self.ctx, symbol, required_bits, forbidden_bits)
+        }
+
+        pub fn callers_of_filtered(&self, symbol: u32, required_bits: u16, forbidden_bits: u16) -> Vec<u32> {
+            (self.callers_of_filtered_fn)(self.ctx, symbol, required_bits, forbidden_bits)
+        }
+
+        pub fn reachable_from_filtered(&self, roots: &[u32], max_depth: usize, required_bits: u16, forbidden_bits: u16) -> Vec<u32> {
+            (self.reachable_from_filtered_fn)(self.ctx, roots, max_depth, required_bits, forbidden_bits)
+        }
+
+        pub fn reachable_to_filtered(&self, targets: &[u32], max_depth: usize, required_bits: u16, forbidden_bits: u16) -> Vec<u32> {
+            (self.reachable_to_filtered_fn)(self.ctx, targets, max_depth, required_bits, forbidden_bits)
+        }
+
+        pub fn strongly_connected_components_filtered(&self, required_bits: u16, forbidden_bits: u16) -> Vec<Vec<u32>> {
+            (self.strongly_connected_components_filtered_fn)(self.ctx, required_bits, forbidden_bits)
+        }
+
+        pub fn shortest_path_to_any_filtered(&self, from: u32, targets: &[u32], max_depth: usize, required_bits: u16, forbidden_bits: u16) -> Option<Vec<u32>> {
+            (self.shortest_path_to_any_filtered_fn)(self.ctx, from, targets, max_depth, required_bits, forbidden_bits)
+        }
     }
 
-    pub fn is_symbol_referenced(&self, dense_id: u32) -> bool {
-        (self.is_symbol_referenced_fn)(self.ctx, dense_id)
+    #[derive(Clone, Copy)]
+    pub struct FactsHandle<'facts> {
+        ctx: *const (),
+        for_symbol_fn: fn(*const (), u64) -> Vec<UserFact>,
+        for_custom_fn: fn(*const (), &str) -> Vec<UserFact>,
+        _facts: std::marker::PhantomData<&'facts ()>,
     }
 
-    pub fn is_definitely_dead_code(&self, dense_id: u32) -> Option<bool> {
-        (self.is_definitely_dead_code_fn)(self.ctx, dense_id)
-    }
+    impl<'facts> FactsHandle<'facts> {
+        pub fn for_symbol(&self, symbol: SymbolId) -> Vec<UserFact> {
+            (self.for_symbol_fn)(self.ctx, symbol)
+        }
 
-    pub fn signature_for(&self, dense_id: u32) -> Option<&str> {
-        let (ptr, len) = (self.signature_for_raw_fn)(self.ctx, dense_id)?;
-        Some(unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len)) })
-    }
-
-    pub fn location_for(&self, dense_id: u32) -> Option<(&str, usize)> {
-        let (ptr, len, line) = (self.location_for_raw_fn)(self.ctx, dense_id)?;
-        Some((unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len)) }, line))
-    }
-
-    pub fn declaration_kind(&self, dense_id: u32) -> Option<DeclarationKind> {
-        (self.declaration_kind_fn)(self.ctx, dense_id)
-    }
-
-    pub fn visibility_of(&self, dense_id: u32) -> Visibility {
-        (self.visibility_of_fn)(self.ctx, dense_id)
-    }
-
-    pub fn edge_reason(&self, from: u32, to: u32) -> Option<EdgeReason> {
-        (self.edge_reason_fn)(self.ctx, from, to)
-    }
-
-    pub fn edge_evidence(&self, from: u32, to: u32) -> Option<u16> {
-        (self.edge_evidence_fn)(self.ctx, from, to)
-    }
-
-    pub fn callees_of_filtered(&self, symbol: u32, required_bits: u16, forbidden_bits: u16) -> Vec<u32> {
-        (self.callees_of_filtered_fn)(self.ctx, symbol, required_bits, forbidden_bits)
-    }
-
-    pub fn callers_of_filtered(&self, symbol: u32, required_bits: u16, forbidden_bits: u16) -> Vec<u32> {
-        (self.callers_of_filtered_fn)(self.ctx, symbol, required_bits, forbidden_bits)
-    }
-
-    pub fn reachable_from_filtered(&self, roots: &[u32], max_depth: usize, required_bits: u16, forbidden_bits: u16) -> Vec<u32> {
-        (self.reachable_from_filtered_fn)(self.ctx, roots, max_depth, required_bits, forbidden_bits)
-    }
-
-    pub fn reachable_to_filtered(&self, targets: &[u32], max_depth: usize, required_bits: u16, forbidden_bits: u16) -> Vec<u32> {
-        (self.reachable_to_filtered_fn)(self.ctx, targets, max_depth, required_bits, forbidden_bits)
-    }
-
-    pub fn strongly_connected_components_filtered(&self, required_bits: u16, forbidden_bits: u16) -> Vec<Vec<u32>> {
-        (self.strongly_connected_components_filtered_fn)(self.ctx, required_bits, forbidden_bits)
-    }
-
-    pub fn shortest_path_to_any_filtered(&self, from: u32, targets: &[u32], max_depth: usize, required_bits: u16, forbidden_bits: u16) -> Option<Vec<u32>> {
-        (self.shortest_path_to_any_filtered_fn)(self.ctx, from, targets, max_depth, required_bits, forbidden_bits)
+        pub fn for_custom(&self, name: &str) -> Vec<UserFact> {
+            (self.for_custom_fn)(self.ctx, name)
+        }
     }
 }
 
@@ -211,24 +241,6 @@ pub struct UserFact {
     pub line: usize,
     pub message: String,
     pub custom_key: Option<String>,
-}
-
-#[derive(Clone, Copy)]
-pub struct FactsHandle<'facts> {
-    ctx: *const (),
-    for_symbol_fn: fn(*const (), u64) -> Vec<UserFact>,
-    for_custom_fn: fn(*const (), &str) -> Vec<UserFact>,
-    _facts: std::marker::PhantomData<&'facts ()>,
-}
-
-impl<'facts> FactsHandle<'facts> {
-    pub fn for_symbol(&self, symbol: SymbolId) -> Vec<UserFact> {
-        (self.for_symbol_fn)(self.ctx, symbol)
-    }
-
-    pub fn for_custom(&self, name: &str) -> Vec<UserFact> {
-        (self.for_custom_fn)(self.ctx, name)
-    }
 }
 "#;
 
@@ -277,7 +289,7 @@ pub struct FileContext {
 /// like `DeclarationKind`/`Visibility`/`EdgeReason` are checked above.
 /// Deliberately plain `pub const` items (Messi Rule 17, anti-magic,
 /// matching `reasons.rs`'s own rationale) rather than a bitflags type, and
-/// declared at crate-root scope like everything else in this preamble so
+/// declared at crate-root scope (like every public data type here) so
 /// evaluator code can reference them unqualified (e.g. `evidence &
 /// RECEIVER_TYPE_MATCH != 0`).
 pub(crate) const GRAPH_PREAMBLE_EXTRA_6: &str = r#"
@@ -302,8 +314,9 @@ pub const RECEIVER_TYPE_MISMATCH: u16 = 1 << 14;
 /// `xray_collect_facts` + `xray_analyze_graph`, NEVER `xray_evaluate_node`
 /// (ADR-001: "graph artifacts do not export xray_reduce_facts or
 /// xray_drain_facts" and, symmetrically, never the legacy export either).
-/// `xray_abi_version`/`xray_drain_debug_log` are duplicated from `EPILOGUE`
-/// rather than factored into a shared tail constant -- both epilogues are
+/// `xray_drain_debug_log` is exported once, from `PREAMBLE`'s private
+/// debug-log module, for both modes. `xray_abi_version` is duplicated from
+/// `EPILOGUE` rather than factored into a shared tail constant -- both epilogues are
 /// short, static text with no parameters to thread through, and a shared
 /// helper would buy no real deduplication for two 6-line blocks while
 /// adding a level of indirection to trace when reading either mode's
@@ -362,14 +375,6 @@ pub extern "C" fn xray_rustc_version_ptr() -> u64 {
 #[no_mangle]
 pub extern "C" fn xray_rustc_version_len() -> u64 {
     XRAY_RUSTC_VERSION.len() as u64
-}
-
-#[no_mangle]
-pub fn xray_drain_debug_log() -> Vec<String> {
-    DEBUG_LOG.with(|log| {
-        let mut log = log.borrow_mut();
-        std::mem::take(&mut *log)
-    })
 }
 "#;
 

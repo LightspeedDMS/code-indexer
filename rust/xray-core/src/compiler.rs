@@ -52,7 +52,7 @@ pub use diagnostics::adjust_error_lines;
 // `mod tests { use super::*; ... }` saw every item in this file) can still
 // reach them.
 #[cfg(test)]
-pub(crate) use preamble::{EPILOGUE, PREAMBLE};
+pub(crate) use preamble::PREAMBLE;
 #[cfg(test)]
 pub(crate) use graph_preamble::{
     GRAPH_PREAMBLE_EXTRA_1, GRAPH_PREAMBLE_EXTRA_2, GRAPH_PREAMBLE_EXTRA_3, GRAPH_PREAMBLE_EXTRA_4,
@@ -85,3 +85,7 @@ mod tests_diagnostics;
 #[cfg(test)]
 #[path = "compiler/tests_debug_log.rs"]
 mod tests_debug_log;
+
+#[cfg(test)]
+#[path = "compiler/tests_handle_privacy.rs"]
+mod tests_handle_privacy;

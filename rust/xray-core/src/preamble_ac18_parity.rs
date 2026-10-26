@@ -335,7 +335,7 @@ fn diff_method(real: &ImplItemFn, mirror: &ImplItemFn, label: &str) -> Option<St
 /// check, not a body comparison -- there is nothing to structurally
 /// reconcile between "has a Drop impl" and "does not".
 fn mirror_declares_drop_impl(file: &File, self_ty: &str) -> bool {
-    file.items.iter().any(|item| match item {
+    flatten_items(&file.items).into_iter().any(|item| match item {
         Item::Impl(item_impl) => {
             let is_drop_trait = item_impl
                 .trait_
@@ -794,6 +794,13 @@ impl Foo {
             !mirror_declares_drop_impl(&without_file, "Foo"),
             "a source with no Drop impl must not be falsely flagged"
         );
+    }
+
+    // ^ hazard top-level-only scan => Drop on a preamble handle inside `mod xray_host_handles` goes unseen
+    #[test]
+    fn detects_drop_impl_nested_inside_a_mod_block() {
+        let nested = parse_items("mod outer { pub struct Foo; impl Drop for Foo { fn drop(&mut self) {} } }", "nested");
+        assert!(mirror_declares_drop_impl(&nested, "Foo"), "an `impl Drop for Foo` inside a mod block must be detected");
     }
 
     /// THE AC18 GATE: parses the REAL `owned_node.rs`/`finding.rs` and the

@@ -348,13 +348,15 @@ The server validates evaluator code against a security whitelist before compilat
 
 **Forbidden constructs** (rejected at validation time):
 
-- `unsafe` blocks and `unsafe fn` declarations
-- Standard library I/O imports: `std::fs`, `std::net`, `std::process`, `std::env`, `std::io`
+- `unsafe` in any form: `unsafe` blocks, `unsafe fn` (free functions, methods and trait methods), `unsafe impl`, `unsafe trait`, and `unsafe fn()` pointer types
+- Standard library paths outside the allowlist (see Allowed constructs). Every other `std`, `core` or `alloc` path is rejected, in a `use` or in code, e.g. `std::fs`, `std::net`, `std::process`, `std::env`, `std::io`, `std::os`, `std::thread`, `std::sync`, `std::time`, `std::ffi`, `std::path`, `std::ptr`, `std::mem`, `std::alloc`, `std::panic`
+- Renaming a standard-library path (`use std as s`, `use std::{self as s}`, `use std::collections as c`)
 - Raw pointers: `*const`, `*mut`
-- Foreign function interface: `extern` blocks, `extern "C" fn`
+- Foreign function interface: `extern` blocks, `extern "C" fn`, `extern "C" fn()` pointer types, `extern crate`
 - Module declarations: `mod`
 - Static declarations: `static` and `static mut` (use `const` instead)
-- Forbidden macros: `include!`, `include_str!`, `include_bytes!`, `env!`, `option_env!`, `println!`, `eprintln!`, `print!`, `eprint!`, `panic!`, `todo!`, `unimplemented!`
+- Every macro other than `vec!`, `format!` and `matches!`, e.g. `include!`, `include_str!`, `include_bytes!`, `env!`, `option_env!`, `println!`, `eprintln!`, `print!`, `eprint!`, `panic!`, `todo!`, `unimplemented!`, `assert!`, and any `macro_rules!` definition
+- Input limits: source larger than 131072 bytes (UTF-8), or bracket nesting deeper than 64 levels (`{`, `(` and `[` counted together)
 
 **Allowed constructs** (safe Rust subset):
 
@@ -363,10 +365,10 @@ The server validates evaluator code against a security whitelist before compilat
 - Local function definitions: `fn` (helper functions within the evaluator)
 - String operations: `.to_string()`, `.clone()`, `.contains()`, `.starts_with()`, `.ends_with()`, `.to_uppercase()`, `.to_lowercase()`, `.split()`, `.trim()`, `format!`
 - Vec operations: `Vec::new()`, `vec![]`, `.push()`, `.len()`, `.iter()`, `.is_empty()`
-- Standard library collections: `std::collections::HashMap`, `HashSet`, `BTreeMap`, `BTreeSet` (import with `use`)
+- Standard library, imported with `use` or named by full path: `std::collections` (`HashMap`, `HashSet`, `BTreeMap`, `BTreeSet`, ...), `std::fmt`, `std::iter`, `std::cmp`, `std::str`, `std::string`, `std::vec`, `std::option`, `std::result`, `std::ops`, `std::convert`, `std::char`, `std::num`, `std::hash`, `std::borrow`, `std::default`, `std::boxed`, `std::rc`, `std::cell`, `std::array`, `std::slice`, `std::marker`, `std::primitive`, `std::error`, `std::any`, `std::f32`, `std::f64`, and the integer modules (`std::i8` to `std::i128`, `std::u8` to `std::u128`, `std::isize`, `std::usize`); the same modules under `core::` where they exist, and `alloc::{vec, string, collections, boxed, rc}`
 - Iterator chains: `.filter()`, `.map()`, `.any()`, `.all()`, `.count()`, `.flat_map()`, `.enumerate()`, `.collect()`
 - Pattern matching, closures, `Option`/`Result` combinators (`.unwrap_or()`, `.map()`, `.and_then()`)
-- Safe macros: `format!`, `vec![]`, `assert!`, `assert_eq!`, `assert_ne!`
+- Macros: only `format!`, `vec![]` and `matches!`, each written bare (no path prefix); their arguments obey the same rules as other code
 - The `OwnedNode` and `EvalFinding` types (provided by compiler preamble)
 - `debug_log(msg: &str)` -- trace evaluator execution; messages returned in `debug_output[]` (provided by compiler preamble, see "debug_log() function" section)
 - `truncate_snippet(s: &str, max_len: usize) -> String` -- collapse whitespace and truncate to `max_len` bytes on a UTF-8 boundary, appending "..." if truncated (provided by compiler preamble)

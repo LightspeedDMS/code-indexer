@@ -19,11 +19,27 @@ it is described in [architecture.md](architecture.md).
 
 Every handler calls `validate_rust_evaluator(code)` before submitting work. It rejects:
 
+- `source_too_large` / `nesting_too_deep`: checked first, before any other scan. A source over
+  `MAX_EVALUATOR_SOURCE_BYTES` (131072 UTF-8 bytes, about 18 times the largest documented evaluator), or bracket
+  nesting deeper than `MAX_BRACKET_DEPTH` (64; `{`, `(` and `[` counted together by one linear scan of the raw text,
+  including strings and comments). The values live in `code_indexer/xray/rust_source_limits.py` and mirror
+  `rust/xray-core/src/validator/source_limits.rs` (drift test `python_mirror_matches_source_limits`). Both limits are
+  applied before any parsing, in the Python pre-flight and in the Rust validator; source beyond either gets a clean
+  validation error.
 - `missing_entry_point`: neither `fn evaluate_node` (single-file mode) nor both `fn collect_facts` and
   `fn analyze_graph` (graph mode). Mixed-mode sources pass here and are rejected by the Rust compiler's own mode
   detection.
-- The constructs in `_RUST_FORBIDDEN_PATTERNS`: `unsafe`; `std::fs`, `std::net`, `std::process`, `std::env`,
-  `std::io`; raw pointers (`*const`, `*mut`); `extern`; `mod`; `static`; `macro_rules!`; and named macros such as
+- `forbidden_stdlib`: any `std`, `core` or `alloc` path outside `PERMITTED_STD_PATHS` (modules such as
+  `std::collections`, `std::cmp`, `std::fmt`, `std::iter`, `std::str`, `std::error`, `std::any`, the `core::`
+  counterparts that exist, and `alloc::{vec, string, collections, boxed, rc}`). The allowed modules give no file,
+  network, process, thread or environment access; `RandomState::new()` reads OS randomness, and `Box`/`Rc` can
+  produce raw pointers, which are unusable because `unsafe` is rejected. Rejected in a `use` tree or in code, with
+  any rename of a standard-library path. The `use`-tree walk is iterative. The list lives in
+  `code_indexer/xray/rust_std_paths.py` and mirrors `rust/xray-core/src/validator/std_paths.rs`, the authority; the
+  Rust test `python_mirror_matches_permitted_std_paths` fails when the two lists differ. A `use` tree the Python
+  scanner cannot parse gets no Python verdict and is left to the Rust validator.
+- The constructs in `_RUST_FORBIDDEN_PATTERNS`: `unsafe`; raw pointers (`*const`, `*mut`); `extern` (including
+  `extern crate`); `mod`; `static`; `macro_rules!`; and named macros such as
   `include!`, `include_str!`, `include_bytes!`, `env!`, `option_env!`, `print!`, `println!`, `eprint!`,
   `eprintln!`, `panic!`, `todo!`, `unimplemented!`.
 - Any macro invocation other than a bare `vec!`, `format!` or `matches!`.
@@ -34,15 +50,26 @@ names early.
 
 ## 2. Authoritative validation
 
-`validate_evaluator_source()` parses the source with `syn` and walks the AST. It rejects:
+`validate_evaluator_source()` first applies the same size and bracket-depth limits (from one Rust constant pair in
+`validator/source_limits.rs`), then parses the source with `syn` and walks the AST. It rejects:
 
-- `unsafe` blocks and `unsafe fn`;
-- `use std::{fs,net,process,env,io}` (and sub-paths) and any path expression starting with those modules;
-- `static` items, raw pointer types, `extern` blocks and `extern` ABI functions, `mod` declarations;
+- `unsafe` blocks, `unsafe` on every function signature (free functions, impl methods, trait methods), `unsafe impl`,
+  `unsafe trait`, and `unsafe` function-pointer types;
+- every WRITTEN `std`/`core`/`alloc` path outside `PERMITTED_STD_PATHS`, in a `use` tree or a path, and any rename
+  of a standard-library path; `extern crate`;
+- `static` items, raw pointer types, `extern` blocks, `extern` ABI functions and `extern` ABI function-pointer types,
+  `mod` declarations;
 - `macro_rules!` definitions;
 - macro invocations other than bare, unqualified `vec!`, `format!` and `matches!`, with the arguments of allowed
   macros inspected as well, and macro nesting deeper than 32;
-- attributes other than doc comments.
+- attributes other than doc comments;
+- any syntax node `syn` leaves unparsed (a `Verbatim` item, impl item, trait item, foreign item, expression, type,
+  pattern or type bound), since no other rule can inspect it.
+
+The allowlist governs paths the evaluator writes. User code shares the crate root with the trusted PREAMBLE and
+EPILOGUE, so names they import or define there (`Arc`, `RefCell`, `PhantomData`, and the preamble's own types and
+functions) remain usable by bare name; each of them is part of the evaluator's reachable surface and must be reviewed
+like an allowlist entry.
 
 Graph-mode sources go through the same visitor first.
 

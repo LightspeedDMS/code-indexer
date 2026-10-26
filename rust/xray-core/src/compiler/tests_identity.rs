@@ -309,17 +309,20 @@ fn test_preamble_contains_debug_log() {
     );
 }
 
+// ^ invariant xray_drain_debug_log lives beside DEBUG_LOG in PREAMBLE's private module; test:test_debug_log_truncation_limits_runtime
 #[test]
-fn test_epilogue_contains_drain_debug_log() {
-    // AC2: xray_drain_debug_log must be exported so the loader can retrieve messages.
-    assert!(
-        EPILOGUE.contains("xray_drain_debug_log"),
-        "EPILOGUE must export xray_drain_debug_log symbol"
-    );
-    assert!(
-        EPILOGUE.contains("Vec<String>"),
-        "xray_drain_debug_log must return Vec<String>"
-    );
+fn test_drain_debug_log_export_defined_once_in_preamble() {
+    const DRAIN_EXPORT: &str = "fn xray_drain_debug_log() -> Vec<String>";
+    assert!(PREAMBLE.contains(DRAIN_EXPORT), "PREAMBLE must define {DRAIN_EXPORT}");
+    let user_code = "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { Vec::new() }";
+    let graph_code = "fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> { Vec::new() }\n\
+fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult { GraphResult::default() }";
+    for (mode, assembled) in [
+        ("legacy", assemble_evaluator_source(user_code)),
+        ("graph", assemble_graph_evaluator_source(graph_code)),
+    ] {
+        assert_eq!(assembled.matches(DRAIN_EXPORT).count(), 1, "{mode} source must define the drain export exactly once");
+    }
 }
 
 /// Issue #1934 (pure-move regression guard): proves the composite cache

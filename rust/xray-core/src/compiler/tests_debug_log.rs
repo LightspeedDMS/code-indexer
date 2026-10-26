@@ -141,3 +141,31 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
         );
     }
 }
+
+// ^ why direct libloading lookup, not GraphDynlibEvaluator; the graph loader never requests the drain symbol
+#[test]
+fn graph_mode_artifact_exports_drain_debug_log_symbol() {
+    let dir = TempDir::new().unwrap();
+    let user_code = r#"
+fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> {
+    let _ = (node, file);
+    debug_log("collect");
+    Vec::new()
+}
+fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
+    let _ = (g, facts);
+    GraphResult::default()
+}
+"#;
+    let cr = compile_evaluator(user_code, dir.path()).expect("graph-mode evaluator must compile");
+    let lib = unsafe { libloading::Library::new(&cr.so_path) }.expect("must load compiled .so directly");
+    let drained: Vec<String> = unsafe {
+        let drain: libloading::Symbol<fn() -> Vec<String>> = lib
+            .get(b"xray_drain_debug_log")
+            .expect("graph artifact must export xray_drain_debug_log");
+        drain()
+    };
+    assert!(drained.is_empty(), "nothing was logged on this thread: {drained:?}");
+    let legacy_only = unsafe { lib.get::<fn()>(b"xray_evaluate_node") };
+    assert!(legacy_only.is_err(), "a graph artifact must not export the legacy callback");
+}
