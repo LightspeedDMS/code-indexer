@@ -9,12 +9,15 @@ Follows the SearchEventLogWriter pattern for dual-backend design.
 
 import logging
 import os
+import re
 import sqlite3
 import time
 import uuid as _uuid_module
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple, cast
+
+from code_indexer.server.services.xray_evaluator_sources import split_hashes
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +50,13 @@ _EXCEL_COLUMNS = [
     "door",
     "outcome",
     "error_class",
+    # Story #2203 (X-Ray): the evaluator hash(es) and stored pattern name(s),
+    # and the source looked up by hash, cut to the XLSX cell limit; the flag
+    # is true when the cell is not the whole source. Blank for other rows.
+    "evaluator_sha256",
+    "xray_pattern_name",
+    "evaluator_source",
+    "evaluator_source_truncated",
 ]
 
 # Rows per store read (Bug #2106). An export reads every matching row in
@@ -106,6 +116,29 @@ def _validate_export_id(export_id: str) -> None:
         ) from exc
 
 
+class _NeutralExportError(RuntimeError):
+    # ^ security message written by this module only; never stored text
+    pass
+
+
+class _SearchEventReadFailure(Exception):
+    # ^ invariant __cause__ = the database error of a search event store read
+    pass
+
+
+def _export_failure(exc: Exception) -> Tuple[str, BaseException]:
+    # ^ invariant returns (history and log text, exception to raise)
+    # ^ why a read keeps the database message, not neutral; locked != missing table (#2105)
+    if isinstance(exc, _SearchEventReadFailure) and exc.__cause__ is not None:
+        return str(exc.__cause__), exc.__cause__
+    if isinstance(exc, _NeutralExportError):
+        return str(exc), exc
+    # ^ security str(exc) may echo a cell (openpyxl IllegalCharacterError) => never stored, logged or raised
+    neutral = _NeutralExportError(f"export failed ({type(exc).__name__})")
+    neutral.__cause__ = exc
+    return str(neutral), neutral
+
+
 def _build_record_tuple(record: Dict[str, Any]) -> tuple:
     """Map a record dict to the canonical INSERT column order."""
     return (
@@ -135,6 +168,55 @@ def _bounded_by_start(filters: Dict[str, Any], start_ts: float) -> Dict[str, Any
     return bounded
 
 
+# ^ external an XLSX cell holds <= 32767 UTF-16 code units (Excel specification)
+XLSX_CELL_MAX_UTF16 = 32_767
+# ^ external XML 1.0 refuses these code points; lxml raises "All strings must be XML compatible"
+_XML_ILLEGAL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff￾￿]")
+_REPLACEMENT_CHARACTER = "�"
+# Columns whose text `_with_evaluator_sources` already made cell-safe.
+_CELL_SAFE_COLUMNS = frozenset({"evaluator_source"})
+
+
+def _cut_utf16(text: str, limit: int) -> str:
+    # ^ invariant result <= `limit` UTF-16 code units; never ends inside a surrogate pair
+    if len(text) * 2 <= limit:
+        return text
+    units = 0
+    for index, character in enumerate(text):
+        units += 2 if ord(character) > 0xFFFF else 1
+        if units > limit:
+            return text[:index]
+    return text
+
+
+def _sheet_text(value: str) -> Tuple[str, bool]:
+    # ^ invariant returns (cell-safe text, whether it differs from `value`)
+    cleaned = _XML_ILLEGAL.sub(_REPLACEMENT_CHARACTER, value)
+    cell = _cut_utf16(cleaned, XLSX_CELL_MAX_UTF16)
+    return cell, cell != value
+
+
+def _literal_cell(ws: Any, text: str) -> Any:
+    from openpyxl.cell import WriteOnlyCell
+
+    cell = WriteOnlyCell(ws, value=text)
+    # ^ security data_type "s" after the value; inferred type makes "=..." a formula (<f>)
+    cell.data_type = "s"
+    return cell
+
+
+def _sheet_row(ws: Any, row: Dict[str, Any], keys: List[str]) -> List[Any]:
+    values: List[Any] = []
+    for key in keys:
+        value = row.get(key)
+        if isinstance(value, str):
+            text = value if key in _CELL_SAFE_COLUMNS else _sheet_text(value)[0]
+            values.append(_literal_cell(ws, text))
+        else:
+            values.append(value)
+    return values
+
+
 # Workbook/worksheet parameters below are typed Any: openpyxl is imported
 # lazily and ships no type stubs.
 def _new_sheet(wb: Any, number: int) -> Any:
@@ -160,10 +242,60 @@ def _append_rows(wb: Any, rows: Iterable[Dict[str, Any]]) -> int:
             sheet_number += 1
             ws = _new_sheet(wb, sheet_number)
             in_sheet = 0
-        ws.append([row.get(k) for k in keys])
+        ws.append(_sheet_row(ws, row, keys))
         in_sheet += 1
         written += 1
     return written
+
+
+_SourceCells = Dict[str, Tuple[str, bool]]
+
+
+def _lookup_batch_sources(
+    search_backend: Any, batch: List[Dict[str, Any]]
+) -> _SourceCells:
+    hashes = {sha for row in batch for sha in split_hashes(row.get("evaluator_sha256"))}
+    # ^ perf one cell + 1 characters per source read; > the cell => cut anyway
+    if not hashes:
+        return {}
+    return dict(
+        search_backend.evaluator_sources(hashes, max_chars=XLSX_CELL_MAX_UTF16 + 1)
+    )
+
+
+def _with_evaluator_sources(
+    batch: List[Dict[str, Any]], found: _SourceCells
+) -> List[Dict[str, Any]]:
+    # ^ perf one cell per distinct hash list per batch; sanitised once
+    cells: Dict[Optional[str], Tuple[Optional[str], Optional[bool]]] = {}
+    for row in batch:
+        key = row.get("evaluator_sha256")
+        if key not in cells:
+            cells[key] = _evaluator_cell(key, found)
+        row["evaluator_source"], row["evaluator_source_truncated"] = cells[key]
+    return batch
+
+
+def _evaluator_cell(
+    column_sha256: Optional[str], found: _SourceCells
+) -> Tuple[Optional[str], Optional[bool]]:
+    # ^ invariant flag = source gone, stored truncated or escaped, or text altered or cut
+    hashes = split_hashes(column_sha256)
+    if not hashes:
+        return None, None
+    parts: List[str] = []
+    partial = False
+    for sha in hashes:
+        if sha not in found:
+            partial = True
+            continue
+        source, truncated = found[sha]
+        partial = partial or truncated
+        parts.append(source if len(hashes) == 1 else f"// sha256:{sha}\n{source}")
+    if not parts:
+        return None, True
+    cell, altered = _sheet_text("\n\n".join(parts))
+    return cell, partial or altered
 
 
 def _discard_workbook(wb: Any, file_path: Path) -> None:
@@ -175,14 +307,26 @@ def _discard_workbook(wb: Any, file_path: Path) -> None:
     try:
         wb.save(str(file_path))
     except Exception as exc:
+        # ^ security type only; str(exc) may echo a cell
         logger.warning(
             "QueryAnalyticsExportService: could not release temp files of the "
             "abandoned export workbook %s: %s",
             file_path,
-            exc,
+            type(exc).__name__,
         )
     finally:
+        _remove_export_file(file_path)
+
+
+def _remove_export_file(file_path: Path) -> None:
+    # ^ security an OSError names the path => logged as its type only, never raised over the export's own error
+    try:
         file_path.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning(
+            "QueryAnalyticsExportService: could not remove a failed export file: %s",
+            type(exc).__name__,
+        )
 
 
 def _validate_update_fields(fields: Dict[str, Any]) -> None:
@@ -562,10 +706,14 @@ class QueryAnalyticsExportService:
         """
         after: Optional[Tuple[float, int]] = None
         while True:
-            batch = search_backend.query_for_export(
-                filters, limit=_EXPORT_BATCH_SIZE, after=after
-            )
-            yield from batch
+            try:
+                batch = search_backend.query_for_export(
+                    filters, limit=_EXPORT_BATCH_SIZE, after=after
+                )
+                found = _lookup_batch_sources(search_backend, batch)
+            except Exception as exc:
+                raise _SearchEventReadFailure() from exc
+            yield from _with_evaluator_sources(batch, found)
             if len(batch) < _EXPORT_BATCH_SIZE:
                 return
             last = batch[-1]
@@ -607,7 +755,7 @@ class QueryAnalyticsExportService:
         file_path: Optional[Path] = None
         try:
             if search_event_log_backend is None:
-                raise RuntimeError("search event log is not initialized")
+                raise _NeutralExportError("search event log is not initialized")
             self.ensure_export_dir()
             file_path = self.export_path(export_id)
             rows = self._iter_export_rows(
@@ -629,19 +777,21 @@ class QueryAnalyticsExportService:
                 error_message=None,
             )
         except Exception as exc:
+            failure, raised = _export_failure(exc)
             logger.error(
-                "QueryAnalyticsExportService: export %s failed: %s", export_id, exc
+                "QueryAnalyticsExportService: export %s failed: %s", export_id, failure
             )
             if file_path is not None:
-                file_path.unlink(missing_ok=True)
+                _remove_export_file(file_path)
             error_retention_until = now + export_retention_days * _SECONDS_PER_DAY
             self._backend.update_export(
                 export_id,
                 status="failed",
-                error_message=str(exc),
+                error_message=failure,
                 retention_until=error_retention_until,
             )
-            raise
+            # ^ security BackgroundJobManager stores and logs str(raised); never a cell's text
+            raise raised
 
     def _write_excel(self, rows: Iterable[Dict[str, Any]], file_path: Path) -> int:
         """Stream rows into an Excel file at file_path; return rows written.

@@ -58,6 +58,10 @@ from code_indexer.server.services.audit_outcome import (
 from code_indexer.server.services.cidx_meta_backup.paths import (
     cidx_meta_is_git_repository,
 )
+from code_indexer.server.services.xray_pattern_names import (
+    has_path_traversal,
+    is_storable_pattern_name,
+)
 from code_indexer.server.services.xray_pattern_params import (
     build_const_lines,
     resolve_params,
@@ -236,7 +240,7 @@ class XrayPatternService:
             repo=None if is_global else scope,
         )
         # 0. Validate scope for path traversal sequences (before any filesystem access)
-        if "/" in scope or "\\" in scope or ".." in scope:
+        if has_path_traversal(scope):
             return {
                 "error": "path_traversal_rejected",
                 "message": (f"scope '{scope}' contains path traversal sequences"),
@@ -266,11 +270,14 @@ class XrayPatternService:
         facts["name"] = name
         evaluator_code: str = spec["evaluator_code"]
 
-        # 2a. Validate name for path traversal sequences
-        if "/" in name or "\\" in name or ".." in name:
+        # 2a. Validate name: no path traversal sequences, short enough to store
+        if not is_storable_pattern_name(name):
             return {
                 "error": "invalid_pattern_name",
-                "message": (f"name '{name}' contains path traversal sequences"),
+                "message": (
+                    f"name '{name}' contains path traversal sequences or is "
+                    "too long to store"
+                ),
             }
 
         # 3. Validate evaluator_code via Rust whitelist
@@ -589,7 +596,7 @@ class XrayPatternService:
             ("repo_alias", repo_alias),
             ("pattern_name", pattern_name),
         ]:
-            if "/" in field_value or "\\" in field_value or ".." in field_value:
+            if has_path_traversal(field_value):
                 raise ValueError(
                     f"path_traversal_rejected: {field_name} '{field_value}' "
                     "contains path traversal sequences"
@@ -648,7 +655,7 @@ class XrayPatternService:
             ("repo_alias", repo_alias),
             ("pattern_name", pattern_name),
         ]:
-            if "/" in field_value or "\\" in field_value or ".." in field_value:
+            if has_path_traversal(field_value):
                 raise ValueError(
                     f"path_traversal_rejected: {field_name} '{field_value}' "
                     "contains path traversal sequences"

@@ -12,11 +12,13 @@ import threading
 import time
 from dataclasses import dataclass
 from queue import Empty, Full, Queue
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from code_indexer.server.services.config_service import (
     get_config_service as get_config_service_for_eviction,
 )
+from code_indexer.server.services import xray_evaluator_sources as evaluator_sources
+from code_indexer.server.services.xray_evaluator_sources import EvaluatorSource
 from code_indexer.server.storage.postgres.connection_pool import ConnectionPool
 
 logger = logging.getLogger(__name__)
@@ -78,6 +80,11 @@ class SearchEventRecord:
     door: Optional[str] = None
     outcome: Optional[str] = None
     error_class: Optional[str] = None
+    # ^ invariant X-Ray only; evaluator_sha256 lists the started evaluators' hashes (HASH_SEPARATOR); #2203
+    # ^ see services/xray_evaluator_sources.py:store_sources; evaluator_sources is no column, stored once per hash
+    evaluator_sha256: Optional[str] = None
+    xray_pattern_name: Optional[str] = None
+    evaluator_sources: Tuple[EvaluatorSource, ...] = ()
 
 
 # Story #2117: the values the door and outcome columns can carry.
@@ -89,14 +96,16 @@ SEARCH_EVENT_OUTCOMES = ("success", "failure")
 _ADDED_COLUMN_TRUNCATED = "query_text_truncated"
 
 # Columns added after the original DDL, in the order an existing table gains
-# them: (name, SQLite type, PostgreSQL type). Bug #2114 then Story #2117
-# (PG migrations 073 and 074).
+# them: (name, SQLite type, PostgreSQL type). Bug #2114, Story #2117 then
+# Story #2203 (PG migrations 073, 074 and 078).
 _ADDED_COLUMNS = (
     (_ADDED_COLUMN_TRUNCATED, "INTEGER", "BOOLEAN"),
     ("tool", "TEXT", "TEXT"),
     ("door", "TEXT", "TEXT"),
     ("outcome", "TEXT", "TEXT"),
     ("error_class", "TEXT", "TEXT"),
+    ("evaluator_sha256", "TEXT", "TEXT"),
+    ("xray_pattern_name", "TEXT", "TEXT"),
 )
 
 # Every column a read returns, by name (both backends select this list, so
@@ -180,7 +189,7 @@ def _flag(value: Optional[bool]) -> Optional[int]:
 def _insert_values(r: SearchEventRecord, sqlite: bool) -> tuple:
     """One record's values in _INSERT_COLUMNS order."""
     to_db = _flag if sqlite else (lambda v: v)
-    return (
+    values = (
         r.timestamp,
         r.username,
         r.repo_alias,
@@ -201,6 +210,16 @@ def _insert_values(r: SearchEventRecord, sqlite: bool) -> tuple:
         r.door,
         r.outcome,
         r.error_class,
+        r.evaluator_sha256,
+        r.xray_pattern_name,
+    )
+    return _storable_values(values)
+
+
+def _storable_values(values: tuple) -> tuple:
+    # ^ hazard a raw lone surrogate in one row => the whole batch insert fails; test:test_lone_surrogate_row_and_its_neighbours_are_stored
+    return tuple(
+        evaluator_sources.storable_text(v) if isinstance(v, str) else v for v in values
     )
 
 
@@ -466,7 +485,9 @@ class SearchEventLogSqliteBackend:
                         tool TEXT,
                         door TEXT,
                         outcome TEXT,
-                        error_class TEXT
+                        error_class TEXT,
+                        evaluator_sha256 TEXT,
+                        xray_pattern_name TEXT
                     )
                     """
                 )
@@ -474,6 +495,8 @@ class SearchEventLogSqliteBackend:
                 # existed (here or by DatabaseSchema) gains it in place; old
                 # rows read NULL.
                 _sqlite_add_missing_columns(conn)
+                for statement in evaluator_sources.sqlite_ddl():
+                    conn.execute(statement)
                 conn.execute(
                     """
                     CREATE INDEX IF NOT EXISTS idx_sel_timestamp
@@ -500,6 +523,7 @@ class SearchEventLogSqliteBackend:
         try:
             conn = sqlite3.connect(self._db_path, timeout=30)
             try:
+                evaluator_sources.store_sources(conn, records, sqlite=True)
                 conn.executemany(
                     _insert_sql("?"),
                     [_insert_values(r, sqlite=True) for r in records],
@@ -520,6 +544,7 @@ class SearchEventLogSqliteBackend:
                     "DELETE FROM search_event_log WHERE timestamp < ?",
                     (cutoff_timestamp,),
                 )
+                evaluator_sources.prune_sources(conn, cutoff_timestamp, sqlite=True)
                 conn.commit()
             finally:
                 conn.close()
@@ -617,6 +642,19 @@ class SearchEventLogSqliteBackend:
         finally:
             conn.close()
 
+    def evaluator_sources(
+        self, hashes: Iterable[str], max_chars: Optional[int] = None
+    ) -> Dict[str, Tuple[str, bool]]:
+        """Story #2203: {sha256: (stored source, truncated)}, each source cut
+        to `max_chars` in SQL when given; failures propagate."""
+        conn = sqlite3.connect(self._db_path, timeout=30)
+        try:
+            return evaluator_sources.lookup_sources(
+                conn, hashes, sqlite=True, max_chars=max_chars
+            )
+        finally:
+            conn.close()
+
     def get_hit_rate_counts(
         self,
         mode: str,
@@ -709,13 +747,17 @@ class SearchEventLogPostgresBackend:
                         tool                TEXT,
                         door                TEXT,
                         outcome             TEXT,
-                        error_class         TEXT
+                        error_class         TEXT,
+                        evaluator_sha256    TEXT,
+                        xray_pattern_name   TEXT
                     )
                     """
                 )
                 # Bug #2114 / Story #2117 (also PG migrations 073/074): a
                 # table created before a column existed gains it.
                 _pg_add_missing_columns(conn)
+                for statement in evaluator_sources.pg_ddl():
+                    conn.execute(statement)
                 conn.execute(
                     """
                     CREATE INDEX IF NOT EXISTS idx_sel_timestamp
@@ -741,6 +783,7 @@ class SearchEventLogPostgresBackend:
             return
         try:
             with self._pool.connection() as conn:
+                evaluator_sources.store_sources(conn, records, sqlite=False)
                 for r in records:
                     conn.execute(_insert_sql("%s"), _insert_values(r, sqlite=False))
                 conn.commit()
@@ -754,10 +797,12 @@ class SearchEventLogPostgresBackend:
         """Delete records older than cutoff_timestamp (Unix epoch seconds)."""
         try:
             with self._pool.connection() as conn:
+                evaluator_sources.lock_for_prune(conn)
                 conn.execute(
                     "DELETE FROM search_event_log WHERE timestamp < %s",
                     (cutoff_timestamp,),
                 )
+                evaluator_sources.prune_sources(conn, cutoff_timestamp, sqlite=False)
                 conn.commit()
         except Exception as exc:
             logger.warning(
@@ -838,6 +883,16 @@ class SearchEventLogPostgresBackend:
         with self._pool.connection() as conn:
             return _oldest_from_row(conn.execute(OLDEST_TIMESTAMP_SQL).fetchone())
 
+    def evaluator_sources(
+        self, hashes: Iterable[str], max_chars: Optional[int] = None
+    ) -> Dict[str, Tuple[str, bool]]:
+        """Story #2203: {sha256: (stored source, truncated)}, each source cut
+        to `max_chars` in SQL when given; failures propagate."""
+        with self._pool.connection() as conn:
+            return evaluator_sources.lookup_sources(
+                conn, hashes, sqlite=False, max_chars=max_chars
+            )
+
     def get_hit_rate_counts(
         self,
         mode: str,
@@ -880,8 +935,8 @@ class SearchEventLogPostgresBackend:
 # ---------------------------------------------------------------------------
 
 
-def _record_drop_metric() -> None:
-    """Count one dropped search event in OTEL (Bug #2114). Never raises."""
+def _record_drop_metric(count: int) -> None:
+    """Count `count` dropped search events in OTEL (Bug #2114). Never raises."""
     try:
         from code_indexer.server.telemetry.manager import peek_telemetry_manager
         from code_indexer.server.telemetry.metrics_instrumentation import (
@@ -891,7 +946,7 @@ def _record_drop_metric() -> None:
         telemetry_manager = peek_telemetry_manager()
         if telemetry_manager is None:
             return
-        get_application_metrics(telemetry_manager).record_search_event_dropped()
+        get_application_metrics(telemetry_manager).record_search_event_dropped(count)
     except Exception as exc:  # telemetry never breaks the hot path
         logger.debug("search event drop metric not recorded: %s", exc)
 
@@ -964,10 +1019,7 @@ class SearchEventLogWriter:
             self._queue.put_nowait(record)
             self._overflow_warned = False
         except Full:
-            with self._drop_lock:
-                self._dropped += 1
-                self._last_drop_at = self._clock()
-            _record_drop_metric()
+            self._count_drops(1)
             if not self._overflow_warned:
                 logger.warning("search_event_log queue full — dropping newest events")
                 self._overflow_warned = True
@@ -982,7 +1034,18 @@ class SearchEventLogWriter:
             except Empty:
                 break
         if batch:
-            self._backend.insert_batch(batch)
+            try:
+                self._backend.insert_batch(batch)
+            except Exception:
+                self._count_drops(len(batch))
+                raise
+
+    def _count_drops(self, count: int) -> None:
+        # ^ invariant queue overflow and a failed batch insert both count here; test:test_a_failed_batch_counts_its_dropped_events
+        with self._drop_lock:
+            self._dropped += count
+            self._last_drop_at = self._clock()
+        _record_drop_metric(count)
 
     def _maybe_evict(self) -> None:
         """Run prune_older_than at most once every 24 hours."""

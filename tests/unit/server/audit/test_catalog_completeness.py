@@ -112,6 +112,8 @@ _ENTRY_POINTS: Dict[str, FrozenSet[str]] = {
         "git_credential_configured": {"configure_credential_audited"},
         "git_credential_deleted": {"delete_credential_audited"},
         "xray_pattern_stored": {"store_xray_pattern_audited"},
+        # Recorded with the search event of the run (search_event_recording).
+        "xray_evaluator_executed": {"run_recorded_xray", "handle_xray_search_batch"},
         "golden_repo_added": {"add_golden_repo"},
         "golden_repo_removed": {"remove_golden_repo"},
         "golden_repo_refreshed": {"request_golden_repo_refresh"},
@@ -189,6 +191,7 @@ _ALL_EVIDENCE: FrozenSet[str] = frozenset(
 
 _LOGIN = ("authentication_success", "authentication_failure")
 _ELEVATION = ("elevation_granted", "elevation_failed")
+_XRAY_RUN = ("xray_evaluator_executed",)
 
 _MCP_MAPPED: Dict[str, Tuple[str, ...]] = {
     "authenticate": _LOGIN,
@@ -201,6 +204,9 @@ _MCP_MAPPED: Dict[str, Tuple[str, ...]] = {
     "configure_git_credential": ("git_credential_configured",),
     "delete_git_credential": ("git_credential_deleted",),
     "store_xray_pattern": ("xray_pattern_stored",),
+    "xray_search": _XRAY_RUN,
+    "xray_explore": _XRAY_RUN,
+    "xray_search_batch": _XRAY_RUN,
     "create_group": ("group_create",),
     "update_group": ("group_update",),
     "delete_group": ("group_delete",),
@@ -228,8 +234,11 @@ _MCP_MAPPED: Dict[str, Tuple[str, ...]] = {
 # Tools that authenticate the caller themselves (no permission gate).
 _SELF_AUTHENTICATING_MCP = frozenset({"elevate_session"})
 
-# Non-admin tools whose writes to shared state are audited all the same.
-_AUDITED_NON_ADMIN_MCP = frozenset({"store_xray_pattern"})
+# Non-admin tools whose writes to shared state, or evaluator code runs
+# (Story #2203), are audited all the same.
+_AUDITED_NON_ADMIN_MCP = frozenset(
+    {"store_xray_pattern", "xray_search", "xray_explore", "xray_search_batch"}
+)
 
 _READ_ONLY = READ_ONLY
 _WORKSPACE_GIT = WORKSPACE_GIT
@@ -432,6 +441,9 @@ _ROUTE_MAPPED: Dict[str, Tuple[str, ...]] = {
     "POST /admin/siem-delivery/destinations/{destination_key}/abandon": (
         "siem_destination_abandoned",
     ),
+    # X-Ray evaluator runs (Story #2203)
+    "POST /api/xray/search": _XRAY_RUN,
+    "POST /api/xray/search/batch": _XRAY_RUN,
     # Server operations
     "POST /api/admin/maintenance/enter": ("maintenance_mode_entered",),
     "POST /api/admin/maintenance/exit": ("maintenance_mode_exited",),

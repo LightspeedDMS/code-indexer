@@ -202,8 +202,6 @@ ROUTE_SELF_SERVICE: Dict[str, str] = {
             "/api/query/multi",
             "/api/regex/search",
             "/api/repositories/{repo_id}/search",
-            "/api/xray/search",
-            "/api/xray/search/batch",
             *(
                 f"/api/scip/multi/{kind}"
                 for kind in (

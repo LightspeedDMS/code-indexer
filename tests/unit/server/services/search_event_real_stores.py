@@ -56,6 +56,11 @@ class RealStore(NamedTuple):
     # EXPLAIN with sequential scans disabled (test tables are tiny, so the
     # planner would otherwise never show which index conditions are usable).
     explain: Callable[[str, List[Any]], List[str]]
+    # Story #2203: rows of xray_evaluator_sources (one per stored evaluator).
+    evaluator_source_rows: Callable[[], int]
+
+
+_COUNT_EVALUATOR_SOURCES = "SELECT COUNT(*) FROM xray_evaluator_sources"
 
 
 def make_record(**overrides: Any) -> SearchEventRecord:
@@ -136,6 +141,13 @@ def sqlite_store(directory: Path) -> Iterator[RealStore]:
         finally:
             conn.close()
 
+    def evaluator_source_rows() -> int:
+        conn = sqlite3.connect(db_path)
+        try:
+            return int(conn.execute(_COUNT_EVALUATOR_SOURCES).fetchone()[0])
+        finally:
+            conn.close()
+
     yield RealStore(
         backend=SearchEventLogSqliteBackend(db_path),
         export_backend=QueryAnalyticsExportSqliteBackend(db_path),
@@ -143,6 +155,7 @@ def sqlite_store(directory: Path) -> Iterator[RealStore]:
         bulk_insert=bulk_insert,
         kind="sqlite",
         explain=explain,
+        evaluator_source_rows=evaluator_source_rows,
     )
 
 
@@ -192,6 +205,11 @@ def postgres_store() -> Iterator[RealStore]:
                         finally:
                             conn.rollback()
 
+                def evaluator_source_rows() -> int:
+                    with pool.connection() as conn:
+                        row = conn.execute(_COUNT_EVALUATOR_SOURCES).fetchone()
+                        return int(row[0])
+
                 yield RealStore(
                     backend=SearchEventLogPostgresBackend(pool),
                     export_backend=QueryAnalyticsExportPostgresBackend(pool),
@@ -199,6 +217,7 @@ def postgres_store() -> Iterator[RealStore]:
                     bulk_insert=bulk_insert,
                     kind="postgres",
                     explain=explain,
+                    evaluator_source_rows=evaluator_source_rows,
                 )
             finally:
                 pool.close()

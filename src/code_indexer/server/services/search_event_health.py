@@ -67,7 +67,8 @@ def search_event_drop_reasons(info: Optional[SearchEventLogHealthInfo]) -> List[
         f"events in a server process on node {info.node_id} since that "
         f"process started (last "
         f"{int(info.seconds_since_last_drop)}s ago): its recording queue was "
-        "full; Query Analytics exports are missing those searches"
+        "full or a write to the store failed; Query Analytics exports are "
+        "missing those searches"
     ]
 
 

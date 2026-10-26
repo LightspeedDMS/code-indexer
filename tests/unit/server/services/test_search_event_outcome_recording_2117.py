@@ -99,7 +99,7 @@ class TestOriginAndSuccess:
             repo_alias="example-repo-global",
             query_text="def",
             result_count=1,
-            started_monotonic=0.0,
+            started_monotonic=time.monotonic(),
             correlation_id=None,
         )
         assert rec.rows() == []
@@ -577,7 +577,8 @@ def _xray(rec: Recorder, result: Dict[str, Any], cancelled: bool = False) -> Non
         repo_alias="example-repo-global",
         pattern="def",
         result=result,
-        started_monotonic=0.0,
+        # ^ hazard 0.0 => latency = host uptime ms > INT32 max after 24.8 days; PG insert fails
+        started_monotonic=time.monotonic(),
         correlation_id=None,
         cancelled=(lambda: cancelled),
     )
@@ -645,7 +646,7 @@ class TestScipOutcomes:
             username="alice",
             repo_alias="example-repo-global",
             query_text="ExampleService",
-            started_monotonic=0.0,
+            started_monotonic=time.monotonic(),
             correlation_id=None,
         )
         assert _outcome(_row(rec)) == (
