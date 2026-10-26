@@ -280,6 +280,35 @@ class TestFinalReviewExport:
         assert sorted(r["query_text"] for r in rows) == sorted(texts)
         assert {r["evaluator_source"] for r in rows} == {"=1+1"}
 
+    def test_error_code_text_is_exported_as_text(self, store, tmp_path):
+        texts = ["#N/A", "#DIV/0!"]
+        store.backend.insert_batch(
+            [_xray_record("fn f() {}", query_text=text) for text in texts]
+        )
+
+        export_id = str(uuid.uuid4())
+        _run_export(store, tmp_path, export_id)
+        path = _record(store, tmp_path, export_id)["file_path"]
+
+        assert 't="e"' not in _sheet_xml(path)
+        assert sorted(r["query_text"] for r in _sheet_rows(path)) == sorted(texts)
+
+    def test_only_text_openpyxl_would_type_is_a_literal_cell(self):
+        import openpyxl
+
+        from code_indexer.server.services import query_analytics_export_service as qae
+
+        ws = openpyxl.Workbook(write_only=True).create_sheet()
+        keys = ["plain", "formula", "error_code", "number"]
+        row = {"plain": "+cmd", "formula": "=1+1", "error_code": "#N/A", "number": 3}
+
+        plain, formula, error_code, number = qae._sheet_row(ws, row, keys)
+
+        assert type(plain) is str and plain == "+cmd"
+        for cell, text in ((formula, "=1+1"), (error_code, "#N/A")):
+            assert (cell.value, cell.data_type) == (text, "s")
+        assert number == 3
+
     def test_cell_and_cleanup_failures_raise_and_log_no_cell_text(
         self, store, tmp_path, caplog
     ):

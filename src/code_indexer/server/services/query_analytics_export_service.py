@@ -191,6 +191,8 @@ def _cut_utf16(text: str, limit: int) -> str:
 
 def _sheet_text(value: str) -> Tuple[str, bool]:
     # ^ invariant returns (cell-safe text, whether it differs from `value`)
+    if len(value) * 2 <= XLSX_CELL_MAX_UTF16 and _XML_ILLEGAL.search(value) is None:
+        return value, False
     cleaned = _XML_ILLEGAL.sub(_REPLACEMENT_CHARACTER, value)
     cell = _cut_utf16(cleaned, XLSX_CELL_MAX_UTF16)
     return cell, cell != value
@@ -211,7 +213,10 @@ def _sheet_row(ws: Any, row: Dict[str, Any], keys: List[str]) -> List[Any]:
         value = row.get(key)
         if isinstance(value, str):
             text = value if key in _CELL_SAFE_COLUMNS else _sheet_text(value)[0]
-            values.append(_literal_cell(ws, text))
+            # ^ external openpyxl Cell._bind_value types "=..." as "f" and ERROR_CODES ("#...") as "e", other str as "s"
+            # ^ perf a literal cell per str costs a Cell + openpyxl's ValueError/repr fallback; test:test_only_text_openpyxl_would_type_is_a_literal_cell
+            literal = text.startswith(("=", "#"))
+            values.append(_literal_cell(ws, text) if literal else text)
         else:
             values.append(value)
     return values
