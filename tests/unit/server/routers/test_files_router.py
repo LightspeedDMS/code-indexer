@@ -80,6 +80,7 @@ def test_create_file_endpoint_success(test_client):
             content="def hello(): pass",
             username="testuser",
             access_for=ANY,
+            pattern_writer=ANY,
         )
 
 
@@ -206,6 +207,7 @@ def test_edit_file_endpoint_success(test_client):
             replace_all=False,
             username="testuser",
             access_for=ANY,
+            pattern_writer=ANY,
         )
 
 
@@ -285,6 +287,7 @@ def test_delete_file_endpoint_success(test_client):
             content_hash=None,
             username="testuser",
             access_for=ANY,
+            pattern_writer=ANY,
         )
 
 
@@ -341,4 +344,5 @@ def test_delete_file_endpoint_path_with_slashes(test_client):
             content_hash=None,
             username="testuser",
             access_for=ANY,
+            pattern_writer=ANY,
         )

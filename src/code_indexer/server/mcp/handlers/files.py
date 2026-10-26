@@ -32,6 +32,7 @@ from code_indexer.server.services.cidx_meta_access.tree_projection import (
     restrict_catalog_tree,
 )
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.services.xray_pattern_authority import PatternWriter
 from code_indexer.server.services.file_listing_paths import (
     normalize_listing_path,
     compute_direct_children_of,
@@ -405,6 +406,11 @@ def _judge(alias: Any, served_path: Optional[str], user: User) -> CatalogFileAcc
         registry_of(_utils.app_module.app.state),
         may_write=user.has_permission("repository:write"),
     )
+
+
+def _pattern_writer(user: User) -> PatternWriter:
+    """The caller of a file write, for the X-Ray pattern rule."""
+    return PatternWriter.of(user, _get_access_filtering_service())
 
 
 def _golden_dir_or_none() -> Optional[str]:
@@ -1252,6 +1258,7 @@ def handle_create_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             content=params["content"],
             username=user.username,
             access_for=lambda served: _judge(repository_alias, served, user),
+            pattern_writer=_pattern_writer(user),
         )
         _start_auto_watch_if_needed(repository_alias, user, "MCP-GENERAL-041")
 
@@ -1295,6 +1302,7 @@ def handle_edit_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             replace_all=params.get("replace_all", False),
             username=user.username,
             access_for=lambda served: _judge(repository_alias, served, user),
+            pattern_writer=_pattern_writer(user),
         )
         _start_auto_watch_if_needed(repository_alias, user, "MCP-GENERAL-046")
 
@@ -1322,6 +1330,7 @@ def handle_delete_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             content_hash=params.get("content_hash"),
             username=user.username,
             access_for=lambda served: _judge(repository_alias, served, user),
+            pattern_writer=_pattern_writer(user),
         )
         _start_auto_watch_if_needed(repository_alias, user, "MCP-GENERAL-052")
 

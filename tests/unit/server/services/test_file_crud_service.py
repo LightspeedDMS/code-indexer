@@ -287,6 +287,93 @@ def test_create_file_raises_for_existing_file(service_with_mock_repo, test_repo_
     assert "existing.py" in str(exc_info.value)
 
 
+def test_create_file_never_replaces_a_file_created_concurrently(
+    service_with_mock_repo, test_repo_dir, monkeypatch
+):
+    target = Path(test_repo_dir) / "raced.py"
+    real_fsync = file_crud_service_module.nfs_safe_fsync
+
+    def fsync_then_concurrent_create(fd):
+        real_fsync(fd)
+        if not target.exists():
+            target.write_text("concurrent content")
+
+    monkeypatch.setattr(
+        file_crud_service_module, "nfs_safe_fsync", fsync_then_concurrent_create
+    )
+
+    with pytest.raises(FileExistsError, match="File already exists: raced.py"):
+        service_with_mock_repo.create_file(
+            repo_alias="test-repo",
+            file_path="raced.py",
+            content="new content",
+            username="testuser",
+        )
+
+    assert target.read_text() == "concurrent content"
+    assert not list(Path(test_repo_dir).glob(".tmp_*"))
+
+
+def test_create_file_counts_its_own_landed_link_as_created(
+    service_with_mock_repo, test_repo_dir, monkeypatch
+):
+    import os
+
+    repo = Path(test_repo_dir)
+    target = repo / "landed.py"
+    real_fsync = file_crud_service_module.nfs_safe_fsync
+
+    def fsync_then_link_lands(fd):
+        real_fsync(fd)
+        (temp,) = repo.glob(".tmp_*landed.py")
+        os.link(temp, target)
+
+    monkeypatch.setattr(
+        file_crud_service_module, "nfs_safe_fsync", fsync_then_link_lands
+    )
+
+    result = service_with_mock_repo.create_file(
+        repo_alias="test-repo",
+        file_path="landed.py",
+        content="new content",
+        username="testuser",
+    )
+
+    assert result["success"] is True
+    assert target.read_text() == "new content"
+    assert not list(repo.glob(".tmp_*"))
+
+
+def test_create_file_succeeds_when_the_temp_name_cannot_be_removed(
+    service_with_mock_repo, test_repo_dir, monkeypatch, caplog
+):
+    import logging
+    import os
+
+    real_remove = os.remove
+
+    def remove_refusing_the_temp_name(path, *args, **kwargs):
+        if ".tmp_" in os.fspath(path):
+            raise PermissionError("temp name not removable")
+        real_remove(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "remove", remove_refusing_the_temp_name)
+
+    with caplog.at_level(logging.WARNING):
+        result = service_with_mock_repo.create_file(
+            repo_alias="test-repo",
+            file_path="kept.py",
+            content="published",
+            username="testuser",
+        )
+
+    assert result["success"] is True
+    assert (Path(test_repo_dir) / "kept.py").read_text() == "published"
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("kept.py" in m and "PermissionError" in m for m in warnings), warnings
+    assert not any(".tmp_" in m for m in warnings), warnings
+
+
 def test_create_file_blocks_git_directory(service_with_mock_repo):
     """create_file should block attempts to create files in .git/ directory."""
     service = service_with_mock_repo

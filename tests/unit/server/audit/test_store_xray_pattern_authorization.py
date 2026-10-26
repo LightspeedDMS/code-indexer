@@ -202,9 +202,9 @@ def test_ungranted_and_unknown_repository_scopes_get_the_same_refusal(
     unknown = _store(POWER, "no-such-repo-global", _pattern("p4"))
     assert ungranted.get("success") is not True
     assert ungranted["error"] == unknown["error"] == "access_denied"
-    assert ungranted["message"].replace(UNGRANTED_REPO, "X") == unknown[
-        "message"
-    ].replace("no-such-repo", "X")
+    assert ungranted["message"] == unknown["message"]
+    for identifier in (UNGRANTED_REPO, "no-such-repo", POWER.username):
+        assert identifier not in ungranted["message"]
     assert not (cidx_meta / "xray-patterns" / f"{UNGRANTED_REPO}-global").exists()
     assert _outcomes(store) == [(POWER.username, "failure")] * 2
 
@@ -265,6 +265,34 @@ def test_a_failed_commit_is_never_success(server, store, cidx_meta) -> None:
     assert _outcomes(store) == [(POWER.username, "failure")]
 
 
+@pytest.mark.parametrize("replacing", [False, True])
+def test_a_failed_commit_never_rolls_back_a_peers_file(
+    server, store, cidx_meta, caplog, replacing
+) -> None:
+    relative = "xray-patterns/__any__/p13.yaml"
+    target = cidx_meta / relative
+    if replacing:
+        assert _store(ADMIN, "__any__", _pattern("p13", "old")).get("success")
+    hook = cidx_meta / ".git" / "hooks" / "pre-commit"
+    hook.write_text(
+        "#!/bin/sh\n"
+        f"printf 'name: p13\\ndescription: peer\\n' > {relative}.peer\n"
+        f"mv {relative}.peer {relative}\n"
+        "exit 1\n"
+    )
+    hook.chmod(0o755)
+    caller = ADMIN if replacing else POWER
+
+    with caplog.at_level("WARNING"):
+        body = _store(caller, "__any__", _pattern("p13", "mine"), overwrite=replacing)
+
+    assert body["error"] == "commit_failed"
+    assert target.read_text() == "name: p13\ndescription: peer\n"
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any(relative in message for message in warnings), warnings
+    assert not any(caller.username in message for message in warnings)
+
+
 def test_a_pattern_created_while_waiting_for_the_lock_is_not_overwritten(
     server, store, cidx_meta
 ) -> None:
@@ -295,6 +323,107 @@ def test_a_global_pattern_appearing_while_waiting_for_the_lock_needs_admin(
     assert body.get("error") == "global_pattern_overwrite_forbidden"
     assert "pattern peer" in target.read_text()
     assert _outcomes(store) == [(POWER.username, "failure")]
+
+
+def _peer_publishes_during(
+    monkeypatch: pytest.MonkeyPatch, target: Path, marker: str
+) -> None:
+    """Another pattern writer publishes *target* after this store's locked
+    absence check and before its own publish."""
+    from code_indexer.global_repos import catalog_staged_write
+
+    real_sweep = catalog_staged_write._sweep_stale_staging
+
+    def sweep_then_peer_publishes(staging_dir: Path) -> None:
+        real_sweep(staging_dir)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(_pattern(target.stem, marker))
+
+    monkeypatch.setattr(
+        catalog_staged_write, "_sweep_stale_staging", sweep_then_peer_publishes
+    )
+
+
+@pytest.mark.parametrize("overwrite", [False, True])
+def test_a_pattern_created_during_the_publish_is_not_overwritten(
+    server, store, cidx_meta, monkeypatch, overwrite
+) -> None:
+    target = cidx_meta / "xray-patterns" / "__any__" / "p11.yaml"
+    _peer_publishes_during(monkeypatch, target, "peer")
+
+    body = _store(POWER, "__any__", _pattern("p11", "mine"), overwrite=overwrite)
+
+    assert body.get("error") == "pattern_already_exists", body
+    if overwrite:
+        assert "overwrite=true" not in body["message"]
+        assert "concurrently" in body["message"]
+    assert "pattern peer" in target.read_text()
+    assert _outcomes(store) == [(POWER.username, "failure")]
+
+
+def test_a_pattern_appearing_between_the_locked_check_and_the_read_is_not_overwritten(
+    server, store, cidx_meta, monkeypatch
+) -> None:
+    target = cidx_meta / "xray-patterns" / "__any__" / "p14.yaml"
+    real_refusal = XrayPatternService._replace_refusal
+    calls = []
+
+    def refusal_then_peer_publishes(self, *args, **kwargs):
+        result = real_refusal(self, *args, **kwargs)
+        calls.append(1)
+        if len(calls) == 2:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(_pattern("p14", "peer"))
+        return result
+
+    monkeypatch.setattr(
+        XrayPatternService, "_replace_refusal", refusal_then_peer_publishes
+    )
+
+    body = _store(POWER, "__any__", _pattern("p14", "mine"))
+
+    assert body.get("error") == "pattern_already_exists", body
+    assert "pattern peer" in target.read_text()
+
+
+def test_a_peer_replacing_right_after_the_publish_is_never_taken_for_ours(
+    server, store, cidx_meta, monkeypatch
+) -> None:
+    target = cidx_meta / "xray-patterns" / "__any__" / "p15.yaml"
+    real_put = XrayPatternService._put_catalog_file
+    calls = []
+
+    def put_then_peer_replaces(self, *args, **kwargs):
+        identity = real_put(self, *args, **kwargs)
+        calls.append(1)
+        if len(calls) == 1:
+            peer = target.with_name("p15.peer")
+            peer.write_text(_pattern("p15", "peer"))
+            peer.replace(target)
+        return identity
+
+    monkeypatch.setattr(XrayPatternService, "_put_catalog_file", put_then_peer_replaces)
+    hook = cidx_meta / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+
+    body = _store(POWER, "__any__", _pattern("p15", "mine"))
+
+    assert body["error"] == "commit_failed"
+    assert "pattern peer" in target.read_text()
+
+
+def test_a_permitted_overwrite_still_replaces(
+    server, store, cidx_meta, monkeypatch
+) -> None:
+    assert _store(ADMIN, "__any__", _pattern("p12", "a")).get("success") is True
+    target = cidx_meta / "xray-patterns" / "__any__" / "p12.yaml"
+    _peer_publishes_during(monkeypatch, target, "peer")
+
+    body = _store(ADMIN, "__any__", _pattern("p12", "b"), overwrite=True)
+
+    assert body.get("success") is True, body
+    assert "pattern b" in target.read_text()
 
 
 def _git(cidx_meta: Path, *args: str) -> str:

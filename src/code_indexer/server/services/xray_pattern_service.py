@@ -93,6 +93,20 @@ def _record_pattern_store(
     )
 
 
+def _regular_file_identity(path: Path) -> Optional[Tuple[int, int]]:
+    """(st_dev, st_ino) of *path* when it is a regular file, else None."""
+    import os
+    import stat
+
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        return None
+    return info.st_dev, info.st_ino
+
+
 def record_refused_pattern_store(actor: str, scope: str) -> None:
     """Record a store refused before the service ran (e.g. an ungranted
     scope): one failure row, the pattern itself not yet resolved."""
@@ -334,10 +348,11 @@ class XrayPatternService:
         # write lock unless it piggybacks on another holder's lock).
         result_path = str(target_path.relative_to(self._cidx_meta))
         unchanged = {"success": True, "path": result_path}
-        if self._holds(target_path, pattern_yaml):
+        current = self._read_or_none(target_path)
+        if current == pattern_yaml:
             return unchanged
         refusal = self._replace_refusal(
-            target_path, scope, name, overwrite, may_replace_global
+            current is not None, scope, name, overwrite, may_replace_global
         )
         if refusal is not None:
             return refusal
@@ -346,17 +361,22 @@ class XrayPatternService:
         owner = f"{XRAY_PATTERN_LOCK_OWNER_PREFIX}store:{name}"
 
         def _write_and_commit(piggyback: bool) -> Optional[Dict[str, Any]]:
-            if self._holds(target_path, pattern_yaml):
+            previous = self._read_or_none(target_path)
+            if previous == pattern_yaml:
                 return unchanged
             locked_refusal = self._replace_refusal(
-                target_path, scope, name, overwrite, may_replace_global
+                previous is not None, scope, name, overwrite, may_replace_global
             )
             if locked_refusal is not None:
                 return locked_refusal
-            previous = target_path.read_text("utf-8") if target_path.exists() else None
             facts["details"]["overwrite"] = previous is not None
             action = "add" if previous is None else "update"
-            self._put_catalog_file(target_path, pattern_yaml)
+            try:
+                published = self._put_catalog_file(
+                    target_path, pattern_yaml, exclusive=previous is None
+                )
+            except FileExistsError:
+                return self._already_exists(scope, name, overwrite)
             if piggyback:
                 return None
             try:
@@ -365,7 +385,13 @@ class XrayPatternService:
                     message=f"xray-patterns: {action} {scope}/{name} by {actor}",
                 )
             except PatternCommitError:
-                if previous is None:
+                if _regular_file_identity(target_path) != published:
+                    logger.warning(
+                        "X-Ray pattern %s changed after a failed commit; "
+                        "another writer's file is left in place",
+                        result_path,
+                    )
+                elif previous is None:
                     target_path.unlink(missing_ok=True)
                 else:
                     self._put_catalog_file(target_path, previous)
@@ -400,22 +426,36 @@ class XrayPatternService:
 
         refresh_after_catalog_write(self._scheduler, lock_still_held)
 
-    def _put_catalog_file(self, target: Path, content: str) -> None:
-        """Put *target* in place atomically, staged outside the catalog."""
+    def _put_catalog_file(
+        self, target: Path, content: str, *, exclusive: bool = False
+    ) -> Tuple[int, int]:
+        """Put *target* in place atomically, staged outside the catalog, and
+        return the published file's (st_dev, st_ino), taken from the staged
+        file. *exclusive*: only as a new file; FileExistsError (nothing
+        written) when *target* exists."""
         from code_indexer.global_repos.catalog_staged_write import (
             SHARED_CATALOG_FILE_MODE,
-            write_catalog_file,
+            publish_catalog_file,
         )
 
-        if not write_catalog_file(
-            self._cidx_meta, target, content, mode=SHARED_CATALOG_FILE_MODE
-        ):
+        published = publish_catalog_file(
+            self._cidx_meta,
+            target,
+            content,
+            mode=SHARED_CATALOG_FILE_MODE,
+            exclusive=exclusive,
+        )
+        if not published.durable:
             logger.warning("X-Ray pattern %s written without a directory fsync", target)
+        return published.identity
 
     @staticmethod
-    def _holds(target_path: Path, pattern_yaml: str) -> bool:
-        """True when the pattern file already has exactly this content."""
-        return target_path.exists() and target_path.read_text("utf-8") == pattern_yaml
+    def _read_or_none(target_path: Path) -> Optional[str]:
+        """The pattern file's text, or None when it does not exist."""
+        try:
+            return target_path.read_text("utf-8")
+        except FileNotFoundError:
+            return None
 
     def _unstage(self, target_path: Path) -> None:
         """Reset the index entry of *target_path* to HEAD after a failed
@@ -436,26 +476,42 @@ class XrayPatternService:
                 result.stderr.strip(),
             )
 
+    @staticmethod
+    def _already_exists(
+        scope: str, name: str, overwrite: bool = False
+    ) -> Dict[str, Any]:
+        """*overwrite*: the caller asked to replace and lost a create race."""
+        if overwrite:
+            message = (
+                f"Pattern '{name}' was created concurrently in scope "
+                f"'{scope}'; retry the store."
+            )
+        else:
+            message = (
+                f"Pattern '{name}' already exists in scope '{scope}'. "
+                "Use overwrite=true to replace it."
+            )
+        return {"error": "pattern_already_exists", "message": message}
+
     def _replace_refusal(
         self,
-        target_path: Path,
+        exists: bool,
         scope: str,
         name: str,
         overwrite: bool,
         may_replace_global: bool,
     ) -> Optional[Dict[str, Any]]:
-        """The refusal to replace an existing pattern, or None to proceed."""
-        if not target_path.exists():
+        """The refusal to replace an existing pattern (*exists*: from the
+        caller's one reading of it), or None to proceed."""
+        from code_indexer.server.services.xray_pattern_authority import (
+            may_replace_pattern,
+        )
+
+        if not exists:
             return None
         if not overwrite:
-            return {
-                "error": "pattern_already_exists",
-                "message": (
-                    f"Pattern '{name}' already exists in scope '{scope}'. "
-                    "Use overwrite=true to replace it."
-                ),
-            }
-        if scope == self.ANY_SCOPE and not may_replace_global:
+            return self._already_exists(scope, name)
+        if not may_replace_pattern(scope, admin_role=may_replace_global):
             return {
                 "success": False,
                 "error": "global_pattern_overwrite_forbidden",
@@ -626,10 +682,15 @@ class XrayPatternService:
             return True
 
         def _write_and_commit(piggyback: bool) -> None:
-            created = [target for target, _content in seeds if not target.exists()]
+            created = []
             for target, content in seeds:
-                if target in created:
-                    self._put_catalog_file(target, content)
+                if target.exists():
+                    continue
+                try:
+                    self._put_catalog_file(target, content, exclusive=True)
+                except FileExistsError:
+                    continue
+                created.append(target)
             if created and not piggyback:
                 self._git_commit_tolerating_failure(
                     files=created,

@@ -193,7 +193,9 @@ def test_unchanged_catalog_paths_keep_todays_behaviour(
     assert created["success"] is True, created
     assert (env.fx.root / "xray-patterns" / "__any__" / "n.yaml").is_file()
     assert "Content hash mismatch" in mismatch["error"]
-    assert absent["error"] == "File not found: xray-patterns/__any__/x.yaml"
+    assert absent["error"] == (
+        "Replacing or deleting a shared X-Ray pattern requires the admin role."
+    )
 
 
 def _projected_write_replies(env: CatalogFileDoorEnv, path: str) -> list:

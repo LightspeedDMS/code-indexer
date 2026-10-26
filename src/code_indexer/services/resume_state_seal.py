@@ -51,6 +51,8 @@ def _publish_new_key(key_path: Path) -> None:
     into place. ``os.link`` fails if the key already exists, so concurrent
     creators never overwrite each other and a reader never observes a
     partially written key."""
+    from code_indexer.utils.file_locking import nfs_safe_link_exclusive
+
     fd, tmp_name = tempfile.mkstemp(dir=str(key_path.parent), prefix=".seal-key-")
     try:
         os.fchmod(fd, 0o600)
@@ -59,7 +61,7 @@ def _publish_new_key(key_path: Path) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         try:
-            os.link(tmp_name, str(key_path))
+            nfs_safe_link_exclusive(tmp_name, str(key_path))
         except FileExistsError:
             pass  # Another process published the key first; use theirs.
     finally:

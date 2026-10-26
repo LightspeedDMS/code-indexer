@@ -90,6 +90,7 @@ class TestHandleCreateFile:
             content="def hello():\n    return 'world'",
             username="testuser",
             access_for=ANY,
+            pattern_writer=ANY,
         )
 
     def test_create_file_missing_params(self, mock_user, mock_file_crud_service):
@@ -238,6 +239,7 @@ class TestHandleEditFile:
             replace_all=False,
             username="testuser",
             access_for=ANY,
+            pattern_writer=ANY,
         )
 
     def test_edit_file_replace_all(self, mock_user, mock_file_crud_service):
@@ -396,6 +398,7 @@ class TestHandleDeleteFile:
             content_hash=None,
             username="testuser",
             access_for=ANY,
+            pattern_writer=ANY,
         )
 
     def test_delete_file_success_with_hash(self, mock_user, mock_file_crud_service):
@@ -427,6 +430,7 @@ class TestHandleDeleteFile:
             content_hash="hash_xyz789",
             username="testuser",
             access_for=ANY,
+            pattern_writer=ANY,
         )
 
     def test_delete_file_missing_params(self, mock_user, mock_file_crud_service):

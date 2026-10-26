@@ -284,3 +284,30 @@ def test_the_batch_job_piggybacks_seeds_on_a_refresh(
     assert all((meta / s).exists() for s in SEEDS)
     assert _git(meta, "rev-parse", "HEAD") == head, "committed under a refresh"
     assert _infra._seeds_ensured is True
+
+
+def test_a_seed_created_concurrently_is_never_overwritten(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from code_indexer.global_repos import catalog_staged_write
+
+    meta = tmp_path / "golden-repos" / CATALOG
+    meta.mkdir(parents=True)
+    _git(meta, "init", "-q")
+    peer = meta / SEEDS[0]
+    real_sweep = catalog_staged_write._sweep_stale_staging
+
+    def sweep_then_peer_publishes(staging_dir: Path) -> None:
+        real_sweep(staging_dir)
+        if not peer.exists():
+            peer.parent.mkdir(parents=True, exist_ok=True)
+            peer.write_text("name: catch-rethrow\ndescription: peer\n")
+
+    monkeypatch.setattr(
+        catalog_staged_write, "_sweep_stale_staging", sweep_then_peer_publishes
+    )
+
+    assert XrayPatternService(meta).ensure_seed_patterns() is True
+
+    assert peer.read_text() == "name: catch-rethrow\ndescription: peer\n"
+    assert "evaluate_node" in (meta / SEEDS[1]).read_text()

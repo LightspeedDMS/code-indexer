@@ -21,6 +21,7 @@ from code_indexer.server.services.file_crud_service import (
     WriteModeLockUnavailableError,
     file_crud_service,
 )
+from code_indexer.server.services.xray_pattern_authority import PatternWriter
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.routers import repo_access_http
 
@@ -63,6 +64,12 @@ def _catalog_judge(
         getattr(state, "activated_repo_manager", None),
         may_write=user.has_permission("repository:write"),
     )
+
+
+def _pattern_writer(request: Request, user: User) -> PatternWriter:
+    """The caller of a file write, for the X-Ray pattern rule."""
+    access = getattr(request.app.state, "access_filtering_service", None)
+    return PatternWriter.of(user, access)
 
 
 # Request/Response Models
@@ -167,6 +174,7 @@ def create_file(
             content=request.content,
             username=user.username,
             access_for=_catalog_judge(http_request, alias, user),
+            pattern_writer=_pattern_writer(http_request, user),
         )
         return CreateFileResponse(**result)
 
@@ -267,6 +275,7 @@ def edit_file(
             replace_all=request.replace_all,
             username=user.username,
             access_for=_catalog_judge(http_request, alias, user),
+            pattern_writer=_pattern_writer(http_request, user),
         )
         return EditFileResponse(**result)
 
@@ -364,6 +373,7 @@ def delete_file(
             content_hash=content_hash,
             username=user.username,
             access_for=_catalog_judge(http_request, alias, user),
+            pattern_writer=_pattern_writer(http_request, user),
         )
         return DeleteFileResponse(**result)
 
