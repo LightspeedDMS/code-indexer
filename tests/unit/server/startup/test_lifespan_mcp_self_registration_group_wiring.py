@@ -121,9 +121,9 @@ def test_lifespan_starts_the_migration_after_audit_is_bound() -> None:
     assert start > audit_bound
     assert "await _migrate_analysis_agent_credential()" not in source
     running = source.index("yield  # Server is now running")
-    assert source.index("await _stop_analysis_agent_credential_migration(app)") > (
-        running
-    )
+    stop = source.index("await _stop_analysis_agent_credential_migration(app)")
+    assert stop > running
+    assert stop < source.index("await anyio.to_thread.run_sync(_audit_svc.stop)")
 
 
 def test_the_migration_writes_every_audit_row_once_audit_is_bound(tmp_path) -> None:
@@ -162,34 +162,119 @@ def test_the_migration_writes_every_audit_row_once_audit_is_bound(tmp_path) -> N
         audit.stop()
 
 
-@pytest.mark.asyncio
-async def test_the_startup_migration_never_delays_startup_and_stops_at_shutdown() -> (
-    None
-):
-    import asyncio
-    import threading
+class _Gated:
+    def __init__(self) -> None:
+        import threading
+
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.finished = threading.Event()
+
+    def set_group_manager(self, group_manager: object) -> None:
+        self.group_manager = group_manager
+
+    def migrate_at_startup(self) -> bool:
+        from code_indexer.server.services import audit_capture
+        from code_indexer.server.services.audit_events import SystemComponent
+
+        self.entered.set()
+        self.release.wait(30)
+        audit_capture.capture_system(
+            component=SystemComponent.MCP_SELF_REGISTRATION,
+            action_type="user_created",
+            target_type="user",
+            target_id="cidx-analysis-agent",
+            outcome="success",
+            details={"role": "normal_user", "provisioning": "system"},
+        )
+        self.finished.set()
+        return True
+
+
+def _started_migration(probe: _Gated) -> object:
     import types
 
-    release = threading.Event()
-
-    class _Blocking:
-        def set_group_manager(self, group_manager: object) -> None:
-            self.group_manager = group_manager
-
-        def migrate_at_startup(self) -> bool:
-            release.wait(30)
-            return True
-
-    MCPSelfRegistrationService.set_instance(_Blocking())  # type: ignore[arg-type]
+    MCPSelfRegistrationService.set_instance(probe)  # type: ignore[arg-type]
     app = types.SimpleNamespace(state=types.SimpleNamespace())
+    lifespan._start_analysis_agent_credential_migration(app, object())
+    return app
+
+
+@pytest.mark.asyncio
+async def test_shutdown_waits_for_a_running_migration_and_its_audit_row_is_persisted(
+    tmp_path,
+) -> None:
+    import asyncio
+    import sqlite3
+
+    from code_indexer.server.services import audit_capture
+    from code_indexer.server.services.audit_log_service import AuditLogService
+
+    audit = AuditLogService(tmp_path / "groups.db")
+    audit.start()
+    audit_capture.mark_server_process()
+    audit_capture.bind_audit_service(audit, node_id=None)
+    probe = _Gated()
+    before = audit_capture.records_dropped_since_boot()
     try:
-        lifespan._start_analysis_agent_credential_migration(app, object())
-        task = app.state.analysis_agent_credential_migration_task
-        await asyncio.sleep(0.05)
-        assert not task.done()
-        await asyncio.wait_for(
-            lifespan._stop_analysis_agent_credential_migration(app), timeout=5
+        app = _started_migration(probe)
+        assert await asyncio.to_thread(probe.entered.wait, 5)
+        assert not app.state.analysis_agent_credential_migration_task.done()  # type: ignore[attr-defined]
+        stop = asyncio.ensure_future(
+            lifespan._stop_analysis_agent_credential_migration(app)
         )
-        assert task.done()
+        # ^ order sleep(0) => stop reaches its wait before release
+        await asyncio.sleep(0)
+        probe.release.set()
+        await asyncio.wait_for(stop, timeout=10)
+        assert probe.finished.is_set(), "shutdown returned before the migration"
     finally:
-        release.set()
+        probe.release.set()
+        audit.stop()
+        audit_capture.clear_audit_service()
+        audit_capture.reset_server_process_mark()
+    assert audit_capture.records_dropped_since_boot() == before
+    with sqlite3.connect(tmp_path / "groups.db") as conn:
+        rows = conn.execute(
+            "SELECT target_id FROM audit_logs WHERE action_type = 'user_created'"
+        ).fetchall()
+    assert rows == [("cidx-analysis-agent",)]
+
+
+@pytest.mark.asyncio
+async def test_shutdown_stops_waiting_for_a_stalled_migration_at_the_bound(
+    caplog, monkeypatch
+) -> None:
+    import asyncio
+    import logging
+    import time
+
+    bound = 0.5
+    monkeypatch.setattr(
+        lifespan, "_MIGRATION_SHUTDOWN_WAIT_SECONDS", bound, raising=False
+    )
+    probe = _Gated()
+    try:
+        app = _started_migration(probe)
+        assert await asyncio.to_thread(probe.entered.wait, 5)
+        started = time.monotonic()
+        with caplog.at_level(logging.WARNING, logger=lifespan.logger.name):
+            await asyncio.wait_for(
+                asyncio.gather(
+                    lifespan._stop_analysis_agent_credential_migration(app),
+                    lifespan._stop_analysis_agent_credential_migration(app),
+                ),
+                timeout=10,
+            )
+        elapsed = time.monotonic() - started
+        assert bound <= elapsed < bound + 3.0, elapsed
+        assert not probe.finished.is_set()
+        warnings = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.WARNING and "migration" in r.getMessage()
+        ]
+        assert len(warnings) == 1, [r.getMessage() for r in warnings]
+    finally:
+        probe.release.set()
+        probe.finished.wait(10)
