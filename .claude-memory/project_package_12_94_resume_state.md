@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 469b8128-2710-4307-9c15-5e1dfb0f1a0b
-  modified: 2026-10-25T21:48:10.345Z
+  modified: 2026-10-26T21:20:24.947Z
 ---
 
 12.94.0 (package after v12.93.0): pushed to development and staging on 2026-10-23 and validated
@@ -30,18 +30,29 @@ flake); server-fast 29,861 passed (one timing flake); e2e all 7 phases green (ph
 a harness lock race, harness fixed, phases 3-7 re-run green). Committed on development: security change
 alone (0a56a22a7), indexing/server/watch fixes (f5e6843d0), then docs (CHANGELOG, CLAUDE.md).
 
-Update 2026-10-25 ~20:30 UTC: 12.96.0 bumped (tag v12.96.0), pushed to development and staging. Cluster
-staging validation FAILED: every catalog refresh fails at snapshot creation because some catalog entries
-on the shared storage are owned by another account and the catalog permission pass made chmod failures
-fatal (dev 2202). Fix (dev 2202): change only entries the service user owns, prune unreadable
-directories of another owner, report the rest once, never block a catalog publish. Dual review approved;
-server-fast (two timing flakes, pass alone) and e2e phases 3/4/6 green. Committed alone (9a60c2dd7),
-shipping as 12.97.0, then re-validate both staging environments and stop. Production is unaffected
-(still 12.93.0).
+Update 2026-10-25: 12.96.0 shipped to staging, but its catalog permission pass treated any chmod
+failure as fatal, and shared storage can hold entries the service user does not own (dev 2202). Lesson:
+a permission pass must change only what the process owns and report the rest, never block a publish.
+Fixed and shipped as 12.97.0 (tag v12.97.0), VALIDATED 2026-10-25 on both staging environments through
+the front doors; details in gitignored reports/staging_validation_12_97_*.md. STOPPED at staging,
+waiting for the owner.
+
+NEXT (2026-10-25, owner-approved): 12.98.0 on development; full gates green on 2026-10-27 (lint, rust,
+fast, server-fast, e2e all 7 phases), then bump and staging validation of both environments. Its scope, order and owner decisions are tracked outside this repository, never in
+this file. Changes to the pace-maker hook project are ours to make, deploy to staging and test, and
+the code-indexer auto-updater must deliver them.
+
+AFTER 12.98 reaches staging (owner, 2026-10-26): the test-suite package. Move every test that starts
+a real `cidx` process out of fast-automation and server-fast into slow-automation, add a guard that
+fails the fast suites on an unmarked real-process test, make slow-automation a required gate, fix the
+tokenizer load lock (dev 2204), rebalance server-fast chunks. Analysis and plan in gitignored
+reports/fast_suites_slowness_analysis_2026-10-26.md and reports/move_real_cidx_tests_plan_2026-10-26.md.
+See [[feedback-fast-automation-unit-tests-only]].
 
 **How to apply (remaining steps):**
-- Bump 12.96.0 as the push tip, push development, merge to staging, validate both staging environments
-  through the front doors, then WAIT for the owner. Never offer or ask about production promotion.
+- For each package: TDD, Claude + Codex review, full gates once, CHANGELOG + MINOR bump as the push
+  tip, push development, merge to staging, validate solo AND cluster through the front doors, then
+  WAIT for the owner. Never offer or ask about production promotion.
 - Any new development commit needs a new MINOR bump as the push tip before the next staging push.
 - Follow-ups (including dev 2201, watch re-embed on a failing store) are in the gitignored
   reports/package_12_94_followups.md.
