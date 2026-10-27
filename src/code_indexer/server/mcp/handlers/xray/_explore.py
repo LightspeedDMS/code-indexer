@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional, cast
 
 from code_indexer.server.auth.user_manager import User
+from code_indexer.server.services.api_metrics_service import api_metrics_service
 from code_indexer.server.services.query_admission_gate import (
     check_query_admission,
     memory_pressure_mcp_payload,
@@ -223,6 +224,7 @@ def _submit_one_explore_omni(
     if single_path_str is None:
         return None
 
+    api_metrics_service.increment_xray_search(username=user.username)
     jid = str(uuid.uuid4())
     job_tracker.register_job(
         job_id=jid,
@@ -642,6 +644,7 @@ async def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, A
             }
         )
 
+    api_metrics_service.increment_xray_search(username=user.username)
     bjm = _get_background_job_manager()
     job_tracker = _get_job_tracker()
     xray_executor = _get_xray_executor()

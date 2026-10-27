@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from code_indexer.server.auth.dependencies import get_current_user
 from code_indexer.server.auth.user_manager import User
+from code_indexer.server.services.api_metrics_service import api_metrics_service
 from code_indexer.server.services.repo_access_guard import (
     AccessFilteringServiceUnavailableError,
     RepoAccessDeniedError,
@@ -328,6 +329,7 @@ def xray_search(
     # ------------------------------------------------------------------
     # 6. Submit background job
     # ------------------------------------------------------------------
+    api_metrics_service.increment_xray_search(username=user.username)
     repo_path = Path(repo_path_str)
     include_patterns = list(body.include_patterns)
     exclude_patterns = list(body.exclude_patterns)

@@ -62,6 +62,7 @@ class TestGetPerUserStats:
                     "semantic": 10,
                     "other_index": 5,
                     "regex": 3,
+                    "xray": 4,
                     "other_api": 2,
                 }
             }
@@ -72,8 +73,9 @@ class TestGetPerUserStats:
         assert row["semantic"] == 10
         assert row["other_index"] == 5
         assert row["regex"] == 3
+        assert row["xray"] == 4
         assert row["other_api"] == 2
-        assert row["total"] == 20
+        assert row["total"] == 24
 
     def test_sorted_by_total_descending(self):
         """Users are sorted highest total first."""
@@ -129,6 +131,7 @@ class TestGetPerUserStats:
         assert row["semantic"] == 7
         assert row["other_index"] == 0
         assert row["regex"] == 0
+        assert row["xray"] == 0
         assert row["other_api"] == 0
         assert row["total"] == 7
 
@@ -229,6 +232,11 @@ class TestPerUserTemplate:
         """Template must render Regex column."""
         src = self._template_source()
         assert "Regex" in src, "Template must have Regex column header"
+
+    def test_template_has_xray_column(self):
+        """Template must render X-Ray column (Story #2213)."""
+        src = self._template_source()
+        assert "<th>X-Ray</th>" in src, "Template must have X-Ray column header"
 
     def test_template_has_other_api_column(self):
         """Template must render Other API column."""

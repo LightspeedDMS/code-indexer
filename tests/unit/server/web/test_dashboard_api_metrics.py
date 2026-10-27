@@ -23,6 +23,7 @@ class TestDashboardApiMetricsIntegration:
             "semantic_searches": 2,
             "other_index_searches": 1,
             "regex_searches": 1,
+            "xray_searches": 3,
             "other_api_calls": 0,
         }
 
@@ -74,4 +75,5 @@ class TestDashboardApiMetricsIntegration:
         assert api_metrics["semantic_searches"] == 2
         assert api_metrics["other_index_searches"] == 1
         assert api_metrics["regex_searches"] == 1
+        assert api_metrics["xray_searches"] == 3
         assert api_metrics["other_api_calls"] == 0

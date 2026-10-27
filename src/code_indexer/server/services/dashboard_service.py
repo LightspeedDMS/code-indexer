@@ -259,7 +259,7 @@ class DashboardService:
         Returns:
             dict with keys:
                 labels   - list of human-readable time strings (x-axis)
-                datasets - list of 4 dicts, each with label, data, backgroundColor
+                datasets - list of 5 dicts, each with label, data, backgroundColor
         """
         if api_metrics_backend is not None:
             timeseries = api_metrics_backend.get_metrics_timeseries(period_seconds)
@@ -271,7 +271,7 @@ class DashboardService:
         label_index = {label: i for i, label in enumerate(labels_set)}
         num_labels = len(labels_set)
 
-        metric_types = ["semantic", "other_index", "regex", "other_api"]
+        metric_types = ["semantic", "other_index", "regex", "xray", "other_api"]
         datasets_data: Dict[str, List[int]] = {
             mt: [0] * num_labels for mt in metric_types
         }
@@ -288,6 +288,7 @@ class DashboardService:
             "semantic": "#4e79a7",
             "other_index": "#59a14f",
             "regex": "#f28e2b",
+            "xray": "#b07aa1",
             "other_api": "#e15759",
         }
 
@@ -320,7 +321,7 @@ class DashboardService:
 
         Returns:
             List of dicts sorted by total descending, each with keys:
-                username, semantic, other_index, regex, other_api, total.
+                username, semantic, other_index, regex, xray, other_api, total.
         """
         if api_metrics_backend is not None:
             raw = api_metrics_backend.get_metrics_by_user(period_seconds)
@@ -332,14 +333,16 @@ class DashboardService:
             semantic = counts.get("semantic", 0)
             other_index = counts.get("other_index", 0)
             regex = counts.get("regex", 0)
+            xray = counts.get("xray", 0)
             other_api = counts.get("other_api", 0)
-            total = semantic + other_index + regex + other_api
+            total = semantic + other_index + regex + xray + other_api
             rows.append(
                 {
                     "username": username,
                     "semantic": semantic,
                     "other_index": other_index,
                     "regex": regex,
+                    "xray": xray,
                     "other_api": other_api,
                     "total": total,
                 }

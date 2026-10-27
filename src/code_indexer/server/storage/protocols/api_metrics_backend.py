@@ -32,7 +32,7 @@ class ApiMetricsBackend(Protocol):
             username: Username for attribution (e.g. 'alice', '_anonymous').
             granularity: One of 'min1', 'min5', 'hour1', 'day1'.
             bucket_start: ISO 8601 timestamp of the bucket start boundary.
-            metric_type: Category ('semantic', 'other_index', 'regex', 'other_api').
+            metric_type: Category ('semantic', 'other_index', 'regex', 'xray', 'other_api').
             node_id: Cluster node identifier. Empty string for standalone nodes.
                      Non-empty values must not be whitespace-only.
         """
@@ -65,7 +65,8 @@ class ApiMetricsBackend(Protocol):
                      When None, aggregate across all nodes.
 
         Returns:
-            Dict with keys: semantic, other_index, regex, other_api.
+            Dict with keys: semantic_searches, other_index_searches,
+            regex_searches, xray_searches, other_api_calls.
         """
         ...
 

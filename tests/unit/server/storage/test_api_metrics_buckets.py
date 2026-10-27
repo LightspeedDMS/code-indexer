@@ -379,10 +379,10 @@ class TestUpsertBucketValidation:
             backend.upsert_bucket("alice", gran, "2026-04-11T10:00:00", "semantic")
 
     def test_valid_metric_types_do_not_raise(self, backend_and_db):
-        """All four valid metric types must be accepted without error."""
+        """All five valid metric types must be accepted without error."""
         backend, _db_file = backend_and_db
 
-        for metric in ("semantic", "other_index", "regex", "other_api"):
+        for metric in ("semantic", "other_index", "regex", "xray", "other_api"):
             backend.upsert_bucket("alice", "min1", "2026-04-11T10:00:00", metric)
 
 

@@ -530,3 +530,62 @@ class TestSelfTrackingToolsConstant:
         from code_indexer.server.mcp.protocol import _SELF_TRACKING_TOOLS
 
         assert isinstance(_SELF_TRACKING_TOOLS, frozenset)
+
+
+async def _dispatch_and_capture_metrics(tool_name: str) -> Mock:
+    """Dispatch one successful call of tool_name; return the patched metrics mock."""
+    from code_indexer.server.mcp import handlers as handlers_module
+    from code_indexer.server.mcp import tools as tools_module
+    from code_indexer.server.mcp.protocol import handle_tools_call
+
+    with (
+        patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app_module,
+        patch(
+            "code_indexer.server.mcp.session_registry.get_session_registry"
+        ) as mock_reg,
+        patch(
+            "code_indexer.server.services.langfuse_service.get_langfuse_service",
+            return_value=None,
+        ),
+        patch("code_indexer.server.mcp.protocol.api_metrics_service") as mock_metrics,
+        patch.object(
+            handlers_module, "HANDLER_REGISTRY", {tool_name: _make_mock_handler()}
+        ),
+        patch.object(
+            tools_module, "TOOL_REGISTRY", _make_mock_tool_registry(tool_name)
+        ),
+    ):
+        mock_app_module.app.state = _standard_patches()
+        mock_reg.return_value.get_or_create_session.return_value = None
+        await handle_tools_call(
+            {"name": tool_name, "arguments": {}}, _make_user("admin")
+        )
+    return mock_metrics
+
+
+class TestProtocolXraySearchToolsSelfTrack:
+    """Story #2213: X-Ray search tools count themselves; the rest stay Other API."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "tool_name", ["xray_search", "xray_explore", "xray_search_batch"]
+    )
+    async def test_xray_search_tools_are_not_counted_as_other_api(self, tool_name):
+        mock_metrics = await _dispatch_and_capture_metrics(tool_name)
+
+        mock_metrics.increment_other_api_call.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "tool_name",
+        [
+            "analyze_graph",
+            "xray_dump_ast",
+            "poll_search_job",
+            "cidx_fetch_cached_payload",
+        ],
+    )
+    async def test_non_search_xray_tools_stay_other_api(self, tool_name):
+        mock_metrics = await _dispatch_and_capture_metrics(tool_name)
+
+        mock_metrics.increment_other_api_call.assert_called_once_with(username="admin")

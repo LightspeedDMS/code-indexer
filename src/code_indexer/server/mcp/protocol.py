@@ -57,8 +57,11 @@ security = HTTPBearer(auto_error=False)
 # search_code: tracks semantic/other_index via semantic_query_manager._perform_search()
 #   (single-repo) and _omni_search_code() (multi-repo) in handlers.py.
 # regex_search: tracks regex via global_repos/regex_search.py.
+# xray_search/xray_explore/xray_search_batch: track xray per repository in their handlers.
 # authenticate: bypasses handle_tools_call() entirely via mcp-public special path.
-_SELF_TRACKING_TOOLS = frozenset({"search_code", "regex_search"})
+_SELF_TRACKING_TOOLS = frozenset(
+    {"search_code", "regex_search", "xray_search", "xray_explore", "xray_search_batch"}
+)
 
 # Tools whose repo identifier refers to a user-OWNED activation (not a golden
 # alias). The activated_repo_manager enforces ownership at the data layer, so
@@ -1105,7 +1108,7 @@ async def _dispatch_tool_call(
 
     # Bug #350: API metrics tracking centralized at protocol dispatch layer (below).
     # All non-self-tracking tools call increment_other_api_call() on success.
-    # Self-tracking tools (search_code, regex_search) are in _SELF_TRACKING_TOOLS.
+    # Self-tracking tools are listed in _SELF_TRACKING_TOOLS.
     # Service-level tracking removed from file_crud, git_operations, ssh_key_manager.
 
     # Call handler with arguments

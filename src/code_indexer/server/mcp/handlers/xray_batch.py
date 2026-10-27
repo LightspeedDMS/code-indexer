@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 from code_indexer.server.auth.user_manager import User
+from code_indexer.server.services.api_metrics_service import api_metrics_service
 from code_indexer.server.services.search_event_recording import SearchOrigin
 from code_indexer.server.services.search_event_xray import XRayEvaluator
 from code_indexer.xray.rust_backend import SharedIdentityCache
@@ -833,6 +834,10 @@ def handle_xray_search_batch(
                 "errors": repo_errors,
             }
         )
+
+    # ^ coupled with src/code_indexer/server/routes/xray_routes.py:xray_search_batch; that route must not count again
+    for _ in resolved_repos:
+        api_metrics_service.increment_xray_search(username=user.username)
 
     # ------------------------------------------------------------------
     # 4. Submit ONE background job

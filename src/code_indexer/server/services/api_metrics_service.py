@@ -5,6 +5,7 @@ Tracks API call timestamps using rolling window approach:
 - Semantic Searches (search_code with semantic mode)
 - Other Index Searches (FTS, temporal, hybrid searches)
 - Regex Searches (regex_search calls)
+- X-Ray Searches (xray_search, xray_explore, xray_search_batch; one per repository)
 - All Other API Calls (remaining API endpoints)
 
 SQLite database storage allows multiple uvicorn workers to share metrics.
@@ -262,7 +263,7 @@ class ApiMetricsService:
         """Enqueue a metric event to the background writer (non-blocking hot path).
 
         Args:
-            metric_type: Type of metric ('semantic', 'other_index', 'regex', 'other_api')
+            metric_type: Type of metric ('semantic', 'other_index', 'regex', 'xray', 'other_api')
             username: Username for bucket attribution. Defaults to '_anonymous'.
 
         If the queue is full, the metric is dropped with a warning (never crashes).
@@ -289,6 +290,10 @@ class ApiMetricsService:
     def increment_regex_search(self, username: str = "_anonymous") -> None:
         """Record a regex search call timestamp."""
         self._insert_metric("regex", username=username)
+
+    def increment_xray_search(self, username: str = "_anonymous") -> None:
+        """Record an X-Ray search call timestamp (one per repository searched)."""
+        self._insert_metric("xray", username=username)
 
     def increment_other_api_call(self, username: str = "_anonymous") -> None:
         """Record an other API call timestamp."""
@@ -324,7 +329,7 @@ class ApiMetricsService:
 
         Returns:
             Dict with keys: semantic_searches, other_index_searches,
-            regex_searches, other_api_calls.
+            regex_searches, xray_searches, other_api_calls.
         """
         if self._backend is not None:
             return cast(
@@ -337,6 +342,7 @@ class ApiMetricsService:
             "semantic_searches": 0,
             "other_index_searches": 0,
             "regex_searches": 0,
+            "xray_searches": 0,
             "other_api_calls": 0,
         }
 

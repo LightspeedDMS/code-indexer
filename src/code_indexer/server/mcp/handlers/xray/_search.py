@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from code_indexer.server.auth.user_manager import User
+from code_indexer.server.services.api_metrics_service import api_metrics_service
 from code_indexer.server.services.query_admission_gate import (
     check_query_admission,
     memory_pressure_mcp_payload,
@@ -413,6 +414,7 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
                 )
                 continue
 
+            api_metrics_service.increment_xray_search(username=user.username)
             single_repo_path = Path(single_path_str)
             jid = str(uuid.uuid4())
             job_tracker_multi.register_job(
@@ -520,6 +522,7 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
     # ------------------------------------------------------------------
     # 6. Submit to dedicated xray executor (Bug #1070: bypass BJM worker pool)
     # ------------------------------------------------------------------
+    api_metrics_service.increment_xray_search(username=user.username)
     repo_path = Path(repo_path_str)
 
     bjm = _get_background_job_manager()

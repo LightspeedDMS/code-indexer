@@ -25,7 +25,9 @@ logger = logging.getLogger(__name__)
 
 # Valid values for bucket fields — used in upsert_bucket validation
 _VALID_GRANULARITIES = frozenset({"min1", "min5", "hour1", "day1"})
-_VALID_METRIC_TYPES = frozenset({"semantic", "other_index", "regex", "other_api"})
+_VALID_METRIC_TYPES = frozenset(
+    {"semantic", "other_index", "regex", "xray", "other_api"}
+)
 
 # Named period constants (seconds) — Story #673.
 # Defined locally; datetime/timezone/timedelta are already imported above.
@@ -206,7 +208,7 @@ class ApiMetricsPostgresBackend:
             username: Non-empty username for attribution.
             granularity: One of 'min1', 'min5', 'hour1', 'day1'.
             bucket_start: ISO 8601 timestamp of the bucket boundary.
-            metric_type: Category ('semantic', 'other_index', 'regex', 'other_api').
+            metric_type: Category ('semantic', 'other_index', 'regex', 'xray', 'other_api').
             node_id: Cluster node identifier. Empty string for standalone nodes.
                      Non-empty values must not be whitespace-only.
 
@@ -383,7 +385,7 @@ class ApiMetricsPostgresBackend:
 
         Returns:
             Dict with keys: semantic_searches, other_index_searches,
-            regex_searches, other_api_calls.
+            regex_searches, xray_searches, other_api_calls.
         """
         tier, cutoff = _resolve_tier_and_cutoff(period_seconds)
         try:
@@ -418,6 +420,7 @@ class ApiMetricsPostgresBackend:
             "semantic_searches": counts.get("semantic", 0),
             "other_index_searches": counts.get("other_index", 0),
             "regex_searches": counts.get("regex", 0),
+            "xray_searches": counts.get("xray", 0),
             "other_api_calls": counts.get("other_api", 0),
         }
 

@@ -43,11 +43,11 @@ def dashboard_service():
     return DashboardService()
 
 
-class TestGetChartDataAlwaysFourDatasets:
-    """get_chart_data always returns exactly 4 datasets."""
+class TestGetChartDataAlwaysFiveDatasets:
+    """get_chart_data always returns exactly 5 datasets (Story #2213 adds X-Ray)."""
 
-    def test_get_chart_data_returns_4_datasets_with_data(self, dashboard_service):
-        """Result always has exactly 4 dataset entries even with mixed data."""
+    def test_get_chart_data_returns_5_datasets_with_data(self, dashboard_service):
+        """Result always has exactly 5 dataset entries even with mixed data."""
         with patch(
             "code_indexer.server.services.dashboard_service.api_metrics_service"
         ) as mock_svc:
@@ -56,16 +56,30 @@ class TestGetChartDataAlwaysFourDatasets:
                 ("2024-01-01T10:00:00", "regex", 2),
             ]
             result = dashboard_service.get_chart_data(PERIOD_24H)
-        assert len(result["datasets"]) == 4
+        assert len(result["datasets"]) == 5
 
-    def test_get_chart_data_returns_4_datasets_when_empty(self, dashboard_service):
-        """Even with empty timeseries, result has 4 dataset entries."""
+    def test_get_chart_data_returns_5_datasets_when_empty(self, dashboard_service):
+        """Even with empty timeseries, result has 5 dataset entries."""
         with patch(
             "code_indexer.server.services.dashboard_service.api_metrics_service"
         ) as mock_svc:
             mock_svc.get_metrics_timeseries.return_value = []
             result = dashboard_service.get_chart_data(PERIOD_24H)
-        assert len(result["datasets"]) == 4
+        assert len(result["datasets"]) == 5
+
+    def test_xray_rows_land_in_their_own_dataset(self, dashboard_service):
+        """Story #2213: xray counts form the Xray series, not Other Api."""
+        with patch(
+            "code_indexer.server.services.dashboard_service.api_metrics_service"
+        ) as mock_svc:
+            mock_svc.get_metrics_timeseries.return_value = [
+                ("2024-01-01T10:00:00", "xray", 4),
+                ("2024-01-01T10:00:00", "other_api", 1),
+            ]
+            result = dashboard_service.get_chart_data(PERIOD_24H)
+        by_label = {ds["label"]: ds["data"] for ds in result["datasets"]}
+        assert by_label["Xray"] == [4]
+        assert by_label["Other Api"] == [1]
 
     def test_get_chart_data_dataset_labels_are_correct(self, dashboard_service):
         """Datasets have the correct human-readable labels."""
@@ -78,6 +92,7 @@ class TestGetChartDataAlwaysFourDatasets:
         assert "Semantic" in labels
         assert "Other Index" in labels
         assert "Regex" in labels
+        assert "Xray" in labels
         assert "Other Api" in labels
 
     def test_get_chart_data_datasets_have_background_color(self, dashboard_service):

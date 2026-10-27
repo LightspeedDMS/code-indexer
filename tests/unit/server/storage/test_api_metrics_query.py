@@ -88,6 +88,7 @@ class TestGetMetricsBucketed:
             "semantic_searches": 0,
             "other_index_searches": 0,
             "regex_searches": 0,
+            "xray_searches": 0,
             "other_api_calls": 0,
         }
 
@@ -542,6 +543,7 @@ class TestApiMetricsServiceDelegation:
             "semantic_searches": 0,
             "other_index_searches": 0,
             "regex_searches": 0,
+            "xray_searches": 0,
             "other_api_calls": 0,
         }
 

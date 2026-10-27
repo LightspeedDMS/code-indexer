@@ -37,8 +37,8 @@ class ApiMetricsSqliteBackend:
     SQLite backend for API metrics storage (Story #502).
 
     Stores rolling-window API call timestamps so the dashboard can report
-    semantic_searches, other_index_searches, regex_searches, and other_api_calls
-    within any time window.
+    semantic_searches, other_index_searches, regex_searches, xray_searches and
+    other_api_calls within any time window.
 
     Uses a dedicated api_metrics.db file (separate from the main cidx_server.db)
     to isolate high-volume metric writes from other server state.
@@ -105,7 +105,9 @@ class ApiMetricsSqliteBackend:
 
     # Valid values for bucket fields — used in upsert_bucket validation
     _VALID_GRANULARITIES = frozenset({"min1", "min5", "hour1", "day1"})
-    _VALID_METRIC_TYPES = frozenset({"semantic", "other_index", "regex", "other_api"})
+    _VALID_METRIC_TYPES = frozenset(
+        {"semantic", "other_index", "regex", "xray", "other_api"}
+    )
 
     # Retention window per granularity tier (Story #672) — immutable
     _RETENTION_WINDOWS = MappingProxyType(
@@ -169,7 +171,7 @@ class ApiMetricsSqliteBackend:
             username: Non-empty username for attribution.
             granularity: One of 'min1', 'min5', 'hour1', 'day1'.
             bucket_start: ISO 8601 timestamp of the bucket boundary.
-            metric_type: Category ('semantic', 'other_index', 'regex', 'other_api').
+            metric_type: Category ('semantic', 'other_index', 'regex', 'xray', 'other_api').
             node_id: Cluster node identifier. Empty string for standalone nodes.
                      Non-empty values must not be whitespace-only.
 
@@ -379,7 +381,7 @@ class ApiMetricsSqliteBackend:
 
         Returns:
             Dict with keys: semantic_searches, other_index_searches,
-            regex_searches, other_api_calls — each mapped to the integer sum
+            regex_searches, xray_searches, other_api_calls — each mapped to the integer sum
             of counts in the period.
 
         Raises:
@@ -413,6 +415,7 @@ class ApiMetricsSqliteBackend:
             "semantic_searches": counts.get("semantic", 0),
             "other_index_searches": counts.get("other_index", 0),
             "regex_searches": counts.get("regex", 0),
+            "xray_searches": counts.get("xray", 0),
             "other_api_calls": counts.get("other_api", 0),
         }
 

@@ -12,6 +12,7 @@
                         <th>Semantic</th>
                         <th>Other Index</th>
                         <th>Regex</th>
+                        <th>X-Ray</th>
                         <th>Other API</th>
                         <th>Total</th>
                     </tr>
@@ -24,13 +25,14 @@
                         <td>{{ row.semantic }}</td>
                         <td>{{ row.other_index }}</td>
                         <td>{{ row.regex }}</td>
+                        <td>{{ row.xray }}</td>
                         <td>{{ row.other_api }}</td>
                         <td><strong>{{ row.total }}</strong></td>
                     </tr>
                     {% endfor %}
                     {% else %}
                     <tr>
-                        <td colspan="6" style="text-align: center;">No activity in selected period.</td>
+                        <td colspan="7" style="text-align: center;">No activity in selected period.</td>
                     </tr>
                     {% endif %}
                 </tbody>

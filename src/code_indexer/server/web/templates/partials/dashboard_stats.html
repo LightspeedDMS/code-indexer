@@ -154,6 +154,16 @@
 
     <article class="stat-card">
         <header>
+            <h3>X-Ray Searches</h3>
+        </header>
+        <div class="stat-value">{{ api_metrics.xray_searches if api_metrics else 0 }}</div>
+        <footer>
+            <small>X-Ray searches, per repository</small>
+        </footer>
+    </article>
+
+    <article class="stat-card">
+        <header>
             <h3>Other API Calls</h3>
         </header>
         <div class="stat-value">{{ api_metrics.other_api_calls if api_metrics else 0 }}</div>
