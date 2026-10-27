@@ -12,7 +12,8 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    #^ why ubuntu-24.04, not ubuntu-latest; latest = 26.04 has no Python 3.9 for setup-python
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         python-version: ['3.9', '3.10', '3.11', '3.12']
@@ -38,7 +39,8 @@ jobs:
         python3 -m pytest tests/unit/server/storage/test_factory.py tests/unit/server/mcp/test_protocol.py tests/unit/services/test_database_health_cluster.py -v --tb=short --deselect=tests/unit/server/storage/test_factory.py::TestSQLiteProtocolSatisfaction::test_dependency_map_tracking_satisfies_protocol
 
   lint:
-    runs-on: ubuntu-latest
+    #^ coupled Python 3.9 (mypy python_version) with ubuntu-24.04; ubuntu-latest = 26.04 lacks 3.9
+    runs-on: ubuntu-24.04
 
     steps:
     - uses: actions/checkout@v4
