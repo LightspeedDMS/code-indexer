@@ -311,6 +311,11 @@ class TestQueryAnalyticsExportServiceExcel:
             "door",
             "outcome",
             "error_class",
+            # Story #2203
+            "evaluator_sha256",
+            "xray_pattern_name",
+            "evaluator_source",
+            "evaluator_source_truncated",
         ]
         assert headers == expected
         # Data row

@@ -339,7 +339,9 @@ def xray_search(
         bind_xray_recorder,
         run_recorded_xray,
         writer_from_app,
+        xray_engine_started,
     )
+    from code_indexer.server.services.search_event_xray import XRayEvaluator
     from code_indexer.server.telemetry.correlation_bridge import (
         get_current_correlation_id,
     )
@@ -351,6 +353,7 @@ def xray_search(
         repo_alias=body.repository_alias,
         pattern=body.driver_regex,
         correlation_id=get_current_correlation_id(),
+        evaluator=XRayEvaluator(evaluator_code, body.pattern_name or None),
     )
 
     # cancel_check: BackgroundJobManager injects its cancellation check into
@@ -360,7 +363,7 @@ def xray_search(
 
         return run_recorded_xray(
             record_event,
-            lambda: _Engine().run(
+            lambda: xray_engine_started(record_event, _Engine()).run(
                 repo_path=repo_path,
                 driver_regex=body.driver_regex,
                 evaluator_code=evaluator_code,

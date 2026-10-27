@@ -26,17 +26,6 @@ use tempfile::TempDir;
 
 const MAX_CACHE_ENTRIES: usize = 100;
 
-/// H2 (consolidated review, Issue #1811/Bug #1812, Codex): a source-size
-/// cap, checked BEFORE validation/compilation ever runs. Real evaluator
-/// sources are at most a few hundred lines; this is a generous ceiling
-/// (2 MiB) whose only purpose is to reject a pathological payload cheaply
-/// rather than let it reach rustc at all.
-///
-/// Deliberately a hardcoded constant, NOT a Web-UI/config setting -- per
-/// this project's standing rule against adding configuration to gate a
-/// bug fix, and matching the sibling constants below.
-const MAX_USER_CODE_BYTES: usize = 2 * 1024 * 1024;
-
 /// Compile user evaluator code into a cached .so file.
 ///
 /// Pipeline: validate → hash → cache check → assemble → compile → save
@@ -237,24 +226,13 @@ pub(crate) fn chrono_now_iso() -> String {
     format!("{}s-since-epoch", duration.as_secs())
 }
 
-/// Steps 0-2 helper: rejects an oversized source (H2), validates it
-/// (sandbox rules), then classifies its evaluator mode SYNCHRONOUSLY --
+/// Steps 0-2 helper: validates the source (size and nesting limits, then
+/// sandbox rules), then classifies its evaluator mode SYNCHRONOUSLY --
 /// `detect_evaluator_mode` subsumes the old "must define evaluate_node"
 /// check: it IS that check for the Legacy case, plus the symmetric
 /// Graph-mode check ADR-001 requires, with mixed/incomplete callback
 /// families rejected as errors rather than silently guessed at.
 fn validate_and_classify(user_code: &str) -> Result<EvaluatorMode, CompileError> {
-    if user_code.len() > MAX_USER_CODE_BYTES {
-        return Err(CompileError {
-            message: format!(
-                "Evaluator source exceeds the maximum allowed size of {} bytes (got {} bytes)",
-                MAX_USER_CODE_BYTES,
-                user_code.len()
-            ),
-            details: vec![],
-            kind: CompileErrorKind::Compile,
-        });
-    }
     if let Err(errors) = validator::validate_evaluator_source(user_code) {
         return Err(CompileError {
             message: "Evaluator validation failed".to_string(),

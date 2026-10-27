@@ -369,8 +369,9 @@ class ApplicationMetrics:
                 f"Failed to record xray timeout config read failure metric: {e}"
             )
 
-    def record_search_event_dropped(self) -> None:
-        """Record one search event dropped on queue overflow (Bug #2114).
+    def record_search_event_dropped(self, count: int = 1) -> None:
+        """Record `count` search events dropped: queue overflow (Bug #2114)
+        or a failed batch insert (Story #2203).
 
         Viewed as a rate, it shows sustained recording overload that leaves
         Query Analytics exports short. Never raises.
@@ -379,7 +380,7 @@ class ApplicationMetrics:
             return
         try:
             assert self._search_event_dropped_counter is not None
-            self._search_event_dropped_counter.add(1)
+            self._search_event_dropped_counter.add(count)
         except Exception as e:
             logger.debug(f"Failed to record search event drop metric: {e}")
 

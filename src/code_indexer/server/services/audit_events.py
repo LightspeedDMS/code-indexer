@@ -37,6 +37,7 @@ from code_indexer.server.middleware.audit_request_context import (
     current_audit_request_context,
     current_mcp_principal,
 )
+from code_indexer.server.services.xray_pattern_names import is_storable_pattern_name
 
 OUTCOMES: FrozenSet[str] = frozenset({"success", "failure", "denied", "attempted"})
 AUTH_METHODS: FrozenSet[str] = frozenset(
@@ -127,6 +128,8 @@ CONFIG_KEY = FieldType(kind="config_key")
 CONFIG_VALUE_MAP = FieldType(kind="config_value_map", max_items=200)
 OPAQUE_ID_OR_ALL = FieldType(kind="opaque_id_or_all")
 CONFIG_KEY_OR_ALL = FieldType(kind="config_key_or_all")
+# Any name the X-Ray pattern library can store (xray_pattern_names).
+XRAY_PATTERN_NAME = FieldType(kind="xray_pattern_name")
 
 # The names account creation accepts (validate_username_path_safe): not
 # blank, not "." or "..", no "/", "\\", C0 control character or DEL.
@@ -187,6 +190,8 @@ def conforms(ftype: FieldType, value: Any) -> bool:
         return item is not None and all(conforms(item, v) for v in value)
     if kind == "config_value_map":
         return _conforms_config_value_map(ftype, value)
+    if kind == "xray_pattern_name":
+        return is_storable_pattern_name(value)
     if kind in ("opaque_id_or_all", "config_key_or_all"):
         if value == ALL_TARGETS_MARKER:
             return True
@@ -266,6 +271,8 @@ _API_KEY_PROVIDER = _enum("anthropic", "voyageai", "cohere")
 _INDEX_TYPE = _enum("semantic", "fts", "temporal", "scip")
 _BULK_LIST_MAX = 100
 _CONFIG_KEYS_MAX = 200
+# ^ coupled with server/mcp/handlers/xray_batch.py:_MAX_SCANS; a batch row lists <= one hash per scan
+_XRAY_SCANS_MAX = 50
 
 _ELEVATION = {"scope": _enum("full", "totp_repair"), "used_recovery_code": BOOL}
 _CREDENTIAL = {"credential_id": OPAQUE_ID, "for_self": BOOL}
@@ -332,6 +339,18 @@ AUDIT_ACTION_CATALOG: Dict[str, ActionSpec] = {
     "xray_pattern_stored": _spec(
         "xray_pattern",
         {"overwrite": BOOL, "global_scope": BOOL, "repo": REPO_ALIAS},
+    ),
+    # --- X-Ray evaluator runs: one row per search event row (Story #2203);
+    # the evaluator source itself is never in the audit log. Audit log only
+    # (not SIEM scope). ---
+    # ^ why QUEUED, not DURABLE; a synchronous insert would delay every X-Ray result; test:test_audit_row_is_handed_to_the_writer_not_written_inline
+    "xray_evaluator_executed": _spec(
+        "repo",
+        {
+            "evaluator_sha256s": _list(OPAQUE_ID, _XRAY_SCANS_MAX),
+            "pattern_names": _list(XRAY_PATTERN_NAME, _XRAY_SCANS_MAX),
+        },
+        _Q,
     ),
     # --- Golden repositories (job-based: a row means "submitted") ---
     "golden_repo_added": _spec(

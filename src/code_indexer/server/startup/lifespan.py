@@ -356,14 +356,33 @@ def _start_analysis_agent_credential_migration(app: Any, group_manager: Any) -> 
     )
 
 
+# ^ why 15 s, not the CLI timeouts' ~100 s; systemd default stop = 90 s for ALL of shutdown; normal migration < 5 s
+_MIGRATION_SHUTDOWN_WAIT_SECONDS = 15.0
+
+
 async def _stop_analysis_agent_credential_migration(app: Any) -> None:
-    """Cancel a still-running startup credential migration at shutdown."""
     task = getattr(app.state, "analysis_agent_credential_migration_task", None)
-    if task is None:
+    if task is None or task.done():
         return
-    if not task.done():
-        task.cancel()
-    await asyncio.gather(task, return_exceptions=True)
+    loop = asyncio.get_running_loop()
+    deadline = getattr(app.state, "analysis_agent_credential_migration_deadline", None)
+    if deadline is None:
+        deadline = loop.time() + _MIGRATION_SHUTDOWN_WAIT_SECONDS
+        app.state.analysis_agent_credential_migration_deadline = deadline
+    # ^ why asyncio.wait, not task.cancel() first; cancel abandons the thread => its audit rows after the writer stops = drops
+    await asyncio.wait({task}, timeout=max(0.0, deadline - loop.time()))
+    if task.done() or getattr(
+        app.state, "analysis_agent_credential_migration_abandoned", False
+    ):
+        return
+    logger.warning(
+        "Startup migration of the analysis agents' MCP credential still running "
+        "after the %g s shutdown bound; abandoning it, its late audit rows may "
+        "be dropped",
+        _MIGRATION_SHUTDOWN_WAIT_SECONDS,
+    )
+    app.state.analysis_agent_credential_migration_abandoned = True
+    task.cancel()
 
 
 def _wire_query_tracker_into_semantic_query_manager(

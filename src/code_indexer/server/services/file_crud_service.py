@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, Any, Optional, TYPE_CHECKING
 
-from code_indexer.utils.file_locking import nfs_safe_fsync
+from code_indexer.utils.file_locking import nfs_safe_fsync, nfs_safe_link_exclusive
 from code_indexer.utils.path_confinement import (
     reject_if_within_git_directory,
     reject_if_within_index_directory,
@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from code_indexer.server.services.cidx_meta_access.file_doors import (
         CatalogFileAccess,
     )
+    from code_indexer.server.services.xray_pattern_authority import PatternWriter
 
 logger = logging.getLogger(__name__)
 
@@ -339,6 +340,44 @@ class FileCRUDService:
         access = access_for(served) if access_for is not None else None
         refuse_hidden_catalog_writes(served, [file_path], access)
 
+    def _refuse_pattern_write(
+        self,
+        repo_alias: str,
+        repo_path: Path,
+        file_path: str,
+        resolved: Path,
+        replacing: bool,
+        writer: Optional["PatternWriter"],
+    ) -> None:
+        """The X-Ray pattern rule (``xray_pattern_authority``) for a write
+        on the catalog write exception, after the write-mode gate and before
+        anything is written. Judged: the path as requested (nothing
+        resolved), its link node and the *resolved* target, so a link
+        anywhere on the path never moves the decision."""
+        from code_indexer.server.services.constants import is_internal_meta_repo
+        from code_indexer.server.services.xray_pattern_authority import (
+            refuse_catalog_pattern_write,
+        )
+
+        if not (
+            self.is_write_exception(repo_alias) and is_internal_meta_repo(repo_alias)
+        ):
+            return
+        requested = Path(os.path.realpath(repo_path)) / os.path.normpath(file_path)
+        targets = [requested, self._lexical_node(repo_path, file_path), resolved]
+        refuse_catalog_pattern_write(
+            repo_path, targets, replacing=replacing, writer=writer
+        )
+
+    @staticmethod
+    def _lexical_node(repo_path: Path, file_path: str) -> Path:
+        """The node *file_path* names, its final component not followed:
+        the confined real parent joined with the literal name."""
+        name = Path(file_path).name
+        if name in ("", ".", ".."):
+            raise PermissionError("Access denied")
+        return resolve_confined_path(repo_path, str(Path(file_path).parent)) / name
+
     def _validate_path_or_refuse(
         self,
         repo_alias: str,
@@ -382,6 +421,7 @@ class FileCRUDService:
         content: str,
         username: str,
         access_for: Optional[AccessFor] = None,
+        pattern_writer: Optional["PatternWriter"] = None,
     ) -> Dict[str, Any]:
         """
         Create a new file in the activated repository.
@@ -432,6 +472,9 @@ class FileCRUDService:
         # plant a hook that executes on the server's next `git commit`.
         reject_if_within_git_directory(repo_path, full_path, "create_file")
         reject_if_within_index_directory(repo_path, full_path, "create_file")
+        self._refuse_pattern_write(
+            repo_alias, repo_path, file_path, full_path, False, pattern_writer
+        )
 
         # Check if file already exists
         if full_path.exists():
@@ -441,7 +484,10 @@ class FileCRUDService:
         full_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Atomic write
-        self._atomic_write_file(full_path, content)
+        try:
+            self._atomic_write_file(full_path, content, exclusive=True)
+        except FileExistsError:
+            raise FileExistsError(f"File already exists: {file_path}") from None
 
         # Compute hash and metadata
         content_bytes = content.encode("utf-8")
@@ -467,6 +513,7 @@ class FileCRUDService:
         replace_all: bool,
         username: str,
         access_for: Optional[AccessFor] = None,
+        pattern_writer: Optional["PatternWriter"] = None,
     ) -> Dict[str, Any]:
         """
         Edit a file by replacing string occurrences.
@@ -522,6 +569,9 @@ class FileCRUDService:
         # is confined to repo_path yet still resolves into ".git".
         reject_if_within_git_directory(repo_path, full_path, "edit_file")
         reject_if_within_index_directory(repo_path, full_path, "edit_file")
+        self._refuse_pattern_write(
+            repo_alias, repo_path, file_path, full_path, True, pattern_writer
+        )
 
         if not full_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
@@ -577,6 +627,7 @@ class FileCRUDService:
         content_hash: Optional[str],
         username: str,
         access_for: Optional[AccessFor] = None,
+        pattern_writer: Optional["PatternWriter"] = None,
     ) -> Dict[str, Any]:
         """
         Delete a file from the activated repository.
@@ -652,11 +703,7 @@ class FileCRUDService:
         # own real, in-repo location and joins the literal name onto it --
         # removing only the symlink node, never its target, exactly as
         # round 2 intended.
-        name = Path(file_path).name
-        if name in ("", ".", ".."):
-            raise PermissionError("Access denied")
-        confined_parent = resolve_confined_path(repo_path, str(Path(file_path).parent))
-        lexical_path = confined_parent / name
+        lexical_path = self._lexical_node(repo_path, file_path)
 
         # Bug #1891 (final SECURITY round): see create_file's identical
         # comment -- a tracked in-repo symlink (e.g. "gitlink" -> ".git")
@@ -670,6 +717,9 @@ class FileCRUDService:
         reject_if_within_git_directory(repo_path, lexical_path, "delete_file")
         reject_if_within_index_directory(repo_path, full_path, "delete_file")
         reject_if_within_index_directory(repo_path, lexical_path, "delete_file")
+        self._refuse_pattern_write(
+            repo_alias, repo_path, file_path, full_path, True, pattern_writer
+        )
 
         if not full_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
@@ -756,7 +806,11 @@ class FileCRUDService:
         return hashlib.sha256(content).hexdigest()
 
     def _atomic_write_file(
-        self, full_path: Path, content: str, has_bom: bool = False
+        self,
+        full_path: Path,
+        content: str,
+        has_bom: bool = False,
+        exclusive: bool = False,
     ) -> None:
         """
         Atomically write content to file using temp file + rename pattern.
@@ -765,8 +819,11 @@ class FileCRUDService:
             full_path: Full path to target file
             content: Content to write as string
             has_bom: If True, write with UTF-8 BOM (Bug #570)
+            exclusive: publish only if the target does not exist (the
+                absence check and the creation are one operation)
 
         Raises:
+            FileExistsError: *exclusive* and the target exists (untouched)
             CRUDOperationError: If write operation fails
         """
         try:
@@ -784,8 +841,20 @@ class FileCRUDService:
                     temp_file.flush()
                     nfs_safe_fsync(temp_file.fileno())
 
-                # Atomic rename (POSIX guarantees atomicity)
-                os.replace(temp_path, str(full_path))
+                if exclusive:
+                    nfs_safe_link_exclusive(temp_path, str(full_path))
+                    try:
+                        os.remove(temp_path)
+                    except OSError as exc:
+                        logger.warning(
+                            "File %s is published but its temp name could "
+                            "not be removed (%s)",
+                            full_path.name,
+                            type(exc).__name__,
+                        )
+                else:
+                    # Atomic rename (POSIX guarantees atomicity)
+                    os.replace(temp_path, str(full_path))
 
             except Exception:
                 # Clean up temp file on failure
@@ -793,6 +862,8 @@ class FileCRUDService:
                     os.remove(temp_path)
                 raise
 
+        except FileExistsError:
+            raise
         except Exception as e:
             raise CRUDOperationError(
                 f"Failed to write file '{full_path}': {str(e)}"

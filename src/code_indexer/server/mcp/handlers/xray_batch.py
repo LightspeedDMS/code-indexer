@@ -22,10 +22,11 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, cast
+from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.services.search_event_recording import SearchOrigin
+from code_indexer.server.services.search_event_xray import XRayEvaluator
 from code_indexer.xray.rust_backend import SharedIdentityCache
 from code_indexer.xray.sandbox import validate_rust_evaluator
 from code_indexer.xray.search_engine import XRaySearchEngine
@@ -323,6 +324,7 @@ def _run_xray_batch_job(
     bjm: Any,
     progress_callback: Any,
     refresh_scheduler: Optional[object] = None,
+    on_cell_started: Optional[Callable[[str, int, str], None]] = None,
 ) -> Dict[str, Any]:
     """Execute the repos × scans matrix.
 
@@ -444,7 +446,11 @@ def _run_xray_batch_job(
                     if _jid:
                         bjm.register_child_process(_jid, proc)
 
-                cell = XRaySearchEngine(identity_cache=identity_cache).run(
+                engine = XRaySearchEngine(identity_cache=identity_cache)
+                # ^ order on_cell_started after construction, before run; a cell that never runs names no evaluator
+                if on_cell_started is not None:
+                    on_cell_started(repo["alias"], scan_index, eval_code)
+                cell = engine.run(
                     repo_path=repo["path"],
                     driver_regex=scan["driver_regex"],
                     evaluator_code=eval_code,
@@ -845,6 +851,13 @@ def handle_xray_search_batch(
         get_current_correlation_id,
     )
 
+    # ^ invariant job-local; one worker thread fills it as each cell starts (#2203)
+    batch_evaluators: Dict[Optional[str], List[XRayEvaluator]] = {}
+
+    def _note_cell_started(alias: str, scan_index: int, code: str) -> None:
+        pattern_name = captured_scans[scan_index].get("pattern_name") or None
+        batch_evaluators.setdefault(alias, []).append(XRayEvaluator(code, pattern_name))
+
     record_event = bind_xray_recorder(
         writer_from_app(_lazy_singleton_app_or_none()),
         origin=origin or SearchOrigin(tool="xray_search_batch", door="mcp"),
@@ -853,6 +866,7 @@ def handle_xray_search_batch(
         pattern=" | ".join(scan["driver_regex"] for scan in captured_scans),
         correlation_id=get_current_correlation_id(),
         batch_repositories=[repo["alias"] for repo in captured_repos],
+        batch_evaluators=batch_evaluators,
     )
 
     # cancel_check: injected by BackgroundJobManager (declared parameter); a
@@ -871,6 +885,7 @@ def handle_xray_search_batch(
                 bjm=bjm,
                 progress_callback=progress_callback,
                 refresh_scheduler=captured_scheduler,
+                on_cell_started=_note_cell_started,
             ),
             cancel_check,
         )

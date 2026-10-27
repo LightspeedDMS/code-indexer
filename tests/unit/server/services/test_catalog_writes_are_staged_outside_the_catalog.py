@@ -100,29 +100,35 @@ def _no_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
 def replaces(
     monkeypatch: pytest.MonkeyPatch, catalog: Path
 ) -> Callable[[Path, Set[str], str], List[Path]]:
-    """Arm a spy on os.replace for *target*: when the target moves in, the
-    catalog holds exactly *expected* files and the target still holds
-    *previous* ("" when absent). Returns the list of replaced targets."""
-    real_replace = os.replace
+    """Arm a spy on os.replace and os.link (a new file's exclusive publish)
+    for *target*: when the target moves in, the catalog holds exactly
+    *expected* files and the target still holds *previous* ("" when absent).
+    Returns the list of published targets."""
     seen: List[Path] = []
     armed: Dict[str, Any] = {}
 
-    def _spy(src: Any, dst: Any, *args: Any, **kwargs: Any) -> None:
-        destination = Path(os.fspath(dst))
-        if destination.resolve() == armed["target"].resolve():
-            assert _catalog_files(catalog) == armed["expected"], (
-                "a temp file is visible inside the catalog while it is written"
-            )
-            previous = destination.read_text("utf-8") if destination.exists() else ""
-            assert previous == armed["previous"], "the target was written in place"
-            seen.append(destination)
-        real_replace(src, dst, *args, **kwargs)
+    def _spying(real: Callable[..., None]) -> Callable[..., None]:
+        def _spy(src: Any, dst: Any, *args: Any, **kwargs: Any) -> None:
+            destination = Path(os.fspath(dst))
+            if destination.resolve() == armed["target"].resolve():
+                assert _catalog_files(catalog) == armed["expected"], (
+                    "a temp file is visible inside the catalog while it is written"
+                )
+                previous = (
+                    destination.read_text("utf-8") if destination.exists() else ""
+                )
+                assert previous == armed["previous"], "the target was written in place"
+                seen.append(destination)
+            real(src, dst, *args, **kwargs)
+
+        return _spy
 
     def _arm(target: Path, expected: Set[str], previous: str) -> List[Path]:
         armed.update(target=target, expected=expected, previous=previous)
         return seen
 
-    monkeypatch.setattr(os, "replace", _spy)
+    monkeypatch.setattr(os, "replace", _spying(os.replace))
+    monkeypatch.setattr(os, "link", _spying(os.link))
     return _arm
 
 

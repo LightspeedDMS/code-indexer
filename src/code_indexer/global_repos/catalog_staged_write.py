@@ -14,6 +14,9 @@ import os
 import tempfile
 import time
 from pathlib import Path
+from typing import NamedTuple, Tuple
+
+from code_indexer.utils.file_locking import nfs_safe_link_exclusive
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +82,14 @@ def _drop_staged_name(tmp_path: str) -> None:
         logger.debug("write_catalog_file: staged name not removed: %s", exc)
 
 
+class CatalogPublish(NamedTuple):
+    """*durable*: the directory was fsync'd too; *identity*: (st_dev,
+    st_ino) of the published file, taken from the staged file itself."""
+
+    durable: bool
+    identity: Tuple[int, int]
+
+
 def write_catalog_file(
     catalog_root: Path,
     target_path: Path,
@@ -97,6 +108,20 @@ def write_catalog_file(
     Returns False when the content is in place but its directory could not
     be fsync'd (logged): the caller then owes the refresh. Any failure before
     the move removes the temp file and propagates."""
+    return publish_catalog_file(
+        catalog_root, target_path, content, mode=mode, exclusive=exclusive
+    ).durable
+
+
+def publish_catalog_file(
+    catalog_root: Path,
+    target_path: Path,
+    content: str,
+    *,
+    mode: int,
+    exclusive: bool = False,
+) -> CatalogPublish:
+    """``write_catalog_file``, also returning the published file's identity."""
     target_path.parent.mkdir(parents=True, exist_ok=True)
     target_dir = Path(os.path.realpath(target_path.parent))
     staging_dir = Path(os.path.realpath(catalog_root)).parent / STAGING_DIR_NAME
@@ -112,8 +137,10 @@ def write_catalog_file(
             fh.write(content)
             fh.flush()
             os.fsync(fh.fileno())
+            staged = os.fstat(fh.fileno())
+        identity = (staged.st_dev, staged.st_ino)
         if exclusive:
-            os.link(tmp_path, str(target_dir / target_path.name))
+            nfs_safe_link_exclusive(tmp_path, str(target_dir / target_path.name))
             _drop_staged_name(tmp_path)
         else:
             os.replace(tmp_path, str(target_dir / target_path.name))
@@ -142,5 +169,5 @@ def write_catalog_file(
             type(exc).__name__,
             exc,
         )
-        return False
-    return True
+        return CatalogPublish(False, identity)
+    return CatalogPublish(True, identity)

@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from code_indexer.server.auth.user_manager import User, UserRole
+from code_indexer.server.auth.user_manager import User
+from code_indexer.server.services.xray_pattern_authority import (
+    PatternWriter,
+    may_write_scope,
+)
 
 from ._infra import _get_cidx_meta_path
 
@@ -14,37 +18,16 @@ from .._utils import _mcp_response
 _WRITE_PERMISSION = "repository:write"
 
 
-def _scope_refusal(scope: str, user: User) -> Optional[Dict[str, Any]]:
-    """Refusal for a repository scope the caller is not granted, else None.
-
-    The ``__any__`` scope names no repository. Any other scope is judged by
-    golden repository name, like the dispatcher's repository guard, and an
-    ungranted alias gets the same answer as one that does not exist. Without
-    an access filtering service every repository scope is refused.
-    """
-    from code_indexer.server.services.access_filtering_service import (
-        AccessFilteringService,
-    )
-    from code_indexer.server.services.xray_pattern_service import XrayPatternService
-
-    if scope == XrayPatternService.ANY_SCOPE:
-        return None
-    access = _utils._get_access_filtering_service()
-    granted = access is not None and (
-        access.is_admin_user(user.username)
-        or AccessFilteringService.alias_granted(
-            scope, access.get_accessible_repos(user.username), {}
-        )
-    )
-    if granted:
+def _scope_refusal(scope: str, writer: PatternWriter) -> Optional[Dict[str, Any]]:
+    """Refusal for a repository scope the caller is not granted
+    (``may_write_scope``), else None. An ungranted alias gets the same
+    answer as one that does not exist."""
+    if may_write_scope(scope, writer):
         return None
     return {
         "success": False,
         "error": "access_denied",
-        "message": (
-            f"Access denied: repository '{scope}' is not accessible to user "
-            f"'{user.username}'"
-        ),
+        "message": "Access denied: the repository scope is not accessible.",
     }
 
 
@@ -90,7 +73,8 @@ def handle_store_xray_pattern(params: Dict[str, Any], user: User) -> Dict[str, A
                 "message": "pattern_yaml parameter is required",
             }
         )
-    refusal = _scope_refusal(scope, user)
+    writer = PatternWriter.of(user, _utils._get_access_filtering_service())
+    refusal = _scope_refusal(scope, writer)
     if refusal is not None:
         from code_indexer.server.services.xray_pattern_service import (
             record_refused_pattern_store,
@@ -111,6 +95,6 @@ def handle_store_xray_pattern(params: Dict[str, Any], user: User) -> Dict[str, A
         pattern_yaml=pattern_yaml,
         overwrite=overwrite,
         actor=user.username,
-        may_replace_global=user.role == UserRole.ADMIN,
+        may_replace_global=writer.admin_role,
     )
     return _mcp_response(result)

@@ -28,6 +28,7 @@ handoff leaves a pending record in the cluster-shared PayloadCache
 result records it once per caller (`record_deferred_search`).
 """
 
+import contextvars
 import functools
 import hashlib
 import json
@@ -45,7 +46,6 @@ from typing import (
     Optional,
     Sequence,
     Sized,
-    Tuple,
     TypeVar,
     Union,
     cast,
@@ -61,6 +61,14 @@ from code_indexer.server.services.search_event_log_writer import (
     SEARCH_EVENT_DOORS,
     TOOL_MAX_CHARS,
     SearchEventRecord,
+)
+from code_indexer.server.services.search_event_xray import (
+    XRayEvaluator,
+    XRayIdentity,
+    XRayRow,
+    audit_xray_run,
+    xray_event_rows,
+    xray_identity,
 )
 from code_indexer.server.utils.runtime_node_id import resolve_runtime_node_id
 
@@ -138,6 +146,7 @@ def _enqueue(
     correlation_id: Optional[str],
     context: Optional[Union[SearchEventContext, ProviderCacheFields]],
     error_class: Optional[str] = None,
+    xray: Optional[XRayIdentity] = None,
 ) -> None:
     """Build one SearchEventRecord and enqueue it. Raises on any error.
 
@@ -180,6 +189,9 @@ def _enqueue(
             door=origin.door if origin is not None else None,
             outcome=_SUCCESS if error_class is None else _FAILURE,
             error_class=error_class,
+            evaluator_sha256=xray.column_sha256 if xray else None,
+            xray_pattern_name=xray.column_pattern_names if xray else None,
+            evaluator_sources=xray.sources if xray else (),
         )
     )
 
@@ -695,6 +707,8 @@ def record_xray_search(
     cancelled: Optional[Callable[[], bool]] = None,
     error: Optional[BaseException] = None,
     batch_repositories: Optional[Sequence[str]] = None,
+    evaluators: Optional[Mapping[Optional[str], Sequence[XRayEvaluator]]] = None,
+    audit_context: Optional[contextvars.Context] = None,
 ) -> None:
     """Record one X-Ray search (Story #2107).
 
@@ -707,49 +721,39 @@ def record_xray_search(
     batch over `batch_repositories` is one row per repository (Bug #2111,
     `xray_batch_repository_rows`). query_text is the driver pattern -- never
     evaluator source; result_count is the number of matches.
+
+    Story #2203: each row carries the evaluators its repository ran
+    (`evaluators[alias]`; a batch row lists all its scans'), and each row
+    gets one xray_evaluator_executed audit row built in `audit_context`.
     """
-    if writer is None:
-        return
+    rows: List[XRayRow] = []
+    identities: Dict[Optional[str], XRayIdentity] = {}
     with _never_raise("xray"):
-        if (cancelled is not None and cancelled()) or (
-            result is not None and result.get("cancelled")
-        ):
-            return
-        repositories: List[Optional[str]] = (
-            list(batch_repositories) if batch_repositories else [repo_alias]
-        )
-        rows: List[Tuple[Optional[str], int, Optional[str]]]
-        if error is not None:
-            error_class = outcomes.failure_error_class(error)
-            if error_class is None:
-                return
-            rows = [(alias, 0, error_class) for alias in repositories]
-        elif result is None:
-            raise ValueError("record_xray_search needs a result or an error")
-        elif batch_repositories:
-            rows = list(outcomes.xray_batch_repository_rows(result, batch_repositories))
-        else:
-            rows = [
-                (
-                    repo_alias,
-                    len(result.get("matches") or []),
-                    outcomes.xray_result_outcome(result),
+        rows = xray_event_rows(repo_alias, result, cancelled, error, batch_repositories)
+        identities = {
+            row[0]: xray_identity((evaluators or {}).get(row[0], ())) for row in rows
+        }
+        if writer is not None:
+            for row_alias, count, error_class in rows:
+                _enqueue(
+                    writer,
+                    origin=origin,
+                    username=username,
+                    repo_alias=row_alias,
+                    search_type="xray",
+                    query_text=pattern,
+                    result_count=count,
+                    total_latency_ms=elapsed_ms(started_monotonic),
+                    correlation_id=correlation_id,
+                    context=None,
+                    error_class=error_class,
+                    xray=identities[row_alias],
                 )
-            ]
-        for row_alias, count, error_class in rows:
-            _enqueue(
-                writer,
-                origin=origin,
-                username=username,
-                repo_alias=row_alias,
-                search_type="xray",
-                query_text=pattern,
-                result_count=count,
-                total_latency_ms=elapsed_ms(started_monotonic),
-                correlation_id=correlation_id,
-                context=None,
-                error_class=error_class,
-            )
+    # ^ invariant one audit row per recorded row whose evaluator started, writer wired or not
+    for row in rows:
+        if identities[row[0]].sources:
+            with _never_raise("xray audit"):
+                audit_xray_run(username, row, identities[row[0]], audit_context)
 
 
 def record_regex_search(
@@ -1014,18 +1018,36 @@ def bind_xray_recorder(
     pattern: str,
     correlation_id: Optional[str],
     batch_repositories: Optional[Sequence[str]] = None,
+    evaluator: Optional[XRayEvaluator] = None,
+    batch_evaluators: Optional[Mapping[Optional[str], Sequence[XRayEvaluator]]] = None,
 ) -> "XRayRecorder":
     """Bind an X-Ray search's request-time fields; call the result with the
     job's result (and its cancellation check) when it completes. The latency
     clock starts now. A batch passes the repositories it resolved
-    (`batch_repositories`): one row per repository."""
+    (`batch_repositories`): one row per repository.
+
+    Story #2203: a single search passes the `evaluator` it runs, counted
+    only once the door calls `started()` (its engine is constructed); a
+    batch passes `batch_evaluators`, which its job fills as each cell
+    starts. The request's context is captured now for the audit row."""
     started = time.monotonic()
+    audit_context = contextvars.copy_context()
 
     def _record(
         result: Optional[Dict[str, Any]],
-        cancelled: Optional[Callable[[], bool]] = None,
-        error: Optional[BaseException] = None,
+        cancelled: Optional[Callable[[], bool]],
+        error: Optional[BaseException],
+        evaluator_started: bool,
     ) -> None:
+        evaluators: Mapping[Optional[str], Sequence[XRayEvaluator]] = (
+            batch_evaluators
+            if batch_evaluators is not None
+            else (
+                {repo_alias: (evaluator,)}
+                if evaluator is not None and evaluator_started
+                else {}
+            )
+        )
         record_xray_search(
             writer,
             origin=origin,
@@ -1038,14 +1060,40 @@ def bind_xray_recorder(
             cancelled=cancelled,
             error=error,
             batch_repositories=batch_repositories,
+            evaluators=evaluators,
+            audit_context=audit_context,
         )
 
-    return _record
+    return XRayRecorder(_record)
 
 
-# What bind_xray_recorder returns: call with (result, cancelled check), or
-# with (None, cancelled check, error=exc) when the job raised (Story #2117).
-XRayRecorder = Callable[..., None]
+class XRayRecorder:
+    # ^ see bind_xray_recorder; call (result, cancelled) or (None, cancelled, error=exc)
+
+    def __init__(self, record: Callable[..., None]) -> None:
+        self._record = record
+        self._evaluator_started = False
+
+    def started(self) -> None:
+        # ^ order call after the engine is constructed, before run; never started => no hash, no audit
+        self._evaluator_started = True
+
+    def __call__(
+        self,
+        result: Optional[Dict[str, Any]],
+        cancelled: Optional[Callable[[], bool]] = None,
+        error: Optional[BaseException] = None,
+    ) -> None:
+        self._record(result, cancelled, error, self._evaluator_started)
+
+
+_Engine = TypeVar("_Engine")
+
+
+def xray_engine_started(recorder: XRayRecorder, engine: _Engine) -> _Engine:
+    # ^ order engine constructed (the argument) before started(); a failed constructor marks nothing
+    recorder.started()
+    return engine
 
 
 def run_recorded_xray(

@@ -49,7 +49,7 @@ GIT_TIMEOUT_SECONDS = 60
 _SYNTHETIC_REPO = "test builds a temp repository containing these fake doc paths"
 _PATH_AS_DATA = "test passes fake repository-relative doc paths as plain data"
 _BROKEN_BY_DESIGN = "edge-case corpus whose broken image links are the test subject"
-_VALIDATOR_INPUT = 'include_str!("secret.txt") is validator test INPUT in a string'
+_VALIDATOR_INPUT = 'include_str!("data.txt") is validator test INPUT in a string'
 _FIXTURE_REPO_README = "README of a fixture repo; its docs/ paths are the fixture's"
 
 # Tracked files that build synthetic repositories or use fake doc paths as
@@ -67,7 +67,7 @@ FIXTURE_ALLOWLIST: Mapping[str, str] = {
     # docstrings and regex comments; the tests build synthetic repos.
     "scripts/check_doc_references.py": "example doc paths in docstrings/comments",
     "tests/unit/scripts/test_check_doc_references.py": _SYNTHETIC_REPO,
-    "rust/xray-core/src/validator.rs": _VALIDATOR_INPUT,
+    "rust/xray-core/src/validator/tests_constructs.rs": _VALIDATOR_INPUT,
     "rust/xray-core/tests/s0a_validator_reject_sites.rs": _VALIDATOR_INPUT,
     "test-fixtures/versioned_fresh/v_fresh/README.md": _FIXTURE_REPO_README,
     "test-fixtures/versioned_test/v_123456/README.md": _FIXTURE_REPO_README,

@@ -36,6 +36,7 @@ _SAMPLE_BY_KIND: Dict[str, Any] = {
     "config_key": "golden_repos.refresh_interval_seconds",
     "opaque_id_or_all": "7",
     "config_key_or_all": "golden_repos",
+    "xray_pattern_name": "example-pattern",
 }
 
 
@@ -119,6 +120,16 @@ def test_repo_alias_rejects_urls(value) -> None:
             "provider_index_bulk_added",
             {"provider": "cohere", "aliases": [value], "job_ids": ["j1"]},
         )
+
+
+@pytest.mark.parametrize("value", ["a/b", "a\\b", "..", ""])
+def test_xray_pattern_name_rejects_names_the_pattern_library_refuses(value) -> None:
+    with pytest.raises(AuditDetailsSchemaViolation) as info:
+        validate_details(
+            "xray_evaluator_executed",
+            {"evaluator_sha256s": ["a" * 64], "pattern_names": [value]},
+        )
+    assert info.value.field == "pattern_names"
 
 
 def test_git_ref_rejects_url() -> None:

@@ -62,6 +62,7 @@
 - [Prove root cause](feedback_prove_root_cause_before_fix.md) - prove stall/concurrency causes with py-spy first
 - [Description scheduler](feedback_description_refresh_scheduler_requires_staging_validation.md) - scheduler changes need staging validation (cost risk)
 - [X-Ray not in dashboard](feedback_xray_queries_not_in_dashboard.md) - xray_search jobs stay out of the dashboard
+- [Fast = unit tests](feedback_fast_automation_unit_tests_only.md) - real cidx-process tests go to slow-automation, which must stay a gate
 - [Test timeouts](feedback_run_tests_with_timeout_and_monitor.md) - never launch tests without a timeout
 - [Gate on pytest exit](feedback_test_gate_must_check_pytest_exit.md) - `pytest | tail && commit` gates on tail; capture pytest's own rc
 - [Faithful DB mocks](feedback_faithful_db_mocks.md) - DB mocks mirror the real driver; verify on real PG
@@ -140,7 +141,7 @@
 - [Backlog to zero](project_backlog_clear_to_zero_mandate.md) - clear the bug backlog, running tally
 - [Backlog closing E2E](project_backlog_clear_ends_with_staging_e2e.md) - at priority-4-only, raise staging E2E (discuss first)
 - [Batch 1950-1956](project_batch_1950_1956_pending_staging.md) - NOT done until driven through both staging front doors
-- [Package 12.94 resume](project_package_12_94_resume_state.md) - READ FIRST after a reset: 12.95.0 validated on staging; 12.96.0 committed on development, bump + staging push/validation next, then stop
+- [Package 12.94 resume](project_package_12_94_resume_state.md) - READ FIRST after a reset: 12.97.0 validated on staging; 12.98.0 gates green, then bump + staging validation; the test-suite package follows
 - [Package 2087 resume](project_release_package_2087_resume_state.md) - READ FIRST after a reset: 12.87.0 in production; release issues closed, review follow-ups stay open
 - [Release 1873-1876](project_release_1873_1876_overnight_state.md) - resume state for the 2026-09-16 release
 - [Backlog paused 08-27](project_backlog_session_paused_2026_08_27.md) - resume state for the 2026-08-27 sweep (supersedes [VM migration pause](project_backlog_session_paused_for_vm_migration.md))

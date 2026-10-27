@@ -48,6 +48,12 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
+from code_indexer.xray.rust_source_limits import find_source_limit_violation
+from code_indexer.xray.rust_std_paths import (
+    PERMITTED_STD_PATHS,
+    find_std_path_violations,
+)
+
 if TYPE_CHECKING:
     from code_indexer.xray.xray_node import XRayNode
 
@@ -1217,12 +1223,6 @@ def _run_driver_batch(
 _RUST_FORBIDDEN_PATTERNS: list[tuple[str, str, str]] = [
     # Unsafe code — top priority
     ("forbidden_unsafe", "unsafe", r"\bunsafe\b"),
-    # Forbidden std namespaces
-    ("forbidden_stdlib", "std::fs", r"\bstd::fs\b"),
-    ("forbidden_stdlib", "std::net", r"\bstd::net\b"),
-    ("forbidden_stdlib", "std::process", r"\bstd::process\b"),
-    ("forbidden_stdlib", "std::env", r"\bstd::env\b"),
-    ("forbidden_stdlib", "std::io", r"\bstd::io\b"),
     # Raw pointer types
     ("forbidden_raw_ptr", "*const", r"\*const\b"),
     ("forbidden_raw_ptr", "*mut", r"\*mut\b"),
@@ -1471,6 +1471,17 @@ def validate_rust_evaluator(code: str) -> ValidationResult:
         ``ok=False`` with ``error_code``, ``reason``, ``offending_construct``,
         and ``offending_line`` describing the first violation found.
     """
+    limit_violation = find_source_limit_violation(code)
+    if limit_violation is not None:
+        limit_code, limit_line, limit_reason = limit_violation
+        return ValidationResult(
+            ok=False,
+            reason=limit_reason,
+            error_code=limit_code,
+            offending_construct=limit_code,
+            offending_line=limit_line,
+        )
+
     has_legacy_entry_point, has_graph_entry_point = detect_evaluator_entry_points(code)
     if not has_legacy_entry_point and not has_graph_entry_point:
         # Bug #1955 defect 5: name the construct the user ACTUALLY left
@@ -1506,6 +1517,7 @@ def validate_rust_evaluator(code: str) -> ValidationResult:
     # inside a string literal or comment is misread as real code. Line
     # numbers stay correct: blanking preserves every newline.
     scannable_code = _blank_out_strings_and_comments(code)
+    std_violations = find_std_path_violations(scannable_code)
     for lineno, line in enumerate(scannable_code.splitlines(), start=1):
         for error_code, construct, pattern in _RUST_COMPILED_PATTERNS:
             if pattern.search(line):
@@ -1516,6 +1528,26 @@ def validate_rust_evaluator(code: str) -> ValidationResult:
                     offending_construct=construct,
                     offending_line=lineno,
                 )
+
+        std_construct = std_violations.get(lineno)
+        if std_construct is not None:
+            return ValidationResult(
+                ok=False,
+                reason=(
+                    f"forbidden construct '{std_construct}' is not allowed in Rust "
+                    "evaluator code (permitted standard-library paths: std::{"
+                    + ", ".join(
+                        p[len("std::") :]
+                        for p in PERMITTED_STD_PATHS
+                        if p.startswith("std::")
+                    )
+                    + "} and the same modules under core::/alloc:: where they exist; "
+                    "renaming a standard-library path is not allowed)"
+                ),
+                error_code="forbidden_stdlib",
+                offending_construct=std_construct,
+                offending_line=lineno,
+            )
 
         disallowed_macro = _find_disallowed_macro_invocation(line)
         if disallowed_macro is not None:

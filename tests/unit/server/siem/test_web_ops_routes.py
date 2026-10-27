@@ -17,6 +17,10 @@ from .conftest import harness_destination
 from .test_ops_documents import _halt_on
 from .test_ops_pages import _destination, _seed_batch, _seed_queue
 from .web_ops_harness import ADMIN, OpsEnv, build_app, make_scheduler
+from code_indexer.server.services.siem_delivery.canary import synthetic_events
+
+# One canary event per UDM mapping entry, plus the unmapped one.
+_CANARY_EVENTS = len(synthetic_events("example-run"))
 
 ARMING = "/admin/siem-delivery/partials/arming"
 RECOVERY = "/admin/siem-delivery/partials/recovery"
@@ -103,7 +107,7 @@ def _prepare(ops: OpsEnv, action: str) -> Tuple[str, Dict[str, Any]]:
 
 OUTCOMES = {
     "canary": "Canary run",
-    "confirm_visible": "Confirmed 34 of 34",
+    "confirm_visible": f"Confirmed {_CANARY_EVENTS} of {_CANARY_EVENTS}",
     "resume": "resumed: false",
     "requeue": "Requeued 2 events",
     "acknowledge": "Acknowledged batch batch-halted (3 events",

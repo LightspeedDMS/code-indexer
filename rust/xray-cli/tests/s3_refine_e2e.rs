@@ -22,18 +22,11 @@ use xray_core::graph::analyze::result::AnalyzeStatus;
 
 const E2E_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How long the timeout test's compiled evaluator sleeps for -- deliberately
-/// far longer than `CHILD_TIMEOUT_FOR_HANG_TEST`, so the child is always
-/// still sleeping (never finished) when the parent's timeout fires.
-const HANGING_EVALUATOR_SLEEP_SECS: u64 = 10;
-/// The `run_analyze_child` timeout for the hang test -- far shorter than
-/// `HANGING_EVALUATOR_SLEEP_SECS`, so the kill fires well before the
-/// child's own sleep would ever return naturally.
+// ^ invariant HANGING_EVALUATOR_ITERATIONS runs >> CHILD_TIMEOUT_FOR_HANG_TEST; loop is plain arithmetic (no std::thread/std::time in evaluators)
+const HANGING_EVALUATOR_ITERATIONS: u64 = 5_000_000_000;
+// ^ invariant CHILD_TIMEOUT_FOR_HANG_TEST < loop run time => the kill fires before the loop returns
 const CHILD_TIMEOUT_FOR_HANG_TEST: Duration = Duration::from_millis(500);
-/// Upper bound on how long `run_analyze_child` itself may take to notice
-/// the timeout, kill the child, and return -- must be well under
-/// `HANGING_EVALUATOR_SLEEP_SECS`, proving the kill actually happened
-/// rather than the test merely waiting out the sleep.
+// ^ invariant MAX_ACCEPTABLE_KILL_LATENCY < loop run time => the test proves a kill, not a wait
 const MAX_ACCEPTABLE_KILL_LATENCY: Duration = Duration::from_secs(5);
 
 // `file`/`line` exist only to match the real JSON shape byte-for-byte
@@ -165,9 +158,9 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult { 
 }
 
 /// THE AC5 discriminating proof: a `--refine` child running an evaluator
-/// that calls `std::thread::sleep` for a PROVABLY-TERMINATING (Rule 14),
-/// but deliberately long, duration -- far longer than this test's own
-/// timeout -- must be KILLED mid-sleep by the SAME `run_analyze_child`
+/// that runs a PROVABLY-TERMINATING (Rule 14), but deliberately long, busy
+/// loop -- far longer than this test's own timeout -- must be KILLED
+/// mid-loop by the SAME `run_analyze_child`
 /// timeout mechanism `--analyze-graph` already relies on, and reported as
 /// the distinct `TimedOut` status. This is the literal reuse claim AC5
 /// makes: the refine child "carries the same cgroup ceiling and
@@ -177,25 +170,35 @@ fn a_hanging_refine_child_is_killed_at_timeout_via_the_same_container_analyze_gr
     let dir = tempfile::tempdir().expect("create temp dir");
     let (graph_path, files_from_path) = write_repo_fixture(dir.path());
 
-    let sleeping_code = format!(
+    let looping_code = format!(
         r#"
 fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> {{ Vec::new() }}
 fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {{ GraphResult::default() }}
 fn refine(node: &OwnedNode, ctx: &FileContext, g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> Vec<EvalFinding> {{
-    std::thread::sleep(std::time::Duration::from_secs({sleep_secs}));
+    let mut x: u64 = node.start_byte as u64 | 1;
+    let mut i: u64 = 0;
+    while i < {iterations} {{
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        i += 1;
+    }}
+    if x == 0 {{
+        return vec![EvalFinding {{ pattern: "never".to_string(), line: node.start_line, snippet: format!("{{}}", x) }}];
+    }}
     Vec::new()
 }}
 "#,
-        sleep_secs = HANGING_EVALUATOR_SLEEP_SECS,
+        iterations = HANGING_EVALUATOR_ITERATIONS,
     );
-    let cr = xray_core::compiler::compile_evaluator(&sleeping_code, dir.path()).expect("must compile");
+    let cr = xray_core::compiler::compile_evaluator(&looping_code, dir.path()).expect("must compile");
     let command = build_refine_command(&graph_path, &cr.so_path, dir.path(), &files_from_path);
 
     let start = std::time::Instant::now();
     let (status, result) = run_analyze_child::<RefineBatchResultMirror>(command, CHILD_TIMEOUT_FOR_HANG_TEST);
     let elapsed = start.elapsed();
 
-    assert_eq!(status, AnalyzeStatus::TimedOut, "a refine child still sleeping past its timeout must be reported as TimedOut");
+    assert_eq!(status, AnalyzeStatus::TimedOut, "a refine child still looping past its timeout must be reported as TimedOut");
     assert!(result.is_none());
     assert!(
         elapsed < MAX_ACCEPTABLE_KILL_LATENCY,

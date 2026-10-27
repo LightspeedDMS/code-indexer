@@ -62,6 +62,7 @@ def validate_key(raw: bytes, source: str) -> bytes:
 def _create_exclusively(path: Path) -> None:
     """Hard-link a complete new key file into *path* unless one exists."""
     from code_indexer.server.services.locked_secret_file import fsync_dir, write_all
+    from code_indexer.utils.file_locking import nfs_safe_link_exclusive
 
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -72,7 +73,7 @@ def _create_exclusively(path: Path) -> None:
         finally:
             os.close(fd)
         try:
-            os.link(tmp, path)
+            nfs_safe_link_exclusive(tmp, path)
         except FileExistsError:
             pass  # a concurrent creator won; its key is read below
     finally:

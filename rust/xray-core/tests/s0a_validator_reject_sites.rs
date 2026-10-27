@@ -29,11 +29,11 @@ use xray_core::validator::validate_evaluator_source;
 // Authoritative rule tables (mirrored from validator.rs, drift-guarded below)
 // ---------------------------------------------------------------------------
 
-/// std modules rejected by `visit_path` and by `check_forbidden_std_subpath`.
-const FORBIDDEN_STD_MODULES: &[&str] = &["fs", "net", "process", "env", "io"];
+/// std modules outside the allowlist, each exercised in every form below.
+const REJECTED_STD_MODULES: &[&str] = &["fs", "net", "process", "env", "io", "os", "thread", "ffi", "path"];
 
-/// Syntactic forms in which a forbidden std module can appear. Each form is a
-/// SEPARATE reject site in validator.rs, so each needs its own test.
+/// Syntactic forms in which a std path can appear: `visit_path` owns
+/// path_expr, `std_paths::use_tree_violations` owns the three `use` forms.
 const STD_MODULE_FORMS: &[&str] = &["path_expr", "use_path", "use_name", "use_rename"];
 
 /// Macros rejected by `visit_macro`.
@@ -56,17 +56,35 @@ const FORBIDDEN_MACROS: &[&str] = &[
 const SINGLETON_CONSTRUCTS: &[&str] = &[
     "unsafe_block",
     "unsafe_fn",
+    "unsafe_impl_method",
+    "unsafe_trait_method",
+    "unsafe_impl",
+    "unsafe_trait",
     "static_decl",
     "static_mut_decl",
     "raw_ptr_const",
     "raw_ptr_mut",
     "extern_block",
     "extern_abi_fn",
+    "extern_abi_fn_ptr",
+    "unsafe_fn_ptr",
     "mod_decl",
     "use_std_glob",
+    "use_std_root_rename",
+    "extern_crate",
     "syntax_error",
+    "source_too_large",
+    "bracket_nesting_too_deep",
+    "verbatim_item",
+    "verbatim_impl_item",
+    "verbatim_trait_item",
+    "verbatim_foreign_item",
+    "verbatim_expr",
+    "verbatim_type",
+    "verbatim_pat",
+    "verbatim_type_param_bound",
     "macro_rules_definition",
-    "macro_body_smuggled_forbidden_construct",
+    "macro_rules_definition_with_forbidden_body",
 ];
 
 /// CRITICAL (Codex follow-up review; expanded R2-2 re-review): macro
@@ -141,6 +159,18 @@ reject_site_tests! {
     rejects_unsafe_fn: "unsafe_fn"
         => "unsafe fn f() {}",
            "`unsafe` functions are not allowed";
+    rejects_unsafe_impl_method: "unsafe_impl_method"
+        => "struct S; impl S { unsafe fn f() {} }",
+           "`unsafe` functions are not allowed";
+    rejects_unsafe_trait_method: "unsafe_trait_method"
+        => "trait T { unsafe fn f(); }",
+           "`unsafe` functions are not allowed";
+    rejects_unsafe_impl: "unsafe_impl"
+        => "struct S; unsafe impl Send for S {}",
+           "`unsafe impl` blocks are not allowed";
+    rejects_unsafe_trait: "unsafe_trait"
+        => "unsafe trait T {}",
+           "`unsafe trait` declarations are not allowed";
     rejects_static_declaration: "static_decl"
         => "static X: i32 = 0;",
            "`static` declarations are not allowed";
@@ -159,99 +189,189 @@ reject_site_tests! {
     rejects_extern_abi_fn: "extern_abi_fn"
         => r#"extern "C" fn f() {}"#,
            "`extern` ABI functions are not allowed";
+    rejects_extern_abi_fn_pointer_type: "extern_abi_fn_ptr"
+        => r#"fn f(_: extern "C" fn()) {}"#,
+           "`extern` ABI function pointer types are not allowed";
+    rejects_unsafe_fn_pointer_type: "unsafe_fn_ptr"
+        => "fn f(_: unsafe fn()) {}",
+           "`unsafe` function pointer types are not allowed";
     rejects_mod_declaration: "mod_decl"
         => "mod m { fn g() {} }",
            "`mod` declarations are not allowed";
-    rejects_use_std_glob: "use_std_glob"
-        => "use std::*;",
-           "`use std::*` (glob import) is not allowed";
+    rejects_oversized_source: "source_too_large"
+        => &" ".repeat(131_073),
+           "over the maximum of 131072 bytes";
+    rejects_over_deep_bracket_nesting: "bracket_nesting_too_deep"
+        => &"(".repeat(65),
+           "bracket nesting depth exceeds the maximum of 64";
+    rejects_verbatim_item: "verbatim_item"
+        => "unsafe fn f();",
+           "unparsed item syntax";
+    rejects_verbatim_impl_item: "verbatim_impl_item"
+        => "struct S; impl S { fn f(); }",
+           "unparsed impl item syntax";
+    rejects_verbatim_trait_item: "verbatim_trait_item"
+        => "trait T { pub type A; }",
+           "unparsed trait item syntax";
+    rejects_verbatim_foreign_item: "verbatim_foreign_item"
+        => r#"extern "C" { safe fn g(); }"#,
+           "unparsed foreign item syntax";
+    rejects_verbatim_expr: "verbatim_expr"
+        => "fn f() { let _ = builtin # offset_of(S, a); }",
+           "unparsed expression syntax";
+    rejects_verbatim_type: "verbatim_type"
+        => "fn f(_: dyn* Tr) {}",
+           "unparsed type syntax";
+    rejects_verbatim_pat: "verbatim_pat"
+        => "fn f() { let box x = y; }",
+           "unparsed pattern syntax";
+    rejects_verbatim_type_param_bound: "verbatim_type_param_bound"
+        => "fn f<T: const Tr>() {}",
+           "unparsed type bound syntax";
     rejects_unparseable_source: "syntax_error"
         => "fn f( {",
            "Syntax error:";
+    rejects_use_std_glob: "use_std_glob"
+        => "use std::*;",
+           "`use std::*` (glob import) is not a permitted standard-library import";
+    rejects_use_std_root_rename: "use_std_root_rename"
+        => "use std as s;",
+           "`use std as s` renames a standard-library path";
+    rejects_extern_crate: "extern_crate"
+        => "extern crate std as s;",
+           "`extern crate` declarations are not allowed";
 
-    // ---- forbidden std modules: fully-qualified path expression ----
+    // ---- std modules outside the allowlist: path_expr ----
     rejects_std_fs_path_expr: "std_module:fs:path_expr"
-        => r#"fn f() { let _ = std::fs::read_to_string("x"); }"#,
-           "`std::fs` is not allowed";
+        => "fn f() { let _ = std::fs::item; }",
+           "`std::fs::item` is not a permitted standard-library path";
     rejects_std_net_path_expr: "std_module:net:path_expr"
-        => r#"fn f() { let _ = std::net::TcpStream::connect("x"); }"#,
-           "`std::net` is not allowed";
+        => "fn f() { let _ = std::net::item; }",
+           "`std::net::item` is not a permitted standard-library path";
     rejects_std_process_path_expr: "std_module:process:path_expr"
-        => "fn f() { std::process::exit(0); }",
-           "`std::process` is not allowed";
+        => "fn f() { let _ = std::process::item; }",
+           "`std::process::item` is not a permitted standard-library path";
     rejects_std_env_path_expr: "std_module:env:path_expr"
-        => r#"fn f() { let _ = std::env::var("X"); }"#,
-           "`std::env` is not allowed";
+        => "fn f() { let _ = std::env::item; }",
+           "`std::env::item` is not a permitted standard-library path";
     rejects_std_io_path_expr: "std_module:io:path_expr"
-        => "fn f() { let _ = std::io::stdin(); }",
-           "`std::io` is not allowed";
+        => "fn f() { let _ = std::io::item; }",
+           "`std::io::item` is not a permitted standard-library path";
+    rejects_std_os_path_expr: "std_module:os:path_expr"
+        => "fn f() { let _ = std::os::item; }",
+           "`std::os::item` is not a permitted standard-library path";
+    rejects_std_thread_path_expr: "std_module:thread:path_expr"
+        => "fn f() { let _ = std::thread::item; }",
+           "`std::thread::item` is not a permitted standard-library path";
+    rejects_std_ffi_path_expr: "std_module:ffi:path_expr"
+        => "fn f() { let _ = std::ffi::item; }",
+           "`std::ffi::item` is not a permitted standard-library path";
+    rejects_std_path_path_expr: "std_module:path:path_expr"
+        => "fn f() { let _ = std::path::item; }",
+           "`std::path::item` is not a permitted standard-library path";
 
-    // ---- forbidden std modules: `use std::<mod>::<item>` (UseTree::Path) ----
+    // ---- std modules outside the allowlist: use_path ----
     rejects_std_fs_use_path: "std_module:fs:use_path"
-        => "use std::fs::File;",
-           "`use std::fs` (or sub-path) is not allowed";
+        => "use std::fs::Item;",
+           "`use std::fs::Item` is not a permitted standard-library import";
     rejects_std_net_use_path: "std_module:net:use_path"
-        => "use std::net::TcpStream;",
-           "`use std::net` (or sub-path) is not allowed";
+        => "use std::net::Item;",
+           "`use std::net::Item` is not a permitted standard-library import";
     rejects_std_process_use_path: "std_module:process:use_path"
-        => "use std::process::Command;",
-           "`use std::process` (or sub-path) is not allowed";
+        => "use std::process::Item;",
+           "`use std::process::Item` is not a permitted standard-library import";
     rejects_std_env_use_path: "std_module:env:use_path"
-        => "use std::env::vars;",
-           "`use std::env` (or sub-path) is not allowed";
+        => "use std::env::Item;",
+           "`use std::env::Item` is not a permitted standard-library import";
     rejects_std_io_use_path: "std_module:io:use_path"
-        => "use std::io::Read;",
-           "`use std::io` (or sub-path) is not allowed";
+        => "use std::io::Item;",
+           "`use std::io::Item` is not a permitted standard-library import";
+    rejects_std_os_use_path: "std_module:os:use_path"
+        => "use std::os::Item;",
+           "`use std::os::Item` is not a permitted standard-library import";
+    rejects_std_thread_use_path: "std_module:thread:use_path"
+        => "use std::thread::Item;",
+           "`use std::thread::Item` is not a permitted standard-library import";
+    rejects_std_ffi_use_path: "std_module:ffi:use_path"
+        => "use std::ffi::Item;",
+           "`use std::ffi::Item` is not a permitted standard-library import";
+    rejects_std_path_use_path: "std_module:path:use_path"
+        => "use std::path::Item;",
+           "`use std::path::Item` is not a permitted standard-library import";
 
-    // ---- forbidden std modules: `use std::<mod>;` (UseTree::Name) ----
+    // ---- std modules outside the allowlist: use_name ----
     rejects_std_fs_use_name: "std_module:fs:use_name"
         => "use std::fs;",
-           "`use std::fs` is not allowed";
+           "`use std::fs` is not a permitted standard-library import";
     rejects_std_net_use_name: "std_module:net:use_name"
         => "use std::net;",
-           "`use std::net` is not allowed";
+           "`use std::net` is not a permitted standard-library import";
     rejects_std_process_use_name: "std_module:process:use_name"
         => "use std::process;",
-           "`use std::process` is not allowed";
+           "`use std::process` is not a permitted standard-library import";
     rejects_std_env_use_name: "std_module:env:use_name"
         => "use std::env;",
-           "`use std::env` is not allowed";
+           "`use std::env` is not a permitted standard-library import";
     rejects_std_io_use_name: "std_module:io:use_name"
         => "use std::io;",
-           "`use std::io` is not allowed";
+           "`use std::io` is not a permitted standard-library import";
+    rejects_std_os_use_name: "std_module:os:use_name"
+        => "use std::os;",
+           "`use std::os` is not a permitted standard-library import";
+    rejects_std_thread_use_name: "std_module:thread:use_name"
+        => "use std::thread;",
+           "`use std::thread` is not a permitted standard-library import";
+    rejects_std_ffi_use_name: "std_module:ffi:use_name"
+        => "use std::ffi;",
+           "`use std::ffi` is not a permitted standard-library import";
+    rejects_std_path_use_name: "std_module:path:use_name"
+        => "use std::path;",
+           "`use std::path` is not a permitted standard-library import";
 
-    // ---- forbidden std modules: `use std::<mod> as x;` (UseTree::Rename) ----
+    // ---- std modules outside the allowlist: use_rename ----
     rejects_std_fs_use_rename: "std_module:fs:use_rename"
-        => "use std::fs as filesystem;",
-           "`use std::fs` (renamed) is not allowed";
+        => "use std::fs as renamed;",
+           "`use std::fs as renamed` renames a standard-library path";
     rejects_std_net_use_rename: "std_module:net:use_rename"
-        => "use std::net as network;",
-           "`use std::net` (renamed) is not allowed";
+        => "use std::net as renamed;",
+           "`use std::net as renamed` renames a standard-library path";
     rejects_std_process_use_rename: "std_module:process:use_rename"
-        => "use std::process as proc_mod;",
-           "`use std::process` (renamed) is not allowed";
+        => "use std::process as renamed;",
+           "`use std::process as renamed` renames a standard-library path";
     rejects_std_env_use_rename: "std_module:env:use_rename"
-        => "use std::env as environment;",
-           "`use std::env` (renamed) is not allowed";
+        => "use std::env as renamed;",
+           "`use std::env as renamed` renames a standard-library path";
     rejects_std_io_use_rename: "std_module:io:use_rename"
-        => "use std::io as stdio;",
-           "`use std::io` (renamed) is not allowed";
+        => "use std::io as renamed;",
+           "`use std::io as renamed` renames a standard-library path";
+    rejects_std_os_use_rename: "std_module:os:use_rename"
+        => "use std::os as renamed;",
+           "`use std::os as renamed` renames a standard-library path";
+    rejects_std_thread_use_rename: "std_module:thread:use_rename"
+        => "use std::thread as renamed;",
+           "`use std::thread as renamed` renames a standard-library path";
+    rejects_std_ffi_use_rename: "std_module:ffi:use_rename"
+        => "use std::ffi as renamed;",
+           "`use std::ffi as renamed` renames a standard-library path";
+    rejects_std_path_use_rename: "std_module:path:use_rename"
+        => "use std::path as renamed;",
+           "`use std::path as renamed` renames a standard-library path";
 
     // ---- forbidden macros ----
     rejects_include_macro: "macro:include"
-        => r#"fn f() { include!("evil.rs"); }"#,
+        => r#"fn f() { include!("sample.rs"); }"#,
            "`include!` macro is not allowed";
     rejects_include_str_macro: "macro:include_str"
-        => r#"const D: &str = include_str!("secret.txt");"#,
+        => r#"const D: &str = include_str!("data.txt");"#,
            "`include_str!` macro is not allowed";
     rejects_include_bytes_macro: "macro:include_bytes"
-        => r#"const D: &[u8] = include_bytes!("secret.bin");"#,
+        => r#"const D: &[u8] = include_bytes!("data.bin");"#,
            "`include_bytes!` macro is not allowed";
     rejects_env_macro: "macro:env"
         => r#"fn f() -> &'static str { env!("PATH") }"#,
            "`env!` macro is not allowed";
     rejects_option_env_macro: "macro:option_env"
-        => r#"fn f() { let _ = option_env!("SECRET"); }"#,
+        => r#"fn f() { let _ = option_env!("EXAMPLE"); }"#,
            "`option_env!` macro is not allowed";
     rejects_println_macro: "macro:println"
         => r#"fn f() { println!("hi"); }"#,
@@ -275,14 +395,13 @@ reject_site_tests! {
         => "fn f() { unimplemented!(); }",
            "`unimplemented!` macro is not allowed";
 
-    // ---- CRITICAL (Codex follow-up review): macro definition/expansion
-    // evasion -- a macro_rules! DEFINITION's body is opaque to every other
-    // reject site, so the definition itself must be rejected outright. ----
+    // ---- macro definitions ----
+    // ^ invariant every macro_rules! definition => rejected, whatever its body; no other site sees inside the body
     rejects_macro_rules_definition: "macro_rules_definition"
         => r#"macro_rules! harmless_name { () => { 1 + 1 }; } fn f() { harmless_name!(); }"#,
            "`macro_rules!` definitions are not allowed";
-    rejects_macro_body_smuggled_forbidden_construct: "macro_body_smuggled_forbidden_construct"
-        => r#"macro_rules! harmless_name { () => { std::process::Command::new("id").spawn().ok(); }; } fn f() { harmless_name!(); }"#,
+    rejects_macro_rules_definition_with_forbidden_body: "macro_rules_definition_with_forbidden_body"
+        => r#"macro_rules! harmless_name { () => { std::env::args().count(); }; } fn f() { harmless_name!(); }"#,
            "`macro_rules!` definitions are not allowed";
 }
 
@@ -296,7 +415,7 @@ reject_site_tests! {
 /// extending a rule family automatically extends what must be covered.
 fn expected_construct_ids() -> Vec<String> {
     let mut ids: Vec<String> = SINGLETON_CONSTRUCTS.iter().map(|s| s.to_string()).collect();
-    for module in FORBIDDEN_STD_MODULES {
+    for module in REJECTED_STD_MODULES {
         for form in STD_MODULE_FORMS {
             ids.push(format!("std_module:{module}:{form}"));
         }
@@ -407,29 +526,27 @@ fn rule_tables_match_validator_source() {
         );
     }
 
-    // Forbidden std modules, as literally listed in `visit_path`. "std" is the
-    // path root, not a forbidden module, so it is excluded from the comparison.
-    let mut expected_modules: Vec<String> =
-        FORBIDDEN_STD_MODULES.iter().map(|s| s.to_string()).collect();
-    expected_modules.sort();
-    let actual_path_modules: Vec<String> =
-        ident_literals_between("fn visit_path", "syn::visit::visit_path")
-            .into_iter()
-            .filter(|s| s != "std")
-            .collect();
-    assert_eq!(
-        actual_path_modules, expected_modules,
-        "FORBIDDEN_STD_MODULES is out of sync with validator.rs's visit_path."
-    );
+    let permitted = permitted_std_path_literals();
+    assert!(!permitted.is_empty(), "no PERMITTED_STD_PATHS literals found in validator/std_paths.rs");
+    for module in REJECTED_STD_MODULES {
+        let path = format!("std::{module}");
+        assert!(
+            !permitted.iter().any(|p| path == *p || path.starts_with(&format!("{p}::"))),
+            "REJECTED_STD_MODULES and PERMITTED_STD_PATHS must never overlap: {path}"
+        );
+    }
+}
 
-    // The same module list is repeated in check_forbidden_std_subpath for the
-    // `use` forms; it must agree with the path-expression list.
-    let actual_use_modules =
-        ident_literals_between("fn check_forbidden_std_subpath", "#[cfg(test)]");
-    assert_eq!(
-        actual_use_modules, expected_modules,
-        "FORBIDDEN_STD_MODULES is out of sync with check_forbidden_std_subpath."
-    );
+const STD_PATHS_SOURCE: &str = include_str!("../src/validator/std_paths.rs");
+
+/// String literals of the `PERMITTED_STD_PATHS` constant, in source order.
+fn permitted_std_path_literals() -> Vec<String> {
+    let start = STD_PATHS_SOURCE
+        .find("const PERMITTED_STD_PATHS")
+        .expect("std_paths.rs no longer defines PERMITTED_STD_PATHS");
+    let rest = &STD_PATHS_SOURCE[start..];
+    let end = rest.find("];").expect("PERMITTED_STD_PATHS has no closing `];`");
+    rest[..end].split('"').skip(1).step_by(2).map(|lit| lit.to_string()).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -452,7 +569,7 @@ fn group_use_reaches_every_member_reject_site() {
         );
     }
     assert!(
-        !errors.iter().any(|e| e.message.contains("collections")),
+        !errors.iter().any(|e| e.message.starts_with("`use std::collections")),
         "allowed module in a group must not be rejected: {:?}",
         errors.iter().map(|e| &e.message).collect::<Vec<_>>()
     );

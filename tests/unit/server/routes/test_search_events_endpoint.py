@@ -431,3 +431,41 @@ class TestSearchEventsWriterAbsent:
         finally:
             app.dependency_overrides.clear()
             app.state.search_event_log_writer = None
+
+
+class TestSearchEventsEvaluatorIdentity:
+    """Story #2203: the listing exposes the X-Ray evaluator hash and the
+    stored pattern name (read from a real SQLite store)."""
+
+    def test_listing_exposes_evaluator_hash_and_pattern_name(
+        self, app_with_writer, tmp_path
+    ):
+        import dataclasses
+
+        from code_indexer.server.services.search_event_log_writer import (
+            SearchEventLogSqliteBackend,
+        )
+        from code_indexer.server.services.xray_evaluator_sources import (
+            evaluator_source,
+        )
+
+        app, writer = app_with_writer
+        writer.backend = SearchEventLogSqliteBackend(str(tmp_path / "events.db"))
+        stored = evaluator_source("fn evaluate_node() {}")
+        xray = dataclasses.replace(
+            _make_record(search_type="xray", query_text="def example_"),
+            evaluator_sha256=stored.sha256,
+            xray_pattern_name="catch-rethrow",
+            evaluator_sources=(stored,),
+        )
+        writer.backend.insert_batch([xray, _make_record(query_text="legacy")])
+
+        resp = TestClient(app).get("/api/admin/search-events")
+
+        assert resp.status_code == 200, resp.text
+        by_query = {e["query_text"]: e for e in resp.json()["events"]}
+        assert (
+            by_query["def example_"]["evaluator_sha256"],
+            by_query["def example_"]["xray_pattern_name"],
+        ) == (stored.sha256, "catch-rethrow")
+        assert by_query["legacy"]["evaluator_sha256"] is None

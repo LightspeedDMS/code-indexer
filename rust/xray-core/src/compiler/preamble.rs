@@ -98,26 +98,45 @@ fn truncate_snippet(s: &str, max_len: usize) -> String {
     }
 }
 
+// ^ why crate-root RefCell import, not module-only; evaluator docs promise bare `RefCell`
+#[allow(unused_imports)]
 use std::cell::RefCell;
 
-thread_local! {
-    static DEBUG_LOG: RefCell<Vec<String>> = RefCell::new(Vec::new());
-}
+#[allow(unused_imports)]
+use xray_host_debug_log::debug_log;
 
-/// Debug logging helper for evaluator development.
-/// Messages are collected in a per-thread buffer (max 100 messages, 10KB total)
-/// and returned alongside findings in the JSON output as debug_messages[].
-/// Calls past the limits are silently dropped.
-fn debug_log(msg: &str) {
-    DEBUG_LOG.with(|log| {
-        let mut log = log.borrow_mut();
-        if log.len() < 100 {
-            let total_bytes: usize = log.iter().map(|s| s.len()).sum();
-            if total_bytes + msg.len() <= 10240 {
-                log.push(msg.to_string());
+// ^ invariant evaluator access to DEBUG_LOG = debug_log only; user `mod` => rejected by validator.rs:visit_item_mod
+mod xray_host_debug_log {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static DEBUG_LOG: RefCell<Vec<String>> = RefCell::new(Vec::new());
+    }
+
+    /// Debug logging helper for evaluator development.
+    /// Messages are collected in a per-thread buffer (max 100 messages, 10KB total)
+    /// and returned alongside findings in the JSON output as debug_messages[].
+    /// Calls past the limits are silently dropped.
+    pub fn debug_log(msg: &str) {
+        DEBUG_LOG.with(|log| {
+            let mut log = log.borrow_mut();
+            if log.len() < 100 {
+                let total_bytes: usize = log.iter().map(|s| s.len()).sum();
+                if total_bytes + msg.len() <= 10240 {
+                    log.push(msg.to_string());
+                }
             }
-        }
-    });
+        });
+    }
+
+    // ^ external rustc cdylib + #[no_mangle] => symbol exported whatever module visibility; test:test_debug_log_truncation_limits_runtime
+    #[no_mangle]
+    fn xray_drain_debug_log() -> Vec<String> {
+        DEBUG_LOG.with(|log| {
+            let mut log = log.borrow_mut();
+            std::mem::take(&mut *log)
+        })
+    }
 }
 "#;
 
@@ -157,13 +176,5 @@ pub extern "C" fn xray_rustc_version_ptr() -> u64 {
 #[no_mangle]
 pub extern "C" fn xray_rustc_version_len() -> u64 {
     XRAY_RUSTC_VERSION.len() as u64
-}
-
-#[no_mangle]
-pub fn xray_drain_debug_log() -> Vec<String> {
-    DEBUG_LOG.with(|log| {
-        let mut log = log.borrow_mut();
-        std::mem::take(&mut *log)
-    })
 }
 "#;

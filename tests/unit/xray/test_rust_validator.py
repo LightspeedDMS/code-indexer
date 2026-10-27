@@ -65,7 +65,7 @@ _FORBIDDEN_CASES: list[tuple[str, str, str]] = [
         "unsafe",
         """\
 fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
-    unsafe { let _ = 0usize as *const u8; }
+    unsafe {}
     Vec::new()
 }
 """,
@@ -75,7 +75,7 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
         "std::fs",
         """\
 fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
-    let _ = std::fs::read_to_string("dummy.txt");
+    let _: Option<std::fs::FileType> = None;
     Vec::new()
 }
 """,
@@ -85,7 +85,7 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
         "std::net",
         """\
 fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
-    let _ = std::net::TcpStream::connect("dummy-host:0");
+    let _ = std::net::Ipv4Addr::LOCALHOST;
     Vec::new()
 }
 """,
@@ -95,7 +95,7 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
         "std::process",
         """\
 fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
-    std::process::exit(0);
+    let _ = std::process::id();
     Vec::new()
 }
 """,
@@ -560,11 +560,7 @@ _EXPLICIT_FRONT_DOOR_FIXTURES["static"] = """\
 static VALUE: u8 = 1;
 fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { Vec::new() }
 """
-# R2-2 (Codex re-review): macro_rules! must be rejected outright, even
-# with a completely innocuous body (no other blocklisted keyword) -- this
-# is the SAME fixture shape as test_macro_rules_definition_rejected above,
-# kept deliberately isolated so the front-door meta-test discriminates on
-# the macro_rules! ban itself.
+# ^ why body with no other forbidden keyword, not any body; the fixture must hit only the macro_rules! rule
 _EXPLICIT_FRONT_DOOR_FIXTURES["macro_rules!"] = """\
 macro_rules! innocuous_helper {
     () => {
@@ -609,14 +605,7 @@ def test_front_door_meta_test_covers_authoritative_table() -> None:
             True,
         ),
         (
-            # R3-1 (Codex re-review, ROUND 3): flipped from False to True.
-            # A raw string literal's CONTENT is inert runtime data in real
-            # Rust -- it is never parsed as code, regardless of what text
-            # it contains -- so rejecting this was itself a false
-            # positive of the exact class R3-1 fixes (a documented
-            # scanner limitation, not a genuine security invariant: there
-            # is no way to smuggle executable code inside a string
-            # literal's contents).
+            # ^ invariant raw string literal contents = runtime data, never code => accepted
             'fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { let _ = r#"unsafe std::fs"#; Vec::new() }',
             True,
         ),
@@ -626,30 +615,21 @@ def test_front_door_meta_test_covers_authoritative_table() -> None:
         ),
         (
             "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { let _ = std /* comment */ ::fs::dummy; Vec::new() }",
-            True,
+            False,
         ),
     ],
 )
-def test_bypass_attempts_have_defined_front_door_outcomes(
+def test_lookalike_spellings_have_defined_front_door_outcomes(
     code: str, expected_ok: bool
 ) -> None:
     result = validate_rust_evaluator(code)
     assert result.ok is expected_ok
 
 
-# ---------------------------------------------------------------------------
-# R2-2 (Codex re-review): Python's macro check was a hole-y BLOCKLIST of
-# specific names (println!, panic!, etc.) while Rust's validator.rs is a
-# fail-closed ALLOWLIST (only vec!/format!/matches!) -- an arbitrary
-# UNLISTED macro name, a QUALIFIED macro path, or a macro_rules!
-# DEFINITION all sailed through Python's pre-flight only to be rejected
-# late (and confusingly) by Rust's authoritative compile step.
-# ---------------------------------------------------------------------------
+# ^ coupled macro allowlist with rust/xray-core/src/validator.rs:visit_macro; only bare vec!/format!/matches! pass both
 
 
 def test_unlisted_macro_invocation_rejected_fail_closed() -> None:
-    """assert! is not in Python's old named blocklist, but Rust's
-    allowlist (vec!/format!/matches! only) rejects it -- Python must too."""
     code = """\
 fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
     assert!(node.start_line > 0);
@@ -658,38 +638,25 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
 """
     result = validate_rust_evaluator(code)
     assert result.ok is False, (
-        "assert! is not on the allowlist (vec!/format!/matches!) and must be "
-        "rejected fail-closed, matching Rust's validator.rs -- Python was "
-        "previously MORE PERMISSIVE than Rust here (a real cross-layer bug)"
+        "only vec!/format!/matches! may be invoked, so assert! must be rejected"
     )
 
 
 def test_qualified_macro_path_rejected() -> None:
-    """A qualified macro path (evil::vec!) must be rejected even though the
-    last segment matches an allowlisted name -- mirrors validator.rs's
-    exact-path-match fix."""
     code = """\
 fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
-    let _v: Vec<i32> = evil::vec![1, 2, 3];
+    let _v: Vec<i32> = local::vec![1, 2, 3];
     Vec::new()
 }
 """
     result = validate_rust_evaluator(code)
     assert result.ok is False, (
-        "a QUALIFIED macro invocation (evil::vec!) must be rejected -- only "
-        "a bare, unqualified vec!/format!/matches! is permitted"
+        "only a bare, unqualified vec!/format!/matches! is permitted"
     )
 
 
+# ^ why body with no other forbidden keyword, not any body; the test must hit only the macro_rules! rule
 def test_macro_rules_definition_rejected() -> None:
-    """A macro_rules! definition must be rejected OUTRIGHT, regardless of
-    how innocuous its body looks -- mirrors Rust's blanket ban philosophy
-    ("never selectively whitelist macro_rules! bodies").
-
-    Deliberately uses a body with NO other blocklisted keyword (no
-    std::process/unsafe/etc.) so this test discriminates on the
-    macro_rules! ban itself, not an unrelated keyword match that would
-    happen to also appear inside the body."""
     code = """\
 macro_rules! innocuous_helper {
     () => {
@@ -703,9 +670,7 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
 """
     result = validate_rust_evaluator(code)
     assert result.ok is False, (
-        "a macro_rules! definition must be rejected outright -- its body can "
-        "smuggle any forbidden construct, and Rust's validator.rs rejects it "
-        "unconditionally regardless of contents"
+        "every macro_rules! definition must be rejected, whatever its body contains"
     )
 
 

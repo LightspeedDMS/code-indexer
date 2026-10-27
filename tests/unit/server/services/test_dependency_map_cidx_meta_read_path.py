@@ -422,3 +422,64 @@ class TestIdentifyAffectedDomainsReadsFromVersionedPath:
             assert "backend" in affected, (
                 f"Expected 'backend' domain from versioned _index.md, got: {affected}"
             )
+
+
+_DOMAIN_DOC = (
+    "---\ndomain: payments\nparticipating_repos:\n  - alpha\n---\n\n"
+    "# Domain Analysis: payments\n"
+)
+
+
+def _write_complete_snapshot(snapshot: Path) -> None:
+    depmap = snapshot / "dependency-map"
+    depmap.mkdir(parents=True)
+    (depmap / "payments.md").write_text(_DOMAIN_DOC)
+    (depmap / "_domains.json").write_text(
+        json.dumps([{"name": "payments", "participating_repos": ["alpha"]}])
+    )
+
+
+def _publish(golden: Path, snapshot: Path) -> None:
+    aliases = golden / "aliases"
+    aliases.mkdir(exist_ok=True)
+    (aliases / "cidx-meta-global.json").write_text(
+        json.dumps({"target_path": str(snapshot), "repo_name": "cidx-meta"})
+    )
+
+
+class TestReadPathIgnoresSnapshotStillBeingCopied:
+    """A refresh copies a new ``v_*`` before it swaps the alias: readers
+    must keep serving the published snapshot until the swap."""
+
+    def test_returns_alias_target_not_newer_half_copied_snapshot(self, tmp_path):
+        published = tmp_path / ".versioned" / "cidx-meta" / "v_1700000000"
+        _write_complete_snapshot(published)
+        _publish(tmp_path, published)
+        copying = tmp_path / ".versioned" / "cidx-meta" / "v_1700000100"
+        (copying / ".code-indexer").mkdir(parents=True)
+
+        service = _make_service(str(tmp_path))
+
+        assert service._get_cidx_meta_read_path() == published
+
+    def test_read_during_copy_leaves_published_snapshot_membership_intact(
+        self, tmp_path
+    ):
+        from code_indexer.server.services.cidx_meta_access.depmap_model import (
+            load_depmap_model,
+        )
+
+        published = tmp_path / ".versioned" / "cidx-meta" / "v_1700000000"
+        _write_complete_snapshot(published)
+        _publish(tmp_path, published)
+        copying = tmp_path / ".versioned" / "cidx-meta" / "v_1700000100"
+        (copying / ".code-indexer").mkdir(parents=True)
+        service = _make_service(str(tmp_path))
+
+        during = load_depmap_model(service.cidx_meta_read_path / "dependency-map")
+        _write_complete_snapshot(copying)
+        _publish(tmp_path, copying)
+        after = load_depmap_model(service.cidx_meta_read_path / "dependency-map")
+
+        assert during.domain_participants("payments") == frozenset({"alpha"})
+        assert after.domain_participants("payments") == frozenset({"alpha"})

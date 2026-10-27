@@ -96,6 +96,7 @@ class TestCreateFileEndpoint:
                     content="print('hello')",
                     username="testuser",
                     access_for=ANY,
+                    pattern_writer=ANY,
                 )
         finally:
             # Clean up dependency override

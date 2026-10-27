@@ -25,7 +25,9 @@ from code_indexer.server.services.search_event_recording import (
     run_recorded_xray,
     tracked_job_cancelled,
     writer_from_app,
+    xray_engine_started,
 )
+from code_indexer.server.services.search_event_xray import XRayEvaluator
 from code_indexer.server.telemetry.correlation_bridge import (
     get_current_correlation_id as get_correlation_id,
 )
@@ -334,6 +336,9 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
                 repo_alias=alias,
                 pattern=driver_regex,
                 correlation_id=event_correlation_id_multi,
+                evaluator=XRayEvaluator(
+                    evaluator_code, params.get("pattern_name") or None
+                ),
             )
 
             def _job() -> Dict[str, Any]:  # type: ignore[no-untyped-def]
@@ -369,7 +374,7 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
                     # Story #2107/#2117: only the engine run is recorded.
                     result = run_recorded_xray(
                         record_event,
-                        lambda: _E().run(
+                        lambda: xray_engine_started(record_event, _E()).run(
                             repo_path=rp,
                             driver_regex=driver_regex,
                             evaluator_code=evaluator_code,
@@ -540,6 +545,7 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
         repo_alias=repo_alias_parsed,
         pattern=driver_regex,
         correlation_id=get_correlation_id(),
+        evaluator=XRayEvaluator(evaluator_code, params.get("pattern_name") or None),
     )
 
     def job_fn() -> Dict[str, Any]:  # type: ignore[no-untyped-def]
@@ -574,7 +580,7 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
             # Story #2107/#2117: only the engine run is recorded.
             result = run_recorded_xray(
                 record_event,
-                lambda: _Engine().run(
+                lambda: xray_engine_started(record_event, _Engine()).run(
                     repo_path=repo_path,
                     driver_regex=driver_regex,
                     evaluator_code=evaluator_code,

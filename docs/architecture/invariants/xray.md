@@ -36,8 +36,24 @@ Rules the X-Ray code (AST-aware search over user-supplied Rust evaluators) must 
 
 - The compiler module (`rust/xray-core/src/compiler.rs` and `compiler/`; `compile_evaluator` in
   `compiler/pipeline.rs`) compiles evaluator code to a `cdylib` with `rustc`; `dynlib.rs` loads it with
-  `libloading` and checks the ABI version before trusting any function pointer; `validator.rs` rejects `unsafe`,
-  `std::fs`/`net`/`process` and raw pointers in evaluator code.
+  `libloading` and checks the ABI version before trusting any function pointer; `validator.rs` first rejects source
+  over `MAX_EVALUATOR_SOURCE_BYTES` (131072) or with bracket nesting over `MAX_BRACKET_DEPTH` (64)
+  (`validator/source_limits.rs`; the Python pre-flight mirrors these limits in `code_indexer/xray/rust_source_limits.py`,
+  drift test `python_mirror_matches_source_limits`).
+  It then rejects `unsafe` (blocks, every function signature, `unsafe impl`, `unsafe trait`, function-pointer types),
+  `extern` ABIs (functions and function-pointer types), raw pointers, `extern crate`, any rename of a
+  standard-library path, every syntax node `syn` leaves unparsed (`Verbatim`), and every WRITTEN `std`/`core`/`alloc`
+  path outside `PERMITTED_STD_PATHS` in `validator/std_paths.rs` (identifiers are compared after `unraw`). The
+  allowlist governs paths the evaluator writes; names the trusted PREAMBLE imports at crate root (`Arc`, `RefCell`,
+  `PhantomData`) remain usable by bare name, so every PREAMBLE/EPILOGUE import or item is part of the evaluator's
+  reachable surface and needs the same review as an allowlist entry. An entry must give no file, network, process,
+  thread or environment access (`RandomState::new()` reads OS randomness; `Box`/`Rc` raw pointers are unusable
+  because `unsafe` is rejected; `std::mem` stays out), and must be mirrored in `code_indexer/xray/rust_std_paths.py`
+  (drift test `python_mirror_matches_permitted_std_paths`).
+- Evaluator code uses only the public API of `GraphHandle`/`FactsHandle` (their `pub` methods and type names) and
+  reaches the debug-log buffer only through `debug_log`: `CtxPtr`, both handles and `DEBUG_LOG` (with the
+  `xray_drain_debug_log` export) live in private PREAMBLE modules (`xray_host_handles`, `xray_host_debug_log`),
+  which user code cannot reopen because `mod` is rejected (tests: `compiler/tests_handle_privacy.rs`).
 - The host and the compiled evaluator must use the same allocator. Custom global allocators (jemalloc, mimalloc) are
   incompatible with this design: owned types cross the library boundary. Keep the system allocator.
 - `OwnedNode` (`owned_node.rs`) shares one `Arc<str>` of file source per file and slices text by byte range.

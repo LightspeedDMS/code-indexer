@@ -41,7 +41,9 @@ from code_indexer.global_repos.lifecycle_batch_runner import (
 from code_indexer.global_repos.write_lock_manager import describe_scheduler_lock_holder
 
 from .activity_journal_service import ActivityJournalService
-from .constants import CIDX_META_REPO
+from code_indexer.global_repos.alias_manager import read_alias_from_disk
+
+from .constants import CIDX_META_REPO, CIDX_META_REPO_GLOBAL
 from .dep_map_health_detector import DepMapHealthDetector
 from .jittered_dispatcher import (
     DEFAULT_DEPMAP_DISPATCH_JITTER_SECONDS,
@@ -1617,6 +1619,13 @@ class DependencyMapService:
             otherwise falls back to the live golden-repos/cidx-meta/ path.
         """
         golden_repos_dir = Path(self._golden_repos_manager.golden_repos_dir)
+
+        # ^ hazard newest v_* before the alias pointer => reads a snapshot a refresh is still copying; load_depmap_model caches its empty model per path forever; test:test_read_during_copy_leaves_published_snapshot_membership_intact
+        published = read_alias_from_disk(
+            golden_repos_dir / "aliases", CIDX_META_REPO_GLOBAL
+        )
+        if published:
+            return Path(published)
 
         # Check versioned path directly (bypasses get_actual_repo_path() bug
         # where live dir existence masks versioned content for local repos)

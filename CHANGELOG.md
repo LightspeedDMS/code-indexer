@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [12.98.0] - 2026-10-26
+
+### Upgrade notes
+
+- X-Ray: evaluator code may name only an allowlist of standard-library modules: `collections`, `fmt`, `iter`, `cmp`, `str`, `string`, `vec`, `option`, `result`, `ops`, `convert`, `char`, `num`, `hash`, `borrow`, `default`, `boxed`, `rc`, `cell`, `array`, `slice`, `marker`, `primitive`, `error`, `any` and the numeric primitive modules, under `std::` and, where they exist, `core::` and `alloc::`. Any other standard-library path is rejected, as are renames of those roots, `extern crate`, `unsafe` and `extern` in every form, and syntax the validator cannot fully read. Stored patterns are validated when they run: review stored patterns that use other modules (for example `std::mem`, `std::sync`, `std::time`, `std::path`, `std::thread`) before upgrading.
+- X-Ray: evaluator source is limited to 131,072 bytes and a bracket nesting depth of 64; larger or deeper source gets a validation error.
+- X-Ray: compiled evaluators are recompiled once after the upgrade (the compile cache identity changes).
+- Server: PostgreSQL migration 078 adds the `xray_evaluator_sources` table and two nullable columns on the search event log; it is backward compatible for rolling restarts.
+
+### Added
+
+- Server: every X-Ray search (MCP `xray_search`, `xray_explore`, `xray_search_batch`; REST search and batch) records which evaluator code ran: the search event row carries the SHA-256 of the evaluator source and the stored pattern name, and each distinct source is stored once (bounded, pruned with the search event log). Each run whose evaluator started writes one `xray_evaluator_executed` audit row with the hashes and pattern names (audit log only; not delivered to SIEM). The Query Analytics export adds the evaluator source and pattern name columns, and `GET /api/admin/search-events` returns the hash and pattern name.
+
+### Changed
+
+- X-Ray: evaluator code can use only the public methods of the graph and facts handles; their internals are not accessible from evaluator code.
+- Server: the catalog file tools (MCP and REST create, edit and delete) apply the same rule as `store_xray_pattern`: changing or deleting a shared (`__any__`) pattern requires the admin role, and a repository-scoped pattern requires a grant on that repository. The rule applies to the requested path, the link and the resolved target.
+- Server: creating a file through the file tools, `store_xray_pattern` or the seed patterns never replaces a file that appeared concurrently; the create answers "already exists" instead. A failed pattern commit rolls back only the file that write published.
+- Server: `store_xray_pattern` refusals no longer include the scope or the user name.
+
+### Fixed
+
+- Server: the Query Analytics export writes every text cell as text, so a value starting with `=` or `#` is never a formula or an error value; characters a spreadsheet cannot hold are replaced with U+FFFD. An export failure records a neutral message; a database read failure keeps its message.
+- Server: a search event containing an unpaired surrogate character is stored escaped instead of failing its whole write batch; a failed batch is counted as dropped events and reported on health.
+- Server: a stored pattern name too long for the catalog is refused with `invalid_pattern_name` instead of a file-system error.
+- Server: dependency-map pages and tools read the catalog snapshot the `cidx-meta-global` alias publishes. Previously a request during a catalog refresh could read a snapshot that was still being copied and keep returning an empty dependency map to restricted users until the server restarted.
+- Server: shutdown waits up to 15 seconds for the startup migration of the analysis agents' MCP credential before the audit log stops, so its audit rows are written; past the bound it logs one WARNING. Previously a shutdown during the migration could drop those audit rows.
+
 ## [12.97.0] - 2026-10-25
 
 ### Upgrade notes

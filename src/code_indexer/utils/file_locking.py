@@ -15,6 +15,7 @@ import errno
 import fcntl
 import logging
 import os
+import stat
 from typing import Union
 
 logger = logging.getLogger(__name__)
@@ -88,6 +89,29 @@ def nfs_safe_fsync(fd: int) -> None:
             )
             return
         raise
+
+
+def nfs_safe_link_exclusive(source: PathLike, target: PathLike) -> None:
+    """Publish the fully written *source* at *target* only if *target* does
+    not exist: the absence check and the creation are one ``link`` call.
+    Readers never see a partial file. The caller removes *source*.
+
+    Raises:
+        FileExistsError: *target* exists and is not *source*'s own landed
+            link, a symlink to *source* included (untouched).
+        OSError: the link failed for any other reason.
+    """
+    try:
+        os.link(source, target)
+    except FileExistsError:
+        # ^ external NFS retransmitted LINK may answer EEXIST after success
+        landed = os.lstat(target)
+        mine = os.lstat(source)
+        if not (
+            stat.S_ISREG(landed.st_mode)
+            and (landed.st_dev, landed.st_ino) == (mine.st_dev, mine.st_ino)
+        ):
+            raise
 
 
 def nfs_safe_flock(fd: int, operation: int) -> bool:

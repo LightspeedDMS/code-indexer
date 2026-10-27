@@ -27,6 +27,7 @@ from code_indexer.server.services.search_event_recording import (
     tracked_job_cancelled,
     writer_from_app,
 )
+from code_indexer.server.services.search_event_xray import XRayEvaluator
 from code_indexer.server.telemetry.correlation_bridge import (
     get_current_correlation_id as get_correlation_id,
 )
@@ -62,7 +63,9 @@ _MAX_DEBUG_NODES_MIN = 1
 _MAX_DEBUG_NODES_MAX = 500
 
 
-def _explore_event_recorder(user: User, alias: str, pattern: str) -> XRayRecorder:
+def _explore_event_recorder(
+    user: User, alias: str, pattern: str, evaluator: XRayEvaluator
+) -> XRayRecorder:
     """Story #2107: bind this request's search-event fields for one explore job."""
     return bind_xray_recorder(
         writer_from_app(_lazy_singleton_app_or_none()),
@@ -71,6 +74,7 @@ def _explore_event_recorder(user: User, alias: str, pattern: str) -> XRayRecorde
         repo_alias=alias,
         pattern=pattern,
         correlation_id=get_correlation_id(),
+        evaluator=evaluator,
     )
 
 
@@ -135,7 +139,10 @@ def _make_xray_explore_job_fn(  # type: ignore[no-untyped-def]
                 _get_job_tracker().update_status(job_id_holder[0], status="running")
 
             def _run() -> Dict[str, Any]:
-                return _Engine().run(  # type: ignore[no-any-return]
+                engine = _Engine()
+                if record_event is not None:
+                    record_event.started()
+                return engine.run(  # type: ignore[no-any-return]
                     repo_path=repo_path,
                     driver_regex=driver_regex,
                     evaluator_code=evaluator_code,
@@ -205,6 +212,7 @@ def _submit_one_explore_omni(
     job_tracker: Any,  # circular import constraint — see _make_explore_done_cb_omni
     xray_executor: ThreadPoolExecutor,
     explore_fn_kwargs: Dict[str, Any],
+    evaluator: XRayEvaluator,
 ) -> Optional[str]:
     """Register, build, and submit one xray_explore job for a single alias.
 
@@ -229,7 +237,7 @@ def _submit_one_explore_omni(
         job_id_holder=[jid],
         bjm=bjm,
         record_event=_explore_event_recorder(
-            user, single_alias, explore_fn_kwargs["driver_regex"]
+            user, single_alias, explore_fn_kwargs["driver_regex"], evaluator
         ),
         **explore_fn_kwargs,
     )
@@ -263,6 +271,7 @@ def _submit_xray_explore_omni(
     loop: asyncio.AbstractEventLoop,
     job_tracker: Any,  # circular import constraint — see _make_explore_done_cb_omni
     xray_executor: ThreadPoolExecutor,
+    pattern_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Submit one xray_explore background job per alias (Bug #1074 fix).
 
@@ -273,6 +282,7 @@ def _submit_xray_explore_omni(
     bjm = _get_background_job_manager()
     job_ids: list = []
     errors: list = []
+    evaluator = XRayEvaluator(evaluator_code, pattern_name)
 
     explore_fn_kwargs: Dict[str, Any] = dict(
         driver_regex=driver_regex,
@@ -299,6 +309,7 @@ def _submit_xray_explore_omni(
             job_tracker=job_tracker,
             xray_executor=xray_executor,
             explore_fn_kwargs=explore_fn_kwargs,
+            evaluator=evaluator,
         )
         if jid is None:
             errors.append(
@@ -589,6 +600,7 @@ async def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, A
             loop=_omni_loop,
             job_tracker=_omni_jt,
             xray_executor=_omni_xe,
+            pattern_name=params.get("pattern_name") or None,
             **explore_kwargs,
         )
         if timeout_config_degraded:
@@ -648,7 +660,12 @@ async def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, A
         repo_path=Path(repo_path_str),
         job_id_holder=[job_id],
         bjm=bjm,
-        record_event=_explore_event_recorder(user, repo_alias_parsed, driver_regex),
+        record_event=_explore_event_recorder(
+            user,
+            repo_alias_parsed,
+            driver_regex,
+            XRayEvaluator(evaluator_code, params.get("pattern_name") or None),
+        ),
         **explore_kwargs,
     )
 

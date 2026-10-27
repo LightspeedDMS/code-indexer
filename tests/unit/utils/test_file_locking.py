@@ -15,6 +15,7 @@ Tests cover:
 
 import errno
 import fcntl
+import os
 from unittest.mock import patch
 
 import pytest
@@ -23,6 +24,7 @@ from code_indexer.utils.file_locking import (
     nfs_safe_flock,
     nfs_safe_funlock,
     nfs_safe_fsync,
+    nfs_safe_link_exclusive,
 )
 
 
@@ -232,3 +234,50 @@ class TestNfsSafeFsync:
                 nfs_safe_fsync(5)
 
             assert exc_info.value.errno == errno.EIO
+
+
+class TestNfsSafeLinkExclusive:
+    """nfs_safe_link_exclusive() on the real filesystem."""
+
+    def test_publishes_a_new_file(self, tmp_path):
+        source = tmp_path / "staged"
+        source.write_text("new")
+        target = tmp_path / "target"
+
+        nfs_safe_link_exclusive(source, target)
+
+        assert target.read_text() == "new"
+        assert os.stat(target).st_ino == os.stat(source).st_ino
+
+    def test_refuses_an_existing_file(self, tmp_path):
+        source = tmp_path / "staged"
+        source.write_text("new")
+        target = tmp_path / "target"
+        target.write_text("other")
+
+        with pytest.raises(FileExistsError):
+            nfs_safe_link_exclusive(source, target)
+
+        assert target.read_text() == "other"
+
+    def test_accepts_its_own_landed_link(self, tmp_path):
+        source = tmp_path / "staged"
+        source.write_text("new")
+        target = tmp_path / "target"
+        os.link(source, target)
+
+        nfs_safe_link_exclusive(source, target)
+
+        assert target.read_text() == "new"
+
+    def test_refuses_a_symlink_to_the_source(self, tmp_path):
+        source = tmp_path / "staged"
+        source.write_text("new")
+        target = tmp_path / "target"
+        target.symlink_to(source)
+
+        with pytest.raises(FileExistsError):
+            nfs_safe_link_exclusive(source, target)
+
+        assert target.is_symlink()
+        assert source.read_text() == "new"
