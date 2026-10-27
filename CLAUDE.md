@@ -152,6 +152,8 @@ Security-sensitive changes (permission-model edits, prompt-template edits for ca
 
 `fast-automation.sh` does NOT run server tests -- touching server code without `server-fast-automation.sh` = untested. All three pytest suites ignore `rust/` -- touching `rust/` without `rust-automation.sh` = untested. `e2e-automation.sh` (Epic #700) is non-negotiable for epic/story completion; pure doc/config edits may waive with explicit user approval. The `@pytest.mark.slow` marker routes a test INTO `slow-automation.sh`, not nowhere -- confirm that lane covers its path.
 
+`tests/unit/server/conftest.py` imports `anyio._backends._asyncio` eagerly (#2215): removing it lets a test that patches `asyncio.get_running_loop` freeze the Mock into anyio, and every later TestClient test in that process hangs. Its guard (`test_testclient_after_loop_patch_2215.py`) runs only in `slow-automation.sh`.
+
 ### Gate Timing -- Full Gates Only After Approval
 
 Full gates (`fast-`, `server-fast-`, `e2e-automation.sh`, full `./lint.sh`, directory-wide pytest) run ONCE, only after ALL code reviews are approved. In an epic, only after ALL stories are completed and approved. Running them before or between review rounds wastes the run whenever review rejects.

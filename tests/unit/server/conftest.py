@@ -105,6 +105,10 @@ from typing import Any, Callable, Generator, List, Set, Type
 
 import pytest
 
+# ^ external anyio._backends._asyncio binds asyncio.get_running_loop by name at its first import
+# ^ order load it before any test patches asyncio.get_running_loop; a first import under that patch keeps the Mock => later TestClient hangs; #2215
+import anyio._backends._asyncio  # noqa: F401
+
 # Bug #1996: MUST precede every server import -- isolates the server data-dir
 # env vars before any module fixes its directory at import time.
 from tests import _isolated_server_home  # noqa: F401 - side effect
