@@ -3,7 +3,8 @@ use tree_sitter::Language;
 /// Returns the tree-sitter Language for the given file extension, or None
 /// if the extension is not supported.
 pub fn language_for_extension(ext: &str) -> Option<Language> {
-    match ext {
+    // ^ coupled case-insensitive lookup with src/code_indexer/xray/ast_engine.py:AstSearchEngine.detect_language; #2217
+    match ext.to_ascii_lowercase().as_str() {
         "java" => Some(tree_sitter_java::LANGUAGE.into()),
         "kt" | "kts" => Some(tree_sitter_kotlin_ng::LANGUAGE.into()),
         "py" => Some(tree_sitter_python::LANGUAGE.into()),
@@ -13,7 +14,8 @@ pub fn language_for_extension(ext: &str) -> Option<Language> {
         "go" => Some(tree_sitter_go::LANGUAGE.into()),
         "cs" => Some(tree_sitter_c_sharp::LANGUAGE.into()),
         "sh" | "bash" => Some(tree_sitter_bash::LANGUAGE.into()),
-        "html" | "htm" => Some(tree_sitter_html::LANGUAGE.into()),
+        // ^ why vue = HTML grammar, not a crates.io Vue grammar; those are 0.0.x-0.1.x with unverified tree-sitter 0.25 support; #2211
+        "html" | "htm" | "vue" => Some(tree_sitter_html::LANGUAGE.into()),
         "css" => Some(tree_sitter_css::LANGUAGE.into()),
         "tf" | "hcl" => Some(tree_sitter_hcl::LANGUAGE.into()),
         "yml" | "yaml" => Some(tree_sitter_yaml::LANGUAGE.into()),
@@ -30,7 +32,7 @@ pub fn language_for_extension(ext: &str) -> Option<Language> {
 pub fn supported_extensions() -> &'static [&'static str] {
     &[
         "java", "kt", "kts", "py", "ts", "tsx", "js", "jsx", "go", "cs", "sh", "bash", "html",
-        "htm", "css", "tf", "hcl", "yml", "yaml", "sql", "xml", "groovy", "gradle", "mjs", "cjs",
+        "htm", "vue", "css", "tf", "hcl", "yml", "yaml", "sql", "xml", "groovy", "gradle", "mjs", "cjs",
         "c", "h", "cc", "cpp", "cxx", "c++", "hpp", "hh", "hxx", "h++",
     ]
 }
@@ -98,6 +100,29 @@ mod tests {
     fn test_groovy_extensions_present() {
         assert!(language_for_extension("groovy").is_some(), "No language for groovy");
         assert!(language_for_extension("gradle").is_some(), "No language for gradle");
+    }
+
+    #[test]
+    fn test_extension_lookup_is_case_insensitive() {
+        for ext in ["JAVA", "H", "Py"] {
+            assert!(language_for_extension(ext).is_some(), "No language for {ext}");
+        }
+    }
+
+    #[test]
+    fn test_vue_extension_parses_as_html_document() {
+        assert!(supported_extensions().contains(&"vue"), "vue not in supported list");
+        let language = language_for_extension("vue").expect("No language for vue");
+        let source = "<template>\n  <div>{{ msg }}</div>\n</template>\n\n<script>\nexport default { data() { return { msg: 'hi' } } }\n</script>\n";
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&language).expect("set_language");
+        let tree = parser.parse(source, None).expect("parse");
+        let root = tree.root_node();
+        assert_eq!(root.kind(), "document");
+        assert_eq!(root.end_byte(), source.len());
+        let mut cursor = root.walk();
+        let kinds: Vec<&str> = root.children(&mut cursor).map(|c| c.kind()).collect();
+        assert!(kinds.contains(&"script_element"), "kinds: {:?}", kinds);
     }
 
     #[test]

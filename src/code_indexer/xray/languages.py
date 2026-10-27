@@ -23,10 +23,12 @@ SUPPORTED_LANGUAGES: dict[str, str] = {
     "css": "css",
     "c": "c",
     "cpp": "cpp",
+    "yaml": "yaml",
 }
 
-# File extension -> canonical language name mapping
-# All keys are lowercase (matching Path.suffix.lower())
+# ^ invariant EXTENSION_MAP keys = rust languages.rs:supported_extensions = its match arms; test:test_match_arms_list_and_python_map_are_equal
+# ^ why search detection keeps languages absent from SUPPORTED_LANGUAGES, not dropped; xray-cli parses for searches
+# ^ hazard adding sql to SUPPORTED_LANGUAGES => python tree != rust tree in AST dump; test:test_python_dump_kinds_equal_rust_kinds
 EXTENSION_MAP: dict[str, str] = {
     ".java": "java",
     ".kt": "kotlin",
@@ -54,7 +56,19 @@ EXTENSION_MAP: dict[str, str] = {
     ".hh": "cpp",
     ".hxx": "cpp",
     ".h++": "cpp",
+    ".jsx": "javascript",
+    ".tf": "terraform",
+    ".hcl": "hcl",
+    ".yml": "yaml",
+    ".yaml": "yaml",
+    ".sql": "sql",
+    ".xml": "xml",
+    ".groovy": "groovy",
+    ".gradle": "groovy",
+    ".vue": "vue",
 }
+
+AST_DUMP_UNSUPPORTED_MESSAGE = "AST dump not supported for this language"
 
 
 def _hcl_available() -> bool:

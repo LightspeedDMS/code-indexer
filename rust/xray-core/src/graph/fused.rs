@@ -143,7 +143,7 @@ pub fn process_file_fused(
     repo_relative_path: &str,
     fact_collector: &dyn FactCollector,
 ) -> Option<FusedFileResult> {
-    let ext = path.extension()?.to_str()?.to_string();
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     let (root, has_syntax_error) = scanner::parse_file_with_error_flag(path)?;
     let file_id = crate::graph::identity::file_id(repo_relative_path);
     Some(process_parsed_file(root, repo_relative_path, file_id, &ext, fact_collector, has_syntax_error))
@@ -186,6 +186,13 @@ mod tests {
         // Extraction itself must be UNAFFECTED by the later panic --
         // proving the two walks are genuinely independent, not one
         // combined try block that loses extraction's results too.
+        assert_eq!(result.extraction_status, ExtractionStatus::Completed);
+        assert!(result.index.is_some());
+    }
+
+    #[test]
+    fn an_upper_case_java_extension_is_extracted() {
+        let result = write_and_process("class Foo {}\n", "JAVA", &NoOpCollector).unwrap();
         assert_eq!(result.extraction_status, ExtractionStatus::Completed);
         assert!(result.index.is_some());
     }

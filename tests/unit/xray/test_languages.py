@@ -183,12 +183,11 @@ class TestHclAvailable:
             engine = AstSearchEngine()
             assert engine.extension_map.get(".tf") == "terraform"
 
-    def test_terraform_extension_absent_when_hcl_unavailable(self) -> None:
-        """When HCL unavailable (our test environment), .tf not in EXTENSION_MAP."""
-        from code_indexer.xray.languages import _hcl_available, EXTENSION_MAP
+    def test_terraform_extensions_detected_regardless_of_hcl_grammar(self) -> None:
+        from code_indexer.xray.languages import EXTENSION_MAP
 
-        if not _hcl_available():
-            assert ".tf" not in EXTENSION_MAP
+        assert EXTENSION_MAP[".tf"] == "terraform"
+        assert EXTENSION_MAP[".hcl"] == "hcl"
 
 
 class TestTerraformConditionalEngine:
@@ -209,7 +208,12 @@ class TestTerraformConditionalEngine:
         ):
             engine = AstSearchEngine()
         assert "terraform" not in engine.supported_languages
-        assert engine.extension_map.get(".tf") is None
+        assert "hcl" not in engine.supported_languages
+        assert not engine.can_parse("terraform")
+        assert not engine.can_parse("hcl")
+        # ^ invariant search detection != python grammar availability; #2212
+        assert engine.detect_language("main.tf") == "terraform"
+        assert engine.detect_language("config.hcl") == "hcl"
 
     def test_supported_languages_includes_terraform_when_hcl_present(self) -> None:
         """When get_language('hcl') succeeds, terraform MUST appear in engine."""

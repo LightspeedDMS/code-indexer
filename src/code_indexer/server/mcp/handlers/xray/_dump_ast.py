@@ -12,6 +12,7 @@ from typing import Any, Dict
 
 from code_indexer.server.auth.user_manager import User
 from code_indexer.utils.path_confinement import has_git_segment
+from code_indexer.xray.languages import AST_DUMP_UNSUPPORTED_MESSAGE
 from code_indexer.xray.search_engine import XRaySearchEngine
 
 from ._catalog_guard import catalog_xray_refusal, xray_access_service
@@ -183,6 +184,17 @@ def handle_xray_dump_ast(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                     "error": "unsupported_language",
                     "message": (
                         f"No tree-sitter grammar for extension {target.suffix!r}"
+                    ),
+                }
+            )
+        if not engine.ast_engine.can_parse(lang):
+            return _mcp_response(
+                {
+                    "error": "unsupported_language",
+                    "message": (
+                        f"{AST_DUMP_UNSUPPORTED_MESSAGE}: {lang!r}. "
+                        f"xray_search and xray_explore still evaluate "
+                        f"{target.suffix!r} files."
                     ),
                 }
             )

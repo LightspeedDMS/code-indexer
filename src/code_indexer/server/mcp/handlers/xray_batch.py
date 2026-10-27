@@ -348,6 +348,7 @@ def _run_xray_batch_job(
     matches: List[Dict[str, Any]] = []
     errors: List[Dict[str, Any]] = list(repo_errors)
     evaluation_errors: List[Dict[str, Any]] = []
+    warnings: List[Dict[str, Any]] = []
 
     total = len(resolved_repos)
     repos_completed = 0
@@ -511,6 +512,14 @@ def _run_xray_batch_job(
                 evaluation_errors.append(ee_copy)
                 partial = True
 
+            for w in cell.get("warnings", []):
+                warnings.append(
+                    {**w, "repository_alias": repo["alias"], "scan_index": scan_index}
+                )
+                # ^ why partial only for unparsed_files, not every warning; advisory warnings != incomplete scan
+                if w.get("type") == "unparsed_files":
+                    partial = True
+
             if cell.get("partial"):
                 partial = True
 
@@ -536,6 +545,8 @@ def _run_xray_batch_job(
         "timeout": timed_out,
         "cancelled": cancelled,
     }
+    if warnings:
+        result["warnings"] = warnings
     return result
 
 

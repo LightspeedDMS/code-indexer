@@ -109,7 +109,7 @@ outputSchema:
       description: 'Multi-repo: per-alias resolution failures.'
     matches:
       type: array
-      description: 'Inline match list when await_seconds resolves. Each entry has file_path, language, line_number, line_content, matched_node, ast_debug, plus pattern and snippet from the Rust evaluator findings.'
+      description: 'Inline match list when await_seconds resolves. Each entry has file_path, language, line_number, line_content, matched_node, ast_debug, plus pattern and snippet from the Rust evaluator findings. For sql, xml, groovy/gradle and vue files, matched_node and ast_debug are replaced by ast_debug_error ("AST dump not supported for this language: ...").'
       items:
         type: object
     file_metadata:
@@ -262,7 +262,7 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
 | `node.has_descendant_of_kind(kind)` | bool | true if any descendant matches `kind` -- use for fast existence checks without allocating |
 | `node.descendants_of_kind(kind)` | Vec\<&OwnedNode\> | DFS pre-order; all descendants whose kind matches (excludes self) |
 
-For the full cookbook of worked evaluator examples and a cross-language node type table covering the 17 mandatory languages (java, kotlin, go, python, typescript, javascript, bash, csharp, html, css, hcl/terraform, yaml, sql, xml, groovy, c, cpp), see the corresponding sections in `xray_search`. The same evaluator API and `OwnedNode` surface apply to both tools. Glob pattern semantics for `include_patterns`/`exclude_patterns` (brace groups, any-depth vs. root-anchored segments) are also identical between the two tools -- see `xray_search`'s "Glob Pattern Semantics" section for the full matching rules.
+For the full cookbook of worked evaluator examples and a cross-language node type table covering the 17 mandatory languages (java, kotlin, go, python, typescript, javascript, bash, csharp, html, css, hcl/terraform, yaml, sql, xml, groovy, c, cpp) plus vue (`.vue`, parsed with the HTML grammar), see the corresponding sections in `xray_search`. The same evaluator API and `OwnedNode` surface apply to both tools. Glob pattern semantics for `include_patterns`/`exclude_patterns` (brace groups, any-depth vs. root-anchored segments) are also identical between the two tools -- see `xray_search`'s "Glob Pattern Semantics" section for the full matching rules.
 
 ### Globals available in evaluator context
 
@@ -358,6 +358,7 @@ After polling `GET /api/jobs/{job_id}` to COMPLETED status, `result` contains:
   - `snippet` (str, from EvalFinding.snippet) -- code snippet context from the evaluator
   - `matched_node` (server-added): compact description of the file root node -- `{type, start_byte, end_byte, start_point, end_point}`. Distinct from the `node` evaluator input only in serialisation; both refer to the file root.
   - `ast_debug` (server-added): full BFS-serialised AST tree rooted at the file root (see "ast_debug Payload" above).
+  - `ast_debug_error` (server-added, instead of `matched_node`/`ast_debug`): present for sql, xml, groovy/gradle and vue files, which are evaluated but have no in-process AST dump -- `"AST dump not supported for this language: 'sql'"`.
 - `file_metadata[]`: per-file metadata entries. One entry per evaluated file. Shape: `{file_path}`.
 - `evaluation_errors[]`: list of per-file failures. Each entry: `{file_path, line_number, error_type, error_message}`. `evaluation_errors` does NOT cause job failure -- status remains COMPLETED.
 - `files_processed` (int): number of candidate files evaluated.
@@ -404,6 +405,30 @@ After polling `GET /api/jobs/{job_id}` to COMPLETED status, `result` contains:
   "error_message": "No grammar for extension '.md'"
 }
 ```
+
+When NO candidate file is in a supported language, one extra scan-level entry (`file_path: ""`) names the extensions, so an empty result is not mistaken for "no findings":
+
+```json
+{
+  "file_path": "",
+  "line_number": 0,
+  "error_type": "UnsupportedLanguage",
+  "error_message": "No candidate file is in a language X-Ray supports (2 files, extensions: '.md', '.svelte')"
+}
+```
+
+**UnparsedFiles** -- the engine received files it could not parse (an extension this engine build does not support, an unreadable file, or a parser failure). When NO candidate file parsed, one scan-level entry (`file_path: ""`) carries the count and the search counts as failed:
+
+```json
+{
+  "file_path": "",
+  "line_number": 0,
+  "error_type": "UnparsedFiles",
+  "error_message": "The engine could not parse 3 of 3 files (an extension this engine build does not support, an unreadable file, or a parser failure); results cover only the parsed files"
+}
+```
+
+When only SOME files could not be parsed, the result instead carries `unparsed_files: N` and one `warnings` entry `{"type": "unparsed_files", "count": N, "hint": "..."}`; matches from the parsed files are returned and the search counts as successful.
 
 **ValidationFailed** -- appears in `evaluation_errors[]` only as a defensive fallback. The handler validates `evaluator_code` synchronously BEFORE submitting the job and returns a sync error response with structured fields:
 

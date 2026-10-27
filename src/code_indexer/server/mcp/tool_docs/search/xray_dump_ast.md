@@ -105,12 +105,14 @@ Fields per node:
 | invalid_file_path | file_path is empty or otherwise malformed. |
 | path_traversal_rejected | file_path contains ../ sequences that would escape the repository root. |
 | file_not_found | The file does not exist inside the repository. |
-| unsupported_language | The file extension has no registered tree-sitter grammar. Supported extensions correspond to: java, kotlin, go, python, typescript, javascript (including .mjs/.cjs), bash, csharp, html, css, hcl/terraform, yaml, sql, xml, groovy/gradle, c (.c/.h), cpp (.cc/.cpp/.cxx/.c++/.hpp/.hh/.hxx/.h++). |
+| unsupported_language | Either the file extension is not an X-Ray language at all ("No tree-sitter grammar for extension ..."), or it is searchable but has no in-process AST dump ("AST dump not supported for this language: 'sql'" -- sql, xml, groovy/gradle, vue). xray_search and xray_explore still evaluate the second kind. See "Supported Languages" below. |
 | xray_extras_not_installed | The xray extras package (tree-sitter-languages) is not installed on this server. Install via: pip install code-indexer[xray]. |
 
 ## Supported Languages
 
-The 17 mandatory languages in Rust xray-core: java, kotlin, go, python, typescript, javascript (including .mjs/.cjs extensions), bash, csharp, html, css, hcl/terraform, yaml, sql, xml, groovy (including .gradle extension), c (.c, .h), cpp (.cc, .cpp, .cxx, .c++, .hpp, .hh, .hxx, .h++).
+The 17 mandatory languages in Rust xray-core (searchable through xray_search and xray_explore): java, kotlin, go, python, typescript, javascript (including .jsx/.mjs/.cjs extensions), bash, csharp, html, css, hcl/terraform (.tf, .hcl), yaml (.yml, .yaml), sql, xml, groovy (including .gradle extension), c (.c, .h), cpp (.cc, .cpp, .cxx, .c++, .hpp, .hh, .hxx, .h++), and vue (.vue single-file components, parsed with the HTML grammar: template elements, with `<script>` and `<style>` as `script_element`/`style_element` holding `raw_text`; there are no Vue directive nodes).
+
+xray_dump_ast parses in-process with the server's own grammars, not the engine's. It refuses sql, xml, groovy/gradle and vue with `unsupported_language` and the message "AST dump not supported for this language"; use `debug_log()` inside an xray_search evaluator to inspect their node kinds. Every other language above is dumped. For `.html` the dumped root node is `fragment`, while evaluators receive a root of kind `document`; the nodes below the root have the same kinds.
 
 Note on `.h` headers: `.h` maps to the C grammar (GitHub-Linguist default). A C++ header named `.h` parses under the C grammar and may produce ERROR nodes on C++-only syntax (templates, namespaces, classes). Name C++ headers `.hpp`/`.hh`/`.hxx`/`.h++` to parse them under the C++ grammar.
 

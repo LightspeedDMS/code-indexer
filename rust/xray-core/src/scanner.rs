@@ -50,11 +50,8 @@ pub struct ScanResult {
     pub debug_messages: Vec<String>,
 }
 
-/// Collect all files under `dir` whose extension is in supported_extensions().
+/// Collect all files under `dir` whose extension has a grammar (case-insensitive).
 pub fn collect_files(dir: &Path) -> Vec<PathBuf> {
-    let supported: std::collections::HashSet<&str> =
-        languages::supported_extensions().iter().copied().collect();
-
     WalkDir::new(dir)
         .into_iter()
         .filter_map(|e| e.ok())
@@ -63,7 +60,7 @@ pub fn collect_files(dir: &Path) -> Vec<PathBuf> {
             e.path()
                 .extension()
                 .and_then(|s| s.to_str())
-                .map(|ext| supported.contains(ext))
+                .map(|ext| languages::language_for_extension(ext).is_some())
                 .unwrap_or(false)
         })
         .map(|e| e.into_path())
@@ -252,6 +249,15 @@ mod tests {
         let files = collect_files(dir.path());
         assert_eq!(files.len(), 1);
         assert!(files[0].to_str().unwrap().ends_with(".java"));
+    }
+
+    #[test]
+    fn test_collect_files_finds_upper_case_extension() {
+        let dir = TempDir::new().unwrap();
+        write_temp_file(&dir, "Main.JAVA", "class Main {}");
+        let files = collect_files(dir.path());
+        assert_eq!(files.len(), 1);
+        assert!(files[0].to_str().unwrap().ends_with("Main.JAVA"));
     }
 
     #[test]

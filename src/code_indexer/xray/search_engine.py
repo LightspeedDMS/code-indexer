@@ -14,7 +14,7 @@ import math
 import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple
 
 if TYPE_CHECKING:
     from code_indexer.xray.rust_backend import SharedIdentityCache, XrayCacheBackend
@@ -27,6 +27,7 @@ from code_indexer.global_repos.regex_search import (
     RegexSearchService,
     RipgrepExecutionError,
 )
+from code_indexer.xray.languages import AST_DUMP_UNSUPPORTED_MESSAGE
 from code_indexer.xray.sandbox import _line_to_byte_offset_bytes as _line_to_byte_offset
 
 logger = logging.getLogger(__name__)
@@ -468,9 +469,11 @@ class XRaySearchEngine:
         # Language detection stays in parent (no tree-sitter needed — just extension map).
         # Parsing + evaluation moves to the spawned driver process.
         file_specs: List[Dict[str, Any]] = []
+        unsupported_suffixes: Set[str] = set()
         for fp in candidate_files:
             fp_lang = self.ast_engine.detect_language(fp)
             if fp_lang is None:
+                unsupported_suffixes.add(fp.suffix.lower())
                 evaluation_errors.append(
                     {
                         "file_path": str(fp.relative_to(repo_path)),
@@ -493,6 +496,23 @@ class XRaySearchEngine:
                 }
             )
 
+        if candidate_files and not file_specs:
+            # ^ coupled file_path "" with services/search_event_outcomes.py:_whole_run_failure
+            evaluation_errors.append(
+                {
+                    "file_path": "",
+                    "line_number": 0,
+                    "error_type": "UnsupportedLanguage",
+                    "error_message": (
+                        f"No candidate file is in a language X-Ray supports "
+                        f"({len(candidate_files)} files, extensions: "
+                        f"{', '.join(repr(s) for s in sorted(unsupported_suffixes))})"
+                    ),
+                }
+            )
+
+        unparsed_files_count = 0
+        unparsed_warnings: List[Dict[str, Any]] = []
         if file_specs:
             # Bug #1797 (defect 2): floor the DIFFERENCE, not the elapsed
             # value. The old `timeout_seconds - int(_elapsed())` truncated
@@ -558,6 +578,34 @@ class XRaySearchEngine:
                 )
                 if not is_batch_level_failure:
                     files_processed += 1
+            files_errored = int(getattr(self.rust_backend, "_last_files_errored", 0))
+            if files_errored > 0 and not timeout_hit:
+                files_processed = max(0, files_processed - files_errored)
+                unparsed_message = (
+                    f"The engine could not parse {files_errored} of "
+                    f"{len(file_specs)} files (an extension this engine "
+                    f"build does not support, an unreadable file, or a "
+                    f"parser failure); results cover only the parsed files"
+                )
+                # ^ why whole-run marker only when nothing parsed, not always; marker => outcome failure, batch cell "did not run"
+                if files_errored >= len(file_specs):
+                    evaluation_errors.append(
+                        {
+                            "file_path": "",
+                            "line_number": 0,
+                            "error_type": "UnparsedFiles",
+                            "error_message": unparsed_message,
+                        }
+                    )
+                else:
+                    unparsed_files_count = files_errored
+                    unparsed_warnings.append(
+                        {
+                            "type": "unparsed_files",
+                            "count": files_errored,
+                            "hint": unparsed_message,
+                        }
+                    )
 
         # Enrich matches with ast_debug and matched_node when requested.
         # Re-parses each matched file once; safe since include_ast_debug is a
@@ -569,8 +617,12 @@ class XRaySearchEngine:
             parsed_roots: Dict[str, Any] = {}
             for match in matches:
                 fp_str = match.get("file_path", "")
+                spec = spec_by_path.get(fp_str)
+                refusal = self._ast_debug_refusal(spec["lang"]) if spec else None
+                if refusal is not None:
+                    match["ast_debug_error"] = refusal
+                    continue
                 if fp_str not in parsed_roots:
-                    spec = spec_by_path.get(fp_str)
                     if spec is not None:
                         try:
                             file_bytes = (repo_path / fp_str).read_bytes()
@@ -638,9 +690,11 @@ class XRaySearchEngine:
             result["max_files_reached"] = True
 
         # Surface zero-match include_pattern warnings (fix #3).
-        phase1_warnings = getattr(self, "_last_phase1_warnings", [])
-        if phase1_warnings:
-            result["warnings"] = phase1_warnings
+        warnings = list(getattr(self, "_last_phase1_warnings", [])) + unparsed_warnings
+        if warnings:
+            result["warnings"] = warnings
+        if unparsed_files_count:
+            result["unparsed_files"] = unparsed_files_count
 
         if progress_callback:
             if timeout_hit:
@@ -663,6 +717,11 @@ class XRaySearchEngine:
                 )
 
         return result
+
+    def _ast_debug_refusal(self, lang: str) -> Optional[str]:
+        if self.ast_engine.can_parse(lang):
+            return None
+        return f"{AST_DUMP_UNSUPPORTED_MESSAGE}: {lang!r}"
 
     # Lower-level single-file evaluation API used directly by unit tests (not dead code).
     def _evaluate_file(
@@ -753,7 +812,13 @@ class XRaySearchEngine:
 
         matches, errors, meta = batch_results[0]
 
-        if include_ast_debug and matches:
+        refusal = (
+            self._ast_debug_refusal(lang) if include_ast_debug and matches else None
+        )
+        if refusal is not None:
+            for match in matches:
+                match["ast_debug_error"] = refusal
+        elif include_ast_debug and matches:
             try:
                 root = self.ast_engine.parse(source.encode("utf-8"), lang)
                 raw_root = getattr(root, "_node", root)

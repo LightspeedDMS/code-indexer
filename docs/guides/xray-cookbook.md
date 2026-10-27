@@ -37,6 +37,31 @@ An empty `Vec<EvalFinding>` means that the file matched Phase 1 but the
 evaluator found nothing to report. The evaluator is file-as-unit: it does not
 receive a separate callback for every regular-expression match.
 
+### Vue single-file components
+
+`.vue` files are parsed with the HTML grammar. The root node is `document`;
+template markup appears as `element`, `start_tag`, and `attribute` nodes, and
+`<script>` and `<style>` are `script_element` and `style_element` nodes whose
+body is a single `raw_text` node. There are no Vue directive nodes and no
+script AST, so a Vue evaluator usually reads `node.text()` and scans its lines
+(for example, to report the line on which a given directive or call appears).
+
+A stored pattern's `language` field describes the pattern; it does not select
+files. Phase 1 (the driver regex plus `include_patterns`/`exclude_patterns`)
+selects the candidates, so restrict a Vue scan with an include pattern such as
+`**/*.vue`.
+
+`xray_dump_ast` refuses `.vue` with "AST dump not supported for this language";
+inspect Vue node kinds with `debug_log()` inside an evaluator instead. (`.html`
+files are dumped, but the dump shows the server grammar's `fragment` root,
+while evaluators receive a `document` root.)
+
+If the engine cannot parse some candidate files (for example an older engine
+build without a grammar), the result says so instead of reading as a clean
+scan. When no candidate parsed, it carries one `UnparsedFiles` error. When only
+some did, it carries an `unparsed_files` count and an `unparsed_files` entry in
+`warnings`, and the search still counts as successful.
+
 ## Template library: single-file mode
 
 Each template below is copy-pasteable as `evaluator_code`. Node kinds

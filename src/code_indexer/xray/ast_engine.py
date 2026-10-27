@@ -17,10 +17,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Optional, Union, cast
 
 from code_indexer.xray.languages import (
+    AST_DUMP_UNSUPPORTED_MESSAGE,
     EXTENSION_MAP,
     SUPPORTED_LANGUAGES,
     _hcl_available,
 )
+
+
+class AstDumpUnsupportedError(ValueError):
+    pass
+
 
 if TYPE_CHECKING:
     # These imports are for type checkers only — never executed at runtime
@@ -82,7 +88,7 @@ class AstSearchEngine:
 
         if _hcl_available():
             self._supported_languages["terraform"] = "hcl"
-            self._extension_map[".tf"] = "terraform"
+            self._supported_languages["hcl"] = "hcl"
 
     # ------------------------------------------------------------------
     # Public properties
@@ -101,6 +107,9 @@ class AstSearchEngine:
     # ------------------------------------------------------------------
     # Language detection
     # ------------------------------------------------------------------
+
+    def can_parse(self, language: str) -> bool:
+        return language in self._supported_languages
 
     def detect_language(self, path: Union[str, Path]) -> Optional[str]:
         """Return the canonical language name for a file path, or None.
@@ -134,9 +143,10 @@ class AstSearchEngine:
         """
         from code_indexer.xray.xray_node import XRayNode
 
-        if language not in self._supported_languages:
-            raise ValueError(
-                f"unsupported language: {language!r}. "
+        if not self.can_parse(language):
+            raise AstDumpUnsupportedError(
+                f"{AST_DUMP_UNSUPPORTED_MESSAGE}: {language!r} "
+                f"(unsupported for in-process parsing). "
                 f"Supported: {sorted(self._supported_languages)}"
             )
 

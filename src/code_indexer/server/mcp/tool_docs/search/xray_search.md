@@ -723,7 +723,7 @@ Each example is a complete `evaluator_code` value. All patterns return `Vec<Eval
 
 ### Common cross-language node type names
 
-tree-sitter node type names differ between languages. Use this table as a starting reference for the general-purpose languages. Bash, HTML, CSS, HCL/Terraform, YAML, SQL, XML, and Groovy are also supported but have limited overlap with the constructs below -- use `xray_dump_ast` to discover their node types.
+tree-sitter node type names differ between languages. Use this table as a starting reference for the general-purpose languages. Bash, HTML, CSS, HCL/Terraform, YAML, SQL, XML, Groovy and Vue are also supported but have limited overlap with the constructs below. Use `xray_dump_ast` to discover node types for Bash, HTML, CSS, HCL/Terraform and YAML. `xray_dump_ast` refuses SQL, XML, Groovy and Vue, so for those emit `debug_log(&format!("{} line {}", n.kind, n.start_line))` while walking the tree inside an xray_search evaluator and read `debug_output`. Vue single-file components (`.vue`) are parsed with the HTML grammar: the root is `document`, template markup is `element`/`start_tag`/`attribute` nodes, and `<script>`/`<style>` are `script_element`/`style_element` whose body is one `raw_text` node. There are no Vue directive or script AST nodes, so Vue evaluators usually scan `node.text()` (stored `language: vue` patterns do).
 
 | Construct | Python | Java | TypeScript / JavaScript | Go | Kotlin | C# |
 |-----------|--------|------|-------------------------|-----|--------|-----|
@@ -832,6 +832,30 @@ Each `error_type` carries a distinct `error_message` shape:
   "error_message": "No grammar for extension '.md'"
 }
 ```
+
+When NO candidate file is in a supported language, one extra scan-level entry (`file_path: ""`) names the extensions, so an empty result is not mistaken for "no findings":
+
+```json
+{
+  "file_path": "",
+  "line_number": 0,
+  "error_type": "UnsupportedLanguage",
+  "error_message": "No candidate file is in a language X-Ray supports (2 files, extensions: '.md', '.svelte')"
+}
+```
+
+**UnparsedFiles** -- the engine received files it could not parse (an extension this engine build does not support, an unreadable file, or a parser failure). When NO candidate file parsed, one scan-level entry (`file_path: ""`) carries the count and the search counts as failed:
+
+```json
+{
+  "file_path": "",
+  "line_number": 0,
+  "error_type": "UnparsedFiles",
+  "error_message": "The engine could not parse 3 of 3 files (an extension this engine build does not support, an unreadable file, or a parser failure); results cover only the parsed files"
+}
+```
+
+When only SOME files could not be parsed, the result instead carries `unparsed_files: N` and one `warnings` entry `{"type": "unparsed_files", "count": N, "hint": "..."}`; matches from the parsed files are returned and the search counts as successful. In `xray_search_batch` results the warning also carries `repository_alias` and `scan_index`.
 
 **ValidationFailed** -- appears in `evaluation_errors[]` only as a defensive fallback. The handler validates `evaluator_code` synchronously BEFORE submitting the job and returns a sync error response with structured fields:
 

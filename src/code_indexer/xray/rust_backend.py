@@ -876,6 +876,8 @@ class RustNativeBackend:
         Returns:
             List of (matches, errors, meta) tuples, one per file spec.
         """
+        # ^ coupled _last_files_errored with xray/search_engine.py:XRaySearchEngine.run; stale count => wrong UnparsedFiles
+        self._last_files_errored = 0
         if not file_specs:
             return []
 
@@ -963,6 +965,7 @@ class RustNativeBackend:
         # Capture debug_log() messages as a side-channel before returning.
         # XRaySearchEngine.run() reads _last_debug_messages to surface in debug_output[].
         self._last_debug_messages = output.get("debug_messages", [])
+        self._last_files_errored = int(output.get("files_errored", 0))
         return self._build_results(
             file_specs, abs_paths, output.get("findings", []), resolved_root
         )

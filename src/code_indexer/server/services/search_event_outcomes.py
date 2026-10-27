@@ -46,6 +46,8 @@ _WHOLE_RUN_FILE_PATH = ""
 _XRAY_WHOLE_RUN_CLASSES = {
     "CompileError": "compile_error",
     "EvaluatorTimeout": "timeout",
+    "UnparsedFiles": "unparsed_files",
+    "UnsupportedLanguage": "unsupported_language",
     "XRayCliError": "xray_cli_error",
 }
 

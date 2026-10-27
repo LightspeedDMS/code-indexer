@@ -231,7 +231,7 @@ fn record_fused_result(full_path: &Path, relative_path: &str, fused_result: Fuse
                 }
             }
         }
-        let language = full_path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_string();
+        let language = full_path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
         acc.files_for_bind.push(FileForBind { file_id: file_id_val, language, index });
     }
 }

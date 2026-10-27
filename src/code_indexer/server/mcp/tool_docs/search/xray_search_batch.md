@@ -188,12 +188,17 @@ Aliases are resolved before submitting the job:
 - `"repo"`: alias could not be resolved (no scan_index).
 - `"cell"`: a specific (repo, scan) cell failed (scan_index required). Codes: `pattern_not_found`, `phase1_failed`, `cell_execution_error`.
 
+### warnings[]
+
+Present only when at least one cell produced warnings. Each entry is a warning the same scan would return from `xray_search` (for example `content_search_read_capped` or `unparsed_files`), tagged with `repository_alias` and `scan_index`. Only an `unparsed_files` warning (the engine could not parse some of the cell's files) sets `partial=true`; advisory warnings such as `content_search_read_capped` do not.
+
 ### partial=true triggers
 
 `partial=true` whenever ANY of the following occurs:
 - At least one repo or cell error.
 - At least one per-file evaluation error.
 - Cell reports `partial=true` (e.g. max_results cap hit).
+- A cell reports an `unparsed_files` warning.
 - Timeout fires.
 - Job cancelled.
 
