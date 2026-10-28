@@ -30,36 +30,31 @@
 # a genuine hang rather than blocking the lane forever (Anti-Unbounded-Loop). Override via
 # --timeout=N or the SLOW_PYTEST_TIMEOUT env var if a specific test population needs more.
 #
-# Two phases, mirroring the fast-automation.sh / server-fast-automation.sh split:
-#   Phase 1 (non-server): tests/unit/, server tree excluded -- no special env needed.
-#   Phase 2 (server):     tests/unit/server/ -- REQUIRES CIDX_SERVER_DATA_DIR pointed at an
-#                          isolated temp dir + CIDX_TEST_FAST_SQLITE=1, exactly as
-#                          server-fast-automation.sh:171-181 sets them. Without
-#                          CIDX_SERVER_DATA_DIR, server tests write into ~/.cidx-server/ --
-#                          the LIVE dev server's data directory (Bug #1776). This script
-#                          NEVER runs a server-tree pytest invocation without that env var.
-#                          Phase 1 UNCONDITIONALLY appends --ignore=tests/unit/server/ to
-#                          every invocation, regardless of --paths -- this closes every
+# Two phases, mirroring the fast-automation.sh / server-fast-automation.sh split, run AT
+# THE SAME TIME, each as N parallel chunks split by file from the previous run's
+# --durations=0 logs (scripts/unit_lane_chunks.py, shared with the two fast lanes):
+#   Phase 1 (non-server): tests/unit/ minus tests/unit/infrastructure/ and, UNCONDITIONALLY,
+#                          tests/unit/server/ -- regardless of --paths, closing every
 #                          ancestor/traversal bypass (e.g. --paths tests/unit, --paths tests/,
-#                          --paths .) in one place instead of trying to enumerate them via
-#                          path canonicalization. Phase 2's temp CIDX_SERVER_DATA_DIR is
-#                          removed via an EXIT/INT/TERM trap, not just a post-pytest rm, so
-#                          an interrupted or hung run cannot leak it under /tmp.
+#                          --paths .) in one place. NOT fast's scripts/unit_lane_ignores.txt:
+#                          slow tests in files the fast lane ignores still run here.
+#   Phase 2 (server):     tests/unit/server/ with CIDX_TEST_FAST_SQLITE=1, as
+#                          server-fast-automation.sh sets it.
+# Every chunk of both phases gets its OWN scratch HOME and CIDX_SERVER_DATA_DIR /
+# CIDX_DATA_DIR under ~/.tmp (scripts/real-server-home-guard.sh real_home_lane_env), so no
+# test writes into ~/.cidx-server/ -- the LIVE dev server's data directory (Bug #1776) --
+# and the lane fails if the real launch.json / config.json changed. The runner removes the
+# scratch dirs when its chunks end, including on interrupt.
 #
-# tests/unit/infrastructure/ is ignored in Phase 1 for the same reason
-# fast-automation.sh:135 ignores it: a pre-existing stale relative import
-# (tests/unit/infrastructure/test_progress_debug.py -> tests.unit.services.test_vector_
+# tests/unit/infrastructure/ is ignored in Phase 1: a pre-existing stale relative
+# import (tests/unit/infrastructure/test_progress_debug.py -> tests.unit.services.test_vector_
 # calculation_manager, a module that does not exist) breaks pytest COLLECTION entirely for
-# that directory, independent of any marker selection. This is not new exclusion policy --
-# it is the same defect the fast gate already carries around.
+# that directory, independent of any marker selection.
 #
-# Each phase writes its OWN telemetry log under .test-telemetry/ BEFORE the phase's pytest
-# process exits, so results survive even if a process wedges at interpreter teardown after
-# all its tests finished (Bug #1800: exactly this happened to a fast-automation.sh chunk,
-# and only the per-chunk log preserved the results). tee's own exit code is checked
-# separately from pytest's (via a single PIPESTATUS snapshot) -- a telemetry-write failure
-# is treated as a phase failure even if pytest itself passed, since a missing/incomplete
-# log defeats the point of logging.
+# Each chunk writes its OWN log .test-telemetry/slow-automation-phase<P>-<ts>-chunk<k>.log
+# (pytest writes it directly, so results survive a process that wedges at interpreter
+# teardown, Bug #1800); each phase's plan and per-chunk summary go to
+# .test-telemetry/slow-automation-phase<P>-<ts>-summary.log.
 #
 # Usage:
 #   ./slow-automation.sh                 # Both phases
@@ -67,10 +62,12 @@
 #   ./slow-automation.sh --phase 2       # Server unit tests only
 #   ./slow-automation.sh --timeout 300   # Override the per-test pytest timeout (positive integer seconds)
 #   ./slow-automation.sh --paths tests/unit/xray/   # Restrict Phase 1 to one subset (bounded runs)
+#   ./slow-automation.sh --chunks 4      # Parallel chunks per phase (default 4)
+#   ./slow-automation.sh --dry-run       # Print each phase's chunk plan and exit
 #
 # Exit codes:
-#   0 - all selected phases passed (or collected zero tests)
-#   1 - one or more phases failed, or a setup/argument error
+#   0 - every selected phase ran tests and passed
+#   1 - a phase failed or selected no test at all, or a setup/argument error
 
 set -e
 
@@ -120,9 +117,23 @@ fi
 ONLY_PHASE=""
 SLOW_PYTEST_TIMEOUT="${SLOW_PYTEST_TIMEOUT:-120}"
 PHASE1_PATHS="tests/unit/"
+CHUNKS=4
+DRY_RUN=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --chunks)
+            if [[ $# -lt 2 || ! "$2" =~ ^[1-9][0-9]*$ ]]; then
+                echo "ERROR: --chunks requires a positive integer" >&2
+                exit 1
+            fi
+            CHUNKS="$2"
+            shift 2
+            ;;
+        --dry-run)
+            DRY_RUN=1
+            shift
+            ;;
         --phase)
             if [[ $# -lt 2 ]]; then
                 echo "ERROR: --phase requires a value (1 or 2)" >&2
@@ -173,12 +184,12 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --help|-h)
-            sed -n '2,58p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,/^[^#]/p' "$0" | grep '^#' | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
             echo "ERROR: Unknown argument: $1" >&2
-            echo "Usage: $0 [--phase 1|2] [--timeout N] [--paths PATH] [--help]" >&2
+            echo "Usage: $0 [--phase 1|2] [--timeout N] [--paths PATH] [--chunks N] [--dry-run] [--help]" >&2
             exit 1
             ;;
     esac
@@ -197,127 +208,91 @@ echo "==========================================="
 echo "Per-test timeout: ${SLOW_PYTEST_TIMEOUT}s"
 
 # PYTHONPATH: src + tests, exactly as server-fast-automation.sh computes it. A bare
-# `pytest` here (no PYTHONPATH) resolves `code_indexer` from the sibling repo at
-# /home/opuser/Dev/code-indexer/ instead of this project -- always set PYPATH explicitly.
+# `pytest` here (no PYTHONPATH) can resolve `code_indexer` from another checkout
+# instead of this project -- always set PYPATH explicitly.
 PYPATH="$(pwd)/src:$(pwd)/tests"
 
 SLOW_MARKER_EXPR="slow and not e2e and not real_api and not integration and not requires_server and not requires_containers and not performance"
 
+PROJECT_DIR=$(pwd)
 TELEMETRY_DIR=".test-telemetry"
-mkdir -p "$TELEMETRY_DIR"
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+LANE_TOOL="$PROJECT_DIR/scripts/unit_lane_chunks.py"
+PHASES=()
+[[ -n "$ONLY_PHASE" && "$ONLY_PHASE" != "1" ]] || PHASES+=(1)
+[[ -n "$ONLY_PHASE" && "$ONLY_PHASE" != "2" ]] || PHASES+=(2)
 
-OVERALL_EXIT_CODE=0
-
-# Sets PHASE_EXTRA_ENV (array) and PHASE_SERVER_DATA_DIR (string, empty for phase 1).
-# Only Phase 2 (server tree) needs an isolated CIDX_SERVER_DATA_DIR -- without it,
-# server tests write into ~/.cidx-server/, the live dev server's data directory
-# (Bug #1776). Installs an EXIT/INT/TERM cleanup trap so an interrupted/hung pytest
-# run cannot leak the temp dir under /tmp.
-_phase_setup_server_env() {
-    local phase_num="$1"
-    PHASE_EXTRA_ENV=()
-    PHASE_SERVER_DATA_DIR=""
-    if [[ "$phase_num" == "2" ]]; then
-        PHASE_SERVER_DATA_DIR=$(mktemp -d /tmp/cidx-slow-phase2-XXXXXX)
-        PHASE_EXTRA_ENV=(CIDX_SERVER_DATA_DIR="$PHASE_SERVER_DATA_DIR" CIDX_TEST_FAST_SQLITE=1)
-        # shellcheck disable=SC2064
-        trap 'rm -rf "$PHASE_SERVER_DATA_DIR"' EXIT INT TERM
+_phase_plan_args() {
+    PHASE_PLAN_ARGS=(--root "$PROJECT_DIR" --chunks "$CHUNKS" --history-dir "$TELEMETRY_DIR")
+    if [[ "$1" == "1" ]]; then
+        # ^ invariant tests/unit/server/ ignored whatever --paths says; never needs the server env
+        # ^ why own ignores, not scripts/unit_lane_ignores.txt; slow tests in fast-ignored files must run
+        PHASE_PLAN_ARGS+=(
+            --paths "$PHASE1_PATHS"
+            --ignore tests/unit/server/
+            --ignore tests/unit/infrastructure/
+            --history-glob 'slow-automation-phase1-*.log'
+        )
+    else
+        PHASE_PLAN_ARGS+=(--paths tests/unit/server/ --history-glob 'slow-automation-phase2-*.log')
     fi
 }
 
-# Runs pytest piped through tee, capturing BOTH exit codes into PHASE_PYTEST_EXIT and
-# PHASE_TEE_EXIT via one PIPESTATUS snapshot (reading PIPESTATUS across two separate
-# `local` statements is wrong -- the first `local` itself becomes the new foreground
-# command and resets PIPESTATUS before the second line can read index 1).
-_phase_exec_pytest() {
-    local log_file="$1"
-    shift
-    local paths=("$@")
+if [[ $DRY_RUN -eq 1 ]]; then
+    for phase in "${PHASES[@]}"; do
+        echo "Phase ${phase}:"
+        _phase_plan_args "$phase"
+        python3 "$LANE_TOOL" plan "${PHASE_PLAN_ARGS[@]}" --show-files
+    done
+    exit 0
+fi
 
-    set +e
-    env "${PHASE_EXTRA_ENV[@]}" PYTHONPATH="$PYPATH" python3 -m pytest \
-        "${paths[@]}" \
+mkdir -p "$TELEMETRY_DIR"
+# ^ see scripts/unit_lane_common.sh; one lane at a time, per-chunk HOME isolation, real-home guard
+# shellcheck source=scripts/unit_lane_common.sh
+source "$PROJECT_DIR/scripts/unit_lane_common.sh"
+unset CIDX_REAL_HOME_GUARD_DIR  # a developer-shell export must not redirect it
+unit_lane_start slow
+
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+SUMMARIES=()
+PHASE_PIDS=()
+for phase in "${PHASES[@]}"; do
+    _phase_plan_args "$phase"
+    PHASE_ENV=(--env PYTHONPATH="$PYPATH")
+    [[ "$phase" != "2" ]] || PHASE_ENV+=(--env CIDX_TEST_FAST_SQLITE=1)
+    summary="$TELEMETRY_DIR/slow-automation-phase${phase}-${TIMESTAMP}-summary.log"
+    print_step "Phase ${phase}: ${CHUNKS} chunks (summary: $summary)"
+    unit_lane_spawn "$summary" "${PHASE_PLAN_ARGS[@]}" \
+        --log-prefix "slow-automation-phase${phase}" \
+        --timestamp "$TIMESTAMP" \
+        "${PHASE_ENV[@]}" \
+        -- \
         -m "$SLOW_MARKER_EXPR" \
         --timeout="$SLOW_PYTEST_TIMEOUT" \
         --durations=0 \
         --tb=short \
-        -q \
-        2>&1 | tee "$log_file"
-    local pipeline_status=("${PIPESTATUS[@]}")
-    set -e
+        -q
+    PHASE_PIDS+=("$UNIT_LANE_PID")
+    SUMMARIES+=("$summary")
+done
 
-    PHASE_PYTEST_EXIT=${pipeline_status[0]}
-    PHASE_TEE_EXIT=${pipeline_status[1]}
-}
-
-# Cleans up the temp server data dir (if any), interprets both exit codes, prints the
-# phase result, and folds it into OVERALL_EXIT_CODE.
-_phase_report_result() {
-    local phase_num="$1"
-    local phase_name="$2"
-    local log_file="$3"
-
-    if [[ -n "$PHASE_SERVER_DATA_DIR" ]]; then
-        rm -rf "$PHASE_SERVER_DATA_DIR"
-        trap - EXIT INT TERM
-    fi
-
-    local summary
-    summary=$(grep -E "passed|failed|error|no tests ran" "$log_file" 2>/dev/null | tail -1 || echo "no output")
-
-    # pytest exit code 5 = no tests collected for this selection; not a failure of the
-    # runner itself (e.g. --phase 1 restricted to a slow-free custom --paths target).
-    local phase_exit=$PHASE_PYTEST_EXIT
-    if [[ $phase_exit -eq 5 ]]; then
-        phase_exit=0
-    fi
-
-    if [[ $PHASE_TEE_EXIT -ne 0 ]]; then
-        print_error "Phase ${phase_num} (${phase_name}): tee failed writing telemetry log (exit $PHASE_TEE_EXIT) -- treating as failure regardless of pytest result"
-        phase_exit=$PHASE_TEE_EXIT
-    fi
-
-    if [[ $phase_exit -eq 0 ]]; then
-        print_success "Phase ${phase_num} (${phase_name}): $summary"
+OVERALL_EXIT_CODE=0
+for i in "${!PHASE_PIDS[@]}"; do
+    phase="${PHASES[$i]}"
+    unit_lane_wait "${PHASE_PIDS[$i]}"
+    cat "${SUMMARIES[$i]}"
+    if [[ $UNIT_LANE_EXIT -eq 0 ]]; then
+        print_success "Phase ${phase} passed"
     else
-        print_error "Phase ${phase_num} (${phase_name}) FAILED (exit $phase_exit): $summary"
+        # ^ invariant exit 5 = the phase selected no test => failure, never a pass
+        print_error "Phase ${phase} FAILED (exit $UNIT_LANE_EXIT)"
+        OVERALL_EXIT_CODE=1
     fi
+    ln -sf "$(basename "${SUMMARIES[$i]}")" "$TELEMETRY_DIR/latest-slow-phase${phase}.log"
+done
 
-    OVERALL_EXIT_CODE=$(( OVERALL_EXIT_CODE | phase_exit ))
-    ln -sf "$(basename "$log_file")" "$TELEMETRY_DIR/latest-slow-phase${phase_num}.log"
-}
-
-run_phase() {
-    local phase_num="$1"
-    local phase_name="$2"
-    shift 2
-    local paths=("$@")
-    local log_file="$TELEMETRY_DIR/slow-automation-phase${phase_num}-${phase_name}-${TIMESTAMP}.log"
-
-    print_step "Phase ${phase_num}: ${phase_name} (${paths[*]})"
-    echo "  Log: $log_file"
-
-    _phase_setup_server_env "$phase_num"
-    _phase_exec_pytest "$log_file" "${paths[@]}"
-    _phase_report_result "$phase_num" "$phase_name" "$log_file"
-}
-
-if [[ -z "$ONLY_PHASE" || "$ONLY_PHASE" == "1" ]]; then
-    # --ignore=tests/unit/server/ is UNCONDITIONAL here, regardless of PHASE1_PATHS.
-    # This is what actually guarantees Phase 1 never touches the server tree (and
-    # therefore never needs CIDX_SERVER_DATA_DIR) -- it closes every ancestor/traversal
-    # bypass (--paths tests/unit, --paths tests/, --paths .) in one place, rather than
-    # trying to enumerate them via path canonicalization on caller-supplied input.
-    PHASE1_PATH_ARR=("$PHASE1_PATHS")
-    run_phase 1 "non-server" "${PHASE1_PATH_ARR[@]}" \
-        --ignore=tests/unit/server/ \
-        --ignore=tests/unit/infrastructure/
-fi
-
-if [[ -z "$ONLY_PHASE" || "$ONLY_PHASE" == "2" ]]; then
-    run_phase 2 "server" tests/unit/server/
-fi
+unit_lane_guard_verify && REAL_HOME_OK=0 || REAL_HOME_OK=$?
+OVERALL_EXIT_CODE=$(real_home_guard_exit_code "$OVERALL_EXIT_CODE" "$REAL_HOME_OK")
 
 echo ""
 echo "==========================================="
@@ -326,6 +301,6 @@ if [[ $OVERALL_EXIT_CODE -eq 0 ]]; then
 else
     print_error "Slow-lane automation FAILED (exit $OVERALL_EXIT_CODE)"
 fi
-echo "Telemetry: $TELEMETRY_DIR/slow-automation-phase*-${TIMESTAMP}.log"
+echo "Telemetry: $TELEMETRY_DIR/slow-automation-phase*-${TIMESTAMP}-*.log"
 
-exit $OVERALL_EXIT_CODE
+exit "$OVERALL_EXIT_CODE"

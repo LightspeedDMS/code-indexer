@@ -74,29 +74,14 @@ class TestPipelineExitCodeCapture:
 class TestFastAutomationScriptFix:
     """Verify the PIPESTATUS fix is present in fast-automation.sh."""
 
-    def test_script_uses_pipestatus_not_plain_question_mark(self) -> None:
-        """fast-automation.sh must capture PYTEST_EXIT_CODE via PIPESTATUS[0].
-
-        The buggy line is:
-            PYTEST_EXIT_CODE=$?
-
-        The fixed line must be:
-            PYTEST_EXIT_CODE=${PIPESTATUS[0]}
-
-        We verify the fix is present by reading the script and asserting the
-        correct assignment exists immediately after the tee pipeline.
-        """
-        assert FAST_AUTOMATION.exists(), (
-            f"fast-automation.sh not found at {FAST_AUTOMATION}"
-        )
+    def test_script_takes_the_exit_code_from_the_runner_wait(self) -> None:
+        # ^ why wait on a background runner, not a foreground | tee pipeline; bash defers EXIT-trap forwarding until a foreground job ends
         content = FAST_AUTOMATION.read_text()
-
-        # The fixed pattern must be present
-        assert "PYTEST_EXIT_CODE=${PIPESTATUS[0]}" in content, (
-            "fast-automation.sh must use PYTEST_EXIT_CODE=${PIPESTATUS[0]} "
-            "to capture pytest's exit code after the tee pipeline. "
-            "Currently it uses $? which returns tee's exit code (always 0)."
-        )
+        helper = (REPO_ROOT / "scripts" / "unit_lane_common.sh").read_text()
+        assert "scripts/unit_lane_common.sh" in content
+        assert "unit_lane_spawn " in content and "unit_lane_wait " in content
+        assert "PYTEST_EXIT_CODE=$UNIT_LANE_EXIT" in content
+        assert 'wait "$pid" && UNIT_LANE_EXIT=0 || UNIT_LANE_EXIT=$?' in helper
 
     def test_script_does_not_use_plain_question_mark_for_pytest_exit(self) -> None:
         """The buggy PYTEST_EXIT_CODE=$? pattern must NOT exist in the script.

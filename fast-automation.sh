@@ -14,7 +14,7 @@ set -e  # Exit on any error
 TELEMETRY_DIR=".test-telemetry"
 mkdir -p "$TELEMETRY_DIR"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-TELEMETRY_FILE="$TELEMETRY_DIR/fast-automation-${TIMESTAMP}.log"
+TELEMETRY_FILE="$TELEMETRY_DIR/fast-automation-${TIMESTAMP}-summary.log"
 DURATION_FILE="$TELEMETRY_DIR/test-durations-${TIMESTAMP}.txt"
 
 # Source .env files if they exist (for local testing)
@@ -160,7 +160,7 @@ report_pytest_timeout_diagnostics() {
     echo "    and usually is NOT a load artifact — treat it as a real failure that"
     echo "    needs investigation."
     echo ""
-    echo "Re-check yourself: grep -c \"from pytest-timeout\" ${TELEMETRY_FILE}"
+    echo "Re-check yourself: grep -h \"from pytest-timeout\" ${TELEMETRY_DIR}/fast-automation-${TIMESTAMP}-chunk*.log | wc -l"
     echo -e "${YELLOW}==================================================================${NC}"
     echo ""
 }
@@ -170,6 +170,68 @@ if [[ ! -f "pyproject.toml" ]]; then
     print_error "Not in project root directory (pyproject.toml not found)"
     exit 1
 fi
+
+# Usage: ./fast-automation.sh [--chunks N] [--paths PATH]... [--dry-run]
+#   --chunks N   parallel pytest chunks, balanced by the previous run's durations (default 8)
+#   --paths P    restrict the run to P (repeatable; default tests/unit/)
+#   --dry-run    print the chunk plan and exit without running anything
+CHUNKS=8
+DRY_RUN=0
+LANE_PATHS=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --chunks)
+            if [[ $# -lt 2 || ! "$2" =~ ^[1-9][0-9]*$ ]]; then
+                print_error "--chunks needs a positive integer"
+                exit 1
+            fi
+            CHUNKS="$2"
+            shift 2
+            ;;
+        --paths)
+            if [[ $# -lt 2 || ! -e "$2" ]]; then
+                print_error "--paths needs an existing path"
+                exit 1
+            fi
+            LANE_PATHS+=("$2")
+            shift 2
+            ;;
+        --dry-run)
+            DRY_RUN=1
+            shift
+            ;;
+        --help|-h)
+            sed -n '/^# Usage: .\/fast-automation.sh/,/^# *--dry-run/p' "$0" | sed 's/^# \{0,1\}//'
+            exit 0
+            ;;
+        *)
+            print_error "Unknown argument: $1"
+            exit 1
+            ;;
+    esac
+done
+[[ ${#LANE_PATHS[@]} -gt 0 ]] || LANE_PATHS=(tests/unit/)
+
+PROJECT_DIR=$(pwd)
+LANE_TOOL="$PROJECT_DIR/scripts/unit_lane_chunks.py"
+PLAN_ARGS=(
+    --root "$PROJECT_DIR"
+    --paths "${LANE_PATHS[@]}"
+    --ignore-file "$PROJECT_DIR/scripts/unit_lane_ignores.txt"
+    --chunks "$CHUNKS"
+    --history-dir "$TELEMETRY_DIR"
+    --history-glob 'fast-automation-*.log'
+)
+if [[ $DRY_RUN -eq 1 ]]; then
+    python3 "$LANE_TOOL" plan "${PLAN_ARGS[@]}" --show-files
+    exit $?
+fi
+
+# ^ see scripts/unit_lane_common.sh; one lane at a time, per-chunk HOME isolation, real-home guard
+# shellcheck source=scripts/unit_lane_common.sh
+source "$PROJECT_DIR/scripts/unit_lane_common.sh"
+unset CIDX_REAL_HOME_GUARD_DIR  # a developer-shell export must not redirect it
+unit_lane_start fast
 
 # Check Python version (GitHub Actions tests multiple versions, we'll use current)
 print_step "Checking Python version"
@@ -184,12 +246,12 @@ print_step "Installing dependencies"
 PROJECT_DIR=$(pwd)
 PROJECT_NAME=$(basename "$PROJECT_DIR")
 cd ..
-if pip install -e "./$PROJECT_NAME[dev]" --break-system-packages 2>/dev/null; then
+if pip install -e "./${PROJECT_NAME}[dev]" --break-system-packages 2>/dev/null; then
     :
-elif pip install -e "./$PROJECT_NAME[dev]" --user 2>/dev/null; then
+elif pip install -e "./${PROJECT_NAME}[dev]" --user 2>/dev/null; then
     :
 else
-    pip install -e "./$PROJECT_NAME[dev]"
+    pip install -e "./${PROJECT_NAME}[dev]"
 fi
 cd "$PROJECT_DIR"
 print_success "Dependencies installed"
@@ -246,135 +308,19 @@ echo "⏱️  pytest-timeout ceiling for this run: ${PYTEST_TIMEOUT}s (override 
 
 check_load_before_run
 
-# Real-server-home isolation (Bug #1996 follow-up): no test may resolve the
-# developer's real ~/.cidx-server -- HOME and the server data dirs point at
-# scratch -- and the lane fails if the real launch.json / config.json changed.
-# shellcheck source=scripts/real-server-home-guard.sh
-source "$PROJECT_DIR/scripts/real-server-home-guard.sh"
-unset CIDX_REAL_HOME_GUARD_DIR  # a developer-shell export must not redirect it
-# Under the real ~/.tmp, not /tmp: tests root their tmp dirs at ~/.tmp, and
-# config discovery walking up from /tmp can hit stray configs there.
-mkdir -p "$HOME/.tmp"
-LANE_SCRATCH=$(mktemp -d "$HOME/.tmp/cidx-lane-home-XXXXXX")
-trap 'rm -rf "$LANE_SCRATCH"' EXIT
-REAL_HOME_STATE="$LANE_SCRATCH/real-home-guard.state"
-real_home_guard_snapshot "$REAL_HOME_STATE"
-real_home_lane_env "$LANE_SCRATCH"
-
-# Run ONLY fast unit tests that don't require external services
-# TELEMETRY: Add --durations=0 to capture ALL test durations
-echo "📊 Telemetry enabled: Results will be saved to $TELEMETRY_FILE"
+echo "📊 Telemetry enabled: summary $TELEMETRY_FILE"
+echo "   Chunk logs: $TELEMETRY_DIR/fast-automation-${TIMESTAMP}-chunk*.log"
 echo "⏱️  Duration report: $DURATION_FILE"
 #
 # --deselect audit (GitHub issue #1685): every --deselect below MUST be either
 # a documented live-masked failure with its own tracking issue (listed here),
 # or it should not exist -- a stale/dead deselect is a silent gate weakener.
-python3 -m pytest \
-    tests/unit/ \
+# ^ see scripts/unit_lane_ignores.txt; this lane's ignored paths
+unit_lane_spawn "$TELEMETRY_FILE" "${PLAN_ARGS[@]}" \
+    --log-prefix fast-automation \
+    --timestamp "$TIMESTAMP" \
+    -- \
     --durations=0 \
-    --ignore=tests/unit/server/ \
-    --ignore=tests/unit/infrastructure/ \
-    --ignore=tests/unit/api_clients/test_base_cidx_remote_api_client_real.py \
-    --ignore=tests/unit/api_clients/test_remote_query_client_real.py \
-    --ignore=tests/unit/api_clients/test_repository_linking_client_real.py \
-    --ignore=tests/unit/api_clients/test_jwt_token_manager_real.py \
-    --ignore=tests/unit/api_clients/test_real_api_integration_required.py \
-    --ignore=tests/unit/api_clients/test_messi_rule2_compliance.py \
-    --ignore=tests/unit/api_clients/test_admin_api_client.py \
-    --ignore=tests/unit/api_clients/test_admin_client_golden_repos_maintenance.py \
-    --ignore=tests/unit/api_clients/test_jobs_cancel_status_real_integration.py \
-    --ignore=tests/unit/api_clients/test_base_cidx_remote_api_client.py \
-    --ignore=tests/unit/api_clients/test_jobs_api_client_tdd.py \
-    --ignore=tests/unit/api_clients/test_isolation_utils.py \
-    --ignore=tests/unit/api_clients/test_jobs_api_client_cancel_tdd.py \
-    --ignore=tests/unit/api_clients/test_remote_query_client.py \
-    --ignore=tests/unit/api_clients/test_repos_client_tdd.py \
-    --ignore=tests/unit/cli/test_admin_commands.py \
-    --ignore=tests/unit/cli/test_explicit_authentication_commands.py \
-    --ignore=tests/unit/cli/test_jobs_cli_e2e_tdd.py \
-    --ignore=tests/unit/cli/test_password_security_validation.py \
-    --ignore=tests/unit/cli/test_server_lifecycle_commands.py \
-    --ignore=tests/unit/cli/test_sync_command_structure.py \
-    --ignore=tests/unit/cli/test_cli_init_segment_size.py \
-    --ignore=tests/unit/cli/test_cli_issues_tdd_fix.py \
-    --ignore=tests/unit/cli/test_cli_response_parsing_errors.py \
-    --ignore=tests/unit/cli/test_cli_error_propagation_fixes.py \
-    --ignore=tests/unit/cli/test_jobs_cancel_status_command_tdd.py \
-    --ignore=tests/unit/cli/test_jobs_command_tdd.py \
-    --ignore=tests/unit/cli/test_repos_commands_tdd.py \
-    --ignore=tests/unit/cli/test_repository_activation_lifecycle.py \
-    --ignore=tests/unit/cli/test_repository_branch_switching.py \
-    --ignore=tests/unit/cli/test_repository_info_command.py \
-    --ignore=tests/unit/cli/test_resource_cleanup_verification.py \
-    --ignore=tests/unit/cli/test_authentication_status_management.py \
-    --ignore=tests/unit/cli/test_admin_repos_integration_validation.py \
-    --ignore=tests/unit/cli/test_daemon_delegation.py \
-    --ignore=tests/unit/cli/test_query_fts_flags.py \
-    --ignore=tests/unit/cli/test_staleness_display_integration.py \
-    --ignore=tests/unit/cli/test_start_stop_backend_integration.py \
-    --ignore=tests/unit/cli/test_cli_clear_temporal_progress.py \
-    --ignore=tests/unit/cli/test_cli_fast_path.py \
-    --ignore=tests/unit/cli/test_cli_temporal_display_comprehensive.py \
-    --ignore=tests/unit/cli/test_cli_temporal_display_story2_1.py \
-    --ignore=tests/unit/cli/test_improved_remote_query_experience.py \
-    --ignore=tests/unit/cli/test_path_pattern_performance.py \
-    --ignore=tests/unit/cli/test_status_temporal_performance.py \
-    --ignore=tests/unit/cli/test_index_commits_clear_bug.py \
-    --ignore=tests/unit/storage/test_filesystem_git_batch_limits.py \
-    --ignore=tests/unit/storage/test_hnsw_incremental_batch.py \
-    --ignore=tests/unit/remote/test_timeout_management.py \
-    --ignore=tests/unit/performance/test_exclusion_filter_performance.py \
-    --ignore=tests/unit/integration/ \
-    --ignore=tests/unit/documentation/test_fixed_size_chunking_documentation.py \
-    --ignore=tests/unit/cli/test_status_temporal_storage_size_bug.py \
-    --ignore=tests/unit/services/test_tantivy_language_filter.py \
-    --ignore=tests/unit/cli/test_index_delegation_progress.py \
-    --ignore=tests/unit/cli/test_cli_option_conflict_fix.py \
-    --ignore=tests/unit/test_codebase_audit_story9.py \
-    --ignore=tests/unit/daemon/test_display_timing_fix.py \
-    --ignore=tests/unit/services/test_clean_file_chunking_manager.py \
-    --ignore=tests/unit/services/test_file_chunk_batching_optimization.py \
-    --ignore=tests/unit/services/test_daemon_fts_cache_performance.py \
-    --ignore=tests/unit/services/test_rpyc_daemon.py \
-    --ignore=tests/unit/services/test_voyage_threadpool_elimination.py \
-    --ignore=tests/unit/services/test_tantivy_regex_optimization.py \
-    --ignore=tests/unit/services/test_tantivy_path_filter.py \
-    --ignore=tests/unit/services/test_tantivy_limit_zero.py \
-    --ignore=tests/unit/services/test_tantivy_search.py \
-    --ignore=tests/unit/services/test_tantivy_regex_snippet_extraction.py \
-    --ignore=tests/unit/cli/test_admin_repos_functionality_verification.py \
-    --ignore=tests/unit/cli/test_admin_repos_maintenance_commands.py \
-    --ignore=tests/unit/cli/test_admin_repos_add_simple.py \
-    --ignore=tests/unit/cli/test_admin_repos_delete_command.py \
-    --ignore=tests/unit/cli/test_admin_repos_delete_integration_e2e.py \
-    --ignore=tests/unit/cli/test_password_management_commands.py \
-    --ignore=tests/unit/test_scip_database_queries.py \
-    --ignore=tests/unit/test_scip_generator.py \
-    --ignore=tests/unit/clients/test_gitlab_ci_client.py \
-    --ignore=tests/unit/clients/test_github_actions_client.py \
-    --ignore=tests/unit/global_repos/test_git_operations.py \
-    --ignore=tests/unit/global_repos/test_refresh_scheduler_locking.py \
-    --ignore=tests/unit/services/test_tantivy_incremental_updates.py \
-    --ignore=tests/unit/tools/test_convert_tool_docs.py \
-    --ignore=tests/unit/cli/test_admin_password_change_command.py \
-    --ignore=tests/unit/cli/test_repos_list_fix_verification.py \
-    --ignore=tests/unit/cli/test_system_health_commands.py \
-    --ignore=tests/unit/remote/test_network_error_handling.py \
-    --ignore=tests/unit/global_repos/test_global_registry_locking.py \
-    --ignore=tests/unit/routers/test_repo_categories_api.py \
-    --ignore=tests/unit/services/test_git_credential_manager.py \
-    --ignore=tests/unit/services/test_repo_category_service_auto_assign.py \
-    --ignore=tests/unit/services/test_repo_category_service_bulk_evaluate.py \
-    --ignore=tests/unit/services/test_repo_category_service_manual_override.py \
-    --ignore=tests/unit/services/test_repo_category_service_map.py \
-    --ignore=tests/unit/services/test_repo_category_service.py \
-    --ignore=tests/unit/services/test_tantivy_regex_dfa_safety.py \
-    --ignore=tests/unit/services/test_tantivy_regex.py \
-    --ignore=tests/unit/services/test_tantivy_unicode_columns.py \
-    --ignore=tests/unit/services/test_token_authenticator.py \
-    --ignore=tests/unit/storage/test_repo_category_backend.py \
-    --ignore=tests/unit/storage/test_sqlite_backends_category.py \
-    --ignore=tests/unit/test_scip_audit_api.py \
     --deselect=tests/unit/query/test_query_parameter_parity.py::TestQueryParameterParity::test_no_extra_mcp_parameters \
     --deselect=tests/unit/query/test_query_parameter_parity.py::TestQueryParameterParity::test_parameter_name_consistency_rest_mcp \
     --deselect=tests/unit/services/temporal/test_temporal_worker_exception_logging.py::test_worker_exception_is_logged_and_propagated \
@@ -394,23 +340,21 @@ python3 -m pytest \
     --deselect=tests/unit/test_scip_database_schema.py::TestIndexCreation::test_create_indexes_creates_all_indexes \
     --deselect=tests/unit/tools/perf_suite/test_report.py::TestHardwareProfileSection::test_hardware_capture_with_invalid_host_returns_none \
     -m "not slow and not e2e and not real_api and not integration and not requires_server and not requires_containers and not performance" \
-    --timeout="$PYTEST_TIMEOUT" \
-    2>&1 | tee "$TELEMETRY_FILE"
+    --timeout="$PYTEST_TIMEOUT"
+echo "⏳ $CHUNKS chunks running (runner pid $UNIT_LANE_PID); progress: $TELEMETRY_DIR/fast-automation-${TIMESTAMP}-chunk*.log"
+unit_lane_wait "$UNIT_LANE_PID"
+PYTEST_EXIT_CODE=$UNIT_LANE_EXIT
+cat "$TELEMETRY_FILE"
 
-PYTEST_EXIT_CODE=${PIPESTATUS[0]}
-
-# Fail the lane if the run changed the developer's real ~/.cidx-server.
-real_home_guard_verify "$REAL_HOME_STATE" && REAL_HOME_OK=0 || REAL_HOME_OK=$?
-if [ "$REAL_HOME_OK" -ne 0 ]; then
-    print_error "This run changed the developer's real ~/.cidx-server (see above)"
-fi
+unit_lane_guard_verify && REAL_HOME_OK=0 || REAL_HOME_OK=$?
 PYTEST_EXIT_CODE=$(real_home_guard_exit_code "$PYTEST_EXIT_CODE" "$REAL_HOME_OK")
 
-# TELEMETRY: Extract duration data
-grep -E "^[0-9]+\.[0-9]+s (call|setup|teardown)" "$TELEMETRY_FILE" | sort -rn > "$DURATION_FILE"
+# TELEMETRY: Extract duration data from every chunk log of this run
+CHUNK_LOG_FILES=("$TELEMETRY_DIR"/fast-automation-"${TIMESTAMP}"-chunk*.log)
+grep -hE "^[0-9]+\.[0-9]+s (call|setup|teardown)" "${CHUNK_LOG_FILES[@]}" | sort -rn > "$DURATION_FILE"
 
 # TELEMETRY: Summary
-TOTAL_TIME=$(grep "passed in" "$TELEMETRY_FILE" | grep -oE "[0-9]+\.[0-9]+s" | head -1)
+TOTAL_TIME=$(grep "^overall:" "$TELEMETRY_FILE" | tail -1)
 SLOW_TESTS=$(awk '$1 > 5.0' "$DURATION_FILE" | wc -l)
 
 echo ""
@@ -425,7 +369,7 @@ if [ $PYTEST_EXIT_CODE -eq 0 ]; then
     print_success "Fast unit tests passed"
 else
     print_error "Fast unit tests failed with exit code $PYTEST_EXIT_CODE"
-    report_pytest_timeout_diagnostics "$TELEMETRY_FILE"
+    report_pytest_timeout_diagnostics "${CHUNK_LOG_FILES[@]}"
     exit $PYTEST_EXIT_CODE
 fi
 
