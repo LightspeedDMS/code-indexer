@@ -18,6 +18,20 @@ connections; nothing here ever hands a connection from one thread to
 another. A design that shared one connection across threads would violate
 this contract and is explicitly rejected by this implementation.
 
+Cross-thread CLOSE of an IDLE store (#2223, #2218): a connection is still
+never USED by two threads, but an idle one (no ``run_reading`` in progress)
+may be closed by another thread -- the lease renewal tick hands over stores
+on a superseded snapshot once idle for a lease TTL (an idle pool thread never
+returns to do it, which pinned deleted snapshots), and the process-wide cap
+(``max_open_stores``) hands over the least-recently-used idle store across
+all threads. The close itself runs on the ``ChunkStoreCloser`` thread
+(``chunk_store_closer.py``), which retries a failed close and releases the
+store's reader lease only after a close succeeds. Connections are therefore
+opened with ``check_same_thread=False``; the close is claimed under
+``_reader_leases_lock`` so it never races a read, the owner drops a claimed
+entry on its next access, and ``run_reading`` reopens a store claimed after
+``get_or_open`` handed it out.
+
 Invalidation: keyed on ``(str(db_path), mtime_ns)`` -- the CURRENT mtime is
 read via a cheap ``os.stat()`` on every ``get_or_open()`` call. A store
 whose ``chunks.db`` file was replaced (e.g. ``os.replace`` during a
@@ -160,8 +174,10 @@ from code_indexer.global_repos.snapshot_reader_lease import (
     SNAPSHOT_READER_LEASE_TTL_SECONDS,
     SnapshotReaderLease,
 )
+from code_indexer.storage.shared.chunk_store_closer import ChunkStoreCloser
 from code_indexer.storage.sqlite_chunk_store import (
     ChunkStore,
+    ChunkStoreError,
     open_chunk_store_for_path,
 )
 
@@ -169,6 +185,18 @@ from code_indexer.storage.sqlite_chunk_store import (
 #: open at once. Generous enough that a normal query-serving thread never
 #: evicts a handle it will reuse moments later, but still finite.
 _MAX_ENTRIES_PER_THREAD = 32
+
+# ^ perf cap = 4096 open stores per process; ~6% of LimitNOFILE 65536; old bound = 32 x threads (~150 threads x 900 repos would churn); #2218
+_MAX_OPEN_STORES = 4096
+
+# ^ invariant run_reading reopens a store claimed under it <= this many times; then raises
+_MAX_REOPEN_ATTEMPTS = 3
+
+# ^ why warn, not refuse opens over the cap; a refused open fails a query
+_CAP_WARNING_INTERVAL_SECONDS = 60.0
+
+# ^ perf churn summary <= 1 INFO line per 10 min; counts only, no paths
+_CHURN_LOG_INTERVAL_SECONDS = 600.0
 
 #: Bound on the number of distinct stale prefixes tracked at once (both
 #: the set AND the ordered/cursor-sweepable list). Once exceeded, the
@@ -184,15 +212,6 @@ _CacheEntry = Tuple[Optional[int], ChunkStore]
 _T = TypeVar("_T")
 
 logger = logging.getLogger(__name__)
-
-
-def _safe_close(store: ChunkStore) -> None:
-    try:
-        store.close()
-    except Exception:
-        # Best-effort: an already-closed/broken connection must never
-        # prevent the cache from proceeding to open a fresh one.
-        pass
 
 
 def _matches_stale_prefix(resolved_path: str, prefixes: Set[str]) -> bool:
@@ -223,6 +242,8 @@ class _StoreUse:
     def __init__(self) -> None:
         self.active = 0
         self.touched = time.monotonic()
+        self.closed = False
+        self.reopen: Optional[Tuple[Union[str, Path], str, bool]] = None
 
     def idle_for(self, seconds: float) -> bool:
         return self.active == 0 and time.monotonic() - self.touched > seconds
@@ -245,11 +266,27 @@ class ChunkStoreThreadCache:
         *,
         lease_root: Optional[Path] = None,
         is_versioned_snapshot: Optional[Callable[[str], bool]] = None,
+        max_open_stores: int = _MAX_OPEN_STORES,
     ) -> None:
         if max_entries_per_thread < 1:
             raise ValueError(
                 f"max_entries_per_thread must be >= 1, got {max_entries_per_thread}"
             )
+        if max_open_stores < 1:
+            raise ValueError(f"max_open_stores must be >= 1, got {max_open_stores}")
+        self._max_open_stores = max_open_stores
+        # ^ invariant every open store of every thread is here, LRU first; guarded by _reader_leases_lock
+        # ^ see get_global_chunk_store_cache; the server's one instance => this bound is process-wide
+        self._open_stores: "OrderedDict[_StoreUse, weakref.ref[ChunkStore]]" = (
+            OrderedDict()
+        )
+        self._closer = ChunkStoreCloser(on_closed=self._on_store_closed)
+        self._cap_warned_at: Optional[float] = None
+        self._cap_evictions = 0
+        self._store_opens = 0
+        self._churn_window_start = time.monotonic()
+        self._window_evictions = 0
+        self._window_opens = 0
         if max_tracked_stale_prefixes < 1:
             raise ValueError(
                 "max_tracked_stale_prefixes must be >= 1, got "
@@ -340,22 +377,144 @@ class ChunkStoreThreadCache:
             self._lease_stop_event.clear()
 
             def renew_loop() -> None:
-                while not self._lease_stop_event.wait(
-                    timeout=SNAPSHOT_READER_LEASE_TTL_SECONDS / 3.0
-                ):
-                    self._renew_or_release_reader_leases()
+                try:
+                    while not self._lease_stop_event.wait(
+                        timeout=SNAPSHOT_READER_LEASE_TTL_SECONDS / 3.0
+                    ):
+                        self._renew_or_release_reader_leases()
+                finally:
+                    self._closer.stop()
 
             self._lease_thread = threading.Thread(
                 target=renew_loop, name="ChunkStoreReaderLeaseRenewal", daemon=True
             )
             self._lease_thread.start()
 
+    def _claim(self, use: _StoreUse) -> bool:
+        """Caller holds ``_reader_leases_lock``. False when already claimed."""
+        if use.closed:
+            return False
+        use.closed = True
+        return True
+
     def _close_store(self, store: ChunkStore) -> None:
-        _safe_close(store)
+        use = self._use_of(store)
         with self._reader_leases_lock:
+            if not self._claim(use):
+                return
+        self._closer.close_now(store)
+
+    def _on_store_closed(self, store: ChunkStore) -> None:
+        # ^ hazard calling this before a SUCCESSFUL close => lease released => cleanup deletes under an open fd
+        use = self._use_of(store)
+        with self._reader_leases_lock:
+            self._open_stores.pop(use, None)
             finalizer = self._store_finalizers.pop(store, None)
         if finalizer is not None:
             finalizer()
+
+    def _register_open(
+        self,
+        store: ChunkStore,
+        db_path: Union[str, Path],
+        collection_path: str,
+        read_only: bool,
+    ) -> None:
+        use = self._use_of(store)
+
+        def forget(_ref: object) -> None:
+            self._forget_collected(use)
+
+        with self._reader_leases_lock:
+            use.reopen = (db_path, collection_path, read_only)
+            use.touched = time.monotonic()
+            self._open_stores[use] = weakref.ref(store, forget)
+            self._store_opens += 1
+            self._window_opens += 1
+
+    def _forget_collected(self, use: _StoreUse) -> None:
+        with self._reader_leases_lock:
+            self._open_stores.pop(use, None)
+
+    def _is_closed(self, store: ChunkStore) -> bool:
+        use = self._use_of(store)
+        with self._reader_leases_lock:
+            return use.closed
+
+    def _close_idle(
+        self, select: Callable[[_StoreUse], bool], limit: Optional[int] = None
+    ) -> int:
+        """Claim stores no read is using, in LRU order, and hand them to the
+        closer thread; never a store inside ``run_reading``, never a close on
+        the calling thread. Returns how many were handed over."""
+        handed = 0
+        with self._reader_leases_lock:
+            for use, ref in list(self._open_stores.items()):
+                if limit is not None and handed >= limit:
+                    break
+                store = ref()
+                if store is None or use.active or use.closed or not select(use):
+                    continue
+                self._claim(use)
+                if not self._closer.submit(store):
+                    # ^ order undo the claim => the store stays usable and open; retried on the next open, read or tick
+                    use.closed = False
+                    break
+                handed += 1
+        return handed
+
+    def _enforce_process_cap(self, keep: Optional[_StoreUse] = None) -> None:
+        with self._reader_leases_lock:
+            over = len(self._open_stores) - self._max_open_stores
+            if over <= 0:
+                return
+            # ^ invariant claimed stores still hold descriptors => counted in `over` until their close succeeds
+            claimed = sum(1 for use in self._open_stores if use.closed)
+        still_needed = over - claimed
+        if still_needed > 0:
+            handed = self._close_idle(lambda use: use is not keep, limit=still_needed)
+            with self._reader_leases_lock:
+                self._cap_evictions += handed
+                self._window_evictions += handed
+        if claimed:
+            # ^ why only failed or stalled closes warn; healthy in-flight closes over the cap are routine bursts
+            troubled = self._closer.troubled_count()
+            if troubled:
+                self._warn_cap_exceeded(over, troubled)
+
+    def _maybe_log_churn(self) -> None:
+        now = time.monotonic()
+        with self._reader_leases_lock:
+            window = now - self._churn_window_start
+            if window < _CHURN_LOG_INTERVAL_SECONDS:
+                return
+            evictions, opens = self._window_evictions, self._window_opens
+            self._churn_window_start = now
+            self._window_evictions = self._window_opens = 0
+        if evictions:
+            logger.info(
+                "Chunk-store cache churn over the last %.0fs: %d cap evictions, "
+                "%d opens (process cap %d)",
+                window,
+                evictions,
+                opens,
+                self._max_open_stores,
+            )
+
+    def _warn_cap_exceeded(self, over: int, closing: int) -> None:
+        now = time.monotonic()
+        with self._reader_leases_lock:
+            last = self._cap_warned_at
+            if last is not None and now - last < _CAP_WARNING_INTERVAL_SECONDS:
+                return
+            self._cap_warned_at = now
+        logger.warning(
+            "Open chunk stores exceed the process cap of %d by %d: %d closes "
+            "failed or are stalled; new opens are still served",
+            self._max_open_stores,
+            over,
+            closing,
+        )
 
     def _bind_lease_to_store(
         self, store: ChunkStore, snapshot_root: str, lease: SnapshotReaderLease
@@ -383,6 +542,8 @@ class ChunkStoreThreadCache:
         use = self._use_of(store)
         with self._reader_leases_lock:
             use.touched = time.monotonic()
+            if use in self._open_stores:
+                self._open_stores.move_to_end(use)
 
     def _release_reader_lease(self, lease_key: int) -> None:
         with self._reader_leases_lock:
@@ -400,18 +561,14 @@ class ChunkStoreThreadCache:
             )
 
     def _renew_or_release_reader_leases(self) -> None:
-        """One renewal tick: a lease on a superseded (invalidated) snapshot is
-        released once its store is idle -- no read in progress and untouched
-        for a whole lease TTL -- and every other lease is renewed. The owner
-        thread's open handle is never touched (only that thread closes it)."""
+        """One renewal tick: every live lease is renewed FIRST; then each store
+        on a superseded (invalidated) snapshot that is idle -- no read in
+        progress and untouched for a whole lease TTL -- is handed to the closer
+        thread, whose successful close releases its lease. The owner thread
+        drops the closed entry on its next access."""
         with self._reader_leases_lock:
             entries = list(self._reader_leases.items())
-        for lease_key, (snapshot_root, lease, use) in entries:
-            with self._reader_leases_lock:
-                idle = use.idle_for(SNAPSHOT_READER_LEASE_TTL_SECONDS)
-            if idle and self._is_stale(snapshot_root):
-                self._release_reader_lease(lease_key)
-                continue
+        for _lease_key, (snapshot_root, lease, _use) in entries:
             try:
                 lease.renew()
             except OSError:
@@ -421,6 +578,16 @@ class ChunkStoreThreadCache:
                     snapshot_root,
                     exc_info=True,
                 )
+        self._queue_idle_stale_closes()
+
+    def _queue_idle_stale_closes(self) -> None:
+        # ^ hazard closing on this thread => a hung NFS close stops renewal => cleanup deletes under a reader
+        # ^ hazard releasing the lease but keeping the handle => cleanup deletes under open fds; #2223
+        self._close_idle(
+            lambda use: use.reopen is not None
+            and use.idle_for(SNAPSHOT_READER_LEASE_TTL_SECONDS)
+            and self._is_stale(str(use.reopen[0]))
+        )
 
     def _entries(self) -> "OrderedDict[Tuple[str, bool], _CacheEntry]":
         entries = getattr(self._local, "entries", None)
@@ -639,6 +806,9 @@ class ChunkStoreThreadCache:
             current_mtime = None
 
         cached = entries.get(key)
+        if cached is not None and self._is_closed(cached[1]):
+            del entries[key]
+            cached = None
         if cached is not None:
             cached_mtime, store = cached
             if cached_mtime == current_mtime:
@@ -651,10 +821,15 @@ class ChunkStoreThreadCache:
             self._close_store(store)
             del entries[key]
 
-        store = open_chunk_store_for_path(db_path, collection_path, read_only=read_only)
+        # ^ why check_same_thread=False, not owner-only close; an idle pool thread never returns to close it; #2223
+        store = open_chunk_store_for_path(
+            db_path, collection_path, read_only=read_only, check_same_thread=False
+        )
         leased = self._acquire_reader_lease(collection_path)
         if leased is not None:
             self._bind_lease_to_store(store, *leased)
+        # ^ order lease bound before register => a closer never closes a store whose lease is still unbound
+        self._register_open(store, db_path, collection_path, read_only)
         try:
             fresh_mtime: Optional[int] = os.stat(db_path).st_mtime_ns
         except OSError:
@@ -667,22 +842,45 @@ class ChunkStoreThreadCache:
         while len(entries) > self._max_entries:
             _, (_, evicted_store) = entries.popitem(last=False)
             self._close_store(evicted_store)
+        self._enforce_process_cap(keep=self._use_of(store))
+        self._maybe_log_churn()
 
         return store
 
     def run_reading(self, store: ChunkStore, read: Callable[[ChunkStore], _T]) -> _T:
         """Run ``read(store)`` with the store marked in use: while it runs, the
-        store's reader lease is renewed even if its snapshot was superseded."""
-        use = self._use_of(store)
-        with self._reader_leases_lock:
-            use.active += 1
-            use.touched = time.monotonic()
+        store's reader lease is renewed even if its snapshot was superseded.
+        A store another thread closed since it was handed out is reopened."""
+        reopens = 0
+        while True:
+            use = self._use_of(store)
+            with self._reader_leases_lock:
+                reopen = use.reopen
+                if not use.closed:
+                    use.active += 1
+                    use.touched = time.monotonic()
+                    if use in self._open_stores:
+                        self._open_stores.move_to_end(use)
+                    break
+            if reopen is None:
+                raise ChunkStoreError(
+                    f"ChunkStoreThreadCache: store {store.db_path} was closed "
+                    "and has no reopen recipe"
+                )
+            if reopens == _MAX_REOPEN_ATTEMPTS:
+                raise ChunkStoreError(
+                    f"ChunkStoreThreadCache: store {store.db_path} was closed "
+                    f"after {reopens} reopens before it could be read"
+                )
+            store = self.get_or_open(reopen[0], reopen[1], read_only=reopen[2])
+            reopens += 1
         try:
             return read(store)
         finally:
             with self._reader_leases_lock:
                 use.active -= 1
                 use.touched = time.monotonic()
+            self._enforce_process_cap()
 
     def close_current_thread(self) -> None:
         """Close and drop every cached handle owned by THIS thread.

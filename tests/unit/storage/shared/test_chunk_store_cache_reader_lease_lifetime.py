@@ -8,7 +8,7 @@ the snapshot:
   reuse collision);
 - variant B: a pool thread that went idle on a SUPERSEDED (invalidated)
   snapshot does not keep renewing its lease, so cleanup can proceed; its
-  open handle is never closed from another thread;
+  idle handle is closed together with the lease (#2223);
 - a reader of a CURRENT snapshot keeps its lease while idle.
 
 Real threads, real ChunkStore, real lease files. Only the lease TTL constant
@@ -133,8 +133,11 @@ class TestVariantBIdleThread:
             _wait(_SEVERAL_RENEWAL_TICKS_SECONDS)
 
             assert world.has_live_reader(root) is False
-            # Never closed from another thread: its owner can still read.
-            assert _run_on(idle_pool, store.count) == 0
+            assert world.cache._is_closed(store)
+            assert (
+                _run_on(idle_pool, world.cache.run_reading, store, ChunkStore.count)
+                == 0
+            )
 
     def test_idle_reader_of_a_current_snapshot_keeps_its_lease(self, world: World):
         root, db_path, collection = world.snapshot("v_1")

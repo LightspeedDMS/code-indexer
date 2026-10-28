@@ -10,11 +10,12 @@ def test_renewal_thread_check_and_start_is_single_flight(monkeypatch):
     real_thread = threading.Thread
 
     class ProbeThread:
-        starts = 0
+        starts: dict = {}
         starts_lock = threading.Lock()
 
         def __init__(self, *, target, name, daemon):
             self.target = target
+            self.name = name
             self.started = False
 
         def is_alive(self):
@@ -24,7 +25,7 @@ def test_renewal_thread_check_and_start_is_single_flight(monkeypatch):
 
         def start(self):
             with self.starts_lock:
-                type(self).starts += 1
+                type(self).starts[self.name] = type(self).starts.get(self.name, 0) + 1
                 self.started = True
 
     monkeypatch.setattr(chunk_store_cache.threading, "Thread", ProbeThread)
@@ -51,4 +52,4 @@ def test_renewal_thread_check_and_start_is_single_flight(monkeypatch):
         caller.join(timeout=2)
 
     assert all(not caller.is_alive() for caller in callers)
-    assert ProbeThread.starts == 1
+    assert ProbeThread.starts == {"ChunkStoreReaderLeaseRenewal": 1}

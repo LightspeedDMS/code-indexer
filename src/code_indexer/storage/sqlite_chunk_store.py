@@ -335,6 +335,7 @@ class ChunkStore:
         read_only: bool = False,
         expected_dim: Optional[int] = None,
         durable_synchronous: bool = False,
+        check_same_thread: bool = True,
     ) -> None:
         """Open (creating if needed) a chunk store at ``db_path``.
 
@@ -408,6 +409,7 @@ class ChunkStore:
         self._immutable = immutable
         self._read_only = read_only
         self._durable_synchronous = durable_synchronous
+        self._check_same_thread = check_same_thread
         self._compressor = zstandard.ZstdCompressor()
         self._decompressor = zstandard.ZstdDecompressor()
         if not immutable and not read_only:
@@ -470,7 +472,9 @@ class ChunkStore:
             # Path.resolve().as_uri() produces a correctly percent-encoded
             # file:// URI, matching chunk_store_has_real_data's fix.
             uri = f"{Path(self.db_path).resolve().as_uri()}?immutable=1"
-            conn = sqlite3.connect(uri, uri=True)
+            conn = sqlite3.connect(
+                uri, uri=True, check_same_thread=self._check_same_thread
+            )
         elif self._read_only:
             # Bug #1760 code review Finding 1: genuinely read-only, NOT
             # immutable -- mode=ro never promises the engine the file is
@@ -482,9 +486,13 @@ class ChunkStore:
             # write journal_mode is the ORIGINAL "attempt to write a
             # readonly database" root cause this mode exists to avoid.
             uri = f"{Path(self.db_path).resolve().as_uri()}?mode=ro"
-            conn = sqlite3.connect(uri, uri=True)
+            conn = sqlite3.connect(
+                uri, uri=True, check_same_thread=self._check_same_thread
+            )
         else:
-            conn = sqlite3.connect(str(self.db_path))
+            conn = sqlite3.connect(
+                str(self.db_path), check_same_thread=self._check_same_thread
+            )
             # Codex-15 finding: the post-connect() PRAGMA runs BEFORE
             # __init__'s post-open guard is even reached (that guard wraps
             # _ensure_schema/_configure_durable_synchronous/_load_persisted_dim
@@ -1597,7 +1605,11 @@ def _resolve_immutable_predicate():
 
 
 def open_chunk_store_for_path(
-    db_path: Union[str, Path], collection_path: str, *, read_only: bool = False
+    db_path: Union[str, Path],
+    collection_path: str,
+    *,
+    read_only: bool = False,
+    check_same_thread: bool = True,
 ) -> ChunkStore:
     """Open a :class:`ChunkStore`, deciding mutable vs. immutable via the
     EXISTING ``is_immutable_versioned_snapshot()`` predicate applied to
@@ -1622,10 +1634,10 @@ def open_chunk_store_for_path(
     predicate = _resolve_immutable_predicate()
     is_versioned_immutable = predicate(collection_path)
     if is_versioned_immutable:
-        return ChunkStore(db_path, immutable=True)
+        return ChunkStore(db_path, immutable=True, check_same_thread=check_same_thread)
     if read_only:
-        return ChunkStore(db_path, read_only=True)
-    return ChunkStore(db_path)
+        return ChunkStore(db_path, read_only=True, check_same_thread=check_same_thread)
+    return ChunkStore(db_path, check_same_thread=check_same_thread)
 
 
 # ---------------------------------------------------------------------------
