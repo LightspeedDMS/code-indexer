@@ -464,3 +464,19 @@ class ImageExtractorFactory:
         if extractor_class:
             return extractor_class()
         return None
+
+
+def extract_valid_image_paths(
+    text: str, file_path: Path, repo_root: Union[str, Path]
+) -> List[str]:
+    """Repo-relative paths of the images ``text`` references that are
+    existing, regular, supported raster files inside ``repo_root``; [] for a
+    file type with no image syntax."""
+    extractor = ImageExtractorFactory.get_extractor(file_path.suffix.lower())
+    if extractor is None:
+        return []
+    # ^ hazard extract_images instead => unvalidated refs route prose to multimodal and fail the file; #2225
+    valid_paths, _ = extractor.extract_images_with_validation(
+        text, file_path, repo_root
+    )
+    return list(valid_paths)

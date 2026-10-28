@@ -5,7 +5,7 @@ from typing import List, Optional, Dict, Any, Tuple
 from pathlib import Path
 
 from ..config import IndexingConfig
-from .image_extractor import ImageExtractorFactory
+from .image_extractor import ImageExtractorFactory, extract_valid_image_paths
 from ..logging import AdaptiveLogger
 from ..utils.source_text_decoding import read_source_text
 
@@ -740,18 +740,7 @@ class TextChunker:
         # Extract images from supported file types (markdown, HTML, HTMX)
         extracted_images: List[str] = []
         if file_path and repo_root:
-            # Get appropriate extractor for file type
-            image_extractor = ImageExtractorFactory.get_extractor(f".{file_extension}")
-            if image_extractor:
-                extracted_images = image_extractor.extract_images(
-                    text, file_path, repo_root
-                )
-                # Filter images by validation
-                extracted_images = [
-                    img
-                    for img in extracted_images
-                    if image_extractor.validate_image(img, repo_root)
-                ]
+            extracted_images = extract_valid_image_paths(text, file_path, repo_root)
 
         # Split text into lines for line tracking
         text_lines = text.splitlines()

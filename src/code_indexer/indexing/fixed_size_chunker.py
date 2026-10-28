@@ -13,7 +13,7 @@ from typing import List, Dict, Any, Optional, Union
 from pathlib import Path
 
 from ..config import IndexingConfig, Config
-from .image_extractor import ImageExtractorFactory
+from .image_extractor import extract_valid_image_paths
 from ..utils.path_confinement import is_indexable_location
 from ..utils.source_text_decoding import read_source_text
 
@@ -141,30 +141,10 @@ class FixedSizeChunker:
         if not repo_root:
             return []
 
-        # Get file extension
-        file_extension = file_path.suffix.lower() if file_path.suffix else ""
-
-        # Get appropriate extractor from factory
-        extractor = ImageExtractorFactory.get_extractor(file_extension)
-        if not extractor:
-            # File type not supported for image extraction
-            return []
-
-        # Extract images (extractor returns list of relative paths as strings)
-        image_paths = extractor.extract_images(text, file_path, repo_root)
-
-        # Convert to dict format for backward compatibility with existing code
-        # HtmlImageExtractor returns list[str], MarkdownImageExtractor returns list[str]
-        images = []
-        for path in image_paths:
-            images.append(
-                {
-                    "alt_text": "",  # HTML extractor doesn't extract alt text
-                    "path": path,
-                }
-            )
-
-        return images
+        return [
+            {"alt_text": "", "path": path}
+            for path in extract_valid_image_paths(text, file_path, repo_root)
+        ]
 
     def _calculate_line_numbers(
         self, text: str, start_pos: int, end_pos: int
