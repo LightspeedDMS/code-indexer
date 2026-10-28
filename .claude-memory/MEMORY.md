@@ -40,7 +40,8 @@
 - [Netns shares host PIDs](feedback_netns_shares_host_pids.md) - never kill by pgrep name (hits the dev server)
 - [No gates during edits](feedback_no_gates_while_worker_edits.md) - never run full gates while an agent edits the tree
 - [Probes isolate HOME](feedback_probes_must_isolate_server_home.md) - importing the server app writes the real ~/.cidx-server; point HOME at scratch
-- [Dispatch cap by tier](feedback_parallel_dispatch_cap_4_on_20x.md) - 20x: up to 3 agents (workers+reviewers); 5x: 1+1; extra usage: no timer polling
+- [Dispatch cap](feedback_parallel_dispatch_cap_4_on_20x.md) - parallel agent cap and polling rules (local only)
+- [Local-only memories](feedback_local_only_memories.md) - package/session state and environment, credential or business detail stay gitignored, never pushed
 
 ## Quality Standards
 - [Zero failures](feedback_zero_failures_no_excuses.md) - never dismiss failures as "pre-existing"
@@ -52,6 +53,7 @@
 - [E2E is execution](feedback_e2e_not_code_inspection.md) - E2E means executing real functionality
 - [E2E verifies indexes](feedback_e2e_verify_indexes_work.md) - indexes exist on disk AND return results
 - [No fallbacks](feedback_no_fallbacks_ever.md) - one path that works or fails loudly
+- [Hardening keeps capabilities](feedback_hardening_must_retain_all_capabilities.md) - hardening keeps every needed capability; close only intended doors (local only)
 - [900-repo scale](feedback_design_for_900_repo_scale.md) - design for ~900 repos; no sync I/O in async def
 - [No gating settings](feedback_no_settings_to_gate_bug_fixes.md) - never add a setting unasked or gate a fix behind one
 - [No half-wired features](feedback_no_half_wired_features.md) - write-path needs its read-path and status-path
@@ -141,10 +143,10 @@
 - [Backlog to zero](project_backlog_clear_to_zero_mandate.md) - clear the bug backlog, running tally
 - [Backlog closing E2E](project_backlog_clear_ends_with_staging_e2e.md) - at priority-4-only, raise staging E2E (discuss first)
 - [Batch 1950-1956](project_batch_1950_1956_pending_staging.md) - NOT done until driven through both staging front doors
-- [Package 12.94 resume](project_package_12_94_resume_state.md) - READ FIRST after a reset: 12.97.0 validated on staging; 12.98.0 gates green, then bump + staging validation; the test-suite package follows
-- [Package 2087 resume](project_release_package_2087_resume_state.md) - READ FIRST after a reset: 12.87.0 in production; release issues closed, review follow-ups stay open
-- [Release 1873-1876](project_release_1873_1876_overnight_state.md) - resume state for the 2026-09-16 release
-- [Backlog paused 08-27](project_backlog_session_paused_2026_08_27.md) - resume state for the 2026-08-27 sweep (supersedes [VM migration pause](project_backlog_session_paused_for_vm_migration.md))
+- [Current package resume](project_package_12_94_resume_state.md) - READ FIRST after a reset: current package state (local only)
+- [Package 2087 resume](project_release_package_2087_resume_state.md) - older package state (local only)
+- [Release 1873-1876](project_release_1873_1876_overnight_state.md) - older release state (local only)
+- [Backlog paused 08-27](project_backlog_session_paused_2026_08_27.md) - older sweep state (local only; supersedes [VM migration pause](project_backlog_session_paused_for_vm_migration.md))
 - [pytest tmp](project_pytest_tmp_accumulates_unbounded.md) - clean pytest tmp dirs >15 min old
 
 ## External References

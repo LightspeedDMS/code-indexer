@@ -207,3 +207,22 @@ coverage.json
 # for the live-collector E2E test), not a generated artifact -- exempt it
 # from the blanket docker-compose.yml ignore rules above.
 !tests/otel-collector/docker-compose.yml
+
+# Local-only agent memories: package/release/session state and environment,
+# credential-procedure or business detail. Kept on disk, never in a remote.
+/.claude-memory/project_package_*
+/.claude-memory/project_release_*
+/.claude-memory/project_batch_*
+/.claude-memory/project_backlog_*
+/.claude-memory/project_staging_*
+/.claude-memory/local_*
+/.claude-memory/feedback_admin_password_sacred.md
+/.claude-memory/feedback_port_config_locked.md
+/.claude-memory/feedback_parallel_dispatch_cap_4_on_20x.md
+/.claude-memory/feedback_hardening_must_retain_all_capabilities.md
+/.claude-memory/reference_staging_nfs_wedge_recovery.md
+/.claude-memory/reference_corrupt_chunks_db_restore.md
+/.claude-memory/project_nfs_host_down_hangs_systemd.md
+/.claude-memory/project_reembed_cost_incident_2026_10_06.md
+/.claude-memory/project_own_local_dev_cidx_server.md
+/.claude-memory/project_eks_is_eventual_deployment_target.md
