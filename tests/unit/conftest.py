@@ -19,6 +19,13 @@ from pathlib import Path
 import pytest
 
 from tests.unit.test_cidx_curl_wrapper_helpers import _CFG
+from tests.utils.real_process_guard import (  # noqa: F401
+    install as _install_real_process_guard,
+    pytest_runtest_makereport,
+    pytest_runtest_protocol,
+)
+
+_install_real_process_guard()
 
 # Bug #1800: bounded settle window for disposed non-daemon threads to exit.
 # Bounded on purpose (Messi Rule #14) -- a guard against hangs must not hang.
