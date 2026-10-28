@@ -9,8 +9,11 @@ TDD RED PHASE: Tests written before production code.
 
 import json
 import threading
+import time
+from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from typing import Callable, Iterator, List
 from unittest.mock import MagicMock
 
 import pytest
@@ -402,38 +405,213 @@ def test_get_running_job_id_conservative_on_tracker_exception(
 # ---------------------------------------------------------------------------
 
 
+_READER_PAUSE_SECONDS = 0.001
+_READER_MAX_SECONDS = 30.0
+_READER_JOIN_SECONDS = 5.0
+
+
+@contextmanager
+def _running_readers(read_once: Callable[[], None], count: int = 4) -> Iterator[None]:
+    stop = threading.Event()
+    deadline = time.monotonic() + _READER_MAX_SECONDS
+    crashes: List[str] = []
+
+    def loop() -> None:
+        while not stop.is_set() and time.monotonic() < deadline:
+            try:
+                read_once()
+            except Exception as exc:
+                crashes.append(f"{type(exc).__name__}: {exc}")
+                return
+            # ^ hazard removing stop.wait => readers hot-spin and starve the writer; #2222
+            stop.wait(_READER_PAUSE_SECONDS)
+
+    threads = [
+        threading.Thread(target=loop, name=f"dashboard-cache-reader-{i}", daemon=True)
+        for i in range(count)
+    ]
+    started: List[threading.Thread] = []
+    body_errors: List[BaseException] = []
+    try:
+        for t in threads:
+            t.start()
+            started.append(t)
+        yield
+    except BaseException as exc:
+        body_errors.append(exc)
+        raise
+    finally:
+        stop.set()
+        for t in started:
+            t.join(timeout=_READER_JOIN_SECONDS)
+        leftover = [t.name for t in started if t.is_alive()]
+        problems = []
+        if leftover:
+            problems.append(f"reader threads still alive: {leftover}")
+        if crashes:
+            problems.append(f"reader threads crashed: {crashes}")
+        if problems:
+            failure = AssertionError("; ".join(problems))
+            if not body_errors:
+                raise failure
+            # ^ invariant body error stays primary; failure sits before its old __context__; test:test_running_readers_keep_the_body_error_existing_context
+            failure.__context__ = body_errors[0].__context__
+            body_errors[0].__context__ = failure
+
+
+def test_running_readers_stop_when_the_body_raises() -> None:
+    with pytest.raises(RuntimeError, match="interrupted"):
+        with _running_readers(lambda: None):
+            raise RuntimeError("interrupted")
+
+    alive = [
+        t.name
+        for t in threading.enumerate()
+        if t.name.startswith("dashboard-cache-reader-") and t.is_alive()
+    ]
+    assert alive == []
+
+
+def test_running_readers_stop_started_readers_when_a_start_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_start = threading.Thread.start
+    started: List[threading.Thread] = []
+
+    def start_two_then_fail(self: threading.Thread) -> None:
+        if len(started) == 2:
+            raise RuntimeError("cannot start thread")
+        started.append(self)
+        real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", start_two_then_fail)
+    with pytest.raises(RuntimeError, match="cannot start thread"):
+        with _running_readers(lambda: None):
+            pass
+    monkeypatch.undo()
+
+    assert len(started) == 2
+    assert [t.name for t in started if t.is_alive()] == []
+
+
+def test_running_readers_report_a_stuck_reader_without_masking_the_body_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release = threading.Event()
+    entered = threading.Event()
+
+    def blocked_read() -> None:
+        entered.set()
+        release.wait(timeout=5)
+
+    monkeypatch.setattr(f"{__name__}._READER_JOIN_SECONDS", 0.05)
+    try:
+        with pytest.raises(RuntimeError, match="body failed") as excinfo:
+            with _running_readers(blocked_read, count=1):
+                assert entered.wait(timeout=5)
+                raise RuntimeError("body failed")
+    finally:
+        release.set()
+        for t in threading.enumerate():
+            if t.name.startswith("dashboard-cache-reader-"):
+                t.join(timeout=5)
+
+    leak = excinfo.value.__context__
+    assert isinstance(leak, AssertionError)
+    assert "dashboard-cache-reader-0" in str(leak)
+
+
+def test_running_readers_report_a_reader_crash_without_masking_the_body_error() -> None:
+    crashed = threading.Event()
+
+    def crashing_read() -> None:
+        crashed.set()
+        raise ValueError("reader broke")
+
+    with pytest.raises(RuntimeError, match="body failed") as excinfo:
+        with _running_readers(crashing_read, count=1):
+            assert crashed.wait(timeout=5)
+            raise RuntimeError("body failed")
+
+    crash = excinfo.value.__context__
+    assert isinstance(crash, AssertionError)
+    assert "reader broke" in str(crash)
+
+
+def test_running_readers_keep_the_body_error_existing_context() -> None:
+    crashed = threading.Event()
+
+    def crashing_read() -> None:
+        crashed.set()
+        raise ValueError("reader broke")
+
+    with pytest.raises(RuntimeError, match="body failed") as excinfo:
+        with _running_readers(crashing_read, count=1):
+            assert crashed.wait(timeout=5)
+            try:
+                raise KeyError("original cause")
+            except KeyError:
+                raise RuntimeError("body failed")
+
+    reader_failure = excinfo.value.__context__
+    assert isinstance(reader_failure, AssertionError)
+    assert "reader broke" in str(reader_failure)
+    assert isinstance(reader_failure.__context__, KeyError)
+
+
+def _payload_checker(cache_file: Path, errors: List[str]) -> Callable[[], None]:
+    def read_once() -> None:
+        if not cache_file.exists():
+            return
+        data = cache_file.read_text()
+        try:
+            parsed = json.loads(data)
+        except json.JSONDecodeError as exc:
+            errors.append(f"Partial write detected: {exc} — raw: {data!r}")
+            return
+        if "result_json" not in parsed:
+            errors.append(f"Incomplete payload: {data!r}")
+
+    return read_once
+
+
+def test_reader_check_detects_a_non_atomic_write(cache_dir: Path) -> None:
+    cache_file = cache_dir / "_dashboard_cache.json"
+    errors: List[str] = []
+    half_written = threading.Event()
+    sampled = threading.Event()
+    check = _payload_checker(cache_file, errors)
+    text = json.dumps({"result_json": '{"iteration": 0}', "job_id": None})
+
+    def read_once() -> None:
+        # ^ hazard reading half_written after check() => a read of the old file sets sampled; control turns flaky
+        saw_half_write = half_written.is_set()
+        check()
+        if saw_half_write:
+            sampled.set()
+
+    with _running_readers(read_once):
+        with cache_file.open("w") as fh:
+            fh.write(text[: len(text) // 2])
+            fh.flush()
+            half_written.set()
+            assert sampled.wait(timeout=5), "no reader sampled the partial file"
+            fh.write(text[len(text) // 2 :])
+
+    assert any(e.startswith("Partial write detected") for e in errors), errors
+
+
 def test_atomic_write_readers_see_complete_payload(
     backend: FilesystemDashboardCacheBackend,
     cache_dir: Path,
 ) -> None:
     """Concurrent readers never observe a partial write (atomic via tmp+rename)."""
-    cache_file = cache_dir / "_dashboard_cache.json"
-    errors = []
-    stop_flag = threading.Event()
+    errors: List[str] = []
+    read_once = _payload_checker(cache_dir / "_dashboard_cache.json", errors)
 
-    def reader() -> None:
-        while not stop_flag.is_set():
-            if not cache_file.exists():
-                continue
-            try:
-                data = cache_file.read_text()
-                parsed = json.loads(data)
-                # Must have the expected key
-                if "result_json" not in parsed:
-                    errors.append(f"Incomplete payload: {data!r}")
-            except json.JSONDecodeError as exc:
-                errors.append(f"Partial write detected: {exc} — raw: {data!r}")
-
-    reader_threads = [threading.Thread(target=reader) for _ in range(4)]
-    for t in reader_threads:
-        t.start()
-
-    for i in range(20):
-        backend.set_result(f'{{"iteration": {i}}}')
-
-    stop_flag.set()
-    for t in reader_threads:
-        t.join(timeout=5)
+    with _running_readers(read_once):
+        for i in range(20):
+            backend.set_result(f'{{"iteration": {i}}}')
 
     assert not errors, f"Atomic write violations: {errors}"
 
@@ -615,32 +793,12 @@ def test_concurrent_set_cached_atomic(
     cache_dir: Path,
 ) -> None:
     """Concurrent set_cached calls never produce a partially-written file."""
-    cache_file = cache_dir / "_dashboard_cache.json"
-    errors: list = []
-    stop_flag = threading.Event()
+    errors: List[str] = []
+    read_once = _payload_checker(cache_dir / "_dashboard_cache.json", errors)
 
-    def reader() -> None:
-        while not stop_flag.is_set():
-            if not cache_file.exists():
-                continue
-            try:
-                data = cache_file.read_text()
-                parsed = json.loads(data)
-                if "result_json" not in parsed:
-                    errors.append(f"Incomplete payload: {data!r}")
-            except json.JSONDecodeError as exc:
-                errors.append(f"Partial write detected: {exc}")
-
-    readers = [threading.Thread(target=reader) for _ in range(4)]
-    for t in readers:
-        t.start()
-
-    for i in range(20):
-        backend.set_cached(f'{{"iteration": {i}}}')
-
-    stop_flag.set()
-    for t in readers:
-        t.join(timeout=5)
+    with _running_readers(read_once):
+        for i in range(20):
+            backend.set_cached(f'{{"iteration": {i}}}')
 
     assert not errors, f"Atomic write violations: {errors}"
 
