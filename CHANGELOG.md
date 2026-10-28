@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [12.99.0] - 2026-10-27
+
+### Upgrade notes
+
+- X-Ray: the Rust engine changes (new `.vue` mapping, case-insensitive extensions), so the auto-updater rebuilds `xray-cli` on deploy (`cargo build --release --locked`).
+- X-Ray: searches that include YAML, Terraform/HCL, SQL, XML, Groovy/Gradle, JSX, Vue or upper-case-extension files now evaluate those files. Stored patterns that read as "no findings" on such files may now report findings.
+- Dashboard: the new X-Ray category counts from this release on. Earlier X-Ray calls stay under Other API. During a rolling restart, nodes still on the old version count X-Ray under Other API and leave the new rows out of their totals until they are updated. The metric column is TEXT, so no migration is needed.
+
+### Fixed
+
+- X-Ray: searches through MCP (`xray_search`, `xray_explore`, `xray_search_batch`) and REST now evaluate `.jsx`, `.tf`, `.hcl`, `.yml`, `.yaml`, `.sql`, `.xml`, `.groovy` and `.gradle` files. The server rejected them as `UnsupportedLanguage` before the engine saw them, so such searches read as "no findings". `xray_dump_ast` and the `xray_explore` AST debug payload now cover YAML, HCL/Terraform and JSX; for SQL, XML and Groovy/Gradle they return an explicit "AST dump not supported for this language" error (`ast_debug_error` on explore matches) instead of a parse error or a silently missing AST. A search whose candidate files are all in unsupported languages now carries one scan-level `UnsupportedLanguage` error naming the extensions.
+- X-Ray: `.vue` single-file components are now parsed (with the HTML grammar), so stored patterns with `language: vue` report their findings through MCP and REST; before, every `.vue` file was rejected and the result read as clean. `xray_dump_ast` and the `xray_explore` AST debug payload refuse `.vue` explicitly. Files the engine itself cannot parse (an older engine build without a grammar, an unreadable file, a parser failure) are no longer silently dropped: when none of the candidates parsed, the search reports one `UnparsedFiles` error; when only some did, it reports an `unparsed_files` count and warning and still succeeds.
+- X-Ray: the engine now matches file extensions case-insensitively, like the server, so files such as `Main.JAVA`, `util.H` or `b.PY` are parsed and evaluated (including graph-mode extraction for Java and Kotlin). Before, the server accepted them but the engine could not parse them, so they were never evaluated.
+- Indexing: a markdown or HTML image reference now counts as an image only when it names an existing, supported image file inside the repository. Before, any image syntax (for example prose that quotes `![](path)`, or a reference to a missing file or to a file outside the repository) sent the chunk to multimodal embedding, which failed the file (a refresh whose only change was such a file failed with "All files failed to index") and left a multimodal collection with no HNSW index behind. Such text is now indexed as plain text.
+
+### Changed
+
+- Dashboard: X-Ray searches now have their own category in the API calls chart, an "X-Ray Searches" card and an X-Ray column in the per-user table, instead of being counted under Other API. One X-Ray search is counted per repository searched by MCP `xray_search`, `xray_explore` and `xray_search_batch` and by REST `POST /api/xray/search` and `POST /api/xray/search/batch`; a request refused during validation is not counted. `analyze_graph`, `xray_dump_ast` and result polls stay under Other API. Counts recorded before this release stay under Other API.
+
 ## [12.98.0] - 2026-10-26
 
 ### Upgrade notes
