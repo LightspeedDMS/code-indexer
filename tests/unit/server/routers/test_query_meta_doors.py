@@ -127,7 +127,10 @@ def test_rest_catalog_handles_are_bound_and_projected(
         assert CANARY not in env.app.state.payload_cache.retrieve_full(handle).lower()
 
 
-@pytest.mark.parametrize("search_type", ["semantic", "fts", "regex"])
+@pytest.mark.parametrize(
+    "search_type",
+    ["semantic", "fts", pytest.param("regex", marks=pytest.mark.slow)],
+)
 def test_multi_query_catalog_rows_are_projected(
     client: TestClient, search_type: str
 ) -> None:

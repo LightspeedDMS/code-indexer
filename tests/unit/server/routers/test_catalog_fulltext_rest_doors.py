@@ -119,7 +119,9 @@ def test_ordinary_repository_boolean_query_is_not_refused(
     assert [row["path"] for row in rest.json()["fts_results"]] == ["README.md"]
 
 
-@pytest.mark.parametrize("search_type", ["fts", "regex"])
+@pytest.mark.parametrize(
+    "search_type", ["fts", pytest.param("regex", marks=pytest.mark.slow)]
+)
 @pytest.mark.parametrize("query", [CANARY, ABSENT, "payments"])
 def test_multi_counts_are_the_projected_rows(
     client: TestClient,  # noqa: F811

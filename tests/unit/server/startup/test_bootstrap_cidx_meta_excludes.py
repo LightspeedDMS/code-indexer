@@ -6,14 +6,10 @@ directory MUST contain:
   - ".locks" in add_exclude_dirs  (defense-in-depth; primary lock dir is outside clone)
   - "*.tmp"  in force_exclude_patterns  (atomic write temp files)
 
-These tests use real filesystem (tmp_path) and mock subprocess.run so that
-cidx init creates a minimal .code-indexer-override.yaml without requiring
-the real cidx CLI to be installed.
+These tests use the real filesystem (tmp_path). A fresh install runs the real
+in-process cidx-meta init (Story #2295), which writes the default override YAML.
 
 Mock justification:
-  - subprocess.run for 'cidx init': external CLI subprocess; its real output
-    is a side-effect (file creation). We provide that side-effect manually so
-    the test controls exactly what config exists at the start of each scenario.
   - golden_repo_manager.register_local_repo: registers metadata in a real DB;
     for these tests we only care about the YAML patch, not registration.
 
@@ -29,7 +25,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Dict
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 import yaml
@@ -84,12 +80,6 @@ def _make_manager(already_registered: bool = False) -> MagicMock:
     return mgr
 
 
-def _fake_cidx_init(cidx_meta_path: Path):
-    """Side-effect replacing subprocess.run(['cidx', 'init', ...])."""
-    _write_code_indexer_config(cidx_meta_path)
-    _write_override(cidx_meta_path, dict(_MINIMAL_OVERRIDE))
-
-
 # ---------------------------------------------------------------------------
 # 1. Fresh bootstrap: excludes are present after first run (2 parametrized)
 # ---------------------------------------------------------------------------
@@ -108,11 +98,7 @@ class TestFreshBootstrapExcludes:
         from code_indexer.server.startup.bootstrap import bootstrap_cidx_meta
 
         cidx_meta_path = tmp_path / "cidx-meta"
-        manager = _make_manager(already_registered=False)
-
-        with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = lambda *a, **kw: _fake_cidx_init(cidx_meta_path)
-            bootstrap_cidx_meta(manager, str(tmp_path))
+        bootstrap_cidx_meta(_make_manager(already_registered=False), str(tmp_path))
 
         data = _read_override(cidx_meta_path)
         assert expected_value in data[field]
@@ -140,13 +126,9 @@ class TestIdempotency:
         cidx_meta_path = tmp_path / "cidx-meta"
 
         # First run: fresh install
-        with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = lambda *a, **kw: _fake_cidx_init(cidx_meta_path)
-            bootstrap_cidx_meta(_make_manager(already_registered=False), str(tmp_path))
-
+        bootstrap_cidx_meta(_make_manager(already_registered=False), str(tmp_path))
         # Second run: already registered
-        with patch("subprocess.run"):
-            bootstrap_cidx_meta(_make_manager(already_registered=True), str(tmp_path))
+        bootstrap_cidx_meta(_make_manager(already_registered=True), str(tmp_path))
 
         data = _read_override(cidx_meta_path)
         assert data[field].count(expected_value) == 1
@@ -179,8 +161,7 @@ class TestPreservation:
         _write_code_indexer_config(cidx_meta_path)
         _write_override(cidx_meta_path, existing)
 
-        with patch("subprocess.run"):
-            bootstrap_cidx_meta(_make_manager(already_registered=True), str(tmp_path))
+        bootstrap_cidx_meta(_make_manager(already_registered=True), str(tmp_path))
 
         data = _read_override(cidx_meta_path)
         for entry in pre_existing:
@@ -214,8 +195,7 @@ class TestRetrofit:
         _write_code_indexer_config(cidx_meta_path)
         _write_override(cidx_meta_path, dict(_MINIMAL_OVERRIDE))
 
-        with patch("subprocess.run"):
-            bootstrap_cidx_meta(_make_manager(already_registered=True), str(tmp_path))
+        bootstrap_cidx_meta(_make_manager(already_registered=True), str(tmp_path))
 
         data = _read_override(cidx_meta_path)
         assert expected_value in data[field]
@@ -228,7 +208,7 @@ class TestRetrofit:
 
 class TestMissingOverrideYaml:
     def test_missing_override_yaml_does_not_crash(self, tmp_path):
-        """When override YAML is absent (e.g. cidx init failed), bootstrap does not raise."""
+        """When override YAML is absent (e.g. init failed), bootstrap does not raise."""
         from code_indexer.server.startup.bootstrap import bootstrap_cidx_meta
 
         cidx_meta_path = tmp_path / "cidx-meta"
@@ -237,6 +217,5 @@ class TestMissingOverrideYaml:
         # .code-indexer/config.json exists but NO override YAML
         _write_code_indexer_config(cidx_meta_path)
 
-        with patch("subprocess.run"):
-            # Must not raise
-            bootstrap_cidx_meta(_make_manager(already_registered=True), str(tmp_path))
+        # Must not raise
+        bootstrap_cidx_meta(_make_manager(already_registered=True), str(tmp_path))

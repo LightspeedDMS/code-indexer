@@ -127,6 +127,7 @@ def test_scip_source_reader_refuses_git_backed_files(
 # ------------------------------------------------------------------- Listings
 
 
+@pytest.mark.slow
 def test_mcp_listings_hide_git_backed_symlinks(
     client: TestClient, app: Any, activation: str
 ) -> None:
@@ -140,6 +141,7 @@ def test_mcp_listings_hide_git_backed_symlinks(
             _assert_hidden(body)
 
 
+@pytest.mark.slow
 def test_rest_listing_hides_git_backed_symlinks(
     client: TestClient, app: Any, activation: str
 ) -> None:

@@ -284,6 +284,31 @@ class GitOperationError(GoldenRepoError):
     pass
 
 
+def _initialize_repo_before_indexing(repo_path: str) -> None:
+    from code_indexer.config import ConfigManager
+    from code_indexer.services.local_project_init import initialize_local_project
+
+    config_path = Path(repo_path) / ".code-indexer" / "config.json"
+    try:
+        if config_path.exists():
+            # ^ why load, not re-init; `cidx init` refused an existing config (tolerated) and a corrupt one (fatal)
+            ConfigManager(config_path).load()
+            return
+        result = initialize_local_project(
+            Path(repo_path).resolve(), no_override_file=True
+        )
+    except Exception as e:
+        cause = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+        raise GoldenRepoError(
+            f"Failed to initialize repo before indexing: {cause}"
+        ) from e
+    if result.backend_error is not None:
+        logging.warning(
+            f"Vector backend initialisation failed for {repo_path}: "
+            f"{result.backend_error}"
+        )
+
+
 def _gather_repo_metrics(repo_path) -> tuple:
     """
     Gather file count and commit count for a repository.
@@ -1397,27 +1422,26 @@ class GoldenRepoManager:
         # Initialize CIDX index structure for local repos (idempotent)
         if not (folder_path / ".code-indexer").exists():
             try:
-                import subprocess
-
-                subprocess.run(
-                    ["cidx", "init", "--no-override-file"],
-                    cwd=str(folder_path),
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    env=build_cidx_subprocess_env(),
+                from code_indexer.services.local_project_init import (
+                    initialize_local_project,
                 )
+
+                # ^ why resolve(), not the given path; codebase_dir = os.getcwd() form `cidx init` wrote; test:test_in_process_init_matches_pre_change_cidx_init
+                init_result = initialize_local_project(
+                    Path(folder_path).resolve(), no_override_file=True
+                )
+            except Exception as e:
+                # ^ why log and continue, not raise; registration must succeed when init fails
+                logging.error(f"Failed to initialize CIDX for '{alias}': {e}")
+            else:
+                if init_result.backend_error is not None:
+                    logging.warning(
+                        f"Vector backend initialisation failed for '{alias}': "
+                        f"{init_result.backend_error}"
+                    )
                 logging.info(
                     f"Initialized CIDX index structure for local repo '{alias}'"
                 )
-            except subprocess.CalledProcessError as e:
-                logging.error(
-                    f"Failed to initialize CIDX for '{alias}': {e.stderr if e.stderr else str(e)}"
-                )
-                # Continue with registration even if init fails
-            except Exception as e:
-                logging.error(f"Unexpected error during CIDX init for '{alias}': {e}")
-                # Continue with registration even if init fails
 
         # Lifecycle hooks (controlled by fire_lifecycle_hooks parameter)
         if fire_lifecycle_hooks:
@@ -4710,31 +4734,7 @@ class GoldenRepoManager:
                         _stdout_lines.clear()
                         _stderr_lines.clear()
 
-                # Ensure repo is initialized before running cidx index commands (idempotent)
-                init_result = subprocess.run(
-                    ["cidx", "init", "--no-override-file"],
-                    cwd=repo_path,
-                    capture_output=True,
-                    text=True,
-                    env=build_cidx_subprocess_env(),
-                )
-                init_output = (init_result.stdout or "") + (init_result.stderr or "")
-                if (
-                    init_result.returncode != 0
-                    and "already exists" not in init_output.lower()
-                ):
-                    error_details = (
-                        init_result.stderr
-                        or init_result.stdout
-                        or f"Exit code {init_result.returncode}"
-                    )
-                    raise GoldenRepoError(
-                        f"Failed to initialize repo before indexing: {error_details}"
-                    )
-                if init_result.stdout:
-                    all_stdout += f"[init] {init_result.stdout}\n"
-                if init_result.stderr:
-                    all_stderr += f"[init] {init_result.stderr}\n"
+                _initialize_repo_before_indexing(repo_path)
 
                 # Run each requested index type sequentially
                 for index_type in index_types:

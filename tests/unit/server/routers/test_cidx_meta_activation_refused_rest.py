@@ -174,6 +174,7 @@ class TestExistingCopy:
 
         assert_refused_as_unknown(client, USER, CONTENT[route], META_COPY)
 
+    @pytest.mark.slow
     def test_existing_copy_rows_are_never_returned_by_query(self, client, catalog):
         # The catalog carries its index configuration (written at bootstrap),
         # so the copy does too; a restricted caller's catalog search embeds

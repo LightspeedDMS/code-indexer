@@ -10,16 +10,29 @@ Verifies the fallback chain:
 3. f"Exit code {result.returncode}" (last resort when both are empty)
 
 Affected locations in golden_repo_manager.py:
-- cidx init failure (line ~2391)
 - cidx index (semantic) failure (line ~2411)
 - cidx index --rebuild-fts-index (FTS) failure (line ~2427)
 - cidx index --index-commits (temporal) failure (line ~2460)
 - cidx scip generate (SCIP) failure (line ~2529)
 """
 
+from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
+
+_REPO_PATH = "/fake/data/golden-repos/test-repo"
+
+
+@pytest.fixture(autouse=True)
+def _initialized_repo(tmp_path, monkeypatch):
+    from code_indexer.services.local_project_init import initialize_local_project
+
+    repo = tmp_path / "test-repo"
+    repo.mkdir()
+    initialize_local_project(repo.resolve(), no_override_file=True)
+    monkeypatch.setattr(f"{__name__}._REPO_PATH", str(repo))
+    return Path(repo)
 
 
 def _make_subprocess_result(returncode, stdout="", stderr=""):
@@ -74,9 +87,7 @@ def _make_manager_for_add_index():
     golden_repo.enable_temporal = False
 
     manager.golden_repos = {"test-repo": golden_repo}
-    manager.get_actual_repo_path = Mock(
-        return_value="/fake/data/golden-repos/test-repo"
-    )
+    manager.get_actual_repo_path = Mock(return_value=_REPO_PATH)
 
     # Bug #1316: add_indexes_to_golden_repo's background_worker now resolves
     # `repo` authoritatively via _resolve_golden_repo_authoritative, which
@@ -121,66 +132,6 @@ def _extract_background_worker(manager, index_type):
 
 
 # ---------------------------------------------------------------------------
-# cidx init failure
-# ---------------------------------------------------------------------------
-
-
-class TestInitSubprocessErrorMessages:
-    """Tests for cidx init failure error message fallback chain."""
-
-    def test_init_stderr_used_when_present(self):
-        """When cidx init fails and stderr has content, error uses stderr."""
-        manager, GoldenRepoError = _make_manager_for_add_index()
-        worker = _extract_background_worker(manager, "semantic")
-
-        init_fail = _make_subprocess_result(
-            returncode=1,
-            stdout="some stdout text",
-            stderr="meaningful stderr error",
-        )
-        with patch("subprocess.run", return_value=init_fail):
-            with pytest.raises(GoldenRepoError) as exc_info:
-                worker()
-
-        assert "meaningful stderr error" in str(exc_info.value)
-
-    def test_init_stdout_used_when_stderr_empty(self):
-        """When cidx init fails with empty stderr, error falls back to stdout."""
-        manager, GoldenRepoError = _make_manager_for_add_index()
-        worker = _extract_background_worker(manager, "semantic")
-
-        init_fail = _make_subprocess_result(
-            returncode=1,
-            stdout="Error: config file not found\n",
-            stderr="",
-        )
-        with patch("subprocess.run", return_value=init_fail):
-            with pytest.raises(GoldenRepoError) as exc_info:
-                worker()
-
-        error_msg = str(exc_info.value)
-        assert "Error: config file not found" in error_msg
-        # Should NOT just show empty string or bare colon
-        assert error_msg.rstrip() != "Failed to initialize repo before indexing:"
-
-    def test_init_exit_code_used_when_both_empty(self):
-        """When cidx init fails with both stderr and stdout empty, uses exit code."""
-        manager, GoldenRepoError = _make_manager_for_add_index()
-        worker = _extract_background_worker(manager, "semantic")
-
-        init_fail = _make_subprocess_result(
-            returncode=42,
-            stdout="",
-            stderr="",
-        )
-        with patch("subprocess.run", return_value=init_fail):
-            with pytest.raises(GoldenRepoError) as exc_info:
-                worker()
-
-        assert "42" in str(exc_info.value)
-
-
-# ---------------------------------------------------------------------------
 # cidx index (semantic) failure
 # ---------------------------------------------------------------------------
 
@@ -189,12 +140,11 @@ class TestSemanticIndexErrorMessages:
     """Tests for cidx index (semantic) failure error message fallback chain.
 
     Semantic indexing uses subprocess.Popen (via run_with_popen_progress) for
-    real-time progress streaming. We mock subprocess.run for init (one call)
-    and subprocess.Popen for the semantic indexing step.
+    real-time progress streaming; only that Popen is mocked.
     """
 
-    def _run_semantic_worker_with_results(self, init_result, semantic_result):
-        """Helper: run semantic worker with controlled subprocess results."""
+    def _run_semantic_worker_with_result(self, semantic_result):
+        """Helper: run semantic worker with a controlled index result."""
         manager, GoldenRepoError = _make_manager_for_add_index()
         worker = _extract_background_worker(manager, "semantic")
 
@@ -204,10 +154,7 @@ class TestSemanticIndexErrorMessages:
             stdout_lines=[semantic_result.stdout] if semantic_result.stdout else [],
         )
 
-        with (
-            patch("subprocess.run", return_value=init_result),
-            patch("subprocess.Popen", return_value=mock_popen),
-        ):
+        with patch("subprocess.Popen", return_value=mock_popen):
             with pytest.raises(GoldenRepoError) as exc_info:
                 worker()
 
@@ -215,31 +162,28 @@ class TestSemanticIndexErrorMessages:
 
     def test_semantic_stderr_used_when_present(self):
         """When cidx index (semantic) fails with stderr content, error uses stderr."""
-        init_ok = _make_subprocess_result(0, stdout="initialized", stderr="")
         sem_fail = _make_subprocess_result(
             1, stdout="", stderr="VoyageAI API key invalid"
         )
-        exc_info = self._run_semantic_worker_with_results(init_ok, sem_fail)
+        exc_info = self._run_semantic_worker_with_result(sem_fail)
         assert "VoyageAI API key invalid" in str(exc_info.value)
 
     def test_semantic_stdout_used_when_stderr_empty(self):
         """When cidx index (semantic) fails with empty stderr, error falls back to stdout."""
-        init_ok = _make_subprocess_result(0, stdout="initialized", stderr="")
         sem_fail = _make_subprocess_result(
             1,
             stdout="Fatal: embedding provider not configured\n",
             stderr="",
         )
-        exc_info = self._run_semantic_worker_with_results(init_ok, sem_fail)
+        exc_info = self._run_semantic_worker_with_result(sem_fail)
         error_msg = str(exc_info.value)
         assert "Fatal: embedding provider not configured" in error_msg
         assert error_msg.rstrip() != "Failed to create semantic index:"
 
     def test_semantic_exit_code_used_when_both_empty(self):
         """When cidx index (semantic) fails with both outputs empty, uses exit code."""
-        init_ok = _make_subprocess_result(0, stdout="initialized", stderr="")
         sem_fail = _make_subprocess_result(99, stdout="", stderr="")
-        exc_info = self._run_semantic_worker_with_results(init_ok, sem_fail)
+        exc_info = self._run_semantic_worker_with_result(sem_fail)
         assert "99" in str(exc_info.value)
 
 
@@ -251,19 +195,11 @@ class TestSemanticIndexErrorMessages:
 class TestFTSIndexErrorMessages:
     """Tests for cidx index --rebuild-fts-index (FTS) failure error message fallback."""
 
-    def _run_fts_worker_with_results(self, init_result, fts_result):
+    def _run_fts_worker_with_result(self, fts_result):
         manager, GoldenRepoError = _make_manager_for_add_index()
         worker = _extract_background_worker(manager, "fts")
 
-        call_count = [0]
-
-        def side_effect(cmd, **kwargs):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                return init_result
-            return fts_result
-
-        with patch("subprocess.run", side_effect=side_effect):
+        with patch("subprocess.run", return_value=fts_result):
             with pytest.raises(GoldenRepoError) as exc_info:
                 worker()
 
@@ -271,27 +207,24 @@ class TestFTSIndexErrorMessages:
 
     def test_fts_stderr_used_when_present(self):
         """When FTS index fails with stderr content, error uses stderr."""
-        init_ok = _make_subprocess_result(0, stdout="initialized", stderr="")
         fts_fail = _make_subprocess_result(1, stdout="", stderr="Tantivy schema error")
-        exc_info = self._run_fts_worker_with_results(init_ok, fts_fail)
+        exc_info = self._run_fts_worker_with_result(fts_fail)
         assert "Tantivy schema error" in str(exc_info.value)
 
     def test_fts_stdout_used_when_stderr_empty(self):
         """When FTS index fails with empty stderr, error falls back to stdout."""
-        init_ok = _make_subprocess_result(0, stdout="initialized", stderr="")
         fts_fail = _make_subprocess_result(
             1, stdout="Error: FTS directory already locked\n", stderr=""
         )
-        exc_info = self._run_fts_worker_with_results(init_ok, fts_fail)
+        exc_info = self._run_fts_worker_with_result(fts_fail)
         error_msg = str(exc_info.value)
         assert "Error: FTS directory already locked" in error_msg
         assert error_msg.rstrip() != "Failed to create FTS index:"
 
     def test_fts_exit_code_used_when_both_empty(self):
         """When FTS index fails with both outputs empty, uses exit code."""
-        init_ok = _make_subprocess_result(0, stdout="initialized", stderr="")
         fts_fail = _make_subprocess_result(7, stdout="", stderr="")
-        exc_info = self._run_fts_worker_with_results(init_ok, fts_fail)
+        exc_info = self._run_fts_worker_with_result(fts_fail)
         assert "7" in str(exc_info.value)
 
 
@@ -304,11 +237,10 @@ class TestTemporalIndexErrorMessages:
     """Tests for cidx index --index-commits (temporal) failure error message fallback.
 
     Temporal indexing uses subprocess.Popen (via run_with_popen_progress) for
-    real-time progress streaming. We mock subprocess.run for init (one call)
-    and subprocess.Popen for the temporal indexing step.
+    real-time progress streaming; only that Popen is mocked.
     """
 
-    def _run_temporal_worker_with_results(self, init_result, temporal_result):
+    def _run_temporal_worker_with_result(self, temporal_result):
         manager, GoldenRepoError = _make_manager_for_add_index()
         worker = _extract_background_worker(manager, "temporal")
 
@@ -318,10 +250,7 @@ class TestTemporalIndexErrorMessages:
             stdout_lines=[temporal_result.stdout] if temporal_result.stdout else [],
         )
 
-        with (
-            patch("subprocess.run", return_value=init_result),
-            patch("subprocess.Popen", return_value=mock_popen),
-        ):
+        with patch("subprocess.Popen", return_value=mock_popen):
             with pytest.raises(GoldenRepoError) as exc_info:
                 worker()
 
@@ -329,29 +258,26 @@ class TestTemporalIndexErrorMessages:
 
     def test_temporal_stderr_used_when_present(self):
         """When temporal index fails with stderr content, error uses stderr."""
-        init_ok = _make_subprocess_result(0, stdout="initialized", stderr="")
         temp_fail = _make_subprocess_result(
             1, stdout="", stderr="git: not a git repository"
         )
-        exc_info = self._run_temporal_worker_with_results(init_ok, temp_fail)
+        exc_info = self._run_temporal_worker_with_result(temp_fail)
         assert "git: not a git repository" in str(exc_info.value)
 
     def test_temporal_stdout_used_when_stderr_empty(self):
         """When temporal index fails with empty stderr, error falls back to stdout."""
-        init_ok = _make_subprocess_result(0, stdout="initialized", stderr="")
         temp_fail = _make_subprocess_result(
             1, stdout="Error: no commits found in repository\n", stderr=""
         )
-        exc_info = self._run_temporal_worker_with_results(init_ok, temp_fail)
+        exc_info = self._run_temporal_worker_with_result(temp_fail)
         error_msg = str(exc_info.value)
         assert "Error: no commits found in repository" in error_msg
         assert error_msg.rstrip() != "Failed to create temporal index:"
 
     def test_temporal_exit_code_used_when_both_empty(self):
         """When temporal index fails with both outputs empty, uses exit code."""
-        init_ok = _make_subprocess_result(0, stdout="initialized", stderr="")
         temp_fail = _make_subprocess_result(3, stdout="", stderr="")
-        exc_info = self._run_temporal_worker_with_results(init_ok, temp_fail)
+        exc_info = self._run_temporal_worker_with_result(temp_fail)
         assert "3" in str(exc_info.value)
 
 
@@ -363,19 +289,11 @@ class TestTemporalIndexErrorMessages:
 class TestSCIPIndexErrorMessages:
     """Tests for cidx scip generate (SCIP) failure error message fallback chain."""
 
-    def _run_scip_worker_with_results(self, init_result, scip_result):
+    def _run_scip_worker_with_result(self, scip_result):
         manager, GoldenRepoError = _make_manager_for_add_index()
         worker = _extract_background_worker(manager, "scip")
 
-        call_count = [0]
-
-        def side_effect(cmd, **kwargs):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                return init_result
-            return scip_result
-
-        with patch("subprocess.run", side_effect=side_effect):
+        with patch("subprocess.run", return_value=scip_result):
             with pytest.raises(GoldenRepoError) as exc_info:
                 worker()
 
@@ -383,27 +301,24 @@ class TestSCIPIndexErrorMessages:
 
     def test_scip_stderr_used_when_present(self):
         """When SCIP generation fails with stderr content, error uses stderr."""
-        init_ok = _make_subprocess_result(0, stdout="initialized", stderr="")
         scip_fail = _make_subprocess_result(
             1, stdout="", stderr="scip-python: command not found"
         )
-        exc_info = self._run_scip_worker_with_results(init_ok, scip_fail)
+        exc_info = self._run_scip_worker_with_result(scip_fail)
         assert "scip-python: command not found" in str(exc_info.value)
 
     def test_scip_stdout_used_when_stderr_empty(self):
         """When SCIP generation fails with empty stderr, error falls back to stdout."""
-        init_ok = _make_subprocess_result(0, stdout="initialized", stderr="")
         scip_fail = _make_subprocess_result(
             1, stdout="Error: unsupported language for SCIP indexing\n", stderr=""
         )
-        exc_info = self._run_scip_worker_with_results(init_ok, scip_fail)
+        exc_info = self._run_scip_worker_with_result(scip_fail)
         error_msg = str(exc_info.value)
         assert "Error: unsupported language for SCIP indexing" in error_msg
         assert error_msg.rstrip() != "Failed to create SCIP index:"
 
     def test_scip_exit_code_used_when_both_empty(self):
         """When SCIP generation fails with both outputs empty, uses exit code."""
-        init_ok = _make_subprocess_result(0, stdout="initialized", stderr="")
         scip_fail = _make_subprocess_result(5, stdout="", stderr="")
-        exc_info = self._run_scip_worker_with_results(init_ok, scip_fail)
+        exc_info = self._run_scip_worker_with_result(scip_fail)
         assert "5" in str(exc_info.value)

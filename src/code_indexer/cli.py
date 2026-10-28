@@ -376,61 +376,9 @@ def _generate_language_help_text() -> str:
         return "Filter by programming language. Supports both friendly names (python, javascript, etc.) and file extensions (py, js, etc.)"
 
 
-def _create_default_override_file(project_dir: Path, force: bool = False) -> bool:
-    """Create default .code-indexer-override.yaml file.
-
-    Args:
-        project_dir: Project root directory
-        force: Overwrite existing file if True
-
-    Returns:
-        True if file was created, False if skipped
-    """
-    override_path = project_dir / ".code-indexer-override.yaml"
-
-    # Don't overwrite existing file unless force is True
-    if override_path.exists() and not force:
-        return False
-
-    default_content = """# Code-indexer override file
-#
-# This file allows you to override file inclusion/exclusion rules
-# at the project level, with highest precedence over gitignore and config.
-#
-# Rules are applied in this order:
-# 1. force_exclude_patterns (absolute exclusion, overrides everything)
-# 2. force_include_patterns (overrides base exclusion)
-# 3. Extension filtering (add_extensions, remove_extensions)
-# 4. Directory filtering (add_exclude_dirs, add_include_dirs)
-# 5. Base config and gitignore rules (lowest precedence)
-#
-# Patterns use gitignore syntax:
-#   *.log        - matches all .log files
-#   temp/        - matches temp directory
-#   **/*.cache   - matches .cache files in any subdirectory
-#   !important/  - negation (force include)
-
-# Additional file extensions to index (beyond config defaults)
-add_extensions: []
-
-# File extensions to exclude (overrides config whitelist)
-remove_extensions: []
-
-# Additional directories to exclude from indexing
-add_exclude_dirs: []
-
-# Additional directories to force include
-add_include_dirs: []
-
-# Force include files matching these patterns (overrides gitignore/config)
-force_include_patterns: []
-
-# Force exclude files matching these patterns (absolute exclusion)
-force_exclude_patterns: []
-"""
-
-    override_path.write_text(default_content)
-    return True
+from .services.local_project_init import (  # noqa: E402
+    create_default_override_file as _create_default_override_file,
+)
 
 
 def _format_claude_response(response: str) -> str:
@@ -2458,95 +2406,38 @@ def init(
                 # Prompt for VoyageAI model
                 voyage_model = click.prompt("VoyageAI model", default="voyage-code-3")
 
-        # Create default config with target_dir for proper initialization
-        # target_dir respects --codebase-dir parameter
-        config = Config(codebase_dir=target_dir)
-        config_manager._config = config
+        from .services.local_project_init import initialize_local_project
 
-        # Update config with provided options
-        updates: Dict[str, Any] = {}
+        init_result = initialize_local_project(
+            target_dir,
+            embedding_provider=embedding_provider,
+            voyage_model=voyage_model,
+            # ^ why cast, not a runtime check; click.Choice admits only filesystem
+            vector_store=cast(Literal["filesystem"], vector_store),
+            max_file_size=max_file_size,
+            force=force,
+            create_override_file=create_override_file,
+            no_override_file=no_override_file,
+        )
+        config = init_result.config
+        config_manager = init_result.config_manager
 
-        # Set embedding provider
-        updates["embedding_provider"] = embedding_provider
-
-        # Set vector store backend
-        from .config import VectorStoreConfig
-
-        # Cast to Literal["filesystem"] - vector_store is validated by click.Choice to only allow "filesystem"
-        updates["vector_store"] = VectorStoreConfig(
-            provider=cast(Literal["filesystem"], vector_store)
-        ).model_dump()
-
-        # Provider-specific configuration
-        if embedding_provider == "voyage-ai":
-            voyage_ai_config = config.voyage_ai.model_dump()
-            voyage_ai_config["model"] = voyage_model
-            voyage_ai_config["tokens_per_minute"] = (
-                1000000  # Set default to avoid rate limiting
-            )
-            updates["voyage_ai"] = voyage_ai_config
-            # Note: Vector size is determined dynamically by embedding provider
-            # voyage-code-3: 1024 dimensions, voyage-large-2: 1536 dimensions
-
-        # Indexing configuration updates
-        if max_file_size is not None:
-            indexing_config = config.indexing.model_dump()
-            indexing_config["max_file_size"] = max_file_size
-            updates["indexing"] = indexing_config
-
-        # filesystem_segment_size parameter removed in v8.0 (Filesystem backend removed)
-        # FilesystemVectorStore doesn't require segment size configuration
-
-        # Conditionally allocate ports based on vector store backend
-        # Filesystem backend doesn't need containers, so no port allocation
-        # Apply updates if any (project_ports/project_containers removed in v8.0)
-        if updates:
-            config = config_manager.update_config(**updates)
-
-        # Save with documentation
-        config_manager.save_with_documentation(config)
-
-        # Initialize vector storage backend
-
-        backend = BackendFactory.create(config=config, project_root=config.codebase_dir)
-        try:
-            backend.initialize()
+        if init_result.backend_error is None:
             console.print(
                 f"✅ Initialized {config.vector_store.provider} vector storage backend"  # type: ignore
             )
-        except Exception as e:
+        else:
             console.print(
-                f"⚠️  Warning: Failed to initialize backend: {e}", style="yellow"
+                f"⚠️  Warning: Failed to initialize backend: {init_result.backend_error}",
+                style="yellow",
             )
 
-        # Create filesystem storage directory proactively during init to prevent race condition
-        # Only needed for filesystem backend
-        if config.vector_store and config.vector_store.provider == "filesystem":  # type: ignore
-            project_filesystem_dir = (
-                config.codebase_dir / ".code-indexer" / "filesystem"
+        if init_result.override_file_created:
+            console.print(
+                "📝 Created .code-indexer-override.yaml for project-level file filtering"
             )
-            project_filesystem_dir.mkdir(parents=True, exist_ok=True)
 
-        # Create override file (by default or if explicitly requested)
-        # Skip entirely when --no-override-file is set (used by server-side golden repo init)
-        project_root = config.codebase_dir
-        if not no_override_file and (
-            create_override_file
-            or not (project_root / ".code-indexer-override.yaml").exists()
-        ):
-            if _create_default_override_file(project_root, force=force):
-                console.print(
-                    "📝 Created .code-indexer-override.yaml for project-level file filtering"
-                )
-
-        # Create language mappings file (proactive creation during init)
-        from .utils.yaml_utils import create_language_mappings_yaml
-
-        language_mappings_created = create_language_mappings_yaml(
-            config_manager.config_path.parent, force=force
-        )
-
-        if language_mappings_created:
+        if init_result.language_mappings_created:
             console.print(
                 "📚 Created language-mappings.yaml for query language filtering"
             )

@@ -15,7 +15,6 @@ import yaml
 
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log
-from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 
 if TYPE_CHECKING:
     from code_indexer.server.repositories.golden_repo_manager import GoldenRepoManager
@@ -286,6 +285,36 @@ def migrate_legacy_cidx_meta(
             )
 
 
+def _initialize_cidx_meta_index(cidx_meta_path: Path) -> None:
+    logger.info(
+        "Initializing cidx-meta index structure",
+        extra={"correlation_id": get_correlation_id()},
+    )
+    try:
+        from code_indexer.services.local_project_init import (
+            initialize_local_project,
+        )
+
+        # ^ why resolve(), not the given path; codebase_dir = os.getcwd() form `cidx init` wrote; test:test_in_process_init_matches_pre_change_cidx_init
+        result = initialize_local_project(cidx_meta_path.resolve())
+    except Exception as e:
+        # ^ why log and continue, not raise; an init failure must not abort server startup
+        logger.error(
+            format_error_log("APP-GENERAL-004", f"Failed to initialize cidx-meta: {e}")
+        )
+        return
+    if result.backend_error is not None:
+        logger.warning(
+            "cidx-meta vector backend initialisation failed: %s",
+            result.backend_error,
+            extra={"correlation_id": get_correlation_id()},
+        )
+    logger.info(
+        "Successfully initialized cidx-meta index structure",
+        extra={"correlation_id": get_correlation_id()},
+    )
+
+
 def bootstrap_cidx_meta(
     golden_repo_manager: "GoldenRepoManager", golden_repos_dir: str
 ) -> None:
@@ -300,9 +329,6 @@ def bootstrap_cidx_meta(
         golden_repo_manager: GoldenRepoManager instance
         golden_repos_dir: Path to golden-repos directory
     """
-    # Import dependencies
-    import subprocess
-
     # Create directory structure
     cidx_meta_path = Path(golden_repos_dir) / "cidx-meta"
     cidx_meta_path.mkdir(parents=True, exist_ok=True)
@@ -316,41 +342,8 @@ def bootstrap_cidx_meta(
             extra={"correlation_id": get_correlation_id()},
         )
 
-        # Initialize CIDX index structure if not already done
         if not (cidx_meta_path / ".code-indexer").exists():
-            try:
-                logger.info(
-                    "Initializing cidx-meta index structure",
-                    extra={"correlation_id": get_correlation_id()},
-                )
-                subprocess.run(
-                    ["cidx", "init"],
-                    cwd=str(cidx_meta_path),
-                    check=True,
-                    capture_output=True,
-                    env=build_cidx_subprocess_env(),
-                    text=True,
-                )
-                logger.info(
-                    "Successfully initialized cidx-meta index structure",
-                    extra={"correlation_id": get_correlation_id()},
-                )
-            except subprocess.CalledProcessError as e:
-                logger.error(
-                    format_error_log(
-                        "APP-GENERAL-004",
-                        f"Failed to initialize cidx-meta: {e.stderr if e.stderr else str(e)}",
-                    )
-                )
-                # Continue with registration even if init fails - don't break server startup
-            except Exception as e:
-                logger.error(
-                    format_error_log(
-                        "APP-GENERAL-005",
-                        f"Unexpected error during cidx-meta initialization: {e}",
-                    )
-                )
-                # Continue with registration even if init fails - don't break server startup
+            _initialize_cidx_meta_index(cidx_meta_path)
 
         # Use standard registration path (Story #175)
         golden_repo_manager.register_local_repo(

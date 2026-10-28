@@ -327,6 +327,7 @@ class TestOwnActivationCustomAlias:
     granted the golden repository the activation was created from, whatever
     alias the activation uses (public #1984)."""
 
+    @pytest.mark.slow
     def test_semantic_custom_alias_activation_returns_its_rows(self, env):
         env.activate_for(USER, GRANTED_REPO, OWN_ACTIVATION)
 
@@ -345,6 +346,7 @@ class TestOwnActivationCustomAlias:
         assert len(rows) == ROWS_PER_REPO
         assert _repos_of(rows) == {OWN_ACTIVATION}
 
+    @pytest.mark.slow
     def test_hybrid_custom_alias_activation_returns_its_fts_rows(self, env):
         env.activate_for(USER, GRANTED_REPO, OWN_ACTIVATION)
 
@@ -393,6 +395,7 @@ class TestMissingAccessServiceRest:
 
         _assert_access_control_unavailable(resp)
 
+    @pytest.mark.slow
     def test_own_activation_alias_still_runs_sync(self, env):
         env.activate_for(USER, GRANTED_REPO, OWN_ACTIVATION)
         with _client(env, NON_ADMIN, None) as client:
@@ -440,6 +443,7 @@ class TestMissingAccessServiceRest:
             assert not any(repo in resp.text for repo in ALL_REPOS), resp.text
         assert env.searched_paths == []
 
+    @pytest.mark.slow
     def test_async_own_activation_alias_still_runs(self, env):
         env.activate_for(USER, GRANTED_REPO, OWN_ACTIVATION)
         with _client(env, NON_ADMIN, None) as client:

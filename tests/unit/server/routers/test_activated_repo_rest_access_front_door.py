@@ -210,7 +210,13 @@ class TestOwnGrantedActivation:
 
         assert response.json()["content"].strip() == README_TEXT
 
-    @pytest.mark.parametrize("route", sorted(SWEEP))
+    @pytest.mark.parametrize(
+        "route",
+        [
+            pytest.param(r, marks=pytest.mark.slow) if r == "activated_reindex" else r
+            for r in sorted(SWEEP)
+        ],
+    )
     def test_granted_activation_is_not_answered_as_unknown(self, client, env, route):
         """The guard never over-refuses: a granted non-admin (every route
         permission, outside the admins group) reaches each route's own

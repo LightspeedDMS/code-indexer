@@ -651,6 +651,7 @@ class TestQueryFailureLogging:
 
 @pytest.mark.parametrize("handler", HANDLERS)
 class TestUnchangedPaths:
+    @pytest.mark.slow
     def test_activated_repo_semantic_query(self, web_app, env, handler):
         env.activate_for(ADMIN, GRANTED_REPO, OWN_ACTIVATION)
 
