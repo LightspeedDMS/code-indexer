@@ -15,8 +15,10 @@ Original voyageai implementation:
 https://github.com/voyage-ai/voyageai-python/blob/main/voyageai/_base.py
 """
 
-# NO IMPORTS AT MODULE LEVEL - All imports happen lazily inside functions
-# This keeps module import time near zero (<1ms)
+# ^ hazard importing tokenizers at module level => CLI startup cost; keep it inside _load_tokenizer
+import threading
+
+from .load_once import load_once
 
 
 class VoyageTokenizer:
@@ -28,6 +30,8 @@ class VoyageTokenizer:
 
     # Cache for loaded tokenizers (model_name -> tokenizer instance)
     _tokenizer_cache: dict[str, object] = {}
+    # ^ perf one lock for all models; loads are rare and 6 concurrent loads = 2.5s vs 0.34s; #2204
+    _load_lock = threading.Lock()
 
     @staticmethod
     def _resolve_hf_cache_path(model: str):  # type: (...) -> object
@@ -92,10 +96,15 @@ class VoyageTokenizer:
             ImportError: If tokenizers package is not installed
             Exception: If model tokenizer cannot be loaded
         """
-        # Check in-memory cache first
-        if model in VoyageTokenizer._tokenizer_cache:
-            return VoyageTokenizer._tokenizer_cache[model]
+        return load_once(
+            VoyageTokenizer._tokenizer_cache,
+            VoyageTokenizer._load_lock,
+            model,
+            VoyageTokenizer._load_tokenizer,
+        )
 
+    @staticmethod
+    def _load_tokenizer(model: str):
         # Lazy import - only load when first needed
         try:
             from tokenizers import Tokenizer  # type: ignore[import-untyped]
@@ -113,7 +122,6 @@ class VoyageTokenizer:
             try:
                 tokenizer = Tokenizer.from_file(str(cached_path))
                 tokenizer.no_truncation()
-                VoyageTokenizer._tokenizer_cache[model] = tokenizer
                 return tokenizer
             except Exception as exc:
                 # APPROVED FALLBACK: 2026-03-08 - Story #384 cache corruption degrades to network
@@ -128,10 +136,6 @@ class VoyageTokenizer:
             # Load official VoyageAI tokenizer from HuggingFace
             tokenizer = Tokenizer.from_pretrained(f"voyageai/{model}")
             tokenizer.no_truncation()
-
-            # Cache for future use
-            VoyageTokenizer._tokenizer_cache[model] = tokenizer
-
             return tokenizer
         except Exception:
             warnings.warn(

@@ -6,10 +6,11 @@ locally at ~/.cache/cidx/tokenizers/cohere-{model}/.
 Fallback: 3 chars per token ratio when tokenizer unavailable.
 """
 
-# NO IMPORTS AT MODULE LEVEL - All imports happen lazily inside functions
-# This keeps module import time near zero (<1ms)
-# Exception: logging is stdlib and near-zero cost
+# ^ hazard importing tokenizers at module level => CLI startup cost; keep it inside _import_tokenizer_class
 import logging
+import threading
+
+from .load_once import load_once
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +18,7 @@ FALLBACK_CHARS_PER_TOKEN = 3
 FALLBACK_WARNING_TOKEN_THRESHOLD = 50_000
 
 _tokenizer_cache: dict = {}
+_load_lock = threading.Lock()
 
 
 def _get_cache_dir(model: str) -> str:
@@ -41,9 +43,10 @@ def _import_tokenizer_class():
 
 def _get_tokenizer(model: str):
     """Load and cache tokenizer. Falls back to None on any failure."""
-    if model in _tokenizer_cache:
-        return _tokenizer_cache[model]
+    return load_once(_tokenizer_cache, _load_lock, model, _load_tokenizer)
 
+
+def _load_tokenizer(model: str):
     try:
         from pathlib import Path
 
@@ -53,14 +56,10 @@ def _get_tokenizer(model: str):
         TokenizerClass = _import_tokenizer_class()
 
         if tokenizer_path.exists():
-            tokenizer = TokenizerClass.from_file(str(tokenizer_path))
-            _tokenizer_cache[model] = tokenizer
-            return tokenizer
+            return TokenizerClass.from_file(str(tokenizer_path))
 
         # Download from HuggingFace Hub via from_pretrained
-        tokenizer = TokenizerClass.from_pretrained(f"Cohere/{model}")
-        _tokenizer_cache[model] = tokenizer
-        return tokenizer
+        return TokenizerClass.from_pretrained(f"Cohere/{model}")
 
     except Exception as exc:
         logger.debug(
@@ -68,7 +67,7 @@ def _get_tokenizer(model: str):
             model,
             exc,
         )
-        _tokenizer_cache[model] = None
+        # ^ why return None, not raise; load_once caches it so a failed load never retries the network; test:test_caches_none_after_failed_load
         return None
 
 
