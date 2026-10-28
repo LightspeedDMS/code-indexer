@@ -22,7 +22,7 @@ Fixture dependency graph:
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
@@ -67,11 +67,11 @@ class E2EConfig:
     server_host: str
     server_port: int
     admin_user: str
-    admin_pass: str
+    admin_pass: str = field(repr=False)
     seed_cache_dir: Path
     server_data_dir: Path
     work_dir: Path
-    voyage_api_key: str
+    voyage_api_key: str = field(repr=False)
     golden_repo_job_timeout: float
     """Maximum seconds to wait for a golden repository indexing job (E2E_GOLDEN_REPO_JOB_TIMEOUT)."""
     golden_repo_job_poll_interval: float

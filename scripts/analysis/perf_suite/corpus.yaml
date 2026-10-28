@@ -1,0 +1,120 @@
+# Pinned performance corpus (story #2214). Keyed by canonical repository URL;
+# the suite resolves each URL to the alias the target uses and queries <alias>-global.
+# expect: a file path (or path suffix such as a basename) that must be in the top_n
+# results; for file_read it is a substring the file content must contain.
+# Regex queries run through ripgrep on both doors (REST POST /api/regex/search,
+# MCP regex_search). Fan-out requires a result group for every corpus repository.
+top_n: 10
+
+# One small fixed evaluator: one finding per candidate file (language independent).
+xray_evaluator: |
+  fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+      vec![EvalFinding { pattern: "file".to_string(), line: node.start_line, snippet: String::new() }]
+  }
+
+repos:
+  - url: https://github.com/pallets/click
+    probe: {query: Context}
+    queries:
+      - {mode: semantic, query: "attach an option parameter to a command with a decorator", expect: src/click/decorators.py}
+      - {mode: semantic, query: "render a progress bar in the terminal", expect: src/click/_termui_impl.py}
+      - {mode: fts, query: EchoingStdin, expect: src/click/testing.py}
+      - {mode: fts, query: make_context, expect: src/click/core.py}
+      - {mode: regex, query: "class Context", expect: src/click/core.py}
+      - {mode: regex, query: "def secho", expect: src/click/termui.py}
+      - {mode: xray, query: "class Context", include: ["*.py"], expect: src/click/core.py}
+      - {mode: files_list, path: src/click, expect: src/click/core.py}
+      - {mode: file_read, path: src/click/core.py, expect: "class Context"}
+
+  - url: https://github.com/tiangolo/typer
+    probe: {query: Typer}
+    queries:
+      - {mode: semantic, query: "build a click command from a function signature and its parameters", expect: typer/main.py}
+      - {mode: fts, query: get_command, expect: typer/main.py}
+      - {mode: regex, query: "class Typer", expect: typer/main.py}
+      - {mode: xray, query: "class Typer", include: ["*.py"], expect: typer/main.py}
+      - {mode: files_list, path: typer, expect: typer/main.py}
+      - {mode: file_read, path: typer/main.py, expect: "class Typer"}
+
+  - url: https://github.com/tqdm/tqdm
+    probe: {query: tqdm}
+    queries:
+      - {mode: semantic, query: "progress bar that wraps an iterable and prints rate and ETA", expect: tqdm/std.py}
+      - {mode: semantic, query: "map a function over items in a thread pool with progress", expect: tqdm/contrib/concurrent.py}
+      - {mode: fts, query: thread_map, expect: tqdm/contrib/concurrent.py}
+      - {mode: regex, query: "def format_meter", expect: tqdm/std.py}
+      - {mode: xray, query: "def format_meter", include: ["*.py"], expect: tqdm/std.py}
+      - {mode: files_list, path: tqdm, expect: tqdm/std.py}
+      - {mode: file_read, path: tqdm/std.py, expect: "def format_meter"}
+
+  - url: https://github.com/pallets/flask
+    probe: {query: Flask}
+    queries:
+      - {mode: semantic, query: "signed cookie based session interface", expect: src/flask/sessions.py}
+      - {mode: semantic, query: "load configuration values from a python file or object", expect: src/flask/config.py}
+      - {mode: fts, query: SecureCookieSessionInterface, expect: src/flask/sessions.py}
+      - {mode: fts, query: from_pyfile, expect: src/flask/config.py}
+      - {mode: regex, query: "class Config", expect: src/flask/config.py}
+      - {mode: xray, query: "class Config", include: ["*.py"], expect: src/flask/config.py}
+      - {mode: files_list, path: src/flask, expect: src/flask/app.py}
+      - {mode: file_read, path: src/flask/config.py, expect: "class Config"}
+
+  - url: https://github.com/pallets/markupsafe
+    probe: {query: Markup}
+    queries:
+      - {mode: semantic, query: "escape a string for safe use in HTML", expect: src/markupsafe/__init__.py}
+      - {mode: fts, query: striptags, expect: src/markupsafe/__init__.py}
+      - {mode: regex, query: "class Markup", expect: src/markupsafe/__init__.py}
+      - {mode: xray, query: "class Markup", include: ["*.py"], expect: src/markupsafe/__init__.py}
+      - {mode: files_list, path: src/markupsafe, expect: src/markupsafe/__init__.py}
+      - {mode: file_read, path: src/markupsafe/__init__.py, expect: "class Markup"}
+
+  - url: https://github.com/jhy/jsoup
+    probe: {query: Jsoup}
+    queries:
+      - {mode: semantic, query: "clean untrusted HTML with an allow list of tags", expect: Cleaner.java}
+      - {mode: semantic, query: "select elements with a CSS query", expect: Selector.java}
+      - {mode: fts, query: Safelist, expect: Safelist.java}
+      - {mode: fts, query: resetInsertionMode, expect: src/main/java/org/jsoup/parser/HtmlTreeBuilder.java}
+      - {mode: regex, query: "public class Element ", expect: src/main/java/org/jsoup/nodes/Element.java}
+      - {mode: xray, query: "public class Document ", include: ["*.java"], expect: src/main/java/org/jsoup/nodes/Document.java}
+      - {mode: files_list, path: src/main/java/org/jsoup/nodes, expect: Element.java}
+      - {mode: file_read, path: src/main/java/org/jsoup/Jsoup.java, expect: "public class Jsoup"}
+
+  - url: https://github.com/microsoft/TypeScript
+    probe: {query: createScanner}
+    queries:
+      - {mode: semantic, query: "tokenize source text into syntax kinds", expect: packages/typescript/src/ast/scanner.ts}
+      - {mode: fts, query: isIdentifierStart, expect: packages/typescript/src/ast/scanner.ts}
+      - {mode: regex, query: "export function createScanner", expect: packages/typescript/src/ast/scanner.ts}
+      - {mode: xray, query: "export function createScanner", include: ["*.ts"], expect: packages/typescript/src/ast/scanner.ts}
+      - {mode: files_list, path: packages/typescript/src/ast, expect: packages/typescript/src/ast/scanner.ts}
+      - {mode: file_read, path: packages/typescript/src/ast/scanner.ts, expect: "export function createScanner"}
+
+  - url: https://github.com/Homebrew/homebrew-core
+    probe: {query: wget}
+    queries:
+      - {mode: semantic, query: "GNU utility to retrieve files over HTTP and FTP", expect: Formula/w/wget.rb}
+      - {mode: fts, query: wget, expect: Formula/w/wget.rb}
+      - {mode: regex, query: "class Wget ", expect: Formula/w/wget.rb}
+      - {mode: files_list, path: Formula/w, expect: Formula/w/wget.rb}
+      - {mode: file_read, path: Formula/w/wget.rb, expect: "class Wget"}
+
+fanout:
+  - mode: regex
+    query: license
+    expect:
+      https://github.com/pallets/click: pyproject.toml
+      https://github.com/tiangolo/typer: LICENSE
+      https://github.com/tqdm/tqdm: LICENCE
+      https://github.com/jhy/jsoup: pom.xml
+  - mode: fts
+    query: license
+    expect:
+      https://github.com/pallets/click: license.md
+      https://github.com/pallets/flask: docs/license.rst
+      https://github.com/jhy/jsoup: pom.xml
+  - mode: semantic
+    query: "progress bar that wraps an iterable and prints rate and ETA"
+    expect:
+      https://github.com/tqdm/tqdm: tqdm/std.py

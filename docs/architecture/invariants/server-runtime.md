@@ -73,17 +73,14 @@ invariant groups: [README](README.md).
     "SELECT timestamp, message FROM logs WHERE message LIKE '%cleanup daemon%' ORDER BY timestamp DESC LIMIT 5;"
   ```
 
-## Multi-worker throughput benchmark
+## Performance regression suite
 
-`scripts/analysis/multi_worker_throughput.py` measures `POST /api/query` throughput in four scenarios (repeating or
-unique queries, cache on or off) per worker count, and exits 1 when the 2-worker/1-worker ratio is below
-`--regression-multiplier` (default 1.7). It never starts or stops a server: point `--server` at an isolated server,
-never the development server on port 8000. Credentials come from the environment or `--local-testing`. Reports go to
-`reports/perf/`. The full 1, 2, 3, 4 worker run is a manual operator gate, not CI; the pytest wrapper
-`tests/performance/test_multi_worker_scaling.py` is skipped unless `CIDX_PERF_TEST=1`.
+`scripts/analysis/perf_suite/run.py` measures semantic, FTS, regex, X-Ray, file and fan-out latency through REST and
+MCP against a pinned corpus of public repositories that must already be registered on the target. It is read-only
+(it never starts, stops, registers or configures anything) and is a manual operator gate, not CI; never point it at
+the development server on port 8000. Usage, required repositories, report format and baselines:
+`docs/server/performance-suite.md`.
 
 ```bash
-python3 scripts/analysis/multi_worker_throughput.py --help
-python3 scripts/analysis/multi_worker_throughput.py \
-  --server http://localhost:8105 --workers 1,2,3,4 --queries 200 --concurrency 20
+python3 scripts/analysis/perf_suite/run.py --url URL --username USER --password PASS
 ```

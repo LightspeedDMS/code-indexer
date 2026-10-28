@@ -2,8 +2,8 @@
 """
 Story #1359 (Epic #1333, S2) AC5: perf guardrail benchmark.
 
-Standalone operator benchmark (NOT automated CI, matches the
-scripts/analysis/multi_worker_throughput.py precedent) measuring the added
+Standalone operator benchmark (NOT automated CI, an operator-run benchmark
+like scripts/analysis/perf_suite/) measuring the added
 cost of the finalize-time orphan detect+repair hook
 (HNSWIndexManager._detect_and_repair_orphans) at production HNSW build
 parameters (M=16, ef_construction=200, cosine).

@@ -446,7 +446,7 @@ cidx watch / watch-stop / stop         # Daemon controls
 - **Smart indexer**: always consider `--reconcile` (non git-aware) -- maintain feature parity.
 - **Tmp files**: `~/.tmp`, never `/tmp`. **Container-free**: no ports, no containers.
 - **Import budget**: startup ~329ms.
-- **Multi-worker benchmark (Story #1168)**: `scripts/analysis/multi_worker_throughput.py` (operator-only, not CI) measures `POST /api/query` throughput per worker; NEVER restart/kill the dev server on :8000 -- use an isolated port; reports in `reports/perf/`.
+- **Performance regression suite (Story #2214)**: `python3 scripts/analysis/perf_suite/run.py --url URL --username USER --password PASS` (operator-only, not CI) measures REST and MCP side by side on a pinned corpus that must already be registered on the target; read-only through one allow-listed client (prints a per-endpoint request tally); never point it at the dev server on :8000; reports in `.analysis/perf/`. See `docs/server/performance-suite.md`.
 
 ---
 
