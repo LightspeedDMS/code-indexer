@@ -22,7 +22,7 @@ from tests.utils.fake_voyage_provider import running_fake_voyage_server
 
 _SENTINEL_KEY = "issue-2225-fake-key"
 _MULTIMODAL_COLLECTION = "voyage-multimodal-3"
-_DOC = "docs/writing-guide.md"
+_DOC = "notes/writing-guide.md"
 
 pytestmark = [pytest.mark.slow, pytest.mark.timeout(240)]
 
@@ -40,7 +40,7 @@ def _repo(root: Path, server: Any) -> FakeProviderRepo:
         _SENTINEL_KEY,
         extra_sitecustomize=_route_multimodal_to(server.base_url),
     )
-    (repo.repo / "docs").mkdir()
+    (repo.repo / _DOC).parent.mkdir()
     return repo
 
 
@@ -75,7 +75,7 @@ def test_real_in_repository_png_still_goes_multimodal(
     tmp_path: Path, fake_provider: Any
 ) -> None:
     repo = _repo(tmp_path, fake_provider)
-    (repo.repo / "docs" / "diagram.png").write_bytes(
+    (repo.repo / _DOC).with_name("diagram.png").write_bytes(
         b"\x89PNG\r\n\x1a\nexample-image-2225"
     )
     (repo.repo / _DOC).write_text(
