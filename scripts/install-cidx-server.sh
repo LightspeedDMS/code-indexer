@@ -1100,6 +1100,28 @@ SERVICEEOF
     info "Systemd service created and enabled"
 }
 
+install_service_limits() {
+    info "--- Service limits (LimitNOFILE, LimitCORE, coredump) ---"
+    local template_dir="${INSTALL_DIR}/src/code_indexer/server/auto_update/templates"
+    local unit_dir="${SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
+    # ^ coupled with src/code_indexer/server/auto_update/service_unit_limits.py:managed_conf_files; names and paths
+    local limits_file="${unit_dir}/cidx-server.service.d/20-cidx-limits.conf"
+    local coredump_file
+    coredump_file="$(dirname "${unit_dir}")/coredump.conf.d/50-cidx-server.conf"
+
+    if [[ "${DRY_RUN}" == "true" ]]; then
+        echo "  [dry-run] Would install ${template_dir}/cidx-server-limits.conf -> ${limits_file}"
+        echo "  [dry-run] Would install ${template_dir}/cidx-server-coredump.conf -> ${coredump_file}"
+        echo "  [dry-run] sudo systemctl daemon-reload"
+        return 0
+    fi
+
+    sudo install -D -m 0644 "${template_dir}/cidx-server-limits.conf" "${limits_file}"
+    sudo install -D -m 0644 "${template_dir}/cidx-server-coredump.conf" "${coredump_file}"
+    sudo systemctl daemon-reload
+    info "Service limits installed: ${limits_file}, ${coredump_file}"
+}
+
 # ---------------------------------------------------------------------------
 # Step: git safe.directory wildcard (Bug #1466)
 #
@@ -1499,6 +1521,7 @@ main() {
     write_config
     install_pace_maker
     create_systemd_service
+    install_service_limits
     ensure_git_safe_directory_wildcard
     install_auto_update_service
 

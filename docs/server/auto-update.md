@@ -92,6 +92,7 @@ nodes provisioned by older installers.
 | 6.5 | `_ensure_data_dir_env_var()` | `CIDX_DATA_DIR` in `cidx-auto-update`, so both units use the same signal and marker paths | no |
 | 6.55 | `_ensure_auto_update_service_has_cli_path()` | `Environment="PATH=..."` in `cidx-auto-update` | no |
 | 6.6 | `_ensure_malloc_arena_max()` | `MALLOC_ARENA_MAX=2` present in `cidx-server` when bootstrap `enable_malloc_arena_max` is true (default), removed when false | no |
+| 6.61 | `_ensure_service_limits()` | `/etc/systemd/system/cidx-server.service.d/20-cidx-limits.conf` (`LimitNOFILE=65536:524288`, `LimitCORE=infinity`) and `/etc/systemd/coredump.conf.d/50-cidx-server.conf` (cores up to 16G stored whole, `MaxUse=20G`, `KeepFree=10G`) match the repository templates; `daemon-reload` after a unit drop-in change | no |
 | 6.65 | `ensure_nodejs()` | A pinned Node.js LTS under `/opt/node`, and `/opt/node/bin` on the `cidx-server` `PATH` | no |
 | 6.7 | `_ensure_codex_cli_installed()` | Codex CLI installed or updated through npm | no |
 | 7 | `ensure_ripgrep()` | ripgrep installed (x86_64 Linux) | no |
@@ -110,6 +111,33 @@ nodes provisioned by older installers.
 | 14.9 | `_ensure_cow_daemon_user_in_service_group()` | On the CoW daemon host only: the daemon's OS user belongs to its `service_group` and the running daemon carries that group | no |
 | 15 | `_ensure_systemd_claude_path()` | `~/.local/bin` on the `cidx-server` `PATH` | no |
 | 16 | `_ensure_rust_toolchain()` | Rust toolchain installed, `/opt/rust/bin` on the `cidx-server` `PATH`, and the `xray-cli` binary built | yes |
+
+Step 6.61 values live once, in `server/auto_update/templates/cidx-server-limits.conf` and
+`cidx-server-coredump.conf`; the installer's `install_service_limits` copies the same files on fresh installs. The
+drop-in name sorts after a hand-made `10-nofile.conf`, so the delivered values win over such an interim file
+(which can then be deleted at leisure). The limits apply at the server restart that ends the deployment.
+systemd-coredump reads the coredump drop-in at every crash, so it needs no reload; `MaxUse` and `KeepFree` are
+cleanup targets (older cores are removed toward them after a core is stored), not hard caps.
+
+The coredump drop-in only takes effect when `sysctl kernel.core_pattern` pipes to
+`/usr/lib/systemd/systemd-coredump`; check that on each host.
+
+Each server process writes `faulthandler-<pid>-<start ticks>.log` in the server logs directory:
+
+- On a fatal signal (SIGSEGV, SIGBUS, SIGABRT, ...) faulthandler writes the Python stacks. It is the only code that
+  runs in that context, and it shows at most 100 threads (newest first), so on a busy worker older threads,
+  including the main thread, can be missing. The whole core (`coredumpctl list`, `coredumpctl dump <pid> -o core`)
+  is the complete record. `py-spy dump --core core --native` (py-spy 0.4) reads Python stacks from a core; it is not
+  yet verified on the servers' Python 3.9 (on a `gcore` core it failed with "failed to get python version"), so
+  check it first, and fall back to `coredumpctl debug <pid>` with gdb and the python3 debuginfo (`py-bt`).
+- `kill -USR1 <worker pid>` appends a `=== SIGUSR1 dump ... threads=N ===` section with every thread (no 100-thread
+  cap), its name and its stack, without stopping the process. Signal only processes that own a
+  `faulthandler-<pid>-*.log` file: any other process dies on SIGUSR1. With `--workers` > 1 the unit's MainPID is the
+  uvicorn supervisor, which writes no dump; list its children with `pgrep -P "$(systemctl show -p MainPID --value
+  cidx-server)"`, keep the PIDs that have a dump file, and `kill -USR1` each. With one worker,
+  `systemctl kill --kill-whom=main -s USR1 cidx-server` is equivalent. WARNING: never run
+  `systemctl kill -s USR1 cidx-server` without `--kill-whom=main`: the default signals the whole cgroup, and the
+  server's `cidx index`, `rustc`/`xray-cli` and Claude/Codex CLI children die on SIGUSR1.
 
 The symlink steps (14.5, 14.7) migrate an existing non-empty real directory by moving it aside to
 `<dir>.legacy.bug<N>` before creating the symlink, and roll back if the symlink cannot be created. A symlink that

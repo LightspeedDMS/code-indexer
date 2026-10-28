@@ -27,6 +27,7 @@ import requests
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.config import write_json_atomic
 from code_indexer.server.utils.host_validation import is_valid_server_host
+from code_indexer.server.auto_update import service_unit_limits
 from code_indexer.server.auto_update.cow_daemon_service_group import (
     COW_DAEMON_SERVICE_NAME,
     account_name_for_uid,
@@ -2618,6 +2619,30 @@ class DeploymentExecutor:
             )
             return False
 
+    # ^ invariant #2299 returns False after a DEPLOY-GENERAL-230 log on any failure; never raises into execute()
+    def _ensure_service_limits(self) -> bool:
+        try:
+            files = service_unit_limits.managed_conf_files(
+                self.repo_path, SYSTEMD_UNIT_DIR, self.service_name
+            )
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                format_error_log(
+                    service_unit_limits.ERROR_CODE,
+                    f"Could not read service limit templates: {type(exc).__name__}: {exc}",
+                )
+            )
+            return False
+
+        def run_privileged(
+            argv: list, stdin: Optional[str]
+        ) -> subprocess.CompletedProcess:
+            return self._run_systemd_op_with_retry(["sudo", *argv], input=stdin)
+
+        return service_unit_limits.ensure_conf_files(
+            files, run_privileged, self._reload_systemd_daemon
+        )
+
     def _build_pip_install_cmd(self, python_path: str, tmpdir: str) -> list:
         """Build a `pip install -e .[cluster]` command for the given interpreter.
 
@@ -4412,6 +4437,18 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-143",
                     "MALLOC_ARENA_MAX could not be verified — glibc arena cap not enforced",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+        # Step 6.61: Story #2299 - open-file limit, whole cores (unit drop-in)
+        # and systemd-coredump size limits; applied by the restart that follows.
+        if not self._ensure_service_limits():
+            logger.warning(
+                format_error_log(
+                    service_unit_limits.ERROR_CODE,
+                    "Service limits could not be verified — LimitNOFILE/LimitCORE "
+                    "or coredump limits may be missing",
                 ),
                 extra={"correlation_id": get_correlation_id()},
             )

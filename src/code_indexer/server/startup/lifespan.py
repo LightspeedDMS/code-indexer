@@ -930,6 +930,20 @@ def make_lifespan(
 
         attach_redacting_filter_to_all_handlers()
 
+        # ^ see src/code_indexer/server/utils/crash_dump.py:enable_crash_dumps; #2299 fatal-signal and SIGUSR1 dumps
+        # ^ why main thread, not anyio.to_thread; faulthandler.enable sets its alternate signal stack per calling thread
+        try:
+            from code_indexer.server.utils.crash_dump import enable_crash_dumps
+
+            enable_crash_dumps(Path(server_data_dir) / "logs")
+        except Exception:
+            logger.error(
+                "Story #2299: faulthandler crash dumps failed to start; a native "
+                "crash of this worker will leave no Python stacks",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+
         # Story S12 (#2087): worker-stall watchdog, one per uvicorn worker (this
         # lifespan runs once per worker). It leaves every thread's stack and the
         # memory samples in <server_dir>/logs/worker-stall-<pid>-<UTC>.log when no
