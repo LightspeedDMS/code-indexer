@@ -8,6 +8,7 @@ and enables full-text search indexing alongside semantic indexing.
 import subprocess
 import sys
 
+import pytest
 from click.testing import CliRunner
 
 from code_indexer.cli import cli
@@ -77,6 +78,7 @@ class TestCLIFTSFlagE2E:
 
         return result
 
+    @pytest.mark.slow
     def test_fts_flag_recognized(self):
         """Test that --fts flag is recognized by the CLI."""
         # This should fail initially - flag doesn't exist yet
@@ -101,6 +103,7 @@ class TestCLIFTSFlagE2E:
             "Flag should not have optional value syntax"
         )
 
+    @pytest.mark.slow
     def test_default_behavior_no_fts(self):
         """Test that without --fts flag, only semantic indexing occurs (default behavior)."""
         # This test verifies acceptance criterion #1: default behavior preserved

@@ -9,6 +9,8 @@ import sys
 
 import pytest
 
+pytestmark = pytest.mark.slow
+
 
 class TestConfigDiffContext:
     """Test config commands for diff-context management."""

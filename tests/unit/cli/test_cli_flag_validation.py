@@ -13,6 +13,8 @@ from typing import Iterator
 
 import pytest
 
+pytestmark = pytest.mark.slow
+
 
 @contextmanager
 def _isolated_project(base: Path) -> Iterator[Path]:

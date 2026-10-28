@@ -30,7 +30,7 @@ from tests.utils.refresh_fake_provider_env import (
 )
 from tests.utils.refresh_fatal_store_harness import Harness, build_harness
 
-pytestmark = pytest.mark.timeout(300)
+pytestmark = [pytest.mark.slow, pytest.mark.timeout(300)]
 
 META_ALIAS = "cidx-meta-global"
 _FAKE_KEY = "debouncer-obligation-fake-key"

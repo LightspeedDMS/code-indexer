@@ -130,6 +130,7 @@ def _warnings_about_alias(caplog: pytest.LogCaptureFixture) -> list:
 
 # Runs real snapshot/indexing subprocesses: seconds alone, slower under load.
 @pytest.mark.timeout(90)
+@pytest.mark.slow
 def test_failed_trigger_only_refresh_is_retried_once_its_backoff_ends(
     tmp_path: Path,
     metadata: Any,
@@ -180,6 +181,7 @@ def test_a_recorded_fatal_failure_keeps_its_failure_backoff(metadata: Any) -> No
 
 # Runs real git and indexing subprocesses: seconds alone, slower under load.
 @pytest.mark.timeout(90)
+@pytest.mark.slow
 def test_failed_git_repo_refresh_is_left_to_its_schedule(
     tmp_path: Path, metadata: Any, child: FakeIndexChild
 ) -> None:
@@ -195,6 +197,7 @@ def test_failed_git_repo_refresh_is_left_to_its_schedule(
 # Runs real snapshot/indexing subprocesses: seconds alone, slower under load.
 @pytest.mark.timeout(90)
 @pytest.mark.parametrize("outcome", ["fail", "partial"])
+@pytest.mark.slow
 def test_a_new_data_trigger_during_an_owed_retry_is_submitted(
     tmp_path: Path, metadata: Any, child: FakeIndexChild, outcome: str
 ) -> None:
@@ -250,6 +253,7 @@ def _alarming_volume(tmp_path: Path, harness: Harness, metadata: Any) -> None:
 # Runs real snapshot/indexing subprocesses: seconds alone, slower under load.
 @pytest.mark.timeout(90)
 @pytest.mark.parametrize("outcome", ["fail", "partial"])
+@pytest.mark.slow
 def test_retry_passes_the_volume_alarm_gate(
     tmp_path: Path,
     metadata: Any,
@@ -282,6 +286,7 @@ def test_retry_passes_the_volume_alarm_gate(
 
 # Runs real snapshot/indexing subprocesses: seconds alone, slower under load.
 @pytest.mark.timeout(90)
+@pytest.mark.slow
 def test_partial_refresh_is_reported_partial_and_logged(
     tmp_path: Path,
     metadata: Any,
@@ -305,6 +310,7 @@ def test_partial_refresh_is_reported_partial_and_logged(
 
 # Runs real snapshot/indexing subprocesses: seconds alone, slower under load.
 @pytest.mark.timeout(90)
+@pytest.mark.slow
 def test_partial_refresh_is_retried_without_new_data(
     tmp_path: Path,
     metadata: Any,
@@ -326,6 +332,7 @@ def test_partial_refresh_is_retried_without_new_data(
 
 # Runs real snapshot/indexing subprocesses: seconds alone, slower under load.
 @pytest.mark.timeout(120)
+@pytest.mark.slow
 def test_retry_of_a_partial_refresh_reindexes_without_new_data_and_resolves(
     tmp_path: Path, metadata: Any, child: FakeIndexChild
 ) -> None:
@@ -342,6 +349,7 @@ def test_retry_of_a_partial_refresh_reindexes_without_new_data_and_resolves(
 
 # Runs real snapshot/indexing subprocesses: seconds alone, slower under load.
 @pytest.mark.timeout(120)
+@pytest.mark.slow
 def test_repeated_partial_refreshes_escalate_the_owed_retry(
     tmp_path: Path, metadata: Any, child: FakeIndexChild
 ) -> None:
@@ -361,6 +369,7 @@ def test_repeated_partial_refreshes_escalate_the_owed_retry(
 
 # Runs real git, snapshot and indexing subprocesses.
 @pytest.mark.timeout(120)
+@pytest.mark.slow
 def test_a_git_repo_keeps_its_schedule_after_a_partial_publish(
     tmp_path: Path, metadata: Any, child: FakeIndexChild
 ) -> None:
@@ -377,6 +386,7 @@ def test_a_git_repo_keeps_its_schedule_after_a_partial_publish(
 
 # Runs real snapshot/indexing subprocesses: seconds alone, slower under load.
 @pytest.mark.timeout(90)
+@pytest.mark.slow
 def test_a_trigger_arriving_mid_cycle_fires_promptly_after_a_partial_publish(
     tmp_path: Path,
     metadata: Any,
@@ -404,6 +414,7 @@ def test_a_trigger_arriving_mid_cycle_fires_promptly_after_a_partial_publish(
 
 # Runs real snapshot/indexing subprocesses: seconds alone, slower under load.
 @pytest.mark.timeout(90)
+@pytest.mark.slow
 def test_a_stale_failure_counter_is_reported_but_never_retried(
     tmp_path: Path,
     metadata: Any,
@@ -423,6 +434,7 @@ def test_a_stale_failure_counter_is_reported_but_never_retried(
 
 # Runs real snapshot/indexing subprocesses: seconds alone, slower under load.
 @pytest.mark.timeout(120)
+@pytest.mark.slow
 def test_unknown_recorded_failures_escalate_the_owed_retry(
     tmp_path: Path,
     metadata: Any,
@@ -451,6 +463,7 @@ def test_unknown_recorded_failures_escalate_the_owed_retry(
 
 # Runs real snapshot/indexing subprocesses: seconds alone, slower under load.
 @pytest.mark.timeout(90)
+@pytest.mark.slow
 def test_the_partial_warning_says_when_no_retry_was_scheduled(
     tmp_path: Path,
     metadata: Any,

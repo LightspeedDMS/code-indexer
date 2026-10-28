@@ -40,6 +40,8 @@ from tests.utils.golden_repo_metadata_stores import (
 from tests.utils.refresh_fatal_store_harness import Harness, build_harness
 from tests.utils.source_tree_age import age_source_files
 
+pytestmark = pytest.mark.slow
+
 if TYPE_CHECKING:
     from code_indexer.server.storage.protocols.golden_repo_metadata_backend import (
         GoldenRepoMetadataBackend,

@@ -21,6 +21,8 @@ from tests.unit.services.test_git_aware_watch_handler_retry import (
 from tests.utils.cidx_fake_provider_repo import COLLECTION
 from tests.utils.fake_voyage_provider import running_fake_voyage_server
 
+pytestmark = pytest.mark.slow
+
 
 class _SessionFailsAfterUpdate(FilesystemVectorStore):
     """A real store whose second HNSW session lookup (the visibility diff,

@@ -38,6 +38,8 @@ from tests.utils.fatal_chunk_store_fixtures import (
 )
 from tests.utils.refresh_fatal_store_harness import typed_kinds
 
+pytestmark = pytest.mark.slow
+
 GENERIC_FAILURE_EXIT_CODE = 1
 
 

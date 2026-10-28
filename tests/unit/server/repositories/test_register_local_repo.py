@@ -459,6 +459,7 @@ class TestRegisterLocalRepo:
             assert "test-repo" in golden_repo_manager.golden_repos
 
 
+@pytest.mark.slow
 class TestRegisterLocalRepoIntegration:
     """Integration tests for register_local_repo() with real components."""
 

@@ -46,6 +46,8 @@ from tests.utils.refresh_fatal_store_harness import (
     typed_kinds,
 )
 
+pytestmark = pytest.mark.slow
+
 
 @pytest.fixture(params=STORE_KINDS)
 def metadata(request, tmp_path: Path) -> Iterator[Any]:

@@ -13,7 +13,7 @@ _SENTINEL_KEY = "issue-2198-fake-key"
 _LEASE_TOKEN = "quokkaleasetokenword"
 _LEASE_DIR = ".snapshot-reader-leases"
 
-pytestmark = pytest.mark.timeout(240)
+pytestmark = [pytest.mark.slow, pytest.mark.timeout(240)]
 
 
 @pytest.fixture

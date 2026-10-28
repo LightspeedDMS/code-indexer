@@ -205,6 +205,7 @@ def _timeout_in_chain(exc: BaseException) -> bool:
     return False
 
 
+@pytest.mark.slow
 def test_cli_index_waits_for_slow_response_and_sends_each_input_once(
     tmp_path: Path, fake_voyage
 ) -> None:

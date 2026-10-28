@@ -97,6 +97,7 @@ def _refresh(harness: Harness) -> Any:
         return harness.scheduler._execute_refresh(ALIAS)
 
 
+@pytest.mark.slow
 def test_verified_publish_records_published_points(
     tmp_path: Path, metadata: Any
 ) -> None:
@@ -118,6 +119,7 @@ def test_verified_publish_records_published_points(
     assert metadata.get_refresh_failure_backoff_state(ALIAS) is None
 
 
+@pytest.mark.slow
 def test_refresh_without_publish_records_nothing(tmp_path: Path, metadata: Any) -> None:
     from tests.utils.fatal_chunk_store_fixtures import (
         diverge_store,

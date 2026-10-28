@@ -67,6 +67,7 @@ import-path handling directly.
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
+import pytest
 from click.testing import CliRunner
 from rich.console import Console
 
@@ -159,6 +160,7 @@ class TestConsoleSingletonPollutionIsolation:
                 f"{mod.__name__}.console was not reset to force_terminal=False"
             )
 
+    @pytest.mark.slow
     def test_d_subprocess_cli_invocation_ignores_ambient_force_color(self):
         """Regression test for Bug #1370's second mechanism.
 

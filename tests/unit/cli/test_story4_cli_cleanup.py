@@ -54,6 +54,7 @@ class TestCLIHelpTextCleanup:
             "semantic search" in help_text
         )  # This refers to the search capability, not chunking
 
+    @pytest.mark.slow
     def test_main_help_no_semantic_references(self):
         """Verify main CLI help has no semantic chunking references."""
         # Use python -m to run CLI (works in any environment)
@@ -186,6 +187,7 @@ class TestCLIConsistency:
 class TestConfigurationDocumentation:
     """Test that configuration-related documentation is clean."""
 
+    @pytest.mark.slow
     def test_configuration_help_references(self):
         """Verify that CLI points to clean configuration documentation."""
         # Check if there are any commands that mention config file setup

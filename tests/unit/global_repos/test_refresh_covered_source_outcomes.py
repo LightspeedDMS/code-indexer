@@ -23,6 +23,8 @@ from tests.utils.refresh_fatal_store_harness import (
     build_harness,
 )
 
+pytestmark = pytest.mark.slow
+
 
 @pytest.fixture
 def harness(tmp_path: Path) -> Iterator[Harness]:

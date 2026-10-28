@@ -198,6 +198,7 @@ class TestQueryParameterParity:
             f"Expected 26 API parameters, got {len(API_EXPECTED_PARAMETERS)}: {sorted(API_EXPECTED_PARAMETERS)}"
         )
 
+    @pytest.mark.slow
     def test_cli_has_all_parameters(self):
         """Verify CLI exposes all 19 expected query parameters (updated from 18 after adding time_range_all)."""
         cli_params = get_cli_parameters()
@@ -239,6 +240,7 @@ class TestQueryParameterParity:
 
         assert not missing, f"MCP API missing parameters: {sorted(missing)}"
 
+    @pytest.mark.slow
     def test_no_extra_cli_parameters(self):
         """Verify CLI doesn't expose unexpected query parameters."""
         cli_params = get_cli_parameters()
@@ -339,6 +341,7 @@ class TestQueryParameterParity:
             f"Parameters only in MCP (excluding documented MCP-only): {sorted(mcp_only)}"
         )
 
+    @pytest.mark.slow
     def test_core_parameters_exist(self):
         """Verify core query parameters exist in all interfaces."""
 
@@ -360,6 +363,7 @@ class TestQueryParameterParity:
         assert "limit" in mcp_params
         assert "min_score" in mcp_params
 
+    @pytest.mark.slow
     def test_phase1_parameters_exist(self):
         """Verify Phase 1 parameters exist in all interfaces (Story #503)."""
         phase1_params = {"exclude_language", "exclude_path", "accuracy", "regex"}
@@ -382,6 +386,7 @@ class TestQueryParameterParity:
             f"Phase 1 parameters missing from MCP: {sorted(missing_mcp)}"
         )
 
+    @pytest.mark.slow
     def test_phase2_fts_parameters_exist(self):
         """Verify Phase 2 FTS parameters exist in all interfaces (Story #503)."""
         phase2_params = {"case_sensitive", "fuzzy", "edit_distance", "snippet_lines"}
@@ -404,6 +409,7 @@ class TestQueryParameterParity:
             f"Phase 2 FTS parameters missing from MCP: {sorted(missing_mcp)}"
         )
 
+    @pytest.mark.slow
     def test_phase3_temporal_filtering_parameters_exist(self):
         """Verify Phase 3 temporal filtering parameters exist in all interfaces (Story #503)."""
         phase3_params = {"diff_type", "author", "chunk_type"}
@@ -426,6 +432,7 @@ class TestQueryParameterParity:
             f"Phase 3 temporal parameters missing from MCP: {sorted(missing_mcp)}"
         )
 
+    @pytest.mark.slow
     def test_temporal_parameters_exist(self):
         """Verify temporal query parameters exist in interfaces (Story #446)."""
         # All temporal params
@@ -455,6 +462,7 @@ class TestQueryParameterParity:
             f"Temporal parameters missing from MCP: {sorted(missing_mcp)}"
         )
 
+    @pytest.mark.slow
     def test_language_path_filters_exist(self):
         """Verify language and path filtering parameters exist in all interfaces."""
         filter_params = {"language", "path_filter", "exclude_language", "exclude_path"}

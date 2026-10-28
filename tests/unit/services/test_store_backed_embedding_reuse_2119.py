@@ -30,7 +30,7 @@ from tests.utils.fake_voyage_provider import running_fake_voyage_server
 
 _SENTINEL_KEY = "issue-2119-fake-key"
 
-pytestmark = pytest.mark.timeout(240)
+pytestmark = [pytest.mark.slow, pytest.mark.timeout(240)]
 
 
 @pytest.fixture

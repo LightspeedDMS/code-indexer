@@ -55,7 +55,7 @@ from tests.utils.refresh_fatal_store_harness import (
     typed_kinds,
 )
 
-pytestmark = pytest.mark.timeout(300)
+pytestmark = [pytest.mark.slow, pytest.mark.timeout(300)]
 
 
 @pytest.fixture(params=STORE_KINDS)

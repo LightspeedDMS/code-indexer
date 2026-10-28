@@ -194,6 +194,7 @@ def real_flow_manager(temp_data_dir, real_golden_repo_manager, monkeypatch):
     reset_config_service()
 
 
+@pytest.mark.slow
 class TestEnumerationLoopsSkipTrashAfterRealDeactivation:
     """A real deactivation creates the real '.trash' directory (the
     fd-anchored rename-then-purge path renames the repo INTO .trash; the

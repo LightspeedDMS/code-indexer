@@ -35,7 +35,7 @@ from tests.utils.fake_voyage_provider import running_fake_voyage_server
 _SENTINEL_KEY = "issue-2153-fake-key"
 _DOC_COUNT = 4
 
-pytestmark = pytest.mark.timeout(240)
+pytestmark = [pytest.mark.slow, pytest.mark.timeout(240)]
 
 
 def _route_multimodal_to(base_url: str) -> str:

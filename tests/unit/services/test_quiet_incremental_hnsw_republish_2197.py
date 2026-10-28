@@ -22,7 +22,7 @@ from tests.utils.cidx_fake_provider_repo import FakeProviderRepo
 from tests.utils.fake_voyage_provider import running_fake_voyage_server
 from tests.utils.source_tree_age import age_source_files
 
-pytestmark = pytest.mark.timeout(300)
+pytestmark = [pytest.mark.slow, pytest.mark.timeout(300)]
 
 # ^ why KeyboardInterrupt, not OSError; an interrupt keeps status completed => the next plain run takes the quiet incremental return
 _INTERRUPT_NEXT_HNSW_REBUILD = _FAIL_NEXT_HNSW_REBUILD.replace(

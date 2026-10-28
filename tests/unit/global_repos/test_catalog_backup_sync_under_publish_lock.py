@@ -34,7 +34,7 @@ from tests.utils.refresh_fatal_store_harness import (
     build_harness,
 )
 
-pytestmark = pytest.mark.timeout(300)
+pytestmark = [pytest.mark.slow, pytest.mark.timeout(300)]
 
 META_ALIAS = "cidx-meta-global"
 CATALOG = "cidx-meta"

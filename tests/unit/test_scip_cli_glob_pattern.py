@@ -9,6 +9,8 @@ import subprocess
 from pathlib import Path
 import shutil
 
+pytestmark = pytest.mark.slow
+
 
 @pytest.fixture
 def scip_test_repo(tmp_path):

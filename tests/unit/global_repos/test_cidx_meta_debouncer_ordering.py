@@ -193,6 +193,7 @@ def _quarantine(harness: Harness) -> None:
         harness.scheduler._record_local_repo_repair_failure(META_ALIAS, "failed")
 
 
+@pytest.mark.slow
 def test_no_job_manager_quarantined_refresh_keeps_the_write_owed(
     tmp_path: Path, metadata: Any
 ) -> None:
@@ -216,6 +217,7 @@ def test_no_job_manager_quarantined_refresh_keeps_the_write_owed(
         debouncer.shutdown()
 
 
+@pytest.mark.slow
 def test_no_job_manager_refresh_run_in_process_settles(
     tmp_path: Path, metadata: Any
 ) -> None:
@@ -233,6 +235,7 @@ def test_no_job_manager_refresh_run_in_process_settles(
         debouncer.shutdown()
 
 
+@pytest.mark.slow
 def test_a_quarantine_suppressed_submission_keeps_the_write_owed(
     tmp_path: Path, metadata: Any
 ) -> None:

@@ -24,7 +24,7 @@ from tests.utils.fake_voyage_provider import running_fake_voyage_server
 _SENTINEL_KEY = "issue-2122-fake-key"
 _EXIT_CODE_RUN_SPEND_DEFECT = 88
 
-pytestmark = pytest.mark.timeout(240)
+pytestmark = [pytest.mark.slow, pytest.mark.timeout(240)]
 
 #: Text a planning defect sends although no resolver registered it as a miss.
 _INJECTED_TEXT = "story-2122 injected text that no resolver registered"

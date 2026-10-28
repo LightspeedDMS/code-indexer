@@ -8,6 +8,7 @@ and rebuilds only the FTS index from existing progress data.
 import subprocess
 import sys
 
+import pytest
 from click.testing import CliRunner
 
 from code_indexer.cli import cli
@@ -77,6 +78,7 @@ class TestCLIRebuildFTSIndexE2E:
 
         return result
 
+    @pytest.mark.slow
     def test_rebuild_fts_index_flag_recognized(self):
         """Test that --rebuild-fts-index flag is recognized by the CLI."""
         result = self.run_cli_command(["index", "--help"], timeout=10)

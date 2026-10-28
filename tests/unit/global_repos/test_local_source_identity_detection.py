@@ -40,7 +40,7 @@ from tests.utils.refresh_fake_provider_env import (
 from tests.utils.refresh_fatal_store_harness import ALIAS, Harness, build_harness
 from tests.utils.source_tree_age import age_source_files
 
-pytestmark = pytest.mark.timeout(300)
+pytestmark = [pytest.mark.slow, pytest.mark.timeout(300)]
 
 _FAKE_KEY = "local-identity-fake-key"
 #: A write landing after the run's ``cidx index`` child exited, before the

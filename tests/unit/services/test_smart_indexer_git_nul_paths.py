@@ -215,6 +215,7 @@ def test_git_incremental_summarizes_skipped_never_indexed_names(
     assert summaries[0].startswith("Skipped 7 "), summaries
 
 
+@pytest.mark.slow
 @pytest.mark.timeout(300)
 def test_reconcile_with_a_committed_non_utf8_name_succeeds(tmp_path: Path) -> None:
     from tests.utils.cidx_fake_provider_repo import FakeProviderRepo

@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 
+import pytest
 from click.testing import CliRunner
 
 from code_indexer.cli import cli
@@ -49,6 +50,7 @@ class TestCLIRebuildIndexes:
     # Flag behavior is validated via E2E tests
 
 
+@pytest.mark.slow
 class TestCLIRebuildIndexesE2E:
     """End-to-end tests for --rebuild-indexes flag using subprocess calls."""
 

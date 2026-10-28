@@ -47,6 +47,8 @@ from tests.utils.refresh_fatal_store_harness import (
     sha256_of,
 )
 
+pytestmark = pytest.mark.slow
+
 INCONCLUSIVE_CYCLES = 3
 
 

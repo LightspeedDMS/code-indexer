@@ -41,7 +41,7 @@ from tests.utils.refresh_fatal_store_harness import (
 
 # Every test runs a real `cidx index` subprocess (up to three per test):
 # several seconds alone, slower under load.
-pytestmark = pytest.mark.timeout(60)
+pytestmark = [pytest.mark.slow, pytest.mark.timeout(60)]
 
 
 @pytest.fixture(params=STORE_KINDS)

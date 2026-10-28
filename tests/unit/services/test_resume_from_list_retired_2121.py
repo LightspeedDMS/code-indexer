@@ -31,7 +31,7 @@ _SYNCED_FILE_COUNT = 3
 #: The staging shape: a stored work list of ~198k entries.
 _STORED_LIST_ENTRIES = 198_000
 
-pytestmark = pytest.mark.timeout(300)
+pytestmark = [pytest.mark.slow, pytest.mark.timeout(300)]
 
 
 @pytest.fixture

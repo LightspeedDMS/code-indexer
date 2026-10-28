@@ -25,7 +25,7 @@ from tests.utils.refresh_fatal_store_harness import (
 )
 from tests.utils.source_tree_age import age_source_files
 
-pytestmark = pytest.mark.timeout(300)
+pytestmark = [pytest.mark.slow, pytest.mark.timeout(300)]
 
 _FAKE_KEY = "issue-2194-fake-key"
 _GIT = ["git", "-c", "user.email=test@example.com", "-c", "user.name=test"]

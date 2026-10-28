@@ -84,6 +84,7 @@ def _pending(metadata: Any) -> bool:
     return state is not None and bool(state["pending_trigger"])
 
 
+@pytest.mark.slow
 def test_quarantined_alias_drops_its_deferred_trigger(
     tmp_path: Path, metadata: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -121,6 +122,7 @@ class _OperatorActsRightAfterTheQuarantineRead:
         return getattr(self._real, name)
 
 
+@pytest.mark.slow
 def test_stale_quarantine_skip_never_drops_a_newer_trigger(
     tmp_path: Path, metadata: Any
 ) -> None:
@@ -148,6 +150,7 @@ def test_stale_quarantine_skip_never_drops_a_newer_trigger(
     assert after["trigger_generation"] == newer["trigger_generation"]
 
 
+@pytest.mark.slow
 def test_orphaned_alias_drops_its_deferred_trigger(
     tmp_path: Path, metadata: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -163,6 +166,7 @@ def test_orphaned_alias_drops_its_deferred_trigger(
     assert jobs.submitted == []
 
 
+@pytest.mark.slow
 def test_held_write_lock_keeps_the_trigger_and_escalates(
     tmp_path: Path, metadata: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -185,6 +189,7 @@ def test_held_write_lock_keeps_the_trigger_and_escalates(
     assert jobs.submitted == [ALIAS], "the trigger was not delivered after release"
 
 
+@pytest.mark.slow
 def test_held_write_lock_escalation_keeps_the_original_failure_reason(
     tmp_path: Path, metadata: Any
 ) -> None:
@@ -200,6 +205,7 @@ def test_held_write_lock_escalation_keeps_the_original_failure_reason(
     assert after["last_detail"] == "disk full", "escalation hid the failure reason"
 
 
+@pytest.mark.slow
 def test_held_write_lock_without_a_pending_trigger_changes_nothing(
     tmp_path: Path, metadata: Any
 ) -> None:
@@ -229,6 +235,7 @@ def _assert_dropped_and_never_refires(
     assert jobs.submitted == []
 
 
+@pytest.mark.slow
 def test_local_repo_repair_quarantine_drops_its_deferred_trigger(
     tmp_path: Path, metadata: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -243,6 +250,7 @@ def test_local_repo_repair_quarantine_drops_its_deferred_trigger(
     _assert_dropped_and_never_refires(harness, jobs, metadata, monkeypatch)
 
 
+@pytest.mark.slow
 def test_alias_gone_drops_its_deferred_trigger(
     tmp_path: Path, metadata: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -255,6 +263,7 @@ def test_alias_gone_drops_its_deferred_trigger(
     _assert_dropped_and_never_refires(harness, jobs, metadata, monkeypatch)
 
 
+@pytest.mark.slow
 def test_registry_entry_gone_drops_its_deferred_trigger(
     tmp_path: Path, metadata: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -267,6 +276,7 @@ def test_registry_entry_gone_drops_its_deferred_trigger(
     _assert_dropped_and_never_refires(harness, jobs, metadata, monkeypatch)
 
 
+@pytest.mark.slow
 def test_uninitialized_local_repo_keeps_the_trigger_and_escalates(
     tmp_path: Path, metadata: Any
 ) -> None:
@@ -308,6 +318,7 @@ class _StoreFailsOnce:
         return getattr(self._real, name)
 
 
+@pytest.mark.slow
 def test_failed_local_repair_keeps_the_trigger_and_escalates(
     tmp_path: Path, metadata: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -326,6 +337,7 @@ def test_failed_local_repair_keeps_the_trigger_and_escalates(
     _assert_kept_and_escalated(metadata, before)
 
 
+@pytest.mark.slow
 def test_unreadable_quarantine_state_keeps_the_trigger_and_escalates(
     tmp_path: Path, metadata: Any
 ) -> None:
@@ -341,6 +353,7 @@ def test_unreadable_quarantine_state_keeps_the_trigger_and_escalates(
     _assert_kept_and_escalated(metadata, before)
 
 
+@pytest.mark.slow
 def test_unreadable_trigger_generation_never_crashes_the_refresh(
     tmp_path: Path, metadata: Any, caplog: pytest.LogCaptureFixture
 ) -> None:

@@ -19,7 +19,7 @@ from tests.unit.global_repos.test_local_git_source_removal_2194 import (
 from tests.utils.cidx_fake_provider_repo import FakeProviderRepo, unique_python_text
 from tests.utils.fake_voyage_provider import running_fake_voyage_server
 
-pytestmark = pytest.mark.timeout(300)
+pytestmark = [pytest.mark.slow, pytest.mark.timeout(300)]
 
 _ADDED = "added_000"
 

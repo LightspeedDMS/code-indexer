@@ -43,7 +43,7 @@ _SRC_DIR = Path(code_indexer.__file__).resolve().parents[1]
 _SENTINEL_KEY = "issue-2118-fake-key"
 _CLI_TIMEOUT_SECONDS = 120
 
-pytestmark = pytest.mark.timeout(120)
+pytestmark = [pytest.mark.slow, pytest.mark.timeout(_CLI_TIMEOUT_SECONDS)]
 
 _ATTRIBUTION = StatsAttribution(
     golden_repo_alias="example-repo-global",

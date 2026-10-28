@@ -70,6 +70,7 @@ class TestCLIRegexValidation:
 
         return repo_dir
 
+    @pytest.mark.slow
     def test_cli_regex_with_semantic_fails(self, runner, initialized_repo):
         """
         GIVEN cidx CLI with initialized FTS index
@@ -85,6 +86,7 @@ class TestCLIRegexValidation:
         assert result.exit_code != 0
         assert "Cannot combine --regex with --semantic" in result.output
 
+    @pytest.mark.slow
     def test_cli_regex_with_fuzzy_fails(self, runner, initialized_repo):
         """
         GIVEN cidx CLI with initialized FTS index
@@ -103,6 +105,7 @@ class TestCLIRegexValidation:
             or "Cannot combine --regex with --edit-distance" in result.output
         )
 
+    @pytest.mark.slow
     def test_cli_regex_with_edit_distance_fails(self, runner, initialized_repo):
         """
         GIVEN cidx CLI with initialized FTS index
@@ -121,6 +124,7 @@ class TestCLIRegexValidation:
             or "Cannot combine --regex with --fuzzy" in result.output
         )
 
+    @pytest.mark.slow
     def test_cli_regex_fts_only_allowed(self, runner, initialized_repo):
         """
         GIVEN cidx CLI with initialized FTS index
@@ -139,6 +143,7 @@ class TestCLIRegexValidation:
             # If it fails, should NOT be due to incompatible flags
             assert "Cannot combine --regex" not in result.output
 
+    @pytest.mark.slow
     def test_cli_regex_without_fts_fails(self, runner, initialized_repo):
         """
         GIVEN cidx CLI

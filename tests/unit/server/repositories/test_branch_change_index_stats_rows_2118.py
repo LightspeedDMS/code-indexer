@@ -54,7 +54,7 @@ _FAKE_PORT = 18118
 #: RFC 5737 TEST-NET-1, never a real destination.
 _PROBE = ("192.0.2.1", 9)
 
-pytestmark = pytest.mark.timeout(120)
+pytestmark = [pytest.mark.slow, pytest.mark.timeout(120)]
 
 _INNER = """
 import json, socket, subprocess, sys

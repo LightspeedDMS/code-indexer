@@ -15,7 +15,7 @@ _BAD_NAME_BYTES = b"bad\xff.py"
 _REPORTED_NAME = "bad\\xff.py"
 _PLAIN_MARKER = "zebrafinchword_plain_handler"
 
-pytestmark = pytest.mark.timeout(240)
+pytestmark = [pytest.mark.slow, pytest.mark.timeout(240)]
 
 
 @pytest.fixture

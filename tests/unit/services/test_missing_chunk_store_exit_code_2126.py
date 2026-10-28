@@ -126,6 +126,7 @@ def _drop_resume_watermark(repo: FakeProviderRepo) -> None:
     repo.metadata_path.write_text(json.dumps(metadata))
 
 
+@pytest.mark.slow
 @pytest.mark.timeout(240)
 @pytest.mark.parametrize(
     "disturb",

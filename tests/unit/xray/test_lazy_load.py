@@ -12,6 +12,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 SRC_ROOT = str(Path(__file__).parent.parent.parent.parent / "src")
 PROJECT_ROOT = str(Path(__file__).parent.parent.parent.parent)
 
@@ -124,6 +126,7 @@ class TestLazyLoadSubprocess:
         )
 
 
+@pytest.mark.slow
 class TestCidxHelpTiming:
     """cidx --help must complete within 2.0s (current baseline ~1.3s)."""
 

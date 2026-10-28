@@ -28,6 +28,8 @@ from __future__ import annotations
 import logging
 from unittest.mock import Mock, patch
 
+import pytest
+
 from code_indexer.server.repositories.golden_repo_manager import (
     GoldenRepoManager,
     _make_hnsw_orphan_event_logger,
@@ -62,6 +64,7 @@ def test_marker_line_is_logged_tagged_with_alias(caplog):
     assert _MARKER_LINE in matching[0].getMessage()
 
 
+@pytest.mark.slow
 def test_add_golden_repo_wires_alias_bound_orphan_event_callback_to_subprocess_boundary(
     tmp_path, caplog
 ):

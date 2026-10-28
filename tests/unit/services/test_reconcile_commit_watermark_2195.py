@@ -19,7 +19,7 @@ from tests.utils.cidx_fake_provider_repo import FakeProviderRepo, unique_python_
 from tests.utils.fake_voyage_provider import running_fake_voyage_server
 from tests.utils.source_tree_age import age_source_files
 
-pytestmark = pytest.mark.timeout(300)
+pytestmark = [pytest.mark.slow, pytest.mark.timeout(300)]
 
 _DOOMED = "doomed_000"
 _KEPT = "kept_000"

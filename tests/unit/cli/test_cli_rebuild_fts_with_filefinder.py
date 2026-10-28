@@ -12,6 +12,8 @@ from pathlib import Path
 import pytest
 import json
 
+pytestmark = pytest.mark.slow
+
 
 class TestRebuildFTSWithFileFinder:
     """Unit tests for FileFinder-based FTS rebuild (AC1, AC3)."""

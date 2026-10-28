@@ -43,6 +43,8 @@ from tests.utils.refresh_fatal_store_harness import (
     run_one_scheduler_iteration,
 )
 
+pytestmark = pytest.mark.slow
+
 #: Smallest persisted backoff the scheduler may apply after one failure.
 MIN_EXPECTED_BACKOFF_SECONDS = 60
 #: The ordinary schedule advance is interval +/- 10% jitter.

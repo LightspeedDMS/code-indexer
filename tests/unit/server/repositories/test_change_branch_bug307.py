@@ -114,6 +114,7 @@ class TestCbFtsBranchCleanup:
         # Should not raise - silently skips
         manager._cb_fts_branch_cleanup(snapshot_path, "master")
 
+    @pytest.mark.slow
     def test_fts_branch_cleanup_keeps_files_with_unusual_names(self, manager, tmp_path):
         from code_indexer.services.tantivy_index_manager import TantivyIndexManager
         from tests.utils.cidx_fake_provider_repo import (
@@ -242,6 +243,7 @@ class TestCbHnswBranchCleanup:
         # Should not raise - silently skips
         manager._cb_hnsw_branch_cleanup(snapshot_path, "master")
 
+    @pytest.mark.slow
     @pytest.mark.parametrize("storage_mode", ["sqlite", "postgres"])
     def test_cb_hnsw_branch_cleanup_keeps_files_with_unusual_names(
         self, manager, tmp_path, storage_mode
@@ -419,6 +421,7 @@ class TestCbHnswBranchCleanup:
         )
 
 
+@pytest.mark.slow
 def test_branch_cleanups_handle_a_non_utf8_file_name(manager, tmp_path):
     import json
     import os

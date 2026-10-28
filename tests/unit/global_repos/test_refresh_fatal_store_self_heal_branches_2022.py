@@ -73,6 +73,7 @@ def _backoff_active(harness: Harness) -> bool:
     return recovery.active_backoff_until(harness.metadata, ALIAS) is not None
 
 
+@pytest.mark.slow
 def test_reported_corruption_with_healthy_store_backs_off_without_strike(
     tmp_path: Path, metadata: Any
 ) -> None:
@@ -86,6 +87,7 @@ def test_reported_corruption_with_healthy_store_backs_off_without_strike(
     assert _backoff_active(harness)
 
 
+@pytest.mark.slow
 def test_reported_corruption_with_unverifiable_store_restores_nothing(
     tmp_path: Path, metadata: Any
 ) -> None:
@@ -101,6 +103,7 @@ def test_reported_corruption_with_unverifiable_store_restores_nothing(
     assert _backoff_active(harness)
 
 
+@pytest.mark.slow
 def test_lost_write_lock_restores_nothing(tmp_path: Path, metadata: Any) -> None:
     harness = build_harness(tmp_path, metadata, snapshot_mode="clean")
     corrupt_btree_pages(harness.source_db)
@@ -113,6 +116,7 @@ def test_lost_write_lock_restores_nothing(tmp_path: Path, metadata: Any) -> None
     assert harness.strikes() == 0
 
 
+@pytest.mark.slow
 def test_failed_restore_strikes_and_backs_off(
     tmp_path: Path, metadata: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -136,6 +140,7 @@ def test_failed_restore_strikes_and_backs_off(
     assert _backoff_active(harness)
 
 
+@pytest.mark.slow
 def test_expired_backoff_is_not_active(
     tmp_path: Path, metadata: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

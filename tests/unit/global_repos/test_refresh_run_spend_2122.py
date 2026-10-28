@@ -47,6 +47,7 @@ def child(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeIndexChild:
     return fake
 
 
+@pytest.mark.slow
 def test_refresh_results_carry_the_childs_metered_spend(
     tmp_path: Path, metadata: Any, child: FakeIndexChild
 ) -> None:
@@ -73,6 +74,7 @@ def test_refresh_results_carry_the_childs_metered_spend(
     assert (second["inputs_sent"], second["attempts"]) == (0, 0)
 
 
+@pytest.mark.slow
 def test_partial_publish_result_carries_spend(
     tmp_path: Path, metadata: Any, child: FakeIndexChild
 ) -> None:
@@ -88,6 +90,7 @@ def test_partial_publish_result_carries_spend(
     assert (result["inputs_sent"], result["attempts"]) == (7, 2)
 
 
+@pytest.mark.slow
 def test_gate_failure_result_carries_spend(
     tmp_path: Path, metadata: Any, child: FakeIndexChild
 ) -> None:
@@ -132,6 +135,7 @@ def test_forced_reconcile_no_change_result_carries_spend(
     assert (result["inputs_sent"], result["attempts"]) == (0, 0)
 
 
+@pytest.mark.slow
 def test_child_without_a_record_reports_no_spend_fields(
     tmp_path: Path, metadata: Any, child: FakeIndexChild
 ) -> None:
@@ -147,6 +151,7 @@ def test_child_without_a_record_reports_no_spend_fields(
     assert "inputs_sent" not in result and "attempts" not in result
 
 
+@pytest.mark.slow
 def test_malformed_record_fails_the_refresh_loudly(
     tmp_path: Path, metadata: Any, child: FakeIndexChild
 ) -> None:
@@ -161,6 +166,7 @@ def test_malformed_record_fails_the_refresh_loudly(
     assert harness.scheduler.alias_manager.read_alias(ALIAS) == target_before
 
 
+@pytest.mark.slow
 def test_meter_defect_child_fails_loudly_without_restore_or_strike(
     tmp_path: Path, metadata: Any, child: FakeIndexChild
 ) -> None:
@@ -197,6 +203,7 @@ def test_meter_defect_child_fails_loudly_without_restore_or_strike(
         ("chunk_store_env", "fatal chunk-store environment failure"),
     ],
 )
+@pytest.mark.slow
 def test_failed_child_error_carries_its_spend(
     tmp_path: Path, metadata: Any, child: FakeIndexChild, mode: str, expected: str
 ) -> None:
@@ -214,6 +221,7 @@ def test_failed_child_error_carries_its_spend(
     assert "run spend: inputs_sent=10000 attempts=80" in message, message
 
 
+@pytest.mark.slow
 def test_malformed_record_on_a_failure_reports_both(
     tmp_path: Path, metadata: Any, child: FakeIndexChild
 ) -> None:
@@ -230,6 +238,7 @@ def test_malformed_record_on_a_failure_reports_both(
     assert "run spend unknown: malformed run_spend record" in message, message
 
 
+@pytest.mark.slow
 def test_failure_after_indexing_carries_the_spend(
     tmp_path: Path,
     metadata: Any,
@@ -255,6 +264,7 @@ def test_failure_after_indexing_carries_the_spend(
     assert "run spend: inputs_sent=21 attempts=5" in message, message
 
 
+@pytest.mark.slow
 def test_successful_child_without_a_record_logs_a_warning(
     tmp_path: Path,
     metadata: Any,
@@ -276,6 +286,7 @@ def test_successful_child_without_a_record_logs_a_warning(
     assert len(warnings) == 1 and ALIAS in warnings[0], warnings
 
 
+@pytest.mark.slow
 def test_semantic_spend_survives_the_temporal_phase(
     tmp_path: Path,
     metadata: Any,

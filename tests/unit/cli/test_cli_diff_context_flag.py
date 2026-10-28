@@ -9,6 +9,8 @@ import sys
 
 import pytest
 
+pytestmark = pytest.mark.slow
+
 
 class TestDiffContextCLIFlag:
     """Test --diff-context CLI flag integration."""

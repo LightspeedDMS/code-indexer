@@ -124,6 +124,7 @@ def test_the_partial_decision_refuses_unattributed_cancelled_or_unreadable_runs(
     assert not failed_only_on_owed_retries(stats(), _Store(error=True), "c")
 
 
+@pytest.mark.slow
 def test_recorded_failures_that_fail_again_on_a_populated_store_exit_0_and_stay_recorded(
     tmp_path: Path, fake_provider
 ) -> None:
@@ -138,6 +139,7 @@ def test_recorded_failures_that_fail_again_on_a_populated_store_exit_0_and_stay_
     assert repo.stored_rows() == rows_before, "the kept index changed"
 
 
+@pytest.mark.slow
 def test_a_new_failing_file_beside_retried_failures_exits_1(
     tmp_path: Path, fake_provider
 ) -> None:
@@ -151,6 +153,7 @@ def test_a_new_failing_file_beside_retried_failures_exits_1(
     assert _recorded_failures(repo) == sorted(_OWED + ["fresh_000.py"])
 
 
+@pytest.mark.slow
 def test_retried_failures_on_an_empty_store_exit_1(
     tmp_path: Path, fake_provider
 ) -> None:

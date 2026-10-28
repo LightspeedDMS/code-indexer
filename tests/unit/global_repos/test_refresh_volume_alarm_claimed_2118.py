@@ -48,6 +48,8 @@ from tests.utils.refresh_fatal_store_harness import (
     build_harness,
 )
 
+pytestmark = pytest.mark.slow
+
 RUNAWAY_ITEMS = 50_000
 
 

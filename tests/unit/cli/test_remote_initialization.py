@@ -21,6 +21,7 @@ from code_indexer.api_clients.base_client import (
 )
 
 
+@pytest.mark.slow
 class TestRemoteInitParameterValidation:
     """Test parameter validation for remote initialization."""
 
@@ -557,6 +558,7 @@ class TestEndToEndRemoteInitialization:
                 assert "cidx start" in output
                 assert "cidx query" in output
 
+    @pytest.mark.slow
     def test_remote_initialization_cli_integration_parameter_validation(self):
         """Test CLI integration with parameter validation (should work without mocks)."""
         with tempfile.TemporaryDirectory() as tmp_dir:

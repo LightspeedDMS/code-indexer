@@ -29,6 +29,8 @@ from tests.utils.cidx_fake_provider_repo import (
 )
 from tests.utils.fake_voyage_provider import running_fake_voyage_server
 
+pytestmark = pytest.mark.slow
+
 _FEATURE = "feature"
 
 

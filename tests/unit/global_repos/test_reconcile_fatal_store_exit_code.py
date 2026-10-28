@@ -36,6 +36,8 @@ from tests.utils.fatal_chunk_store_fixtures import (
     make_journal_path_a_directory,
 )
 
+pytestmark = pytest.mark.slow
+
 
 def _reconcile_child(repo: Path) -> subprocess.CompletedProcess:
     args = append_server_layout_args(

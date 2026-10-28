@@ -155,6 +155,7 @@ def _watch_metadata_file(repo: FakeProviderRepo) -> Path:
     return repo.repo / ".code-indexer" / "watch_metadata.json"
 
 
+@pytest.mark.slow
 def test_failed_branch_unhide_is_retried_and_the_transition_recorded_after(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -192,6 +193,7 @@ def test_failed_branch_unhide_is_retried_and_the_transition_recorded_after(
         assert _watch_metadata_file(repo).exists()
 
 
+@pytest.mark.slow
 def test_failed_watch_deletion_keeps_the_batch_going_and_is_retried(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -223,6 +225,7 @@ def test_failed_watch_deletion_keeps_the_batch_going_and_is_retried(
         assert not handler.watch_metadata.processing_interrupted
 
 
+@pytest.mark.slow
 def test_failed_changed_file_in_watch_cycle_is_requeued(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -242,6 +245,7 @@ def test_failed_changed_file_in_watch_cycle_is_requeued(
         assert handler.watch_metadata.processing_interrupted
 
 
+@pytest.mark.slow
 def test_failed_branch_change_reindex_file_is_requeued(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -271,6 +275,7 @@ def test_failed_branch_change_reindex_file_is_requeued(
         assert handler.watch_metadata.processing_interrupted
 
 
+@pytest.mark.slow
 def test_owed_unhide_of_a_deleted_file_is_dropped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -300,6 +305,7 @@ def test_owed_unhide_of_a_deleted_file_is_dropped(
         assert _watch_metadata_file(repo).exists()
 
 
+@pytest.mark.slow
 def test_unhide_retry_holds_the_mutation_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -353,6 +359,7 @@ _EPS = 1e-6
 _PROBE = 0.1
 
 
+@pytest.mark.slow
 def test_permanently_failing_unhide_backs_off_then_recovers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -412,6 +419,7 @@ def test_permanently_failing_unhide_backs_off_then_recovers(
         assert handler.watch_metadata.current_branch == _FEATURE
 
 
+@pytest.mark.slow
 def test_failed_change_retries_back_off_and_reset_on_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -456,6 +464,7 @@ def test_failed_change_retries_back_off_and_reset_on_success(
             broken.chmod(0o644)
 
 
+@pytest.mark.slow
 def test_cycle_failing_on_a_broken_store_backs_off(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

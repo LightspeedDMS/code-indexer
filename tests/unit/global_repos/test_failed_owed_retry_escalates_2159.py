@@ -99,6 +99,7 @@ def test_only_the_covered_pending_owed_retry_counts(metadata: Any) -> None:
 
 
 # Runs real git, snapshot and indexing subprocesses: slower under load.
+@pytest.mark.slow
 @pytest.mark.timeout(180)
 @pytest.mark.parametrize("git_remote", [True, False], ids=["git", "local"])
 def test_a_failed_owed_retry_escalates_instead_of_refiring_at_its_lease(

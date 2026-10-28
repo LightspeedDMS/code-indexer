@@ -51,7 +51,7 @@ _CLI_TIMEOUT_SECONDS = 180
 # Each test runs 3-5 real `cidx` subprocesses (8-13 s measured), too close
 # to fast-automation's 15 s pytest-timeout ceiling to survive gate load.
 _PYTEST_TIMEOUT_SECONDS = 120
-pytestmark = pytest.mark.timeout(_PYTEST_TIMEOUT_SECONDS)
+pytestmark = [pytest.mark.slow, pytest.mark.timeout(_PYTEST_TIMEOUT_SECONDS)]
 
 
 def _load_fake_server_module():

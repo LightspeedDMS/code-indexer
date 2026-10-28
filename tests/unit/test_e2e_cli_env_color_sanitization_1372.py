@@ -107,6 +107,7 @@ def test_sanitize_handles_missing_force_color_key_gracefully() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 def test_cidx_subprocess_produces_color_free_stdout_despite_ambient_force_color(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -39,6 +39,8 @@ from tests.utils.refresh_fatal_store_harness import (
     run_one_scheduler_iteration,
 )
 
+pytestmark = pytest.mark.slow
+
 ONE_DAY_SECONDS = 24 * 3600
 
 
