@@ -1,32 +1,4 @@
-"""Bug #1325: cidx subprocesses spawned by GoldenRepoManager with cwd=<clone>
-must never inherit a RELATIVE PYTHONPATH unchanged from the server process.
-
-Root cause: when the server is launched via the documented dev command
-(`PYTHONPATH=./src python3 -m uvicorn code_indexer.server.app:app`), that
-relative PYTHONPATH entry is inherited unchanged by `cidx init`/`cidx index`
-child subprocesses. Because PYTHONPATH resolution is relative to the
-CURRENT process's cwd, and these children run with cwd=<clone_path>, the
-relative entry re-anchors into the clone directory. If the clone has its own
-`src/`-layout package colliding with a real cidx dependency (e.g. `click`),
-the clone's package shadows the installed dependency and cidx's own imports
-break -- causing `cidx init failed` / `cidx index failed` and hard failure
-of golden-repo registration.
-
-Fix: every cidx subprocess call site in golden_repo_manager.py with
-cwd=<clone_or_repo_path> passes env=build_cidx_subprocess_env(...), which
-absolutizes any relative PYTHONPATH entry before the child changes cwd.
-
-These are call-site wiring tests proving the fix for BOTH launch paths that
-spawn an init subprocess.run call plus a semantic Popen call:
-- _execute_post_clone_workflow (golden repo registration)
-- add_indexes_to_golden_repo (add-index background worker)
-
-Note: in the post-clone-workflow path, semantic + FTS are combined into ONE
-Popen call (`cidx index --fts --progress-json`, phase_name="semantic"). In
-the add-indexes path, FTS runs as its own direct subprocess.run call (not
-Popen) -- only the init and semantic phases go through the Popen-style
-runner in that path, which is what these tests target.
-"""
+# ^ see #1325; a relative PYTHONPATH re-anchors under the child's cwd=<clone> => clone packages shadow cidx deps
 
 from __future__ import annotations
 
@@ -102,7 +74,7 @@ def _run_captured_worker(manager) -> None:
 
 def _capture_run(calls):
     def _run(command, **kwargs):
-        calls.append(kwargs)
+        calls.append({"command": list(command), **kwargs})
         return Mock(returncode=0, stdout="", stderr="")
 
     return _run
@@ -145,7 +117,7 @@ def _run_post_clone_scenario(tmp_path):
     return run_calls, popen_calls
 
 
-def _run_add_indexes_scenario(tmp_path):
+def _run_add_indexes_scenario(tmp_path, index_types=("semantic",)):
     """Exercise add_indexes_to_golden_repo, capturing subprocess.run/Popen calls."""
     manager = _make_add_indexes_manager(tmp_path)
     server_config = ServerConfig(server_dir="/opt/cidx-server", storage_mode="sqlite")
@@ -168,7 +140,7 @@ def _run_add_indexes_scenario(tmp_path):
         mock_get_cfg_svc.return_value.get_config.return_value = server_config
         manager.add_indexes_to_golden_repo(
             alias="test-repo",
-            index_types=["semantic"],
+            index_types=list(index_types),
             submitter_username="example-admin",
         )
         _run_captured_worker(manager)
@@ -181,20 +153,40 @@ _SCENARIOS = {
 }
 
 
-@pytest.mark.parametrize("scenario_name", list(_SCENARIOS.keys()))
-def test_init_subprocess_receives_absolutized_pythonpath(
-    scenario_name, monkeypatch, tmp_path
+def _cidx_calls(run_calls, subcommand):
+    return [c for c in run_calls if c["command"][:2] == ["cidx", subcommand]]
+
+
+def test_post_clone_init_subprocess_receives_absolutized_pythonpath(
+    monkeypatch, tmp_path
 ):
-    """The cidx init subprocess.run call must receive an absolutized PYTHONPATH."""
     monkeypatch.setenv("PYTHONPATH", _RELATIVE_PYTHONPATH)
     expected_abs = os.path.abspath(_RELATIVE_PYTHONPATH)
 
-    run_calls, _popen_calls = _SCENARIOS[scenario_name](tmp_path)
+    run_calls, _popen_calls = _run_post_clone_scenario(tmp_path)
 
-    assert len(run_calls) >= 1, "expected at least one subprocess.run call (init)"
-    init_env = run_calls[0].get("env")
+    init_calls = _cidx_calls(run_calls, "init")
+    assert len(init_calls) == 1, f"expected one cidx init call, got: {run_calls}"
+    init_env = init_calls[0].get("env")
     assert init_env is not None, "init subprocess.run must receive a sanitized env"
     assert init_env["PYTHONPATH"] == expected_abs
+
+
+def test_add_indexes_fts_subprocess_receives_absolutized_pythonpath(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("PYTHONPATH", _RELATIVE_PYTHONPATH)
+    expected_abs = os.path.abspath(_RELATIVE_PYTHONPATH)
+
+    run_calls, _popen_calls = _run_add_indexes_scenario(tmp_path, ("fts",))
+
+    # ^ see tests/unit/server/repositories/test_add_index_inprocess_init_2295.py; in-process init
+    assert _cidx_calls(run_calls, "init") == []
+    fts_calls = [c for c in run_calls if "--rebuild-fts-index" in c["command"]]
+    assert len(fts_calls) == 1, f"expected one FTS index call, got: {run_calls}"
+    fts_env = fts_calls[0].get("env")
+    assert fts_env is not None, "FTS subprocess.run must receive a sanitized env"
+    assert fts_env["PYTHONPATH"] == expected_abs
 
 
 @pytest.mark.parametrize("scenario_name", list(_SCENARIOS.keys()))

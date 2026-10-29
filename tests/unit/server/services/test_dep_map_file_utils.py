@@ -336,3 +336,16 @@ class TestGetDomainMdFiles:
         result = get_domain_md_files(tmp_path)
 
         assert result == []
+
+    def test_get_domain_md_files_lists_in_name_order(self, tmp_path):
+        _, _, _, _, get_domain_md_files = _get_utils()
+        created = ["mid.md", "zeta.md", "alpha.md", "queue.md"]
+        name_order = sorted(created)
+        # ^ why scrambled creation order, not sorted; XFS lists creation order, tmpfs its reverse
+        assert created != name_order and list(reversed(created)) != name_order
+        for name in created:
+            (tmp_path / name).write_text(name)
+
+        result = get_domain_md_files(tmp_path)
+
+        assert [f.name for f in result] == name_order

@@ -120,4 +120,8 @@ def get_domain_md_files(output_dir: Path) -> List[Path]:
 
     Excludes _index.md, _domains.json, _activity.md, and any other _*.md files.
     """
-    return [f for f in output_dir.glob("*.md") if not f.name.startswith("_")]
+    # ^ why sorted by name, not glob order; readdir order differs per filesystem => tool answers would too
+    return sorted(
+        (f for f in output_dir.glob("*.md") if not f.name.startswith("_")),
+        key=lambda f: f.name,
+    )

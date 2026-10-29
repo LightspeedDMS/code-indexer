@@ -8,14 +8,6 @@
   ],
   "consumers": [
    {
-    "consuming_repo": "gamma",
-    "dependency_type": "Service integration",
-    "domain": "payments",
-    "domain_name": "payments",
-    "evidence": "api/reserve.py",
-    "repo": "gamma"
-   },
-   {
     "consuming_repo": "alpha",
     "dependency_type": "Code-level",
     "domain": "audit",
@@ -30,6 +22,14 @@
     "domain_name": "audit",
     "evidence": "src/stream.py",
     "repo": "beta-team-sample"
+   },
+   {
+    "consuming_repo": "gamma",
+    "dependency_type": "Service integration",
+    "domain": "payments",
+    "domain_name": "payments",
+    "evidence": "api/reserve.py",
+    "repo": "gamma"
    }
   ],
   "resolution": "ok",

@@ -27,12 +27,20 @@ blocked inside the CoW clone subprocess/HTTP call. These tests prove:
 
 from __future__ import annotations
 
+import contextlib
+import errno
+import fcntl
+import os
+import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
+from typing import Callable, Iterator, List
 from unittest.mock import MagicMock, patch
 
+import psutil
 import pytest
 
 from code_indexer.server.storage.shared.clone_backend import (
@@ -44,6 +52,9 @@ from code_indexer.server.utils.cancellable_subprocess import SubprocessCancelled
 # Test-only tuning constants (not production defaults).
 _CANCEL_POLL_INTERVAL_SECONDS = 0.001
 _CANCEL_ELAPSED_BUDGET_SECONDS = 5.0
+_CANCEL_SETUP_BUDGET_SECONDS = 10.0
+# ^ invariant _LEASE_SAFETY_RELEASE_SECONDS > setup + cancel budgets; an earlier release lets cp finish first
+_LEASE_SAFETY_RELEASE_SECONDS = 20.0
 
 # Non-secret placeholder fixture values for the fake CoW daemon HTTP client
 # (mirrors test_clone_backend.py's own _make_cow_backend/_make_cow_config).
@@ -57,27 +68,79 @@ _FAKE_MOUNT_POINT = "/mnt/nfs/cidx"
 # ---------------------------------------------------------------------------
 
 
+@contextlib.contextmanager
+def _write_leased(path: Path, release_after: float) -> Iterator[Callable[[], bool]]:
+    # ^ external a write lease blocks another process's open() of path, read or write, until released; doc:fcntl(2)#Leases
+    leases_enable = Path("/proc/sys/fs/leases-enable")
+    if not leases_enable.exists() or leases_enable.read_text().strip() == "0":
+        pytest.skip("file leases are disabled on this host (fs.leases-enable)")
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        try:
+            # ^ hazard default break signal SIGIO => its default action kills the test process
+            fcntl.fcntl(fd, fcntl.F_SETSIG, signal.SIGURG)
+            fcntl.fcntl(fd, fcntl.F_SETLEASE, fcntl.F_WRLCK)
+        except OSError as exc:
+            if exc.errno in (errno.EINVAL, errno.EAGAIN, errno.ENOLCK):
+                pytest.skip(f"filesystem refuses a write lease on {path}: {exc}")
+            raise
+        safety = threading.Timer(
+            release_after, fcntl.fcntl, (fd, fcntl.F_SETLEASE, fcntl.F_UNLCK)
+        )
+        safety.start()
+        try:
+            # ^ external F_GETLEASE = F_RDLCK while a reader's open() waits for the downgrade
+            yield lambda: fcntl.fcntl(fd, fcntl.F_GETLEASE) == fcntl.F_RDLCK
+        finally:
+            safety.cancel()
+            safety.join()
+    finally:
+        os.close(fd)
+
+
 class TestLocalCloneBackendCreateCloneAtPathCancellation:
     def test_cancel_check_kills_real_cp_process_promptly(self, tmp_path: Path):
         source = tmp_path / "source"
         source.mkdir()
-        for i in range(20):
-            (source / f"file_{i}.txt").write_text("x" * 1024)
+        held = source / "held.txt"
+        held.write_text("x" * 1024)
         dest = tmp_path / "dest"
-
         backend = LocalCloneBackend(versioned_base=str(tmp_path))
+        cp_pids: List[int] = []
+        fired_at: List[float] = []
 
-        start = time.monotonic()
-        with pytest.raises(SubprocessCancelledError):
-            backend.create_clone_at_path(
-                str(source),
-                str(dest),
-                cancel_check=lambda: True,
-                poll_interval=_CANCEL_POLL_INTERVAL_SECONDS,
-            )
-        elapsed = time.monotonic() - start
-        assert elapsed < _CANCEL_ELAPSED_BUDGET_SECONDS, (
-            f"cancellation took {elapsed:.2f}s, "
+        with _write_leased(held, _LEASE_SAFETY_RELEASE_SECONDS) as break_pending:
+
+            def cancel_once_cp_waits_on_the_lease() -> bool:
+                if not break_pending():
+                    return False
+                children = psutil.Process().children()
+                cp_pids.extend(c.pid for c in children if c.name() == "cp")
+                if cp_pids:
+                    fired_at.append(time.monotonic())
+                return bool(cp_pids)
+
+            start = time.monotonic()
+            with pytest.raises(SubprocessCancelledError):
+                backend.create_clone_at_path(
+                    str(source),
+                    str(dest),
+                    cancel_check=cancel_once_cp_waits_on_the_lease,
+                    poll_interval=_CANCEL_POLL_INTERVAL_SECONDS,
+                )
+            raised_at = time.monotonic()
+            assert len(cp_pids) == 1, "the cancel must fire while the real cp runs"
+            assert not psutil.pid_exists(cp_pids[0]), "the cancelled cp must be gone"
+            assert not (dest / "held.txt").exists()
+
+        setup = fired_at[0] - start
+        cancellation = raised_at - fired_at[0]
+        assert setup < _CANCEL_SETUP_BUDGET_SECONDS, (
+            f"cp took {setup:.2f}s to block on the lease, "
+            f"expected < {_CANCEL_SETUP_BUDGET_SECONDS}s"
+        )
+        assert cancellation < _CANCEL_ELAPSED_BUDGET_SECONDS, (
+            f"cancellation took {cancellation:.2f}s, "
             f"expected < {_CANCEL_ELAPSED_BUDGET_SECONDS}s"
         )
 
