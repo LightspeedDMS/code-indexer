@@ -945,6 +945,7 @@ class TextChunker:
         import datetime
 
         debug_file = os.path.expanduser("~/.tmp/cidx_debug.log")
+        os.makedirs(os.path.dirname(debug_file), exist_ok=True)
         with open(debug_file, "a") as f:
             f.write(
                 f"[{datetime.datetime.now().isoformat()}] TextChunker.chunk_file called for: {file_path}\n"

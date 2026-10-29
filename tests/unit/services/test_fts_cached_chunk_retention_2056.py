@@ -27,6 +27,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from unittest.mock import Mock
 
+import pytest
+
 from code_indexer.services.clean_slot_tracker import CleanSlotTracker
 from code_indexer.services.file_chunking_manager import FileChunkingManager
 from code_indexer.services.tantivy_index_manager import TantivyIndexManager
@@ -232,6 +234,8 @@ class TestFtsKeepsCacheReusedChunks2056:
         assert _hits(index_dir, "BRAVOTOKEN") == []
         assert _fts_docs_per_path(index_dir) == Counter({"module.py": 3})
 
+    # ^ perf test_repeated_unchanged_runs_keep_each_chunk_exactly_once = 4.5-5.4 s idle, 21 s beside 8 sync writers; repeated tantivy commits
+    @pytest.mark.slow
     def test_repeated_unchanged_runs_keep_each_chunk_exactly_once(
         self, tmp_path: Path
     ) -> None:

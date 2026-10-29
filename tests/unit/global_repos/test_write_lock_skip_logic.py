@@ -22,6 +22,7 @@ from code_indexer.global_repos.cleanup_manager import CleanupManager
 from code_indexer.global_repos.alias_manager import AliasManager
 from code_indexer.global_repos.global_registry import GlobalRegistry
 from code_indexer.config import ConfigManager
+from code_indexer.services.local_project_init import initialize_local_project
 
 
 @pytest.fixture
@@ -79,9 +80,8 @@ def _setup_local_repo(
     repo_name = alias_name.replace("-global", "")
     local_repo_dir = golden_repos_dir / repo_name
     local_repo_dir.mkdir(exist_ok=True)
-    # Bug #268: mark as initialized so _execute_refresh() proceeds past the
-    # initialization check and reaches write-lock / mtime detection logic.
-    (local_repo_dir / ".code-indexer").mkdir(exist_ok=True)
+    # ^ hazard a bare .code-indexer/ dir => no valid config.json => refresh self-heals via a real cidx init (#1253)
+    initialize_local_project(local_repo_dir, no_override_file=True)
     alias_manager.create_alias(alias_name, str(local_repo_dir))
     registry.register_global_repo(
         repo_name,
@@ -289,9 +289,7 @@ class TestConcurrentWriterAndRefreshScheduler:
         """
         local_repo_dir = golden_repos_dir / "cidx-meta"
         local_repo_dir.mkdir(exist_ok=True)
-        # Bug #268: mark as initialized so _execute_refresh() proceeds past
-        # the initialization check when write lock is released (step 4).
-        (local_repo_dir / ".code-indexer").mkdir(exist_ok=True)
+        initialize_local_project(local_repo_dir, no_override_file=True)
         alias_manager.create_alias("cidx-meta-global", str(local_repo_dir))
         registry.register_global_repo(
             "cidx-meta",

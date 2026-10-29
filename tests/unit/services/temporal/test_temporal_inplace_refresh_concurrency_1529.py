@@ -38,6 +38,8 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Set
 
+import pytest
+
 import numpy as np
 
 from code_indexer.services.temporal.temporal_server_paths import (
@@ -138,6 +140,8 @@ def _assert_row_self_consistent(row: Dict[str, Any], source: str) -> None:
     )
 
 
+# ^ perf test_concurrent_readers_never_see_a_torn_in_place_refresh = 5-8 s idle, 15.8 s in a serial fast run; fsync-bound stress
+@pytest.mark.slow
 def test_concurrent_readers_never_see_a_torn_in_place_refresh(tmp_path: Path) -> None:
     golden_repos_dir = tmp_path / "golden-repos"
     index_root = server_temporal_index_root(golden_repos_dir, REPO_ALIAS)

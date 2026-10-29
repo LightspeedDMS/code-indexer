@@ -187,7 +187,7 @@ class TestGitRetryLogic:
                 # Should NOT wait/retry
                 mock_sleep.assert_not_called()
 
-    def test_retry_logs_failures_with_full_context(self, tmp_path):
+    def test_retry_logs_failures_with_full_context(self, tmp_path, monkeypatch):
         """Test that git failures are logged with command, cwd, and stack trace."""
         from code_indexer.utils.git_runner import run_git_command_with_retry
         from code_indexer.utils.exception_logger import ExceptionLogger
@@ -195,7 +195,8 @@ class TestGitRetryLogic:
         repo_dir = tmp_path / "test_repo"
         repo_dir.mkdir()
 
-        # Initialize exception logger
+        # ^ hazard keeping a singleton another test initialized => its shared log file holds their entries too
+        monkeypatch.setattr(ExceptionLogger, "_instance", None)
         logger = ExceptionLogger.initialize(repo_dir, mode="cli")
 
         call_count = 0

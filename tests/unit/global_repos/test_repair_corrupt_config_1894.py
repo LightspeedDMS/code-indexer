@@ -79,6 +79,7 @@ def _make_corrupt_repo(tmp_path: Path, name: str, corrupt_content: str) -> Path:
     return repo_dir
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize(
     "corrupt_content",
     ["", '""', "{"],

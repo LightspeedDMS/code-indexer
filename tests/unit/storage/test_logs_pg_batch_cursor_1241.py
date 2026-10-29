@@ -10,24 +10,12 @@ PG-cluster mode.
 This test uses a psycopg3-faithful fake: Connection has NO executemany, only
 the Cursor returned by conn.cursor() does.  With that fake in place the test
 would have caught the AttributeError before the code reached staging.
-
-No real psycopg / psycopg_pool packages are required — they are stubbed at
-module level before the backend is imported.
 """
 
 from __future__ import annotations
 
-# Stub psycopg_pool and psycopg BEFORE importing the backend so this unit test
-# runs without the real packages installed.
-import sys
 from contextlib import contextmanager
 from typing import Any, Generator, List
-from unittest.mock import MagicMock
-
-if "psycopg_pool" not in sys.modules:
-    sys.modules["psycopg_pool"] = MagicMock()
-if "psycopg" not in sys.modules:
-    sys.modules["psycopg"] = MagicMock()
 
 
 # ---------------------------------------------------------------------------

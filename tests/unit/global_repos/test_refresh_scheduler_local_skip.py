@@ -22,6 +22,7 @@ from code_indexer.global_repos.cleanup_manager import CleanupManager
 from code_indexer.global_repos.alias_manager import AliasManager
 from code_indexer.global_repos.global_registry import GlobalRegistry
 from code_indexer.config import ConfigManager
+from code_indexer.services.local_project_init import initialize_local_project
 
 
 class TestRefreshSchedulerLocalRepoSkip:
@@ -174,11 +175,8 @@ class TestRefreshSchedulerLocalRepoSkip:
         """
         local_repo_dir = golden_repos_dir / "cidx-meta"
         local_repo_dir.mkdir()
-        # Bug #268: create .code-indexer/ so this repo is treated as initialized.
-        # The test verifies C2 behavior (mtime detection) which only runs for
-        # initialized repos. Without .code-indexer/ the repo is skipped before
-        # reaching _has_local_changes() (Bug #268 fix).
-        (local_repo_dir / ".code-indexer").mkdir()
+        # ^ invariant mtime detection runs only for an initialized repo (#268); a bare .code-indexer/ dir => real cidx init self-heal (#1253)
+        initialize_local_project(local_repo_dir, no_override_file=True)
         alias_manager.create_alias("cidx-meta-global", str(local_repo_dir))
         registry.register_global_repo(
             "cidx-meta",

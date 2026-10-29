@@ -167,6 +167,23 @@ def refresh(scheduler: RefreshScheduler) -> None:
     scheduler._execute_refresh(ALIAS)
 
 
+class IndexingReached(Exception):
+    pass
+
+
+def stop_at_indexing(scheduler: RefreshScheduler) -> None:
+    def _reached(*args: Any, **kwargs: Any) -> None:
+        raise IndexingReached(kwargs.get("alias_name", ALIAS))
+
+    # ^ why stop at _index_source, not a real cidx index child; the branch check is under test, not indexing
+    setattr(scheduler, "_index_source", _reached)
+
+
+def assert_refresh_reached_indexing(excinfo: Any) -> None:
+    assert isinstance(excinfo.value.__cause__, IndexingReached), excinfo.value
+    assert "registered branch" not in str(excinfo.value)
+
+
 def assert_refresh_fails_before_pull(
     tmp_path: Path,
     master: Path,
@@ -207,16 +224,14 @@ def assert_refresh_continues_on_current_branch(
     upstream = git_out("rev-parse", "feature-x", cwd=tmp_path / "work")
     assert head_sha(master) != upstream
 
-    # The golden clone is not cidx-initialised, so a refresh that continued
-    # past the branch check and the pull fails later, at indexing -- never
-    # with the registered-branch error.
+    stop_at_indexing(scheduler)
     with (
         caplog.at_level(logging.WARNING, logger=SCHEDULER_LOGGER),
-        pytest.raises(RuntimeError, match="indexing on source failed") as excinfo,
+        pytest.raises(RuntimeError) as excinfo,
     ):
         refresh(scheduler)
 
-    assert "registered branch" not in str(excinfo.value)
+    assert_refresh_reached_indexing(excinfo)
     assert current_branch(master) == "feature-x"
     assert head_sha(master) == upstream, "the refresh must pull past the check"
     branch_warnings = [
@@ -613,15 +628,14 @@ def branch_check_records(caplog: pytest.LogCaptureFixture) -> list:
 def refresh_past_branch_check(
     scheduler: RefreshScheduler, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Run a refresh that gets past the branch check: the golden clone is
-    not cidx-initialised, so it fails later, at indexing -- never with a
-    registered-branch error."""
+    """Run a refresh that gets past the branch check and stops at indexing."""
+    stop_at_indexing(scheduler)
     with (
         caplog.at_level(logging.WARNING, logger=SCHEDULER_LOGGER),
-        pytest.raises(RuntimeError, match="indexing on source failed") as excinfo,
+        pytest.raises(RuntimeError) as excinfo,
     ):
         refresh(scheduler)
-    assert "registered branch" not in str(excinfo.value)
+    assert_refresh_reached_indexing(excinfo)
 
 
 def test_detached_registration_on_detached_clone_switches_nothing(

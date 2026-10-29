@@ -9,6 +9,7 @@ from code_indexer.config import ConfigManager
 from code_indexer.global_repos.cleanup_manager import CleanupManager
 from code_indexer.global_repos.query_tracker import QueryTracker
 from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
+from code_indexer.services.local_project_init import initialize_local_project
 
 
 class _RegistryStub:
@@ -36,12 +37,11 @@ def _make_scheduler(tmp_path, repo_url):
     """
     golden_repos_dir = tmp_path / ".code-indexer" / "golden_repos"
     golden_repos_dir.mkdir(parents=True)
-    # For local:// repos the scheduler reads source_path directly, so the
-    # directory must exist and contain a .code-indexer sentinel.
+    # ^ hazard a bare .code-indexer/ dir => no valid config.json => refresh self-heals via a real cidx init (#1253)
     if repo_url and repo_url.startswith("local://"):
         cidx_meta_dir = golden_repos_dir / "cidx-meta"
         cidx_meta_dir.mkdir(parents=True)
-        (cidx_meta_dir / ".code-indexer").mkdir()
+        initialize_local_project(cidx_meta_dir, no_override_file=True)
     config_mgr = ConfigManager(tmp_path / ".code-indexer" / "config.json")
     registry = _RegistryStub({"repo_url": repo_url, "default_branch": "master"})
     sched = RefreshScheduler(

@@ -34,6 +34,7 @@ import pytest
 from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
 from code_indexer.global_repos.query_tracker import QueryTracker
 from code_indexer.global_repos.cleanup_manager import CleanupManager
+from code_indexer.services.local_project_init import initialize_local_project
 
 
 # ---------------------------------------------------------------------------
@@ -254,8 +255,8 @@ class TestInitializedLocalRepoProceedsNormally:
         alias_name = "cidx-meta-global"
         source_dir = golden_repos_dir / "cidx-meta"
         source_dir.mkdir(parents=True)
-        # Create .code-indexer/ to mark as initialized
-        (source_dir / ".code-indexer").mkdir()
+        # ^ hazard a bare .code-indexer/ dir => no valid config.json => refresh self-heals via a real cidx init (#1253)
+        initialize_local_project(source_dir, no_override_file=True)
 
         repo_info = _make_repo_info(alias_name, repo_url="local://cidx-meta")
         mock_registry.get_global_repo.return_value = repo_info
@@ -288,8 +289,7 @@ class TestInitializedLocalRepoProceedsNormally:
         alias_name = "cidx-meta-global"
         source_dir = golden_repos_dir / "cidx-meta"
         source_dir.mkdir(parents=True)
-        # Mark as initialized
-        (source_dir / ".code-indexer").mkdir()
+        initialize_local_project(source_dir, no_override_file=True)
         # Add a file so there are changes
         (source_dir / "test.md").write_text("# test content")
 
@@ -476,7 +476,7 @@ class TestNoFailedJobsForUninitializedLocalRepos:
         # cidx-meta: initialized
         cidx_meta_dir = golden_repos_dir / "cidx-meta"
         cidx_meta_dir.mkdir(parents=True)
-        (cidx_meta_dir / ".code-indexer").mkdir()
+        initialize_local_project(cidx_meta_dir, no_override_file=True)
 
         # Langfuse user repo: NOT initialized
         langfuse_dir = golden_repos_dir / "langfuse-user"

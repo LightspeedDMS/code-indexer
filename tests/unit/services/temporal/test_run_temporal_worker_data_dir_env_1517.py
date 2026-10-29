@@ -130,6 +130,14 @@ def _activate_repo(
     )
 
 
+@pytest.fixture(autouse=True)
+def _no_server_app_build(monkeypatch):
+    from code_indexer.server import app as app_module
+
+    # ^ why setitem on the module dict, not setattr or patch; their getattr runs create_app (~7 s); see src/code_indexer/server/app.py:__getattr__
+    monkeypatch.setitem(vars(app_module), "_server_hnsw_cache", None)
+
+
 @pytest.fixture
 def payload_cache(tmp_path):
     db_path = tmp_path / "payload_cache.db"

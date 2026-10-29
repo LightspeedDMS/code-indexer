@@ -15,6 +15,7 @@ import pytest
 from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
 from code_indexer.global_repos.query_tracker import QueryTracker
 from code_indexer.global_repos.cleanup_manager import CleanupManager
+from code_indexer.services.local_project_init import initialize_local_project
 from tests.fixtures.refresh_scheduler_stores import (
     make_registered_repos_due,
     real_metadata_store,
@@ -170,9 +171,8 @@ class TestExecuteRefreshLocalRepoMtimeDetection:
         alias_name = "cidx-meta-global"
         live_dir = Path(temp_golden_repos_dir) / "cidx-meta"
         live_dir.mkdir(parents=True, exist_ok=True)
-        # Bug #268: create .code-indexer/ so repo is treated as initialized.
-        # _has_local_changes() is only called for initialized local repos.
-        (live_dir / ".code-indexer").mkdir(exist_ok=True)
+        # ^ hazard a bare .code-indexer/ dir => no valid config.json => refresh self-heals via a real cidx init (#1253)
+        initialize_local_project(live_dir, no_override_file=True)
 
         repo_info = {
             "alias_name": alias_name,
@@ -210,8 +210,7 @@ class TestExecuteRefreshLocalRepoMtimeDetection:
         alias_name = "cidx-meta-global"
         live_dir = Path(temp_golden_repos_dir) / "cidx-meta"
         live_dir.mkdir(parents=True, exist_ok=True)
-        # Bug #268: create .code-indexer/ so repo is treated as initialized.
-        (live_dir / ".code-indexer").mkdir(exist_ok=True)
+        initialize_local_project(live_dir, no_override_file=True)
 
         repo_info = {
             "alias_name": alias_name,
@@ -322,9 +321,8 @@ class TestExecuteRefreshLocalRepoSourcePath:
         alias_name = "cidx-meta-global"
         live_dir = Path(temp_golden_repos_dir) / "cidx-meta"
         live_dir.mkdir(parents=True, exist_ok=True)
-        # Bug #268: create .code-indexer/ so repo is treated as initialized.
-        # The initialization check uses the live source dir, not the alias target.
-        (live_dir / ".code-indexer").mkdir(exist_ok=True)
+        # ^ invariant the initialization check reads the live source dir, not the alias target
+        initialize_local_project(live_dir, no_override_file=True)
 
         # Alias points to versioned snapshot (NOT the live dir)
         versioned_target = (
