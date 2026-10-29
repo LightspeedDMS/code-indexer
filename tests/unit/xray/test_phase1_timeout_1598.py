@@ -130,6 +130,18 @@ def search_engine():
     return XRaySearchEngine()
 
 
+# ^ why hide rg, not leave it; the RegexSearchService probe these tests drive runs only without rg (#2306)
+@pytest.fixture
+def grep_engine_probe(monkeypatch):
+    import shutil
+
+    real_which = shutil.which
+    monkeypatch.setattr(
+        "code_indexer.xray.search_engine.shutil.which",
+        lambda cmd, *a, **kw: None if cmd == "rg" else real_which(cmd, *a, **kw),
+    )
+
+
 def _build_slow_tree(tmp_path: Path, total_files: int = 100, num_dirs: int = 5) -> None:
     """Create a real, on-disk directory tree with total_files real files."""
     for i in range(total_files):
@@ -353,6 +365,7 @@ class TestContentModeTimeoutForwarding:
         instance.search.assert_called_once()
         assert instance.search.call_args.kwargs.get("timeout_seconds") == 17
 
+    @pytest.mark.usefixtures("grep_engine_probe")
     def test_forwards_timeout_seconds_to_zero_match_probe(
         self, search_engine, tmp_path
     ):
@@ -392,6 +405,7 @@ class TestContentModeTimeoutForwarding:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("grep_engine_probe")
 class TestZeroMatchProbeSharedBudget:
     def test_probe_shares_one_budget_across_patterns(self, search_engine, tmp_path):
         """With the pre-fix code, N include_patterns each got a fresh
@@ -479,6 +493,7 @@ class TestZeroMatchProbeSharedBudget:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("grep_engine_probe")
 class TestZeroMatchProbeTimeoutPreservesMainSearch:
     def test_probe_timeout_preserves_main_search_candidates(
         self, search_engine, tmp_path

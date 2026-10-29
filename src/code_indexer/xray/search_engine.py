@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -27,6 +28,7 @@ from code_indexer.global_repos.regex_search import (
     RegexSearchService,
     RipgrepExecutionError,
 )
+from code_indexer.xray import phase1_limits
 from code_indexer.xray.languages import AST_DUMP_UNSUPPORTED_MESSAGE
 from code_indexer.xray.sandbox import _line_to_byte_offset_bytes as _line_to_byte_offset
 
@@ -37,6 +39,26 @@ logger = logging.getLogger(__name__)
 # This is a process-local operation budget, not an operator setting: at most
 # this many compiled-pattern/path comparisons are spent after Phase 1.
 _ZERO_MATCH_PATTERN_MATCH_ATTEMPT_BUDGET = 10_000
+
+
+def _include_pattern_has_files(
+    repo_path: Path, pattern: str, timeout_seconds: float
+) -> Optional[bool]:
+    if shutil.which("rg") is not None:
+        return phase1_limits.rg_include_pattern_has_files(
+            repo_path, pattern, timeout_seconds
+        )
+    probe = _run_async_in_sync(
+        RegexSearchService(repo_path).search(
+            pattern=r".*",
+            include_patterns=[pattern],
+            max_results=1,
+            timeout_seconds=max(1, math.ceil(timeout_seconds)),
+        )
+    )
+    if probe.matches:
+        return True
+    return None if probe.read_capped else False
 
 
 class XRayPhase1TimeoutError(Exception):
@@ -412,6 +434,7 @@ class XRaySearchEngine:
                 "evaluation_errors": [],
                 "files_processed": 0,
                 "files_total": 0,
+                "phase1_candidate_files": 0,
                 "elapsed_seconds": time.monotonic() - start,
                 "phase1_failed": True,
                 "phase1_error": str(exc),
@@ -436,12 +459,18 @@ class XRaySearchEngine:
                 "evaluation_errors": [],
                 "files_processed": 0,
                 "files_total": len(exc.candidates),
+                "phase1_candidate_files": len(exc.candidates),
                 "elapsed_seconds": time.monotonic() - start,
                 "partial": True,
                 "timeout": True,
             }
 
-        files_total = len(candidate_files)
+        candidate_count = len(candidate_files)
+        phase1_truncation: Optional[str] = getattr(
+            self, "_last_phase1_truncation", None
+        )
+        # ^ invariant files_total = None when Phase 1 was cut; the true candidate total is unknown, #2305
+        files_total: Optional[int] = None if phase1_truncation else candidate_count
         cap_hit = False
 
         if max_files is not None and len(candidate_files) > max_files:
@@ -657,6 +686,7 @@ class XRaySearchEngine:
             "file_metadata": file_metadata,
             "files_processed": files_processed,
             "files_total": files_total,
+            "phase1_candidate_files": candidate_count,
             "elapsed_seconds": elapsed,
             # AC3: debug_log() messages from the Rust evaluator (via _last_debug_messages
             # side-channel). Empty list when no debug_log() calls were made (AC6).
@@ -688,6 +718,10 @@ class XRaySearchEngine:
         elif cap_hit:
             result["partial"] = True
             result["max_files_reached"] = True
+        if phase1_truncation:
+            result["partial"] = True
+            result["phase1_truncated"] = True
+            result["phase1_truncation_reason"] = phase1_truncation
 
         # Surface zero-match include_pattern warnings (fix #3).
         warnings = list(getattr(self, "_last_phase1_warnings", [])) + unparsed_warnings
@@ -701,13 +735,13 @@ class XRaySearchEngine:
                 progress_callback(
                     100,
                     "timeout",
-                    f"partial: {files_processed}/{files_total}",
+                    f"partial: {files_processed}/{candidate_count}",
                 )
             elif cap_hit:
                 progress_callback(
                     100,
                     "max_files_reached",
-                    f"partial: {files_processed}/{files_total}",
+                    f"partial: {files_processed}/{candidate_count}",
                 )
             else:
                 progress_callback(
@@ -941,99 +975,12 @@ class XRaySearchEngine:
         include_patterns: List[str],
         timeout_seconds: int = 120,
     ) -> List[Dict[str, Any]]:
-        """Probe each include_pattern to detect those that match zero files.
-
-        Unlike the AST-mode ``_check_zero_match_patterns`` sibling, this
-        content-mode probe has no pre-collected ``all_rel_paths`` list to
-        check patterns against directly with ``PathPatternMatcher`` --
-        candidates here stream from ripgrep rather than a full filesystem
-        walk. Uses ``RegexSearchService`` with a trivial ``.*`` regex so the
-        probe reuses that SAME real search call path (the same shared
-        selector the main Phase 1 content search itself uses), guaranteeing
-        identical glob semantics without a separate filesystem walk.
-
-        Args:
-            repo_path: Root directory of the repository.
-            include_patterns: The caller-supplied glob patterns to probe.
-            timeout_seconds: TOTAL wall-clock budget SHARED across ALL
-                ``include_patterns`` probed by this call (Bug #1598 R1) --
-                NOT a fresh per-pattern allotment. The caller
-                (``_run_phase1_content``) passes the budget REMAINING after
-                the main Phase 1 search already consumed its share of the
-                caller's requested ``timeout_seconds``, so the main search
-                plus every probe together stay within ONE total deadline
-                instead of each of the N patterns getting its own full
-                budget (which previously let phase 1 alone run for up to
-                ``N * timeout_seconds``).
-
-        Returns:
-            List of zero-match warning dicts (may be empty).
-
-        Raises:
-            TimeoutError: If the shared probe budget is exhausted before
-                every ``include_pattern`` has been probed (checked at the
-                top of each loop iteration, so the loop stops itself once
-                the budget runs out rather than relying solely on each
-                individual ``search()`` call's own internal enforcement),
-                or if an individual probe ``search()`` call itself exceeds
-                its remaining share of the budget. The caller translates
-                this into an advisory warning (Bug #1598 R2) instead of
-                discarding the main search's already-found candidates.
-        """
+        # ^ invariant timeout_seconds is the budget left after the main search, shared by all patterns; #1598
         if not include_patterns:
             return []
-
-        hint = (
-            "Pattern matched 0 files. Use `**/time.py` (with **) for "
-            "recursive matching across directories."
+        return phase1_limits.probe_zero_match_patterns(
+            repo_path, include_patterns, timeout_seconds, _include_pattern_has_files
         )
-        warnings: List[Dict[str, Any]] = []
-        probe_service = RegexSearchService(repo_path)
-        probe_loop_start = time.monotonic()
-
-        for idx, pat in enumerate(include_patterns):
-            remaining = timeout_seconds - (time.monotonic() - probe_loop_start)
-            if remaining <= 0:
-                raise TimeoutError(
-                    f"zero-match-pattern probe shared budget of "
-                    f"{timeout_seconds}s exhausted after probing {idx} of "
-                    f"{len(include_patterns)} include_pattern(s)"
-                )
-            probe_result = _run_async_in_sync(
-                probe_service.search(
-                    pattern=r".*",
-                    include_patterns=[pat],
-                    max_results=1,
-                    timeout_seconds=max(1, math.ceil(remaining)),
-                )
-            )
-            if not probe_result.matches:
-                warnings.append(
-                    {
-                        "type": "zero_match_include_pattern",
-                        "pattern": pat,
-                        "hint": hint,
-                    }
-                )
-            # Issue #1601 (AC-E): this probe's own ``.*`` pattern is the
-            # broadest possible content search -- surface read_capped
-            # rather than silently dropping it, exactly as the main
-            # content driver does.
-            if probe_result.read_capped:
-                warnings.append(
-                    {
-                        "type": "content_search_read_capped",
-                        "pattern": pat,
-                        "hint": (
-                            "The zero-match probe for this include_pattern "
-                            "hit the byte-size read ceiling before "
-                            "completing; its zero-match determination may "
-                            "be unreliable for this pattern."
-                        ),
-                    }
-                )
-
-        return warnings
 
     def _run_phase1_driver(
         self,
@@ -1086,6 +1033,7 @@ class XRaySearchEngine:
         # context_before, context_after}
         self._last_phase1_positions: Dict[Path, List[Dict[str, Any]]] = {}
         self._last_phase1_warnings: List[Dict[str, Any]] = []
+        self._last_phase1_truncation: Optional[str] = None
 
         if search_target == "filename":
             return self._run_phase1_filename(
@@ -1288,7 +1236,7 @@ class XRaySearchEngine:
                     exclude_patterns=effective_excludes,
                     case_sensitive=case_sensitive,
                     context_lines=context_lines,
-                    max_results=100_000,
+                    max_results=phase1_limits.PHASE1_MAX_MATCHES,
                     multiline=multiline,
                     pcre2=pcre2,
                     timeout_seconds=timeout_seconds,
@@ -1381,17 +1329,10 @@ class XRaySearchEngine:
         # reassigned self._last_phase1_warnings.
         if self._last_phase1_warnings is None:
             self._last_phase1_warnings = []
-        if search_result.read_capped:
-            self._last_phase1_warnings.append(
-                {
-                    "type": "content_search_read_capped",
-                    "hint": (
-                        "Content search hit the byte-size read ceiling "
-                        "before scanning could complete; results may be a "
-                        "subset of all matches. Narrow the pattern or "
-                        "include_patterns to reduce match volume."
-                    ),
-                }
-            )
+        self._last_phase1_truncation, cut_warning = phase1_limits.phase1_cut(
+            search_result
+        )
+        if cut_warning is not None:
+            self._last_phase1_warnings.append(cut_warning)
 
         return candidates

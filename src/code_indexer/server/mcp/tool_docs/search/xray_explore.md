@@ -362,12 +362,19 @@ After polling `GET /api/jobs/{job_id}` to COMPLETED status, `result` contains:
 - `file_metadata[]`: per-file metadata entries. One entry per evaluated file. Shape: `{file_path}`.
 - `evaluation_errors[]`: list of per-file failures. Each entry: `{file_path, line_number, error_type, error_message}`. `evaluation_errors` does NOT cause job failure -- status remains COMPLETED.
 - `files_processed` (int): number of candidate files evaluated.
-- `files_total` (int): total candidate files found by Phase 1.
+- `files_total` (int or null): total candidate files found by Phase 1; `null` when Phase 1 was cut
+  (`phase1_truncated: true`), because the true total is then unknown.
+- `phase1_candidate_files` (int): candidate files Phase 1 actually returned.
 - `elapsed_seconds` (float)
 - `partial: true` (only on partial completion)
 - `timeout: true` (only when job-level timeout fired -- takes precedence over `max_files_reached`)
 - `max_files_reached: true` (only when the `max_results` cap fired before timeout)
-- `warnings[]` (only when present): zero-match include_pattern hints
+- `phase1_truncated: true` and `phase1_truncation_reason` (`"read_limit"` or `"match_cap"`): the
+  Phase 1 content driver was cut before it saw every match; always with `partial: true`. Same
+  contract as `xray_search`.
+- `warnings[]` (only when present): advisory diagnostics, same types as `xray_search`
+  (`zero_match_include_pattern`, `zero_match_probe_failed`, `content_search_read_capped`,
+  `phase1_match_cap_reached`, ...)
 
 ### evaluation_errors[] payload examples
 

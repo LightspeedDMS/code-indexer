@@ -93,7 +93,7 @@ def test_batch_cell_with_partial_unparse_counts_as_run(tmp_path):
 _SMALL_READ_CEILING = 64
 
 
-def test_batch_forwards_advisory_warning_without_partial(tmp_path):
+def test_batch_forwards_read_capped_warning_and_reports_cut(tmp_path):
     lines = "".join(f"x = {i}\n" for i in range(50))
     with patch(
         "code_indexer.global_repos.regex_search._MAX_READ_BYTES", _SMALL_READ_CEILING
@@ -105,7 +105,8 @@ def test_batch_forwards_advisory_warning_without_partial(tmp_path):
         for w in result.get("warnings") or []
     ]
     assert ("content_search_read_capped", REPO_ALIAS, 0) in tagged, result
-    assert result["partial"] is False, result
+    assert result["partial"] is True, result
+    assert [c["reason"] for c in result["phase1_truncated_cells"]] == ["read_limit"]
 
 
 def test_batch_cell_with_full_unparse_did_not_run(tmp_path):

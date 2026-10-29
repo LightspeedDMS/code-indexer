@@ -76,7 +76,13 @@ Every handler validates the evaluator with `validate_rust_evaluator()` before st
    (`search_target="content"`, through ripgrep via `RegexSearchService`) or the relative path
    (`search_target="filename"`). It honours `path`, `include_patterns` / `exclude_patterns`, `case_sensitive`,
    `multiline`, `pcre2` and `context_lines`. `max_results` caps the number of candidate files evaluated; hitting it
-   sets `partial` and `max_files_reached`.
+   sets `partial` and `max_files_reached`. When the content driver itself is cut (it hits an internal read limit --
+   the 64 MiB ripgrep output ceiling or the 8 MiB result-content budget -- or matches more than 100,000 lines), the
+   result sets `partial`, `phase1_truncated` and `phase1_truncation_reason` (`read_limit` / `match_cap`; `read_limit`
+   wins when both fire), and `files_total` is `null` because the true candidate total is unknown
+   (`phase1_candidate_files` holds the count actually returned). The zero-match include-pattern probe lists files with
+   `rg --files -q`, which stops at the first selected file and never reads file contents. Both live in
+   `src/code_indexer/xray/phase1_limits.py`.
 2. **Evaluator (Phase 2).** `RustNativeBackend.run_batch()` (`src/code_indexer/xray/rust_backend.py`) compiles the
    evaluator (cached by compile identity) and runs `xray-cli --dynlib ... --json --files-from ...`, which parses each
    file and calls `evaluate_node`. The server adds `file_path`, `language` and `line_content` to every finding.

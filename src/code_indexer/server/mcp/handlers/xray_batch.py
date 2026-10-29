@@ -350,6 +350,7 @@ def _run_xray_batch_job(
     errors: List[Dict[str, Any]] = list(repo_errors)
     evaluation_errors: List[Dict[str, Any]] = []
     warnings: List[Dict[str, Any]] = []
+    phase1_truncated_cells: List[Dict[str, Any]] = []
 
     total = len(resolved_repos)
     repos_completed = 0
@@ -523,6 +524,14 @@ def _run_xray_batch_job(
 
             if cell.get("partial"):
                 partial = True
+            if cell.get("phase1_truncated"):
+                phase1_truncated_cells.append(
+                    {
+                        "repository_alias": repo["alias"],
+                        "scan_index": scan_index,
+                        "reason": cell.get("phase1_truncation_reason"),
+                    }
+                )
 
         if outer_break:
             break
@@ -548,6 +557,9 @@ def _run_xray_batch_job(
     }
     if warnings:
         result["warnings"] = warnings
+    if phase1_truncated_cells:
+        result["phase1_truncated"] = True
+        result["phase1_truncated_cells"] = phase1_truncated_cells
     return result
 
 

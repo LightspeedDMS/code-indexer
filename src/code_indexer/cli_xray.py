@@ -250,23 +250,33 @@ def xray_search(
 # ---------------------------------------------------------------------------
 
 
+def _echo_partial_label(result: dict) -> None:
+    if not result.get("partial", False):
+        return
+    if result.get("max_files_reached"):
+        click.echo("[PARTIAL: max_files reached]")
+    elif result.get("timeout"):
+        click.echo("[PARTIAL: timeout]")
+    if result.get("phase1_truncated"):
+        reason = result.get("phase1_truncation_reason")
+        click.echo(f"[PARTIAL: Phase 1 truncated ({reason})]")
+
+
+def _files_processed_line(result: dict) -> str:
+    files_total = result.get("files_total", 0)
+    total = "unknown" if files_total is None else files_total
+    return f"Files processed: {result.get('files_processed', 0)}/{total}"
+
+
 def _print_table(result: dict) -> None:
     """Print a human-readable table of X-Ray search results to stdout."""
     matches = result.get("matches", [])
     evaluation_errors = result.get("evaluation_errors", [])
-    files_processed = result.get("files_processed", 0)
-    files_total = result.get("files_total", 0)
     elapsed = result.get("elapsed_seconds", 0.0)
-    is_partial = result.get("partial", False)
-    max_files_reached = result.get("max_files_reached", False)
 
-    if is_partial:
-        if max_files_reached:
-            click.echo("[PARTIAL: max_files reached]")
-        else:
-            click.echo("[PARTIAL: timeout]")
+    _echo_partial_label(result)
 
-    click.echo(f"Files processed: {files_processed}/{files_total}")
+    click.echo(_files_processed_line(result))
     click.echo(f"Elapsed: {elapsed:.3f}s")
     click.echo(f"Matches: {len(matches)}")
     click.echo(f"Evaluation errors: {len(evaluation_errors)}")
@@ -529,17 +539,9 @@ def _render_explore(result: dict) -> None:
     """Print a human-readable exploration report with AST subtrees to stdout."""
     matches = result.get("matches", [])
     evaluation_errors = result.get("evaluation_errors", [])
-    files_processed = result.get("files_processed", 0)
-    files_total = result.get("files_total", 0)
     elapsed = result.get("elapsed_seconds", 0.0)
-    is_partial = result.get("partial", False)
-    max_files_reached = result.get("max_files_reached", False)
 
-    if is_partial:
-        if max_files_reached:
-            click.echo("[PARTIAL: max_files reached]")
-        else:
-            click.echo("[PARTIAL: timeout]")
+    _echo_partial_label(result)
 
     for m in matches:
         file_path = m.get("file_path", "")
@@ -554,7 +556,7 @@ def _render_explore(result: dict) -> None:
             _print_ast(ast_debug, indent=4)
         click.echo()
 
-    click.echo(f"Files processed: {files_processed}/{files_total}")
+    click.echo(_files_processed_line(result))
     click.echo(f"Elapsed: {elapsed:.3f}s")
     click.echo(f"Matches: {len(matches)}")
     click.echo(f"Evaluation errors: {len(evaluation_errors)}")

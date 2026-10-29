@@ -772,13 +772,29 @@ After polling `GET /api/jobs/{job_id}` to COMPLETED status, `result` contains:
 - `file_metadata[]`: list of per-file metadata entries. One entry per evaluated file. Shape: `{"file_path": str}`.
 - `evaluation_errors[]`: list of per-file failures. Each entry: `{file_path, line_number, error_type, error_message}`. `evaluation_errors` does NOT cause job failure -- status remains COMPLETED.
 - `files_processed` (int): number of candidate files evaluated.
-- `files_total` (int): total candidate files found by Phase 1.
+- `files_total` (int or null): total candidate files found by Phase 1. `null` when Phase 1 was cut
+  (`phase1_truncated: true`): the true candidate total is then unknown.
+- `phase1_candidate_files` (int): candidate files Phase 1 actually returned (before any `max_results`
+  cap). Equals `files_total` when Phase 1 was not cut.
 - `elapsed_seconds` (float)
 - `partial: true` (only on partial completion)
 - `timeout: true` (only when job-level timeout fired -- takes precedence over `max_files_reached`)
 - `max_files_reached: true` (only when the `max_results` cap fired before timeout)
-- `warnings[]` (only when present): advisory diagnostics from the Phase 1 zero-match-pattern probe.
-  Never causes job failure and never changes `matches[]`. Possible `type` values:
+- `phase1_truncated: true` (only when the Phase 1 content driver was cut before it saw every match;
+  always together with `partial: true`, and independent of `timeout`/`max_files_reached`). Only the
+  files holding the first matches were evaluated. Narrow `pattern` or `include_patterns` to get a
+  complete result.
+- `phase1_truncation_reason` (str, only with `phase1_truncated`): `"read_limit"` (the driver hit an
+  internal read limit: its ripgrep output passed the 64 MiB ceiling, or the matched content passed
+  the 8 MiB result-content budget) or `"match_cap"` (the driver matched more than 100,000 lines).
+  When both fire, `"read_limit"` is reported, because a scan stopped by a read limit cannot know
+  whether the match cap was passed.
+- `warnings[]` (only when present): advisory diagnostics. Never causes job failure and never changes
+  `matches[]`. Possible `type` values:
+  - `content_search_read_capped` (`search_target="content"` only): the main driver hit an internal
+    read limit; the result also carries `phase1_truncation_reason: "read_limit"`.
+  - `phase1_match_cap_reached` (`search_target="content"` only): the main driver matched more than
+    `max_matches` lines; the result also carries `phase1_truncated: true`.
   - `zero_match_include_pattern`: this `include_pattern` matched zero files. Carries `pattern` and a
     `hint` suggesting `**/name` for recursive matching. A likely sign the pattern is narrower than
     intended.
@@ -792,9 +808,10 @@ After polling `GET /api/jobs/{job_id}` to COMPLETED status, `result` contains:
   - `zero_match_probe_timeout` (`search_target="content"` only): the ripgrep-backed probe ran out of
     its shared time budget before checking every `include_pattern`. Same caller implication as
     `zero_match_probe_incomplete` -- some zero-match warnings may be missing; results are unaffected.
-  - `content_search_read_capped` (`search_target="content"` only): a probe's own broadest-possible
-    scan hit the internal byte-size read ceiling, so that pattern's zero-match determination may be
-    unreliable.
+  - `zero_match_probe_failed` (`search_target="content"` only): the zero-match check for this
+    `pattern` could not complete (ripgrep rejected the glob or failed); a zero-match warning may be
+    missing for it. The probe lists files and stops at the first one, so it never reads file
+    contents and never hits the read ceiling.
 
 ### evaluation_errors[] payload examples
 

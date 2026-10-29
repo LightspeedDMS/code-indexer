@@ -190,14 +190,18 @@ Aliases are resolved before submitting the job:
 
 ### warnings[]
 
-Present only when at least one cell produced warnings. Each entry is a warning the same scan would return from `xray_search` (for example `content_search_read_capped` or `unparsed_files`), tagged with `repository_alias` and `scan_index`. Only an `unparsed_files` warning (the engine could not parse some of the cell's files) sets `partial=true`; advisory warnings such as `content_search_read_capped` do not.
+Present only when at least one cell produced warnings. Each entry is a warning the same scan would return from `xray_search` (for example `content_search_read_capped`, `phase1_match_cap_reached` or `unparsed_files`), tagged with `repository_alias` and `scan_index`. A warning by itself never sets `partial=true` except `unparsed_files`; `content_search_read_capped` and `phase1_match_cap_reached` accompany a cut cell, and the cut itself sets `partial=true` (see below).
+
+### phase1_truncated / phase1_truncated_cells
+
+Present only when at least one cell's Phase 1 content driver was cut before it saw every match. `phase1_truncated: true` plus `phase1_truncated_cells`, one entry per cut cell: `{"repository_alias": str, "scan_index": int, "reason": "read_limit" | "match_cap"}` (`read_limit`: the driver hit an internal read limit -- its ripgrep output passed the 64 MiB ceiling or the matched content passed the 8 MiB result-content budget; `match_cap`: the driver matched more than 100,000 lines; when both fire, `read_limit` is reported). Only the files holding the first matches were evaluated in those cells. Narrow the scan's `driver_regex` to get a complete cell.
 
 ### partial=true triggers
 
 `partial=true` whenever ANY of the following occurs:
 - At least one repo or cell error.
 - At least one per-file evaluation error.
-- Cell reports `partial=true` (e.g. max_results cap hit).
+- Cell reports `partial=true` (e.g. max_results cap hit, or its Phase 1 was cut -- see `phase1_truncated_cells`).
 - A cell reports an `unparsed_files` warning.
 - Timeout fires.
 - Job cancelled.
