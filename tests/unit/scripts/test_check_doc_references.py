@@ -466,6 +466,51 @@ def test_main_in_process_exit_codes_and_report(
     assert "git ls-files failed" in capsys.readouterr().err
 
 
+def test_links_to_git_ignored_targets_are_skipped_and_counted(tmp_path: Path) -> None:
+    repo = _make_repo(
+        tmp_path,
+        {
+            ".gitignore": "/notes/local_*\n",
+            "notes/INDEX.md": "[a](local_on_disk.md)\n[b](local_absent.md)\n"
+            "[c](kept.md)\n",
+            "notes/kept.md": "kept\n",
+        },
+        untracked={"notes/local_on_disk.md": "private\n"},
+    )
+    result = _run_cli(repo)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Skipped 2 reference(s) to git-ignored paths" in result.stdout
+    assert _rendered_hits(repo) == []
+
+
+def test_missing_target_that_git_does_not_ignore_still_fails(tmp_path: Path) -> None:
+    repo = _make_repo(
+        tmp_path,
+        {
+            ".gitignore": "/notes/local_*\n",
+            "notes/INDEX.md": "[a](local_absent.md)\n[b](shared_absent.md)\n",
+        },
+    )
+    result = _run_cli(repo)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "1 broken reference(s)" in result.stdout
+    assert "notes/INDEX.md:2 -> shared_absent.md" in result.stdout
+    assert "Skipped 1 reference(s) to git-ignored paths" in result.stdout
+
+
+def test_git_check_ignore_failure_fails_loudly(tmp_path: Path) -> None:
+    # A path beyond a tracked symlink makes `git check-ignore` exit 128 while
+    # `git ls-files` still succeeds: a real git failure, no mocks.
+    repo = _make_repo(tmp_path, {"sub/kept.md": "kept\n"})
+    (repo / "lnk").symlink_to("sub")
+    (repo / "README.md").write_text("[x](lnk/missing.md)\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "symlink")
+    result = _run_cli(repo)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "git check-ignore failed" in result.stderr
+
+
 def test_cli_rejects_non_git_root(tmp_path: Path) -> None:
     result = _run_cli(tmp_path)
     assert result.returncode == 2

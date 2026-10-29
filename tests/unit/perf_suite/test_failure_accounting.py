@@ -100,7 +100,8 @@ def _row(text: str) -> str:
 def _render(rep: Dict[str, Any], comparison: Any = None) -> str:
     rep["comparison"] = comparison
     rep["verdict"] = report.verdict(rep, comparison)
-    return report.render_summary(rep, Path("a.json"), Path("a.md"), color=False)
+    summary: str = report.render_summary(rep, Path("a.json"), Path("a.md"), color=False)
+    return summary
 
 
 def test_zero_success_cell_is_na_never_baselined_never_an_improvement():

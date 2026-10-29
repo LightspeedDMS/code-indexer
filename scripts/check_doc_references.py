@@ -17,7 +17,9 @@ Two checks, over GIT-TRACKED files only (``git ls-files``):
    outside PROSE_SCAN_EXCLUDED; plus each Rust ``include_str!("<path>")`` in
    code-side ``.rs`` files (resolved from the .rs file).
 
-A target must exist inside the repository. Files that deliberately contain
+A target must exist inside the repository, unless git ignores its path (a
+deliberately local-only file, absent in a clean checkout): such references are
+skipped and counted, and a ``git check-ignore`` failure exits 2. Files that deliberately contain
 fake doc paths (synthetic test repositories) are excluded by FIXTURE_ALLOWLIST,
 which is keyed by FILE path -- never by value.
 
@@ -160,6 +162,12 @@ class BrokenReference(NamedTuple):
     source: str  # repository-relative path of the referencing file
     line: int  # 1-based line of the reference
     target: str  # the target exactly as written
+    resolved: str  # normalized repository-relative path the target names
+
+
+class CheckResult(NamedTuple):
+    broken: List[BrokenReference]
+    ignored_skipped: int  # references whose target path git ignores
 
 
 def _tracked_files(root: Path) -> List[str]:
@@ -208,19 +216,45 @@ def _load_repo(root: Path) -> Tuple[_Repo, List[str]]:
     return _Repo(root, frozenset(known)), files
 
 
-def _target_exists(repo: _Repo, base_dir: str, target: str) -> bool:
-    """True when ``target`` (relative to ``base_dir``) is tracked and on disk.
+def _resolve(base_dir: str, target: str) -> str:
+    if target.startswith("/"):
+        return os.path.normpath(target.lstrip("/"))
+    return os.path.normpath(os.path.join(base_dir, target))
+
+
+def _escapes_repo(rel: str) -> bool:
+    return rel == ".." or rel.startswith("../")
+
+
+def _target_exists(repo: _Repo, rel: str) -> bool:
+    """True when the resolved path ``rel`` is tracked and on disk.
 
     Tracked, because CI checks out only tracked files; on disk, because a
     tracked file deleted in the working tree is about to stop existing.
     A target escaping the repository normalizes to ``../..`` and is never
     in ``repo.known``.
     """
-    if target.startswith("/"):
-        rel = os.path.normpath(target.lstrip("/"))
-    else:
-        rel = os.path.normpath(os.path.join(base_dir, target))
     return rel in repo.known and (repo.root / rel).exists()
+
+
+def _ignored_paths(root: Path, paths: Sequence[str]) -> FrozenSet[str]:
+    """Return the members of ``paths`` that git ignores; raise if git fails."""
+    query = sorted({p for p in paths if not _escapes_repo(p)})
+    if not query:
+        return frozenset()
+    payload = "\0".join(query).encode("utf-8", errors="surrogateescape")
+    result = subprocess.run(
+        ["git", "-C", str(root), "check-ignore", "--stdin", "-z"],
+        input=payload,
+        capture_output=True,
+        timeout=GIT_TIMEOUT_SECONDS,
+    )
+    # ^ external git check-ignore exit 1 = nothing ignored; any other non-zero = git failure
+    if result.returncode not in (0, 1):
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"git check-ignore failed in {root}: {detail}")
+    names = result.stdout.decode("utf-8", errors="surrogateescape")
+    return frozenset(p for p in names.split("\0") if p)
 
 
 def _markdown_link_targets(text: str) -> Iterator[Tuple[int, str]]:
@@ -252,8 +286,11 @@ def _check_markdown(repo: _Repo, rel: str, text: str) -> Iterator[BrokenReferenc
         if target.startswith("#") or _URI_SCHEME.match(target):
             continue
         path = unquote(_strip_fragment_and_query(target))
-        if path and not _target_exists(repo, base_dir, path):
-            yield BrokenReference(rel, line_no, target)
+        if not path:
+            continue
+        resolved = _resolve(base_dir, path)
+        if not _target_exists(repo, resolved):
+            yield BrokenReference(rel, line_no, target, resolved)
 
 
 def _is_code_side(rel: str) -> bool:
@@ -268,16 +305,19 @@ def _line_of(text: str, offset: int) -> int:
 
 def _check_docs_paths(repo: _Repo, rel: str, text: str) -> Iterator[BrokenReference]:
     for match in _DOCS_PATH.finditer(text):
-        if not _target_exists(repo, "", match.group(0)):
-            yield BrokenReference(rel, _line_of(text, match.start()), match.group(0))
+        resolved = _resolve("", match.group(0))
+        if not _target_exists(repo, resolved):
+            line = _line_of(text, match.start())
+            yield BrokenReference(rel, line, match.group(0), resolved)
 
 
 def _check_include_str(repo: _Repo, rel: str, text: str) -> Iterator[BrokenReference]:
     base_dir = os.path.dirname(rel)
     for match in _INCLUDE_STR.finditer(text):
-        if not _target_exists(repo, base_dir, match.group(1)):
+        resolved = _resolve(base_dir, match.group(1))
+        if not _target_exists(repo, resolved):
             line = _line_of(text, match.start(1))
-            yield BrokenReference(rel, line, match.group(1))
+            yield BrokenReference(rel, line, match.group(1), resolved)
 
 
 def _strip_fragment_and_query(target: str) -> str:
@@ -303,6 +343,27 @@ def find_broken_references(
     root: Path, allowlist: Mapping[str, str] = FIXTURE_ALLOWLIST
 ) -> List[BrokenReference]:
     """Return every broken doc reference in the tracked files of ``root``."""
+    return check_references(root, allowlist).broken
+
+
+def check_references(
+    root: Path, allowlist: Mapping[str, str] = FIXTURE_ALLOWLIST
+) -> CheckResult:
+    """Return the broken references and how many git-ignored targets were skipped.
+
+    A target whose path git ignores (a deliberately local-only file) is not
+    broken, whether or not it exists on disk.
+    """
+    hits = _unresolved_references(root, allowlist)
+    ignored = _ignored_paths(root, [hit.resolved for hit in hits])
+    skipped = [hit for hit in hits if hit.resolved in ignored]
+    broken = [hit for hit in hits if hit.resolved not in ignored]
+    return CheckResult(_dedupe(broken), len(_dedupe(skipped)))
+
+
+def _unresolved_references(
+    root: Path, allowlist: Mapping[str, str]
+) -> List[BrokenReference]:
     repo, files = _load_repo(root)
     hits: List[BrokenReference] = []
     for rel in files:
@@ -323,7 +384,7 @@ def find_broken_references(
             hits.extend(_check_docs_paths(repo, rel, text))
         if code_side and rel.endswith(".rs"):
             hits.extend(_check_include_str(repo, rel, text))
-    return _dedupe(hits)
+    return hits
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -332,10 +393,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
     root = args.root.resolve()
     try:
-        hits = find_broken_references(root)
+        hits, ignored_skipped = check_references(root)
     except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
         print(f"check_doc_references: {exc}", file=sys.stderr)
         return 2
+    if ignored_skipped:
+        print(f"Skipped {ignored_skipped} reference(s) to git-ignored paths.")
     if not hits:
         print("Doc reference check passed: no broken references.")
         return 0
