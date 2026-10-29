@@ -167,10 +167,9 @@ class TestCleanCommand:
                 input="n\n",
             )
 
-        # Should show prompt in output
-        assert (
-            "collection" in result.output.lower() or "confirm" in result.output.lower()
-        )
+        # ^ hazard asserting a word from the test name => tmp_path in the output satisfies it vacuously
+        assert "Proceed with cleanup?" in result.output
+        assert "Cleanup cancelled" in result.output
 
         # Should NOT clear collection when declined
         vector_store = mock_backend.get_vector_store_client.return_value
@@ -226,8 +225,7 @@ class TestCleanCommand:
         vector_store = mock_backend.get_vector_store_client.return_value
         vector_store.clear_collection.assert_called_once()
 
-        # Output should not contain confirmation text
-        assert "confirm" not in result.output.lower()
+        assert "Proceed with cleanup?" not in result.output
 
     def test_clean_preserves_projection_matrix(self, test_project_root):
         """Test clean preserves projection matrix by default."""
@@ -370,8 +368,9 @@ class TestUninstallCommand:
                 input="n\n",
             )
 
-        # Should show confirmation prompt
-        assert "confirm" in result.output.lower() or "remove" in result.output.lower()
+        # ^ hazard asserting a word from the test name => tmp_path in the output satisfies it vacuously
+        assert "Proceed with uninstall?" in result.output
+        assert "Uninstall cancelled" in result.output
 
         # Should NOT cleanup when declined
         mock_backend.cleanup.assert_not_called()
@@ -423,8 +422,7 @@ class TestUninstallCommand:
         # Should cleanup without prompting
         mock_backend.cleanup.assert_called_once()
 
-        # Should not ask for confirmation
-        assert "confirm" not in result.output.lower()
+        assert "Proceed with uninstall?" not in result.output
 
     def test_uninstall_no_container_cleanup_for_filesystem_backend(
         self, test_project_root, mock_backend
