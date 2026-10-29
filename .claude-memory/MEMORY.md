@@ -83,6 +83,7 @@
 - [Commit on development](feedback_always_checkout_development_before_commit.md) - never commit on master/staging
 - [Bump before staging](feedback_bump_version_before_staging.md) - bump version BEFORE promoting to staging
 - [Lint before commit](feedback_lint_before_commit.md) - ruff/mypy before staging
+- [Skip gates for standalone tooling](feedback_skip_full_gates_for_standalone_tooling.md) - new perf-suite style tooling: no fast-/e2e-automation, no full lint.sh; targeted checks only
 - [No commit mid-agent](feedback_no_commit_during_background_agent.md) - never commit a running agent's files
 - [Bump is push tip](feedback_version_bump_must_be_push_tip.md) - version-bump commit must be the push tip
 - [Delete old junk freely](feedback_delete_old_junk_freely.md) - never ask before deleting junk in tmp/scratchpad
@@ -100,6 +101,7 @@
 - [CLI bugs reach server](feedback_cli_defects_reach_server.md) - the server spawns cidx; never defer as "CLI-only" unproven
 - [Release inclusion bar](feedback_release_inclusion_bar.md) - mid-release additions only for high-severity or P1/P2
 - [Targeted scope](feedback_targeted_scope_discipline.md) - targeted requests trigger no unrelated rewrites
+- [No mid-mission expansion](feedback_no_scope_expansion_mid_mission.md) - file findings during a mission; at the end ask only about critical/high
 - [Validation on scope](feedback_validation_runs_stay_on_scope.md) - staging validation proves the shipped fix; side anomalies = notes
 - [Code reviewer](feedback_use_code_reviewer.md) - Codex is the PRIMARY reviewer
 - [Agents on Opus](feedback_default_agents_to_sonnet5.md) - all agents on Opus (model: "opus"); reviews to Codex
@@ -148,6 +150,7 @@
 - [Release 1873-1876](project_release_1873_1876_overnight_state.md) - older release state (local only)
 - [Backlog paused 08-27](project_backlog_session_paused_2026_08_27.md) - older sweep state (local only; supersedes [VM migration pause](project_backlog_session_paused_for_vm_migration.md))
 - [pytest tmp](project_pytest_tmp_accumulates_unbounded.md) - clean pytest tmp dirs >15 min old
+- [Test host storage](local_test_host_storage.md) - test host disks are slow; size test lanes by sync contention (local only)
 
 ## External References
 - [Staging MFA](project_staging_cluster_mfa_is_self_serviceable.md) - cluster staging MFA is ours to complete

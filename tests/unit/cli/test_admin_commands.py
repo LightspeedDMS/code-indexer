@@ -460,34 +460,38 @@ class TestAdminUsersCreateCommand:
         assert "No credentials found" in result.output
         assert "auth login" in result.output
 
-    def test_admin_users_create_no_project_config(self):
+    def test_admin_users_create_no_project_config(self, tmp_path):
         """Test user creation fails without project configuration."""
-        # Create temp directory WITHOUT .code-indexer to test uninitialized mode
+        # ^ coupled command_mode_detector.py:find_project_root walks cwd + 10 parents; a .code-indexer in them => local mode
+        project_dir = tmp_path.joinpath(*[f"n{i}" for i in range(11)])
+        project_dir.mkdir(parents=True)
         runner = CliRunner()
-        with tempfile.TemporaryDirectory() as temp_dir:
-            old_cwd = os.getcwd()
-            try:
-                os.chdir(temp_dir)
-                result = runner.invoke(
-                    cli,
-                    [
-                        "admin",
-                        "users",
-                        "create",
-                        "noprojectuser",
-                        "--role",
-                        "normal_user",
-                        "--password",
-                        "TestPass123!",
-                    ],
-                )
-            finally:
-                os.chdir(old_cwd)
+        old_cwd = os.getcwd()
+        try:
+            os.chdir(project_dir)
+            result = runner.invoke(
+                cli,
+                [
+                    "admin",
+                    "users",
+                    "create",
+                    "noprojectuser",
+                    "--role",
+                    "normal_user",
+                    "--password",
+                    "TestPass123!",
+                ],
+            )
+        finally:
+            os.chdir(old_cwd)
 
         assert result.exit_code == 1
-        # Real behavior: admin commands are not available in local mode
-        assert "not available in local mode" in result.output
-        assert "remote" in result.output.lower()
+        assert (
+            "is not available in an uninitialized project "
+            "(no configuration found - project needs initialization)."
+        ) in result.output
+        assert "cidx init" in result.output
+        assert "Use remote mode" in result.output
 
 
 class TestAdminUsersListCommand:

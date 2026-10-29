@@ -282,17 +282,27 @@ class DisabledCommandError(ClickException):
         Returns:
             Formatted error message explaining the restriction and providing guidance
         """
-        # Mode context explanations
         mode_contexts = {
-            "remote": "remote mode connects to server-side infrastructure",
-            "local": "local mode manages containers and services on this machine",
-            "proxy": "proxy mode coordinates operations across multiple discovered repositories",
-            "uninitialized": "no configuration found - project needs initialization",
+            "remote": ("remote mode", "it connects to server-side infrastructure"),
+            "local": (
+                "local mode",
+                "it manages containers and services on this machine",
+            ),
+            "proxy": (
+                "proxy mode",
+                "it coordinates operations across multiple discovered repositories",
+            ),
+            "uninitialized": (
+                "an uninitialized project",
+                "no configuration found - project needs initialization",
+            ),
         }
 
-        current_context = mode_contexts.get(
-            self.current_mode, f"'{self.current_mode}' mode"
-        )
+        if self.current_mode in mode_contexts:
+            mode_label, mode_context = mode_contexts[self.current_mode]
+            current_context = f"{mode_label} ({mode_context})"
+        else:
+            current_context = f"'{self.current_mode}' mode"
         allowed_context = ", ".join([f"'{mode}'" for mode in self.allowed_modes])
 
         # Base error message with architectural context

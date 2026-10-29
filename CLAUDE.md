@@ -144,11 +144,13 @@ Security-sensitive changes (permission-model edits, prompt-template edits for ca
 
 | Suite | Scope | When Required | Time |
 |-------|-------|---------------|------|
-| `fast-automation.sh` | CLI, core logic, chunking, storage (ignores `tests/unit/server/`) | ALL changes | ~100 min alone (20,355 tests in 102 min measured 2026-10-25; 20,193 in 88 min on 2026-10-24; 19,888 in 65 min on 2026-10-21; real-CLI tests dominate the growth -- re-measure); use `timeout 10800` (7200 left only ~18 min of margin on 2026-10-25, and a run sharing the host with other load reached only 52% in 72 min on 2026-10-21); estimate remaining time from the previous log's `--durations=0` table in `.test-telemetry/`, never from the percentage (the real-CLI files cluster around 18-50%); NEVER run it concurrently with server-fast |
-| `server-fast-automation.sh` | Server (MCP/REST/services/auth/storage), 6 parallel chunks | Touching `src/code_indexer/server/` | ~22 min (measured 2026-10-08; chunk 6 "rest2" and chunk 4 `web/repositories/routers` are the long poles) |
-| `slow-automation.sh` | `@pytest.mark.slow` unit tests (Bug #1798) | Not yet in the required gate sequence | ~45 min |
+| `fast-automation.sh` | CLI, core logic, chunking, storage (ignores `tests/unit/server/`), 8 parallel chunks | ALL changes | ~5 min alone (20,976 tests in 290 s measured 2026-10-29; was ~100 min as one process) |
+| `server-fast-automation.sh` | Server (MCP/REST/services/auth/storage), 8 parallel chunks | Touching `src/code_indexer/server/` | ~14 min alone (30,105 tests in 850 s measured 2026-10-29; one chunk was the long pole at 14 min, the rest 7-10 min) |
+| `slow-automation.sh` | `@pytest.mark.slow` unit tests (Bug #1798): real `cidx` processes and tests over ~5 s, 2 phases x 4 chunks | ALL changes | ~26 min alone (2,510 tests: phase 1 1,013 s, phase 2 504 s, measured 2026-10-29) |
 | `rust-automation.sh` | Rust X-Ray engine: `cargo test --workspace` (447 tests incl. AC18 PREAMBLE parity) + `cargo clippy --workspace --all-targets -D warnings` | Touching `rust/` | seconds warm |
 | `e2e-automation.sh` | 7-phase E2E (CLI standalone/daemon, server in-process, CLI remote, fault-injection, PostgreSQL parity, SIEM delivery). No mocks. | Final regression gate -- ALL completed work | ~45-90 min |
+
+Run the unit lanes ONE AT A TIME, alone on the host, in the background with `timeout 10800`: they share a lane lock and the host's disk-sync capacity, and two at once turn healthy tests into 15 s timeouts. Each lane splits its files into chunks balanced from the previous run's `--durations=0` table in `.test-telemetry/`. A unit test that starts a real `cidx` process without `@pytest.mark.slow` fails with `RealProcessInUnitTest` (`tests/utils/real_process_guard.py`, wired in `tests/unit/conftest.py`): mark it slow, or replace the process with the in-process call (`services/local_project_init.py` for `cidx init`).
 
 `fast-automation.sh` does NOT run server tests -- touching server code without `server-fast-automation.sh` = untested. All three pytest suites ignore `rust/` -- touching `rust/` without `rust-automation.sh` = untested. `e2e-automation.sh` (Epic #700) is non-negotiable for epic/story completion; pure doc/config edits may waive with explicit user approval. The `@pytest.mark.slow` marker routes a test INTO `slow-automation.sh`, not nowhere -- confirm that lane covers its path.
 
@@ -158,7 +160,7 @@ The three unit lanes (`fast-`, `server-fast-`, `slow-automation.sh`, via `script
 
 ### Gate Timing -- Full Gates Only After Approval
 
-Full gates (`fast-`, `server-fast-`, `e2e-automation.sh`, full `./lint.sh`, directory-wide pytest) run ONCE, only after ALL code reviews are approved. In an epic, only after ALL stories are completed and approved. Running them before or between review rounds wastes the run whenever review rejects.
+Full gates (`fast-`, `server-fast-`, `slow-`, `e2e-automation.sh`, full `./lint.sh`, directory-wide pytest) run ONCE, only after ALL code reviews are approved. In an epic, only after ALL stories are completed and approved. Running them before or between review rounds wastes the run whenever review rejects.
 
 In between, pick tests strategically: (1) tests for the specific capability being worked on, and (2) tests for capabilities you suspect the change could break (callers, shared state, sibling paths). Name the files; never run whole directories as a substitute for thinking. Put this rule in every engineer and pair brief.
 
@@ -168,8 +170,11 @@ In between, pick tests strategically: (1) tests for the specific capability bein
 2. Manual testing
 3. `fast-automation.sh` (zero failures)
 4. `server-fast-automation.sh` when server code touched
-5. `rust-automation.sh` when `rust/` touched
-6. `e2e-automation.sh` (final gate)
+5. `slow-automation.sh` (zero failures)
+6. `rust-automation.sh` when `rust/` touched
+7. `e2e-automation.sh` (final gate)
+
+Steps 3-5 run sequentially, never two at once.
 
 **A/B comparison traps** (proving a fix or a regression against HEAD): a shared `CARGO_TARGET_DIR` across two checkouts of the SAME crate version at different paths SILENTLY REUSES the other tree's integration-test binary -- an A/B run then reports the wrong tree's numbers verbatim, with no error. Give every tree its OWN target dir. This produced a false review result on Bug #1898; the reviewer's first probe of the fixed tree reproduced HEAD's output exactly.
 
