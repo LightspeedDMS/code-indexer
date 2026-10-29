@@ -334,7 +334,17 @@ class ProviderHealthMonitor:
     def reset_instance(cls) -> None:
         """Reset singleton (for testing)."""
         with cls._lock:
+            dropped = cls._instance
             cls._instance = None
+        # ^ hazard keeping the dropped monitor's probes => a thread probes and sinbins its provider every 30s for the process lifetime
+        if dropped is not None:
+            dropped._stop_all_recovery_probes()
+
+    def _stop_all_recovery_probes(self) -> None:
+        with self._probe_lock:
+            providers = list(self._probe_threads)
+        for provider_name in providers:
+            self._stop_recovery_probe(provider_name)
 
     def register_probe(self, provider_name: str, probe_fn: object) -> None:
         """Register a lightweight probe function for a provider (Story #619 HIGH-2).

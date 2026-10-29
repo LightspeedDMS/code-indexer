@@ -62,6 +62,8 @@ def _heartbeats() -> list:
 
 
 class TestLiveHolderKeepsItsLease:
+    # ^ perf waits _OUTLIVE_SECONDS = 12s of wall time; fast lane --timeout=15 left 3s headroom
+    @pytest.mark.slow
     def test_work_past_the_lease_still_passes_the_final_checkpoint(
         self, tmp_path: Path, make_store
     ) -> None:
@@ -96,6 +98,7 @@ def _hold_and_die(golden: str, make_store: Callable[[], Any]) -> None:
 
 
 class TestDeadHolderFreesTheLock:
+    @pytest.mark.slow
     def test_holder_process_gone_is_taken_over(
         self, tmp_path: Path, make_store
     ) -> None:
@@ -113,6 +116,7 @@ class TestDeadHolderFreesTheLock:
 
 
 class TestFailedReleaseStopsTheRenewal:
+    @pytest.mark.slow
     def test_release_that_raises_still_lets_the_lease_lapse(
         self, tmp_path: Path, make_store
     ) -> None:

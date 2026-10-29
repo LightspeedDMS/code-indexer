@@ -152,6 +152,8 @@ Security-sensitive changes (permission-model edits, prompt-template edits for ca
 
 `fast-automation.sh` does NOT run server tests -- touching server code without `server-fast-automation.sh` = untested. All three pytest suites ignore `rust/` -- touching `rust/` without `rust-automation.sh` = untested. `e2e-automation.sh` (Epic #700) is non-negotiable for epic/story completion; pure doc/config edits may waive with explicit user approval. The `@pytest.mark.slow` marker routes a test INTO `slow-automation.sh`, not nowhere -- confirm that lane covers its path.
 
+The three unit lanes (`fast-`, `server-fast-`, `slow-automation.sh`, via `scripts/unit_lane_common.sh`) give every chunk its OWN `TMPDIR` on `/dev/shm` tmpfs (so pytest `tmp_path` never contends for the slow disk's fsyncs; removed when that chunk ends, and with the lane on any exit) and refuse to start when `/dev/shm` is not a writable tmpfs -- never a disk fallback. HOME and the server data dir stay on disk under `~/.tmp`. `tests/conftest.py` resets the `ProviderHealthMonitor` singleton (stopping its recovery-probe threads, which otherwise sinbin a provider every 30 s for the rest of the process) and drops `huggingface_hub`'s cached HTTP session after every test.
+
 `tests/unit/server/conftest.py` imports `anyio._backends._asyncio` eagerly (#2215): removing it lets a test that patches `asyncio.get_running_loop` freeze the Mock into anyio, and every later TestClient test in that process hangs. Its guard (`test_testclient_after_loop_patch_2215.py`) runs only in `slow-automation.sh`.
 
 ### Gate Timing -- Full Gates Only After Approval

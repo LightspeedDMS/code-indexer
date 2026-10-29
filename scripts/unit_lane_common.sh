@@ -2,7 +2,7 @@
 # Lifecycle shared by fast-, server-fast- and slow-automation.sh (sourced, not executed).
 #
 #   source scripts/unit_lane_common.sh
-#   unit_lane_start LANE [LOCK_FILE]     # lane lock + traps + real-home snapshot; refusal => exit 1
+#   unit_lane_start LANE [LOCK_FILE]     # lane lock + traps + real-home snapshot + tmpfs TMPDIR root; refusal => exit 1
 #   unit_lane_spawn SUMMARY RUN_ARGS...  # background chunk runner => UNIT_LANE_PID
 #   unit_lane_wait PID                   # => UNIT_LANE_EXIT
 #   unit_lane_guard_verify               # 0 when the real ~/.cidx-server is unchanged
@@ -11,12 +11,15 @@ _UNIT_LANE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UNIT_LANE_TOOL="$_UNIT_LANE_DIR/unit_lane_chunks.py"
 UNIT_LANE_GUARD="$_UNIT_LANE_DIR/real-server-home-guard.sh"
 UNIT_LANE_SCRATCH=""
+UNIT_LANE_TMP_ROOT=""
 UNIT_LANE_PIDS=()
 UNIT_LANE_SPAWNS=0
 # shellcheck source=scripts/real-server-home-guard.sh
 source "$UNIT_LANE_GUARD"
 
 _unit_lane_cleanup() {
+    # ^ order capture the exit status before any command here resets $?
+    local rc=$?
     # ^ hazard a second TERM/INT here => cleanup aborted, chunk groups and scratch survive
     trap '' TERM INT
     local pid pgid file
@@ -35,6 +38,14 @@ _unit_lane_cleanup() {
         done < "$file"
     done
     [[ -z "$UNIT_LANE_SCRATCH" ]] || rm -rf "$UNIT_LANE_SCRATCH"
+    if [[ -n "$UNIT_LANE_TMP_ROOT" ]]; then
+        rm -rf "$UNIT_LANE_TMP_ROOT" || true
+        if [[ -e "$UNIT_LANE_TMP_ROOT" ]]; then
+            echo "FAILED: lane TMPDIR root $UNIT_LANE_TMP_ROOT could not be removed (tmpfs RAM stays used)" >&2
+            # ^ why only a passing run turns into 1; a failing or interrupted run keeps its own exit code
+            [[ $rc -ne 0 ]] || exit 1
+        fi
+    fi
 }
 
 unit_lane_start() {
@@ -50,6 +61,11 @@ unit_lane_start() {
     unset CIDX_REAL_HOME_GUARD_DIR
     UNIT_LANE_SCRATCH=$(mktemp -d "$HOME/.tmp/cidx-lane-XXXXXX")
     real_home_guard_snapshot "$UNIT_LANE_SCRATCH/real-home-guard.state"
+    # ^ see scripts/unit_lane_chunks.py:sweep_stale_tmp_roots; roots of dead lanes (SIGKILLed shells) are freed here
+    UNIT_LANE_TMP_ROOT=$(python3 "$UNIT_LANE_TOOL" tmp-root --owner-pid $$) || {
+        echo "ERROR: cannot create the lane TMPDIR root under /dev/shm; the lanes need a writable tmpfs there" >&2
+        exit 1
+    }
 }
 
 unit_lane_spawn() {
@@ -60,6 +76,7 @@ unit_lane_spawn() {
         --lock-fd 9 \
         --pgid-file "$UNIT_LANE_SCRATCH/chunk-pgids-$UNIT_LANE_SPAWNS" \
         --scratch-root "$UNIT_LANE_SCRATCH" \
+        --tmp-root "$UNIT_LANE_TMP_ROOT" \
         --guard "$UNIT_LANE_GUARD" \
         "$@" >"$summary" 2>&1 &
     UNIT_LANE_PID=$!

@@ -432,7 +432,6 @@ class TestIntegrationCacheVsNetwork:
     ]
 
     def test_token_counts_identical_from_file_vs_from_pretrained(self):
-        """Token counts from local cache must match those from the network download."""
         from tokenizers import Tokenizer  # type: ignore[import-untyped]
 
         # Load via local cache path
@@ -444,8 +443,18 @@ class TestIntegrationCacheVsNetwork:
         tok_file = Tokenizer.from_file(str(cache_path))
         tok_file.no_truncation()
 
-        # Load via network (HF's own caching ensures same tokenizer)
-        tok_net = Tokenizer.from_pretrained("voyageai/voyage-3")
+        from huggingface_hub import hf_hub_download
+        from huggingface_hub.errors import LocalEntryNotFoundError
+
+        # ^ why local_files_only, not from_pretrained; from_pretrained sends HEAD requests to huggingface.co from the unit lane
+        try:
+            hub_path = hf_hub_download(
+                "voyageai/voyage-3", "tokenizer.json", local_files_only=True
+            )
+        except LocalEntryNotFoundError:
+            # ^ external the offline lookup also needs refs/main, which the class skipif's snapshot check does not prove
+            pytest.skip("HF cache for voyage-3 lacks what the offline hub lookup needs")
+        tok_net = Tokenizer.from_file(hub_path)
         tok_net.no_truncation()
 
         for text in self.SAMPLE_TEXTS:

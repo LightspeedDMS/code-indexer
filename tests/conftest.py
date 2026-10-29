@@ -11,6 +11,7 @@ from . import _isolated_server_home  # noqa: F401 - side effect
 
 import os
 import subprocess
+import sys
 import time
 import shutil
 import tempfile
@@ -538,6 +539,31 @@ def _reset_memory_governor_singleton():
     _clear_memory_governor_singletons()
     yield
     _clear_memory_governor_singletons()
+
+
+_PROVIDER_HEALTH_MODULE_NAMES = (
+    "code_indexer.services.provider_health_monitor",
+    "src.code_indexer.services.provider_health_monitor",
+)
+
+
+@pytest.fixture(autouse=True)
+def _reset_provider_health_monitor_singleton():
+    yield
+    # ^ hazard keeping it => a provider driven down here keeps a probe thread sinbinning it for later tests; test:test_singleton_not_sinbinned_by_an_earlier_test
+    for name in _PROVIDER_HEALTH_MODULE_NAMES:
+        module = sys.modules.get(name)
+        if module is not None:
+            module.ProviderHealthMonitor.reset_instance()
+
+
+@pytest.fixture(autouse=True)
+def _drop_huggingface_hub_session():
+    yield
+    # ^ hazard keeping it => a session built under a test's httpx.Client patch serves later tests; test:test_token_counts_identical_from_file_vs_from_pretrained
+    hub_http = sys.modules.get("huggingface_hub.utils._http")
+    if hub_http is not None:
+        hub_http.close_session()
 
 
 # Bug #1370: module-level `rich.console.Console()` singletons that cache

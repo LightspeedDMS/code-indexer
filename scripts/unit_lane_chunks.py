@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -229,24 +230,191 @@ class ChunkResult:
 _CHUNK_WRAPPER = 'set -e; source "$1"; real_home_lane_env "$2"; shift 2; exec "$@"'
 
 
-def _chunk_env(scratch: Path, extra_env: Dict[str, str]) -> Dict[str, str]:
+# ^ external /proc/self/mounts escapes space, tab, newline, backslash as octal; doc:man5-fstab
+_MOUNT_ESCAPE = re.compile(r"\\([0-7]{3})")
+
+
+def mount_fstype(path: Path, mounts: str) -> str:
+    target = path.as_posix()
+    best, fstype = "", ""
+    for line in mounts.splitlines():
+        fields = line.split()
+        if len(fields) < 3:
+            continue
+        point = _MOUNT_ESCAPE.sub(lambda m: chr(int(m.group(1), 8)), fields[1])
+        inside = point == "/" or target == point or target.startswith(point + "/")
+        if inside and len(point) > len(best):
+            best, fstype = point, fields[2]
+    if not best:
+        raise ValueError(f"no mount contains {target}")
+    return fstype
+
+
+class TmpRootRefused(RuntimeError):
+    pass
+
+
+def require_tmpfs(path: Path, mounts_file: Path = Path("/proc/self/mounts")) -> None:
+    if not path.is_dir():
+        raise TmpRootRefused(f"lane TMPDIR root {path} is not a directory")
+    if not os.access(path, os.W_OK | os.X_OK):
+        raise TmpRootRefused(f"lane TMPDIR root {path} is not writable")
+    fstype = mount_fstype(path.resolve(), mounts_file.read_text(encoding="utf-8"))
+    if fstype != "tmpfs":
+        raise TmpRootRefused(
+            f"lane TMPDIR root {path} is not on tmpfs ({fstype}); the lanes keep "
+            "pytest temp data in RAM and never fall back to disk"
+        )
+
+
+_TMP_ROOT_PREFIX = "cidx-lane-tmp-"
+_TMP_CLAIM_PREFIX = ".cidx-lane-tmp-claim-"
+_OWNER_FILE = "owner"
+OWNERLESS_GRACE_SECONDS = 60.0
+# ^ external starttime = field 22 of /proc/PID/stat = index 19 after the ')' closing comm; doc:man5-proc#stat
+_STAT_STARTTIME_INDEX = 19
+
+
+_PROC_ROOT = Path("/proc")
+
+
+class OwnerLivenessUnknown(RuntimeError):
+    pass
+
+
+def process_start_ticks(pid: int, proc_root: Path = _PROC_ROOT) -> Optional[int]:
+    stat_path = proc_root / str(pid) / "stat"
+    try:
+        stat_text = stat_path.read_text(encoding="utf-8")
+    except (FileNotFoundError, ProcessLookupError):
+        return None
+    except OSError as exc:
+        # ^ why only a missing entry proves death; any other error reads as dead => a live lane's root deleted
+        raise OwnerLivenessUnknown(
+            f"{stat_path} unreadable ({type(exc).__name__})"
+        ) from exc
+    try:
+        return int(stat_text.rsplit(")", 1)[1].split()[_STAT_STARTTIME_INDEX])
+    except (IndexError, ValueError) as exc:
+        raise OwnerLivenessUnknown(f"{stat_path} unparseable") from exc
+
+
+def _owner_alive(root: Path, proc_root: Path) -> Optional[bool]:
+    try:
+        pid_text, ticks_text = (root / _OWNER_FILE).read_text("utf-8").split()
+        owner_pid, owner_ticks = int(pid_text), int(ticks_text)
+    except (OSError, ValueError):
+        return None
+    # ^ why pid + start ticks, not pid alone; a reused pid must not keep a dead lane's root
+    return process_start_ticks(owner_pid, proc_root) == owner_ticks
+
+
+def _is_stale(root: Path, now: float, proc_root: Path) -> bool:
+    alive = _owner_alive(root, proc_root)
+    if alive is None:
+        # ^ order a claim dir gets its owner before its rename; ownerless = mid-claim or pre-owner legacy
+        return now - root.lstat().st_mtime > OWNERLESS_GRACE_SECONDS
+    return not alive
+
+
+def sweep_stale_tmp_roots(parent: Path, proc_root: Path = _PROC_ROOT) -> List[Path]:
+    # ^ why owner liveness, not "found under the lane lock"; tests run unit_lane_start under private locks inside a live lane
+    now = time.time()
+    stale = []
+    for entry in sorted(parent.iterdir()):
+        if not entry.name.startswith((_TMP_ROOT_PREFIX, _TMP_CLAIM_PREFIX)):
+            continue
+        try:
+            info = entry.lstat()
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+                continue
+            if _is_stale(entry, now, proc_root):
+                stale.append(entry)
+        except FileNotFoundError:
+            continue
+        except OwnerLivenessUnknown as unknown:
+            print(f"kept {entry}: owner liveness unknown ({unknown})", file=sys.stderr)
+    leftovers = remove_trees(stale)
+    if leftovers:
+        raise TmpCleanupFailed(leftovers)
+    return stale
+
+
+def create_tmp_root(parent: Path, owner_pid: int) -> Path:
+    ticks = process_start_ticks(owner_pid)
+    if ticks is None:
+        raise TmpRootRefused(f"lane owner pid {owner_pid} is not running")
+    claim = Path(tempfile.mkdtemp(prefix=_TMP_CLAIM_PREFIX, dir=parent))
+    (claim / _OWNER_FILE).write_text(f"{owner_pid} {ticks}\n", encoding="utf-8")
+    root = parent / (_TMP_ROOT_PREFIX + claim.name[len(_TMP_CLAIM_PREFIX) :])
+    os.rename(claim, root)
+    return root
+
+
+def _chunk_env(
+    scratch: Path, tmpdir: Path, extra_env: Dict[str, str]
+) -> Dict[str, str]:
     env = {k: v for k, v in os.environ.items() if k != "CIDX_REAL_HOME_GUARD_DIR"}
     data_dir = str(scratch / "server-home")
     env["CIDX_SERVER_DATA_DIR"] = data_dir
     env["CIDX_DATA_DIR"] = data_dir
     env.update(extra_env)
+    # ^ perf pytest tmp_path on tmpfs, not the disk; 8 chunks contending for fsyncs timed out tests; #2297
+    env["TMPDIR"] = str(tmpdir)
     return env
 
 
-# ^ hazard proc.poll() before this => leader reaped, its group id lost, descendants survive; test:test_run_chunks_reaps_descendants_of_a_chunk_that_already_exited
-def _stop(procs: List["subprocess.Popen[bytes]"]) -> None:
-    for proc in procs:
+# ^ external pgrp = field 5 of /proc/PID/stat = index 2 after the ')' closing comm; doc:man5-proc#stat
+_STAT_PGRP_INDEX = 2
+_STAT_STATE_INDEX = 0
+_STOP_LOCK = threading.Lock()
+# ^ perf bound on joining one waiter after _stop = its group stop grace + one TMPDIR removal
+_WAITER_JOIN_SECONDS = 30.0
+
+
+def _group_survivors(pgid: int) -> List[int]:
+    survivors = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit() or int(entry) == pgid:
+            continue
+        try:
+            fields = (
+                Path(f"/proc/{entry}/stat").read_text("utf-8").rsplit(")", 1)[1].split()
+            )
+        except (OSError, IndexError):
+            continue
+        if fields[_STAT_PGRP_INDEX] == str(pgid) and fields[_STAT_STATE_INDEX] != "Z":
+            survivors.append(int(entry))
+    return sorted(survivors)
+
+
+def _stop_group(
+    proc: "subprocess.Popen[bytes]", report_chunk: Optional[int] = None
+) -> None:
+    with _STOP_LOCK:
+        # ^ hazard signalling after the leader is reaped => its pid may name an unrelated reused group
+        if proc.returncode is not None:
+            return
+        survivors = _group_survivors(proc.pid) if report_chunk is not None else []
+        if survivors:
+            print(
+                f"warning: chunk {report_chunk} leader exited with its process group "
+                f"still running (pids {', '.join(map(str, survivors))}); stopping "
+                "them before its TMPDIR is removed",
+                file=sys.stderr,
+            )
         if not terminate_process_group(proc):
             print(
                 f"warning: chunk pid {proc.pid}: its process group could not be "
                 "signalled; only the chunk itself was killed",
                 file=sys.stderr,
             )
+
+
+# ^ hazard proc.poll() before this => leader reaped, its group id lost, descendants survive; test:test_run_chunks_reaps_descendants_of_a_chunk_that_already_exited
+def _stop(procs: List["subprocess.Popen[bytes]"]) -> None:
+    for proc in procs:
+        _stop_group(proc)
         if proc.returncode is None:
             print(f"error: chunk pid {proc.pid} was not reaped", file=sys.stderr)
 
@@ -258,6 +426,7 @@ def run_chunks(
     common_args: List[str],
     log_paths: List[Path],
     scratch_root: Path,
+    tmp_root: Path,
     guard: Path,
     extra_env: Dict[str, str],
     cwd: Path = Path("."),
@@ -269,6 +438,7 @@ def run_chunks(
             f"{len(chunks)} chunks need {len(chunks)} logs, got {len(log_paths)}"
         )
     scratches: List[Path] = []
+    tmpdirs: List[Path] = []
     procs: List["subprocess.Popen[bytes]"] = []
     done: Dict[int, float] = {}
     waiters: List[threading.Thread] = []
@@ -281,6 +451,12 @@ def run_chunks(
                 )
             )
             scratches.append(scratch)
+            tmpdir = Path(
+                tempfile.mkdtemp(
+                    prefix=f"cidx-lane-chunk{index + 1}-tmp-", dir=tmp_root
+                )
+            )
+            tmpdirs.append(tmpdir)
             log.parent.mkdir(parents=True, exist_ok=True)
             argv = [
                 "bash",
@@ -295,7 +471,7 @@ def run_chunks(
                 proc = subprocess.Popen(
                     argv + command + common_args + chunk.files,
                     cwd=cwd,
-                    env=_chunk_env(scratch, extra_env),
+                    env=_chunk_env(scratch, tmpdir, extra_env),
                     stdin=subprocess.DEVNULL,
                     stdout=handle,
                     stderr=subprocess.STDOUT,
@@ -308,7 +484,7 @@ def run_chunks(
                 with pgid_file.open("a", encoding="utf-8") as pgids:
                     pgids.write(f"{proc.pid}\n")
             waiter = threading.Thread(
-                target=_wait_chunk, args=(proc, index, done), daemon=True
+                target=_wait_chunk, args=(proc, index, done, tmpdir), daemon=True
             )
             waiter.start()
             waiters.append(waiter)
@@ -316,12 +492,17 @@ def run_chunks(
             waiter.join()
     finally:
         _stop(procs)
+        # ^ order waiters finish their own TMPDIR removal before the leftover check below
+        for waiter in waiters:
+            waiter.join(timeout=_WAITER_JOIN_SECONDS)
         # ^ coupled deletion after _stop with scripts/unit_lane_common.sh:_unit_lane_cleanup; a file left = groups to kill
         if pgid_file is not None:
             pgid_file.unlink(missing_ok=True)
         for scratch in scratches:
             shutil.rmtree(scratch, ignore_errors=True)
-    return [
+        # ^ order removal attempted and reported on interrupt too; the interrupt keeps its own exit code
+        leftovers = remove_trees(tmpdirs)
+    results = [
         ChunkResult(
             i,
             proc.returncode if proc.returncode is not None else -1,
@@ -331,6 +512,38 @@ def run_chunks(
         )
         for i, proc in enumerate(procs)
     ]
+    if leftovers:
+        raise TmpCleanupFailed(leftovers, results)
+    return results
+
+
+class TmpCleanupFailed(RuntimeError):
+    def __init__(self, paths: List[Path], results: Optional[List[ChunkResult]] = None):
+        super().__init__(
+            "tmpfs data not removed (RAM stays used): " + ", ".join(map(str, paths))
+        )
+        self.paths = paths
+        self.results = results or []
+
+
+def remove_trees(paths: Iterable[Path]) -> List[Path]:
+    leftovers = []
+    for path in paths:
+        try:
+            shutil.rmtree(path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            print(
+                f"FAILED: could not remove {path} ({type(exc).__name__})",
+                file=sys.stderr,
+            )
+            leftovers.append(path)
+            continue
+        if os.path.lexists(path):
+            print(f"FAILED: {path} still exists after removal", file=sys.stderr)
+            leftovers.append(path)
+    return leftovers
 
 
 class LaneBusy(RuntimeError):
@@ -359,7 +572,7 @@ def acquire_lane_lock(fd: int, lane: str, pid: int) -> None:
 
 
 def _wait_chunk(
-    proc: "subprocess.Popen[bytes]", index: int, done: Dict[int, float]
+    proc: "subprocess.Popen[bytes]", index: int, done: Dict[int, float], tmpdir: Path
 ) -> None:
     # ^ why WNOWAIT, not proc.wait(); the unreaped leader keeps its group id for _stop
     try:
@@ -367,6 +580,10 @@ def _wait_chunk(
     except ChildProcessError:
         pass
     done[index] = time.monotonic()
+    # ^ order group stopped before its TMPDIR is removed; a descendant would lose its files mid-run
+    _stop_group(proc, report_chunk=index + 1)
+    # ^ perf tmpfs is RAM; a finished chunk frees its TMPDIR now, not when the slowest chunk ends
+    shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -390,6 +607,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--log-prefix", required=True)
     run.add_argument("--timestamp", required=True)
     run.add_argument("--scratch-root", required=True)
+    run.add_argument("--tmp-root", required=True)
     run.add_argument("--guard", required=True)
     run.add_argument("--env", action="append", default=[])
     run.add_argument("--lock-fd", type=int)
@@ -398,6 +616,9 @@ def _parser() -> argparse.ArgumentParser:
     locker.add_argument("--fd", type=int, required=True)
     locker.add_argument("--pid", type=int, required=True)
     locker.add_argument("--lane", required=True)
+    tmp_root = sub.add_parser("tmp-root")
+    tmp_root.add_argument("--parent", default="/dev/shm")
+    tmp_root.add_argument("--owner-pid", type=int, required=True)
     return parser
 
 
@@ -429,7 +650,16 @@ def _print_plan(chunks: List[Chunk], show_files: bool) -> None:
                 print(f"    {name}")
 
 
+_TMP_ROOT_REFUSED_EXIT = 2
+
+
 def _cmd_run(args: argparse.Namespace, pytest_args: List[str]) -> int:
+    tmp_root = Path(args.tmp_root)
+    try:
+        require_tmpfs(tmp_root)
+    except TmpRootRefused as refused:
+        print(f"REFUSED: {refused}", file=sys.stderr)
+        return _TMP_ROOT_REFUSED_EXIT
     chunks, ignores = _build_plan(args)
     _print_plan(chunks, show_files=False)
     if not chunks:
@@ -446,18 +676,24 @@ def _cmd_run(args: argparse.Namespace, pytest_args: List[str]) -> int:
         root / args.history_dir / f"{args.log_prefix}-{args.timestamp}-chunk{k}.log"
         for k in range(1, len(chunks) + 1)
     ]
-    results = run_chunks(
-        chunks,
-        command=[sys.executable, "-m", "pytest"],
-        common_args=pytest_args + [f"--ignore={ign}" for ign in ignores],
-        log_paths=logs,
-        scratch_root=Path(args.scratch_root),
-        guard=Path(args.guard),
-        extra_env=extra_env,
-        cwd=root,
-        pass_fds=() if args.lock_fd is None else (args.lock_fd,),
-        pgid_file=None if args.pgid_file is None else Path(args.pgid_file),
-    )
+    try:
+        results = run_chunks(
+            chunks,
+            command=[sys.executable, "-m", "pytest"],
+            common_args=pytest_args + [f"--ignore={ign}" for ign in ignores],
+            log_paths=logs,
+            scratch_root=Path(args.scratch_root),
+            tmp_root=tmp_root,
+            guard=Path(args.guard),
+            extra_env=extra_env,
+            cwd=root,
+            pass_fds=() if args.lock_fd is None else (args.lock_fd,),
+            pgid_file=None if args.pgid_file is None else Path(args.pgid_file),
+        )
+    except TmpCleanupFailed as failed:
+        _print_results(failed.results)
+        print(f"FAILED: {failed}", file=sys.stderr)
+        return _LANE_FAILED
     _print_results(results)
     return lane_exit_code([r.exit_code for r in results])
 
@@ -512,6 +748,27 @@ def _print_results(results: List[ChunkResult]) -> None:
 _INTERRUPTED_EXIT = 130
 
 
+def _cmd_tmp_root(args: argparse.Namespace) -> int:
+    parent = Path(args.parent)
+    try:
+        require_tmpfs(parent)
+        swept = sweep_stale_tmp_roots(parent)
+        root = create_tmp_root(parent, args.owner_pid)
+    except TmpRootRefused as refused:
+        print(f"REFUSED: {refused}", file=sys.stderr)
+        return _TMP_ROOT_REFUSED_EXIT
+    except TmpCleanupFailed as failed:
+        print(f"FAILED: stale lane {failed}", file=sys.stderr)
+        return _LANE_FAILED
+    except OwnerLivenessUnknown as unknown:
+        print(f"FAILED: lane owner {unknown}", file=sys.stderr)
+        return _LANE_FAILED
+    for stale in swept:
+        print(f"removed stale lane TMPDIR root {stale}", file=sys.stderr)
+    print(root)
+    return 0
+
+
 def _interrupt(signum: int, frame: object) -> None:
     # ^ hazard a second TERM/INT inside run_chunks' finally => cleanup aborted, chunk groups survive; test:test_run_cleanup_survives_a_second_signal
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
@@ -545,6 +802,8 @@ def main(argv: List[str]) -> int:
         except KeyboardInterrupt:
             print("interrupted: chunks stopped, scratch removed", file=sys.stderr)
             return _INTERRUPTED_EXIT
+    if args.command == "tmp-root":
+        return _cmd_tmp_root(args)
     try:
         acquire_lane_lock(args.fd, args.lane, args.pid)
     except LaneBusy as busy:

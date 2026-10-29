@@ -491,6 +491,24 @@ class TestRecoveryProbe(unittest.TestCase):
             "Recovery probe must stop when provider is no longer 'down'"
         )
 
+    def test_reset_instance_stops_the_dropped_singletons_recovery_probes(
+        self,
+    ) -> None:
+        monitor = ProviderHealthMonitor.get_instance()
+        for _ in range(DEFAULT_DOWN_CONSECUTIVE_FAILURES):
+            monitor.record_call("voyage-ai", latency_ms=0.0, success=False)
+        probe = monitor._probe_threads["voyage-ai"]
+        assert probe.is_alive()
+
+        ProviderHealthMonitor.reset_instance()
+
+        probe.join(timeout=ProviderHealthMonitor.PROBE_JOIN_TIMEOUT_SEC)
+        assert not probe.is_alive(), (
+            "a dropped singleton's recovery probe keeps probing and recording "
+            "failures on its provider for the rest of the process"
+        )
+        assert monitor._probe_threads == {}
+
     def test_probe_does_not_double_start(self) -> None:
         """Calling _start_recovery_probe twice must not create duplicate threads."""
         monitor = ProviderHealthMonitor()

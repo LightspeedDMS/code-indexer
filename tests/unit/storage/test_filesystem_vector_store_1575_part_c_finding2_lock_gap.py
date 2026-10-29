@@ -9,30 +9,26 @@ before returning), then SEPARATELY calls
 ``_update_hnsw_incrementally_realtime`` ->
 ``HNSWIndexManager.save_incremental_update`` -- which does its OWN
 read-merge-write of ``collection_meta.json`` under a DIFFERENT lock file,
-``.metadata.lock``, with NO participation from ``.index_rebuild.lock`` at
-all. A concurrent writer holding ONLY ``.index_rebuild.lock`` (another
-dirty-before-write, or a full Part C rebuild) therefore provides NO mutual
-exclusion against this real-time watch-mode metadata write.
+``.metadata.lock``. A concurrent writer holding ONLY ``.index_rebuild.lock``
+(another dirty-before-write, or a full Part C rebuild) therefore provided
+NO mutual exclusion against this real-time watch-mode metadata write until
+the fix wrapped the whole real-time update in ``.index_rebuild.lock``.
 
-Discriminating design (no mocking of the code under test -- a real,
-unmodified ``upsert_points(watch_mode=True)`` call runs end to end; only
-pure filesystem observation is used): ``save_incremental_update`` writes
-the new HNSW index via a temp file (``.tmp_hnsw_*.tmp`` in the collection
-directory) before atomically replacing the real one. That temp file's
-on-disk EXISTENCE is an unambiguous, structural marker that execution is
-INSIDE ``save_incremental_update`` -- necessarily long after the earlier,
-already-correct dirty-before-write released its own lock. The test polls
-for that marker and, the INSTANT it appears, checks whether
-``.index_rebuild.lock`` is ALSO contended at that exact moment. Pre-fix,
-it never is (this call path never touches that lock). Post-fix, the fix
-wraps the ENTIRE real-time update -- including this exact save step --
-in that lock, so the two conditions are true simultaneously for the whole
-window the temp file exists.
+Discriminating design: a real, unmodified ``upsert_points(watch_mode=True)``
+runs end to end. ``save_incremental_update`` publishes the new HNSW index
+by ``os.replace`` of its own ``.tmp_hnsw_*.tmp`` temp file; that call is
+unambiguously INSIDE the save step, long after the dirty-before-write
+released its lock. An observation spy around ``os.replace`` (it calls the
+real ``os.replace`` afterwards) checks, at that exact instant, whether
+``.index_rebuild.lock`` is held. The check runs synchronously in the
+saving thread, so it never races the save -- the earlier version polled
+for the temp file from a second thread and lost the race on tmpfs, where
+the whole save finishes between two polls.
 """
 
 import fcntl
-import threading
-import time
+import os
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -42,9 +38,6 @@ from code_indexer.utils.file_locking import nfs_safe_flock, nfs_safe_funlock
 
 VECTOR_DIM = 16
 
-_POLL_INTERVAL_SECONDS = 0.001
-_JOIN_TIMEOUT_SECONDS = 20
-_POLL_MAX_ATTEMPTS = int(_JOIN_TIMEOUT_SECONDS / _POLL_INTERVAL_SECONDS)
 _SEED_POINT_COUNT = 80
 
 
@@ -76,24 +69,6 @@ def _is_contended_once(lock_file_path) -> bool:
         return False
 
 
-def _wait_for_hnsw_tmp_file_and_check_lock(
-    collection_path, index_rebuild_lock_path, still_running
-) -> "tuple[bool, bool]":
-    """Polls until a `.tmp_hnsw_*.tmp` file (save_incremental_update's own
-    real, unmodified temp-write step) is observed on disk, OR the worker
-    finishes, OR the bound is exhausted. Returns
-    (tmp_file_seen, lock_contended_at_that_moment).
-    """
-    attempts = 0
-    while still_running() and attempts < _POLL_MAX_ATTEMPTS:
-        tmp_files = list(collection_path.glob(".tmp_hnsw_*.tmp"))
-        if tmp_files:
-            return True, _is_contended_once(index_rebuild_lock_path)
-        attempts += 1
-        time.sleep(_POLL_INTERVAL_SECONDS)
-    return False, False
-
-
 def _seed_baseline_collection(store):
     store.begin_indexing("coll")
     _ = store.upsert_points(
@@ -105,58 +80,44 @@ def _seed_baseline_collection(store):
 
 @pytest.mark.timeout(30)
 def test_watch_mode_realtime_hnsw_update_holds_index_rebuild_lock_during_tmp_save(
-    tmp_path,
+    tmp_path, monkeypatch
 ):
-    """The instant save_incremental_update's own real temp-file save step
-    is observed on disk (structurally proving execution is inside that
-    method, long after the earlier dirty-before-write released its lock),
-    .index_rebuild.lock must ALSO be contended -- proving the real-time
-    update's metadata write is guarded by the SAME lock every other
-    collection_meta.json writer in this file uses.
+    """At the instant save_incremental_update publishes its own temp-file
+    save (os.replace of .tmp_hnsw_*.tmp), .index_rebuild.lock must be held
+    -- the real-time update's metadata write is guarded by the SAME lock
+    every other collection_meta.json writer in this file uses.
     """
     store = FilesystemVectorStore(base_path=tmp_path)
     _ = store.create_collection("coll", vector_size=VECTOR_DIM)
     collection_path = tmp_path / "coll"
     _seed_baseline_collection(store)
-
     lock_file_path = collection_path / ".index_rebuild.lock"
-    errors: list = []
-    errors_lock = threading.Lock()
-    worker_done = threading.Event()
 
-    def _worker():
-        try:
-            store.upsert_points(
-                "coll",
-                [_point("watchpoint", "src/watchpoint.py", 999)],
-                watch_mode=True,
-            )
-        except Exception as exc:  # pragma: no cover - failure path
-            with errors_lock:
-                errors.append(exc)
-        finally:
-            worker_done.set()
+    real_replace = os.replace
+    contended_at_publish: list = []
 
-    worker_thread = threading.Thread(target=_worker)
-    worker_thread.start()
-    tmp_file_seen, lock_contended = _wait_for_hnsw_tmp_file_and_check_lock(
-        collection_path, lock_file_path, still_running=lambda: not worker_done.is_set()
+    def _observe_publish(src, dst, *args, **kwargs):
+        if Path(os.fspath(src)).name.startswith(".tmp_hnsw_"):
+            contended_at_publish.append(_is_contended_once(lock_file_path))
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", _observe_publish)
+    store.upsert_points(
+        "coll",
+        [_point("watchpoint", "src/watchpoint.py", 999)],
+        watch_mode=True,
     )
-    worker_thread.join(timeout=_JOIN_TIMEOUT_SECONDS)
+    monkeypatch.setattr(os, "replace", real_replace)
 
-    assert not worker_thread.is_alive(), "worker thread failed to terminate in time"
-    assert not errors, f"watch-mode upsert_points raised: {errors}"
-    assert tmp_file_seen, (
-        "never observed save_incremental_update's own .tmp_hnsw_*.tmp "
-        "temp-write file on disk within the bounded poll -- test setup "
-        "issue, not proof of anything about the finding"
+    assert contended_at_publish, (
+        "the watch-mode upsert never published a .tmp_hnsw_*.tmp file -- "
+        "save_incremental_update did not run, so nothing was proven"
     )
-    assert lock_contended, (
-        ".index_rebuild.lock was NOT contended at the exact moment "
-        "save_incremental_update's own temp-file save step was observed "
-        "on disk -- the real-time incremental update's metadata write "
-        "uses ONLY the independent .metadata.lock, providing NO mutual "
-        "exclusion against a concurrent full/incremental Part C rebuild "
-        "or another dirty-before-write that both read-merge-write the "
-        "same collection_meta.json"
+    assert all(contended_at_publish), (
+        ".index_rebuild.lock was NOT held when save_incremental_update "
+        "published its temp-file save -- the real-time incremental update's "
+        "metadata write uses ONLY the independent .metadata.lock, providing NO "
+        "mutual exclusion against a concurrent full/incremental Part C rebuild "
+        "or another dirty-before-write that both read-merge-write the same "
+        "collection_meta.json"
     )

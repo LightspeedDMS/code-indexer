@@ -15,8 +15,12 @@ import tempfile
 import shutil
 from pathlib import Path
 
+import pytest
 
-def test_daemon_selects_main_collection_not_temporal():
+
+# ^ why both creation orders, not one; iterdir order is per filesystem (XFS by name hash, tmpfs by creation)
+@pytest.mark.parametrize("creation_order", ["temporal_first", "main_first"])
+def test_daemon_selects_main_collection_not_temporal(creation_order):
     """
     Test that daemon selects MAIN collection when multiple collections exist.
 
@@ -55,8 +59,11 @@ def test_daemon_selects_main_collection_not_temporal():
         temporal_collection = index_dir / "code-indexer-temporal"
         main_collection = index_dir / "voyage-code-3"
 
-        temporal_collection.mkdir()
-        main_collection.mkdir()
+        pair = [temporal_collection, main_collection]
+        for collection_dir in (
+            pair if creation_order == "temporal_first" else pair[::-1]
+        ):
+            collection_dir.mkdir()
 
         # Create minimal metadata and HNSW index for both collections
         import json
@@ -95,20 +102,14 @@ def test_daemon_selects_main_collection_not_temporal():
             id_index = {"0": collection_path / "vectors" / "dummy.json"}
             id_manager.save_index(collection_path, id_index)
 
-        # Get list of collections to verify alphabetical ordering (the bug trigger)
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
         vector_store = FilesystemVectorStore(
             base_path=index_dir, project_root=project_path
         )
         collections = vector_store.list_collections()
-
-        # Verify test setup: temporal collection is alphabetically first (this triggers the bug)
-        assert collections[0] == "code-indexer-temporal", (
-            "Test setup verification: temporal collection should be alphabetically first"
-        )
-        assert collections[1] == "voyage-code-3", (
-            "Test setup verification: main collection should be alphabetically second"
+        assert sorted(collections) == ["code-indexer-temporal", "voyage-code-3"], (
+            "Test setup verification: both collections must be listed"
         )
 
         # Initialize daemon service and load indexes
