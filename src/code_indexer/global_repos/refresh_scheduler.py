@@ -2269,7 +2269,7 @@ class RefreshScheduler:
         # Story #482 PATH C: Use a named function (not a lambda) so
         # BackgroundJobManager can detect and inject progress_callback.
         #
-        # EVO-64385: tracked_by_caller=True — submit_job() below claims
+        # tracked_by_caller=True — submit_job() below claims
         # (global_repo_refresh, alias_name) in the job tracker (Bug #1065), and
         # that row holds the idx_active_job_per_repo slot for the whole run. The
         # worker must NOT register a second job for the same pair or it collides
@@ -2529,7 +2529,7 @@ class RefreshScheduler:
                 BackgroundJobManager job, whose submit_job() has ALREADY claimed
                 (global_repo_refresh, alias_name) in the job tracker. Registering
                 again here would insert a SECOND active row for the same pair --
-                see the EVO-64385 note below.
+                see the tracker-registration note below.
 
         Returns:
             Dict with success status and details for BackgroundJobManager tracking
@@ -2541,7 +2541,7 @@ class RefreshScheduler:
         # sees it and the auto-updater waits before restarting.
         # Guard with is not None — CLI mode has no tracker.
         #
-        # EVO-64385: ...but ONLY when nobody has registered us already. When this
+        # ...but ONLY when nobody has registered us already. When this
         # refresh runs under a BackgroundJobManager job, submit_job() (Bug #1065)
         # has already called register_job_if_no_conflict() for the SAME
         # (operation_type="global_repo_refresh", repo_alias=alias_name) pair, and
@@ -3533,7 +3533,7 @@ class RefreshScheduler:
             # above (which derives status from this method's returned dict,
             # not from _tracker_raised) -- never duplicate that call here.
             # Bug #935: always unregister from JobTracker (finally runs on return AND raise).
-            # EVO-64385: only for the job WE registered. When tracked_by_caller,
+            # ...but only for the job WE registered. When tracked_by_caller,
             # `refresh-{alias}` was never inserted by us and the outer
             # BackgroundJobManager job owns its own completion -- completing or
             # failing it here would touch a job that is not ours.

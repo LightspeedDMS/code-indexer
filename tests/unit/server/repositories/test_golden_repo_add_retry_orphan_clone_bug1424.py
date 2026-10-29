@@ -10,7 +10,7 @@ AND every future manual re-add of that alias fails forever.
 
 Fix: execute_add_golden_repo_work proactively removes such an ORPHAN clone via
 _remove_orphan_clone_for_retry(repo_url, alias) before cloning. Guards:
-  - never touch in-place-registration content (EVO-64228)
+  - never touch in-place-registration content
   - never remove a clone whose golden_repos row IS committed (near-complete
     registration, not an orphan)
 """

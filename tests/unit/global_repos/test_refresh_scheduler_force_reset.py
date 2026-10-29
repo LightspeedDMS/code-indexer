@@ -495,7 +495,7 @@ class TestSubmitRefreshJobForceReset:
         ) as mock_execute:
             captured_funcs[0]()  # type: ignore[misc]
 
-        # EVO-64385: the worker runs under submit_job's already-claimed job,
+        # The worker runs under submit_job's already-claimed job,
         # so it must tell _execute_refresh not to register a second one.
         mock_execute.assert_called_once_with(
             alias_name,
@@ -545,7 +545,7 @@ class TestSubmitRefreshJobForceReset:
         ) as mock_execute:
             captured_funcs[0]()  # type: ignore[misc]
 
-        # EVO-64385: the worker runs under submit_job's already-claimed job,
+        # The worker runs under submit_job's already-claimed job,
         # so it must tell _execute_refresh not to register a second one.
         mock_execute.assert_called_once_with(
             alias_name,
@@ -589,7 +589,7 @@ class TestSubmitRefreshJobForceReset:
             captured_funcs[0]()  # type: ignore[misc]
 
         # Default must be force_reset=False
-        # EVO-64385: the worker runs under submit_job's already-claimed job,
+        # The worker runs under submit_job's already-claimed job,
         # so it must tell _execute_refresh not to register a second one.
         mock_execute.assert_called_once_with(
             alias_name,

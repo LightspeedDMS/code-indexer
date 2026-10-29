@@ -458,7 +458,7 @@ class TestCohereErrorHandling401Bug595Issue2:
     def test_401_raises_value_error_immediately_without_retry_sleeps(
         self, cohere_provider
     ):
-        """Bug (EVO-64222): a 401 on the indexing path (retry=True) must raise
+        """A 401 on the indexing path (retry=True) must raise
         ValueError on the FIRST occurrence — before any back-off sleep — so a
         doomed pass fails in milliseconds instead of retrying max_retries times.
         """

@@ -1,5 +1,5 @@
 """
-Unit tests for ConfigService golden_repos.externally_managed (EVO-64493).
+Unit tests for ConfigService golden_repos.externally_managed.
 
 Verifies the flag is exposed in get_all_settings() and can be written via
 update_setting (bool and string forms), mirroring the description_refresh_enabled

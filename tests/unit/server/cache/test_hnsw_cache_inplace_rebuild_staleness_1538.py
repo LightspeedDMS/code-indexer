@@ -505,7 +505,7 @@ def test_untouched_index_is_still_a_plain_cache_hit(
 def test_rebuild_after_caching_is_still_detected(
     shard: Tuple[HNSWIndexCache, Path, Path],
 ) -> None:
-    """The pre-existing (EVO-64244) guarantee stays intact: a rebuild that
+    """The pre-existing (mtime-based invalidation) guarantee stays intact: a rebuild that
     happens cleanly after the entry was cached is picked up."""
     cache, collection_dir, index_file = shard
 

@@ -4878,7 +4878,7 @@ def index(
             console.print(f"\n🔄 Indexing additional provider: {_extra_provider}")
             config.embedding_provider = _extra_provider  # type: ignore[assignment]
             _extra_embedding = EmbeddingProviderFactory.create(config, console)
-            # Bug (EVO-64222): use a real authenticating probe (test_api=True)
+            # Use a real authenticating probe (test_api=True)
             # here rather than the shallow default (test_api=False, which passes
             # whenever a key is merely present). A secondary provider with an
             # invalid credential is skipped now, before its doomed pass would

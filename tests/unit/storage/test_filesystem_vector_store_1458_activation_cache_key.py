@@ -303,8 +303,8 @@ class TestChunkLayoutTokenMakesSearchAndInvalidateConsistent:
 
     Isolates the discriminator as the ONLY variable: the SAME FSV instance,
     SAME activation_id, SAME collection path, SAME hnsw_index.bin file (no
-    rebuild between calls, so the existing mtime-based cache invalidation --
-    EVO-64244 Facet 2 -- cannot be what causes any observed miss). The only
+    rebuild between calls, so the existing mtime-based cache invalidation
+    cannot be what causes any observed miss). The only
     thing that changes between the second and third search() call is the
     `chunks_db` discriminator in collection_meta.json, flipped via the real
     production `write_chunks_db_discriminator()` plus a real `ChunkStore`-
@@ -378,7 +378,7 @@ class TestChunkLayoutTokenMakesSearchAndInvalidateConsistent:
         assert hnsw_bin_path.stat().st_mtime_ns == mtime_before_flip, (
             "test setup invariant violated: hnsw_index.bin must NOT be "
             "touched by the discriminator flip, or a mtime-based cache-bust "
-            "(EVO-64244 Facet 2) would confound this proof"
+            "would confound this proof"
         )
 
         # Search #3: SAME activation_id, SAME path, SAME hnsw_index.bin
@@ -467,7 +467,7 @@ class TestInvalidateUsesResolvedPathMatchingSearch:
     Directly compares the ACTUAL key strings each call site passes to the
     shared cache classes (via real spies on HNSWIndexCache.get_or_load/
     invalidate), rather than relying on hit/miss counters -- those are
-    confounded by EVO-64244 Facet 2's independent mtime-based
+    confounded by the cache's independent mtime-based
     invalidation (rebuild_hnsw_filtered's HNSW rebuild always bumps
     hnsw_index.bin's mtime, which busts the cache on its own regardless of
     whether the key matches, masking a pure key-mismatch bug)."""

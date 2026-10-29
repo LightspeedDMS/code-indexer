@@ -1,5 +1,5 @@
 """
-EVO-64245: a partially-built collection must be reported unhealthy.
+A partially-built collection must be reported unhealthy.
 
 Indexing writes ``vector_*.json`` shards incrementally and only renames
 ``hnsw_index.bin`` into place at the very end. If it is interrupted in between

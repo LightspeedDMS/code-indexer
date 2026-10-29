@@ -1,5 +1,5 @@
 """
-Unit tests for GoldenReposConfig.externally_managed (EVO-64493).
+Unit tests for GoldenReposConfig.externally_managed.
 
 The flag lets an external owner manage golden-repo presence/refresh; the server
 then only indexes/serves. These tests pin: defaults to False, round-trips

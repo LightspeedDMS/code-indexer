@@ -8,7 +8,7 @@ the full end-to-end reproduction using the real dedup machinery).
 
 This file proves execute_refresh_for_claimed_job()'s own wiring in
 isolation, following the exact pattern established for the sibling
-EVO-64385 fix in test_refresh_scheduler_double_registration_64385.py: the
+double-registration fix in test_refresh_scheduler_double_registration.py: the
 REAL _resolve_global_alias() and _execute_refresh()/_execute_refresh_impl()
 run unmodified, with only the filesystem collaborator
 (alias_manager.read_alias) and the alias registry patched, plus a
@@ -117,7 +117,7 @@ class TestExecuteRefreshForClaimedJobRunsTheRealRefresh:
     def test_tracked_by_caller_skips_second_tracker_registration(
         self, tmp_path, golden_repos_dir
     ):
-        """EVO-64385: the caller (DistributedJobWorkerService) already owns
+        """The caller (DistributedJobWorkerService) already owns
         the idx_active_job_per_repo slot for this job -- execute_refresh_for_
         claimed_job() must pass tracked_by_caller=True through to
         _execute_refresh(), so the JobTracker is never re-registered here."""

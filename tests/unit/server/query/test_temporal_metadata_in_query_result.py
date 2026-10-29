@@ -248,7 +248,7 @@ class TestExecuteTemporalQueryMetadataExtraction:
                 "commit_date": "2025-05-28",
                 "author_name": "Ryan Pearson",
                 "author_email": "ryan.pearson@example.com",
-                "commit_message": "EVO-45522 Making changes to the Layout.",
+                "commit_message": "Making changes to the Layout.",
                 "diff_type": "modified",
             },
             temporal_context={
@@ -322,10 +322,7 @@ class TestExecuteTemporalQueryMetadataExtraction:
             assert result.metadata["commit_date"] == "2025-05-28"
             assert result.metadata["author_name"] == "Ryan Pearson"
             assert result.metadata["author_email"] == "ryan.pearson@example.com"
-            assert (
-                result.metadata["commit_message"]
-                == "EVO-45522 Making changes to the Layout."
-            )
+            assert result.metadata["commit_message"] == "Making changes to the Layout."
             assert result.metadata["diff_type"] == "modified"
 
     def test_execute_temporal_query_includes_temporal_context(
@@ -433,13 +430,13 @@ class TestExecuteTemporalQueryMetadataExtraction:
                 "commit_date": "2025-05-28",
                 "author_name": "Ryan Pearson",
                 "author_email": "ryan.pearson@example.com",
-                "commit_message": "EVO-45522 Making changes to the PartsTransferPanel Layout.",
+                "commit_message": "Making changes to the PartsTransferPanel Layout.",
                 "diff_type": "modified",
             },
             temporal_context={
                 "commit_hash": "0b7b331",
                 "commit_date": "2025-05-28",
-                "commit_message": "EVO-45522 Making changes to the PartsTransferPanel Layout.",
+                "commit_message": "Making changes to the PartsTransferPanel Layout.",
                 "author_name": "Ryan Pearson",
                 "commit_timestamp": TEST_COMMIT_TS,
                 "diff_type": "modified",
@@ -517,7 +514,7 @@ class TestExecuteTemporalQueryMetadataExtraction:
             assert result_dict["metadata"]["author_email"] == "ryan.pearson@example.com"
             assert (
                 result_dict["metadata"]["commit_message"]
-                == "EVO-45522 Making changes to the PartsTransferPanel Layout."
+                == "Making changes to the PartsTransferPanel Layout."
             )
             assert result_dict["metadata"]["diff_type"] == "modified"
 
@@ -527,7 +524,7 @@ class TestExecuteTemporalQueryMetadataExtraction:
             assert result_dict["temporal_context"]["commit_date"] == "2025-05-28"
             assert (
                 result_dict["temporal_context"]["commit_message"]
-                == "EVO-45522 Making changes to the PartsTransferPanel Layout."
+                == "Making changes to the PartsTransferPanel Layout."
             )
             assert result_dict["temporal_context"]["author_name"] == "Ryan Pearson"
             assert result_dict["temporal_context"]["commit_timestamp"] == TEST_COMMIT_TS

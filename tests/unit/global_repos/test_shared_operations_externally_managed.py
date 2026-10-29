@@ -1,6 +1,6 @@
 """
-Unit tests for GlobalRepoOperations.get_config() surfacing externally_managed
-(EVO-64493). This is the read-path the RefreshScheduler uses to decide whether
+Unit tests for GlobalRepoOperations.get_config() surfacing externally_managed.
+This is the read-path the RefreshScheduler uses to decide whether
 golden repos are externally owned; it must surface the flag and default to
 False when config cannot be loaded.
 """

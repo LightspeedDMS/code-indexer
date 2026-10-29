@@ -1,5 +1,5 @@
 """
-EVO-64385: one logical refresh must claim the active-job slot exactly ONCE.
+One logical refresh must claim the active-job slot exactly ONCE.
 
 In cluster (postgres) mode, scheduled global-repo refresh was failing on EVERY
 run -- last_refresh had been frozen since 2026-07-10 on the test cluster -- with:
@@ -124,7 +124,7 @@ class TestRefreshUnderAnOuterJobRegistersOnlyOnce:
     def test_the_refresh_work_actually_runs(self, tmp_path, golden_repos_dir):
         """The whole point: the refresh must EXECUTE, not be skipped or failed.
 
-        The reverted first attempt at EVO-64385 made every node stand down, so
+        The reverted first attempt at this fix made every node stand down, so
         no refresh ran at all. Assert the work is reached.
         """
         tracker = MagicMock()

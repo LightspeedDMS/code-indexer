@@ -1,5 +1,5 @@
 """
-Tests for EVO-64244: HNSWIndexCache must not negatively-cache a missing index.
+HNSWIndexCache must not negatively-cache a missing index.
 
 Facet 1 (critical): a loader that returns (None, id_mapping) because
 hnsw_index.bin does not exist yet must NOT be stored in the cache. A later
@@ -27,7 +27,7 @@ from code_indexer.server.cache.hnsw_index_cache import (
 )
 
 
-class TestHNSWNegativeCacheEVO64244(unittest.TestCase):
+class TestHNSWNegativeCache(unittest.TestCase):
     """get_or_load must never serve a negatively-cached (None) index."""
 
     def setUp(self) -> None:

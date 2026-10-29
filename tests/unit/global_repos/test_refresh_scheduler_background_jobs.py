@@ -177,7 +177,7 @@ class TestRefreshSchedulerBackgroundJobManagerIntegration:
             submitted_func()
 
             # Verify _execute_refresh was called with correct alias.
-            # EVO-64385: the worker runs under the job submit_job already claimed,
+            # The worker runs under the job submit_job already claimed,
             # so it must tell _execute_refresh not to register a second one.
             mock_execute.assert_called_once_with(
                 "test-repo-global",

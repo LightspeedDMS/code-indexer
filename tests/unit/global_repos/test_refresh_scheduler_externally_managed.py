@@ -1,5 +1,5 @@
 """
-Unit tests for RefreshScheduler externally_managed gating (EVO-64493).
+Unit tests for RefreshScheduler externally_managed gating.
 
 When golden repos are externally managed, the scheduler must:
 - NOT launch its periodic refresh thread (start() is a no-op), and

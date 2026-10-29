@@ -851,7 +851,7 @@ class GoldenRepoManager:
                 return
             try:
                 if os.path.islink(clone_path):
-                    # EVO-64228: a symlink must be unlinked, never rmtree'd —
+                    # A symlink must be unlinked, never rmtree'd —
                     # rmtree raises on a symlink and (if followed) could delete
                     # its target. Unlink removes the stale link cleanly.
                     os.unlink(clone_path)
@@ -895,7 +895,7 @@ class GoldenRepoManager:
                 self._remove_orphan_clone_for_retry(repo_url, alias)
                 # Clone repository
                 clone_path = self._clone_repository(repo_url, alias, default_branch)
-                # EVO-64228 (review MAJOR): in index-in-place mode clone_path IS
+                # In index-in-place mode clone_path IS
                 # the source the caller materialized directly into
                 # golden_repos_dir on the shared volume -- cidx did NOT create
                 # it. Never register it for failure cleanup, or a later indexing
@@ -1132,7 +1132,7 @@ class GoldenRepoManager:
         Removes the directory ONLY when ALL hold, so it can never destroy live
         or caller-owned content:
           - the clone dir actually exists, AND
-          - it is NOT an in-place registration (EVO-64228: the content is the
+          - it is NOT an in-place registration (the content is the
             caller's, not cidx's, to delete), AND
           - there is NO committed golden_repos row for the alias (a row means a
             near-complete registration, not an orphan).
@@ -1976,7 +1976,7 @@ class GoldenRepoManager:
         In this case the golden repo was provisioned directly into
         golden_repos_dir/{alias} (e.g. workspace-mcp writing into the shared RWX
         volume), so cidx must index it IN PLACE (no copy) and must NEVER delete
-        it on failure cleanup -- the content is not cidx's to remove (EVO-64228).
+        it on failure cleanup -- the content is not cidx's to remove.
         Single source of truth for the "same-dir" predicate used by both the
         copy short-circuit and the worker's cleanup guard.
         """
@@ -2041,7 +2041,7 @@ class GoldenRepoManager:
                 return clone_path
 
             if self._is_in_place_registration(repo_url, clone_path):
-                # EVO-64228: the source has already been materialized at clone_path
+                # The source has already been materialized at clone_path
                 # (workspace-mcp provisions golden repos directly into golden_repos_dir on
                 # the shared volume), so it is already in place inside golden_repos_dir —
                 # index it as-is instead of copying a directory onto itself.
@@ -2508,7 +2508,7 @@ class GoldenRepoManager:
 
         try:
             if os.path.islink(str(clone_path_obj)):
-                # EVO-64228: a symlink must be unlinked, never rmtree'd — rmtree
+                # A symlink must be unlinked, never rmtree'd — rmtree
                 # raises on a symlink and (if followed) could delete its target.
                 os.unlink(str(clone_path_obj))
             else:

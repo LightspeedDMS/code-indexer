@@ -335,7 +335,7 @@ class HNSWIndexCacheEntry:
     last_accessed: datetime = field(default_factory=datetime.now)
     access_count: int = 0
     index_size_bytes: int = 0
-    # EVO-64244 Facet 2 / Bug #1538: identity fingerprint of hnsw_index.bin,
+    # Bug #1538: identity fingerprint of hnsw_index.bin,
     # captured BEFORE the load that produced this entry (see get_or_load).
     # None when the index_file path was not supplied, or when it could not be
     # stat'd at load time. None does NOT disable checking: once the file
@@ -525,7 +525,7 @@ class HNSWIndexCache:
         - AC3: Access refreshes TTL
         - AC5: Thread-safe operations with deduplication
 
-        EVO-64244: a loader that returns (None, id_mapping) — because
+        A loader that returns (None, id_mapping) — because
         hnsw_index.bin does not exist yet (repo mid-(re)index) — is never
         cached, so a later query re-runs the loader and picks up the built
         index without waiting for TTL/restart. When index_file is provided,
@@ -592,7 +592,7 @@ class HNSWIndexCache:
                         self._eviction_count += 1
                         # Fall through (no return here)
                     elif entry.hnsw_index is None:
-                        # EVO-64244 Facet 1: never serve a negatively-cached
+                        # Never serve a negatively-cached
                         # (None) index. If one somehow exists, treat it as a
                         # miss so the loader re-runs and picks up a now-built
                         # index rather than returning None for the full TTL.
@@ -609,7 +609,7 @@ class HNSWIndexCache:
                         and repo_path not in self._freshness_checking
                         and self._freshness_check_due(entry)
                     ):
-                        # EVO-64244 Facet 2 / Bug #1538: verify the on-disk
+                        # Bug #1538: verify the on-disk
                         # identity, but do the stat OUTSIDE this lock. Claim the
                         # key so concurrent readers of the SAME key serve their
                         # entry instead of piling into the same blocking stat.
@@ -704,7 +704,7 @@ class HNSWIndexCache:
 
             hnsw_index, id_mapping = loader()
 
-            # EVO-64244 Facet 1: never negatively-cache a missing index.
+            # Never negatively-cache a missing index.
             # load_index() returns None when hnsw_index.bin does not exist yet
             # (e.g. a repo mid-(re)index). Caching that None would serve
             # "index not found" for the full TTL even after the graph is built.

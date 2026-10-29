@@ -1,5 +1,5 @@
 """Unit tests for Web UI Config Screen exposure of
-GoldenReposConfig.externally_managed (EVO-64493 code-review follow-up).
+GoldenReposConfig.externally_managed.
 
 Per the "No Environment Variables for Server Settings" invariant, this flag
 MUST be operator-toggleable via the Web Config screen (not backend-only).

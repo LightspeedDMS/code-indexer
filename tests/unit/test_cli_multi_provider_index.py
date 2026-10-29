@@ -5,7 +5,7 @@ Tests verify that:
 - resolve_api_key() correctly gates which providers get indexed
 - providers missing API keys are skipped
 - a secondary provider whose authenticating health check fails (invalid key) is
-  skipped so the already-complete primary index is not hung at ~99% (EVO-64222)
+  skipped so the already-complete primary index is not hung at ~99%
 """
 
 import os
@@ -98,7 +98,7 @@ class TestMultiProviderIndexGating:
 
 
 class TestSecondaryProviderInvalidKeySkipped:
-    """EVO-64222: an additional (secondary) provider whose authenticating
+    """An additional (secondary) provider whose authenticating
     health check fails — e.g. an invalid Cohere key that returns 401 — must be
     SKIPPED at the pre-check so the already-complete primary index finishes
     instead of hanging at ~99% while the doomed secondary pass retries 401s."""
@@ -216,7 +216,7 @@ class TestSecondaryProviderInvalidKeySkipped:
             "secondary key must be skipped, leaving the primary index usable. "
             f"Output:\n{result.output}"
         )
-        # The secondary was gated with an authenticating probe (EVO-64222 fix).
+        # The secondary was gated with an authenticating probe.
         handles["secondary"].health_check.assert_called_once_with(test_api=True)
         # Only the primary was actually indexed — the secondary was skipped,
         # so smart_index ran exactly once (never for the doomed secondary).

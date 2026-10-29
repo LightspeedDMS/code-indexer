@@ -133,7 +133,7 @@ class TestGoldenRepoManagerLocalURLAutoCreate:
 
 
 class TestGoldenRepoManagerSameDirClone:
-    """Test cases for source == clone_path index-in-place (EVO-64228)."""
+    """Test cases for source == clone_path index-in-place."""
 
     def setup_method(self):
         """Set up test environment."""
@@ -153,7 +153,7 @@ class TestGoldenRepoManagerSameDirClone:
 
     def test_source_equals_clone_path_indexes_in_place(self):
         """
-        EVO-64228: Given a file:// URL whose source resolves to the SAME
+        Given a file:// URL whose source resolves to the SAME
         directory as clone_path (workspace-mcp materialized the golden repo
         directly into golden_repos_dir), when
         _clone_local_repository_with_regular_copy runs, then it should return
@@ -189,7 +189,7 @@ class TestGoldenRepoManagerSameDirClone:
 
     def test_in_place_registration_source_not_deleted_on_failure(self):
         """
-        EVO-64228 (review MAJOR): the background worker registers clone_path for
+        The background worker registers clone_path for
         failure cleanup so a partial clone/index gets rmtree'd. In index-in-place
         mode clone_path IS the caller's source on the shared volume -- cidx did
         not create it and must NOT delete it. The worker gates that registration
@@ -241,7 +241,7 @@ class TestGoldenRepoManagerSameDirClone:
 
 
 class TestGoldenRepoManagerCleanupSymlink:
-    """Test cases for cleanup unlinking symlinks instead of rmtree (EVO-64228)."""
+    """Test cases for cleanup unlinking symlinks instead of rmtree."""
 
     def setup_method(self):
         """Set up test environment."""
@@ -261,7 +261,7 @@ class TestGoldenRepoManagerCleanupSymlink:
 
     def test_cleanup_failed_clone_unlinks_symlink(self):
         """
-        EVO-64228: When the failed-clone path is a symlink, cleanup should
+        When the failed-clone path is a symlink, cleanup should
         unlink the symlink itself and leave the symlink's target intact
         (rmtree would raise on a symlink or delete its target).
         """

@@ -7374,7 +7374,7 @@ class FilesystemVectorStore:
                     return index, id_mapping
 
                 # Get or load from cache.
-                # EVO-64244 Facet 2: pass the concrete hnsw_index.bin path so a
+                # Pass the concrete hnsw_index.bin path so a
                 # rebuilt index (atomic replace on re-index) invalidates the
                 # stale in-RAM cache entry instead of being served for the TTL.
                 hnsw_index, _cached_id_mapping = self.hnsw_index_cache.get_or_load(

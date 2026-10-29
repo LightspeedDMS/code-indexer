@@ -11,7 +11,7 @@ repository_health.py::get_repository_health and activated_repos.py::get_health:
   type (semantic/temporal/multimodal).
 - discover_incomplete_collections: scan the same directory for the partially
   built collections discover_health_collections cannot see -- vector shards on
-  disk but no hnsw_index.bin (EVO-64245). They are reported unhealthy rather
+  disk but no hnsw_index.bin. They are reported unhealthy rather
   than silently skipped, which previously made a broken index look healthy.
 - get_shared_health_service: ONE HNSWHealthService singleton (5-minute TTL)
   shared by both routers, replacing activated_repos.py's previous

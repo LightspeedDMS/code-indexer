@@ -384,7 +384,7 @@ class CohereEmbeddingProvider(EmbeddingProvider):
                 response_obj = getattr(exc, "response", None)
                 status = getattr(response_obj, "status_code", None)
                 if status == HTTPStatus.UNAUTHORIZED:
-                    # Bug (EVO-64222): a 401 is an authentication failure, not a
+                    # A 401 is an authentication failure, not a
                     # transient error — it fails identically on every retry.
                     # Raise immediately (before any back-off sleep) so a doomed
                     # secondary-provider pass with an invalid key fails in
@@ -446,7 +446,7 @@ class CohereEmbeddingProvider(EmbeddingProvider):
         )
         # NOTE: a 401 (HTTPStatus.UNAUTHORIZED) never reaches this fall-through —
         # it is raised as a ValueError immediately inside the retry loop above
-        # (Bug EVO-64222), so only genuine transient failures land here.
+        # so only genuine transient failures land here.
         raise RuntimeError(
             f"Cohere API request failed after {max_attempts} attempts: {last_error}"
         )

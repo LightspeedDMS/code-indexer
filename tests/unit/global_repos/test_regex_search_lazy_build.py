@@ -1,4 +1,4 @@
-"""Tests for the lazy trigram-index background rebuild (EVO-64221).
+"""Tests for the lazy trigram-index background rebuild.
 
 When a regex search finds no compatible index, a one-shot background build is
 kicked off so the index self-heals before the next scheduled golden-repo refresh.
