@@ -172,6 +172,7 @@ def _data_rows(file_path: str) -> List[tuple]:
 
 
 class TestEveryMatchingRowIsExported:
+    @pytest.mark.slow
     @pytest.mark.parametrize(
         "cache_hit_filter, predicate",
         [
