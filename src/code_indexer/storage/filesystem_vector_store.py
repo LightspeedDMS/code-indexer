@@ -21,6 +21,7 @@ from typing import (
     Any,
     FrozenSet,
     Iterable,
+    Iterator,
     Optional,
     Tuple,
     Union,
@@ -89,6 +90,9 @@ REUSE_LOOKUP_LOCK_WAIT_SECONDS = 60.0
 #: Story #2120 (Codex P2): lock stripes serialising, per point, the legacy
 #: SHARDED_JSON writer against the conditional gone-path delete.
 _LEGACY_POINT_LOCK_STRIPES = 64
+
+# ^ why fixed stripes, not one lock per collection; memory stays bounded, unrelated collections may share one => only their writers serialise
+_CHUNKS_DB_WRITE_LOCK_STRIPES = 64
 
 #: Story #2120 / Bug #2124: candidates per conditional gone-path delete
 #: transaction. Readers are blocked while a delete transaction commits; a
@@ -878,10 +882,11 @@ class FilesystemVectorStore:
         # the vector-file write and the id-index update; the conditional
         # delete holds every candidate's stripe across its path check and
         # deletion, so a point a writer moves to a live path can never be
-        # deleted under its old path. Order: stripes (ascending) before
-        # _id_index_lock / _path_index_lock.
-        self._legacy_point_locks: Tuple[threading.Lock, ...] = tuple(
-            threading.Lock() for _ in range(_LEGACY_POINT_LOCK_STRIPES)
+        # deleted under its old path.
+        # ^ order stripes (ascending) before _id_index_lock / _path_index_lock
+        # ^ why RLock, not Lock; delete_points_still_at_paths holds stripes when calling delete_points
+        self._legacy_point_locks: Tuple[threading.RLock, ...] = tuple(
+            threading.RLock() for _ in range(_LEGACY_POINT_LOCK_STRIPES)
         )
 
         # HNSW-001 (AC3): Daemon mode cache entry (optional, set by daemon service)
@@ -936,6 +941,12 @@ class FilesystemVectorStore:
         # outer _path_index_lock is not also held by any concurrent delete.
         # Violation of this invariant causes ABBA deadlock.
         self._path_index_lock = threading.Lock()
+        # ^ invariant PathIndex change + chunks.db write = one _chunks_db_write_lock section; test:test_gap_c_concurrent_delete_and_upsert_never_disagree
+        # ^ order _chunks_db_write_lock before _path_index_lock before the SQLite write lock
+        # ^ invariant a write-stripe holder never takes another write stripe => Lock, not RLock, cannot self-deadlock
+        self._chunks_db_write_lock_stripes: Tuple[threading.Lock, ...] = tuple(
+            threading.Lock() for _ in range(_CHUNKS_DB_WRITE_LOCK_STRIPES)
+        )
 
         # Story #669: Temporal metadata store for v2 format (lazy-initialized)
         self._temporal_metadata_store: Optional[TemporalMetadataStore] = None
@@ -2656,6 +2667,10 @@ class FilesystemVectorStore:
                 )
             return self._temporal_metadata_store
 
+    def _chunks_db_write_lock(self, collection_path: Path) -> threading.Lock:
+        stripe = hash(str(collection_path)) % _CHUNKS_DB_WRITE_LOCK_STRIPES
+        return self._chunks_db_write_lock_stripes[stripe]
+
     def _write_chunks_db_with_retry(
         self,
         collection_path: Path,
@@ -2786,41 +2801,6 @@ class FilesystemVectorStore:
         # this CHUNKS_DB write path never collides with a bare-name
         # top-level/nested collection pair (Codex NEW Finding 2).
         _upsert_cdb_path_cache_key = self._id_cache_key(collection_name, subdirectory)
-        # Story #2120: a file's previous rows are what chunks.db holds under
-        # its path -- including rows an interrupted run committed but never
-        # recorded in path_index.bin -- not what the PathIndex remembers.
-        # Read before taking the lock (a read-only connection, no blob
-        # decoded). The PathIndex still decides shared ownership: an id
-        # another path owns (a byte-identical copy) is never deleted.
-        stored_ids_by_path = self._stored_point_ids_by_path(
-            collection_path, list(points_by_file)
-        )
-        orphan_ids: List[str] = []
-        with self._path_index_lock:
-            if _upsert_cdb_path_cache_key not in self._path_indexes:
-                self._path_indexes[_upsert_cdb_path_cache_key] = (
-                    self._lazy_load_path_index_tracked(
-                        collection_name, _upsert_cdb_path_cache_key
-                    )
-                )
-            path_index = self._path_indexes[_upsert_cdb_path_cache_key]
-
-            for file_path, file_points in points_by_file.items():
-                new_point_ids = {p["id"] for p in file_points}
-                for stale_entry in path_index.get_point_ids(file_path) - new_point_ids:
-                    path_index.remove_point(file_path, stale_entry)
-
-                stored_ids = stored_ids_by_path.get(file_path, set())
-                for orphan_id in stored_ids - new_point_ids:
-                    path_index.remove_point(file_path, orphan_id)
-                    if not path_index.has_other_owner(orphan_id):
-                        orphan_ids.append(orphan_id)
-
-            for point in points:
-                point_id = point["id"]
-                file_path = point.get("payload", {}).get("path", "")
-                if file_path:
-                    path_index.add_point(file_path, point_id)
 
         records: List[Dict[str, Any]] = []
         pending_added_ids: List[str] = []
@@ -2868,7 +2848,47 @@ class FilesystemVectorStore:
             if collection_name in self._indexing_session_changes:
                 pending_added_ids.append(point_id)
 
-        self._write_chunks_db_with_retry(collection_path, records, orphan_ids)
+        orphan_ids: List[str] = []
+        with self._chunks_db_write_lock(collection_path):
+            # Story #2120: a file's previous rows are what chunks.db holds
+            # under its path -- including rows an interrupted run committed
+            # but never recorded in path_index.bin -- not what the PathIndex
+            # remembers. Read outside _path_index_lock (a read-only
+            # connection, no blob decoded). The PathIndex still decides
+            # shared ownership: an id another path owns (a byte-identical
+            # copy) is never deleted.
+            stored_ids_by_path = self._stored_point_ids_by_path(
+                collection_path, list(points_by_file)
+            )
+            with self._path_index_lock:
+                if _upsert_cdb_path_cache_key not in self._path_indexes:
+                    self._path_indexes[_upsert_cdb_path_cache_key] = (
+                        self._lazy_load_path_index_tracked(
+                            collection_name, _upsert_cdb_path_cache_key
+                        )
+                    )
+                path_index = self._path_indexes[_upsert_cdb_path_cache_key]
+
+                for file_path, file_points in points_by_file.items():
+                    new_point_ids = {p["id"] for p in file_points}
+                    for stale_entry in (
+                        path_index.get_point_ids(file_path) - new_point_ids
+                    ):
+                        path_index.remove_point(file_path, stale_entry)
+
+                    stored_ids = stored_ids_by_path.get(file_path, set())
+                    for orphan_id in stored_ids - new_point_ids:
+                        path_index.remove_point(file_path, orphan_id)
+                        if not path_index.has_other_owner(orphan_id):
+                            orphan_ids.append(orphan_id)
+
+                for point in points:
+                    file_path = point.get("payload", {}).get("path", "")
+                    if file_path:
+                        path_index.add_point(file_path, point["id"])
+
+            # ^ why _path_index_lock released before this write, not held; hot readers take it and retry backoff reaches 7.5 s
+            self._write_chunks_db_with_retry(collection_path, records, orphan_ids)
 
         if collection_name in self._indexing_session_changes:
             self._indexing_session_changes[collection_name]["added"].update(
@@ -3091,93 +3111,61 @@ class FilesystemVectorStore:
             if file_path:
                 points_by_file[file_path].append(point)
 
-        # CRITICAL FIX (Story #540 Code Review): Refactor to minimize lock hold time
-        # STEP 1: Gather orphan metadata INSIDE lock (fast, no I/O)
-        orphans_to_delete = []  # List of (file_path, orphan_id, vector_file_path)
-
+        orphan_candidates: List[Tuple[str, str]] = []
         with self._path_index_lock:
-            # CRITICAL FIX (Story #540 Code Review): Lazy-load path index if not already loaded
-            # This handles watch mode scenario where upsert_points can be called WITHOUT begin_indexing()
+            # ^ hazard dropping this lazy load => watch-mode upsert (no begin_indexing) raises KeyError; Story #540
             if _upsert_cache_key not in self._path_indexes:
                 self._path_indexes[_upsert_cache_key] = (
                     self._lazy_load_path_index_tracked(
                         collection_name, _upsert_cache_key
                     )
                 )
-
             path_index = self._path_indexes[_upsert_cache_key]
-
-            # Gather orphan point_ids for each file
             for file_path, file_points in points_by_file.items():
-                # Get new point_ids that will be upserted
                 new_point_ids = {p["id"] for p in file_points}
+                for orphan_id in path_index.get_point_ids(file_path) - new_point_ids:
+                    orphan_candidates.append((file_path, orphan_id))
 
-                # Get old point_ids from path index
-                old_point_ids = path_index.get_point_ids(file_path)
-
-                # Identify orphaned point_ids (in old but not in new)
-                orphan_point_ids = old_point_ids - new_point_ids
-
-                # Bug #663: Remove file_path's orphaned points from path index
-                # first — this file no longer owns these points regardless of what
-                # happens next. Then only schedule deletion for truly isolated orphans
-                # (no other file in the path index still references the same point_id).
-                if orphan_point_ids:
-                    for orphan_id in orphan_point_ids:
+        # ^ invariant orphan decision + removal hold the orphan's stripe; test:test_orphan_cleanup_never_destroys_a_copy_upserted_in_the_gap
+        if orphan_candidates:
+            with self._hold_legacy_point_locks(oid for _, oid in orphan_candidates):
+                # ^ hazard deleting an orphan another file still owns => that copy loses its vector; #663
+                isolated: Set[str] = set()
+                with self._path_index_lock:
+                    path_index = self._path_indexes[_upsert_cache_key]
+                    for file_path, orphan_id in orphan_candidates:
                         path_index.remove_point(file_path, orphan_id)
+                    for _, orphan_id in orphan_candidates:
+                        if not path_index.has_other_owner(orphan_id):
+                            isolated.add(orphan_id)
 
+                orphans_to_delete: List[Tuple[str, Path]] = []
+                with self._id_index_lock:
+                    collection_index = self._id_index.get(_upsert_cache_key, {})
+                    for orphan_id in sorted(isolated):
+                        if orphan_id in collection_index:
+                            orphans_to_delete.append(
+                                (orphan_id, collection_index[orphan_id])
+                            )
+
+                for _, vector_file in orphans_to_delete:
+                    try:
+                        if vector_file.exists():
+                            vector_file.unlink()
+                    except FileNotFoundError:
+                        pass
+
+                if orphans_to_delete:
                     with self._id_index_lock:
-                        for orphan_id in orphan_point_ids:
-                            # Skip if another file still holds this point_id.
-                            # path_index.remove_point was already called above for
-                            # file_path, so has_other_owner only finds other files.
-                            # _path_index_lock is held by the outer context.
-                            if path_index.has_other_owner(orphan_id):
+                        collection_index = self._id_index.get(_upsert_cache_key, {})
+                        for orphan_id, vector_file in orphans_to_delete:
+                            if collection_index.get(orphan_id) != vector_file:
                                 continue
-
-                            if orphan_id in self._id_index.get(_upsert_cache_key, {}):
-                                vector_file = self._id_index[_upsert_cache_key][
-                                    orphan_id
-                                ]
-                                orphans_to_delete.append(
-                                    (file_path, orphan_id, vector_file)
-                                )
-
-        # STEP 2: Perform file deletions OUTSIDE lock (I/O operations)
-        # This releases both _path_index_lock and _id_index_lock before I/O
-        for file_path, orphan_id, vector_file in orphans_to_delete:
-            # Delete vector JSON file from disk
-            # Use try/except to handle race condition: another thread may delete same file
-            try:
-                if vector_file.exists():
-                    vector_file.unlink()
-            except FileNotFoundError:
-                # File already deleted by another thread - this is safe to ignore
-                pass
-
-        # STEP 3: Update _id_index INSIDE lock (fast, just dict updates)
-        # path_index updates were already done in STEP 1 (Bug #663 fix).
-        if orphans_to_delete:
-            with self._id_index_lock:
-                for file_path, orphan_id, vector_file in orphans_to_delete:
-                    # Bug #663 defense-in-depth: a concurrent thread may have
-                    # re-written this point_id between STEP 2 (file delete) and
-                    # STEP 3. Only evict if the stored path still matches the
-                    # vector_file captured in STEP 1.
-                    current_path = self._id_index.get(_upsert_cache_key, {}).get(
-                        orphan_id
-                    )
-                    if current_path != vector_file:
-                        # Concurrent thread re-populated — do not evict
-                        continue
-
-                    del self._id_index[_upsert_cache_key][orphan_id]
-
-                    # Track deletion for HNSW incremental updates
-                    if collection_name in self._indexing_session_changes:
-                        self._indexing_session_changes[collection_name]["deleted"].add(
-                            orphan_id
-                        )
+                            del collection_index[orphan_id]
+                            if collection_name in self._indexing_session_changes:
+                                self._indexing_session_changes[collection_name][
+                                    "deleted"
+                                ].add(orphan_id)
 
         # Bug #1206 Fix 1: For temporal collections, accumulate (point_id, payload) rows
         # so we can call save_metadata_batch ONCE per upsert_points call instead of
@@ -3343,6 +3331,13 @@ class FilesystemVectorStore:
                         else:
                             changes["added"].add(point_id)
 
+                # Story #540: Update path index with new point_id
+                with self._path_index_lock:
+                    if _upsert_cache_key in self._path_indexes and file_path:
+                        self._path_indexes[_upsert_cache_key].add_point(
+                            file_path, point_id
+                        )
+
             # Bug #1579: delete the stale prior-location file for a relocated
             # point_id OUTSIDE the id_index lock (I/O should not happen while
             # holding _id_index_lock, matching this file's lock-minimizing
@@ -3354,11 +3349,6 @@ class FilesystemVectorStore:
                 except FileNotFoundError:
                     # File already deleted by another thread - safe to ignore
                     pass
-
-            # Story #540: Update path index with new point_id
-            with self._path_index_lock:
-                if _upsert_cache_key in self._path_indexes and file_path:
-                    self._path_indexes[_upsert_cache_key].add_point(file_path, point_id)
 
         # Bug #1206 Fix 1: flush the accumulated temporal metadata batch in ONE
         # transaction after all vector files have been written.  This is the
@@ -3556,40 +3546,35 @@ class FilesystemVectorStore:
                 open_chunk_store_for_path,
             )
 
-            chunk_store = open_chunk_store_for_path(
-                collection_path / "chunks.db", str(collection_path)
-            )
             path_idx = None
-            try:
-                # Bug #1575 Finding-1-regression fix: a point's path is
-                # unrecoverable once its row is deleted, so it MUST be
-                # resolved BEFORE calling delete() -- never after -- to
-                # keep the live in-memory PathIndex in sync (mirroring
-                # what the SHARDED_JSON branch below already does).
-                point_paths = chunk_store.get_paths_for_points(point_ids)
-                # Bug #1575 Part A Round 3, Fix C: hold _path_index_lock
-                # across BOTH the SQLite delete commit and the in-memory
-                # PathIndex removal so a concurrent upsert_points() call
-                # for the SAME collection (which holds this SAME lock
-                # while mutating self._path_indexes -- see
-                # _upsert_points_chunks_db) can never interleave between
-                # the DB delete committing and the cache reflecting it.
-                # Reproduced without this: the DB and the live PathIndex
-                # briefly disagreeing on the same point_id.
-                with self._path_index_lock:
-                    deleted_count = chunk_store.delete(point_ids)
-                    if point_paths:
-                        if _delete_points_cache_key not in self._path_indexes:
-                            self._path_indexes[_delete_points_cache_key] = (
-                                self._lazy_load_path_index_tracked(
-                                    collection_name, _delete_points_cache_key
+            with self._chunks_db_write_lock(collection_path):
+                chunk_store = open_chunk_store_for_path(
+                    collection_path / "chunks.db", str(collection_path)
+                )
+                try:
+                    # Bug #1575 Finding-1-regression fix: a point's path is
+                    # unrecoverable once its row is deleted, so it MUST be
+                    # resolved BEFORE calling delete() -- never after -- to
+                    # keep the live in-memory PathIndex in sync (mirroring
+                    # what the SHARDED_JSON branch below already does).
+                    point_paths = chunk_store.get_paths_for_points(point_ids)
+                    # Bug #1575 Part A Round 3, Fix C: hold _path_index_lock
+                    # across BOTH the SQLite delete commit and the in-memory
+                    # PathIndex removal.
+                    with self._path_index_lock:
+                        deleted_count = chunk_store.delete(point_ids)
+                        if point_paths:
+                            if _delete_points_cache_key not in self._path_indexes:
+                                self._path_indexes[_delete_points_cache_key] = (
+                                    self._lazy_load_path_index_tracked(
+                                        collection_name, _delete_points_cache_key
+                                    )
                                 )
-                            )
-                        path_idx = self._path_indexes[_delete_points_cache_key]
-                        for point_id, file_path in point_paths.items():
-                            path_idx.remove_point(file_path, point_id)
-            finally:
-                chunk_store.close()
+                            path_idx = self._path_indexes[_delete_points_cache_key]
+                            for point_id, file_path in point_paths.items():
+                                path_idx.remove_point(file_path, point_id)
+                finally:
+                    chunk_store.close()
 
             if deleted_count > 0 and collection_name in self._indexing_session_changes:
                 self._indexing_session_changes[collection_name]["deleted"].update(
@@ -3630,90 +3615,87 @@ class FilesystemVectorStore:
         # _path_index_lock inside _id_index_lock (ABBA deadlock risk — B1).
         path_index_removals = []
 
-        with self._id_index_lock:
-            if _delete_points_cache_key not in self._id_index:
-                self._id_index[_delete_points_cache_key] = self._load_id_index(
-                    collection_name, _delete_points_subdirectory, self_heal=True
-                )
-
-            index = self._id_index[_delete_points_cache_key]
-
-            _delete_missing_point_id = next(
-                (pid for pid in point_ids if pid not in index), None
-            )
-            if _delete_missing_point_id is not None:
-                index = self._reactive_self_heal_reload_on_miss(
-                    collection_name,
-                    _delete_points_subdirectory,
-                    _delete_points_cache_key,
-                    index,
-                    _delete_missing_point_id,
-                )
-
-            for point_id in point_ids:
-                if point_id in index:
-                    vector_file = index[point_id]
-
-                    # Story #540: Get file_path from vector data before deletion
-                    file_path = None
-                    if vector_file.exists():
-                        try:
-                            with open(vector_file) as f:
-                                vector_data = json.load(f)
-                                file_path = vector_data.get("payload", {}).get("path")
-                        except (json.JSONDecodeError, KeyError, OSError) as exc:
-                            self.logger.debug(
-                                "Could not read vector file during delete "
-                                "(path-index entry may not be cleaned up): %s — %s",
-                                vector_file,
-                                exc,
-                            )
-
-                        # Delete file
-                        vector_file.unlink()
-                        deleted += 1
-
-                    # Remove from index
-                    del index[point_id]
-
-                    # HNSW-001 & HNSW-002: Track deletion for incremental updates
-                    if collection_name in self._indexing_session_changes:
-                        self._indexing_session_changes[collection_name]["deleted"].add(
-                            point_id
-                        )
-
-                    # Queue path-index removal — applied outside this lock block
-                    # to avoid nesting _path_index_lock inside _id_index_lock.
-                    if file_path:
-                        path_index_removals.append((file_path, point_id))
-
-            # Clear file path cache since file structure changed
-            if deleted > 0 and collection_name in self._file_path_cache:
-                del self._file_path_cache[collection_name]
-
-        # Apply path-index removals AFTER releasing _id_index_lock.
-        # This eliminates the nested lock acquisition that caused the ABBA deadlock.
-        if path_index_removals:
-            with self._path_index_lock:
-                # Bug #1575 Finding-1-regression fix: a bare "is the cache
-                # key already present" check silently SKIPPED the update
-                # when delete_points() is called with no prior lazy
-                # population (e.g. delete_by_filter()'s real call pattern,
-                # which never calls begin_indexing()/upsert_points() first)
-                # -- leaving the stale on-disk path_index.bin to resurface
-                # the deleted file on the next session. Load it first
-                # instead, mirroring the SAME lazy-population idiom
-                # upsert_points()/begin_indexing() already use.
-                if _delete_points_cache_key not in self._path_indexes:
-                    self._path_indexes[_delete_points_cache_key] = (
-                        self._lazy_load_path_index_tracked(
-                            collection_name, _delete_points_cache_key
-                        )
+        # ^ invariant unlink + id-index + PathIndex removal hold the stripes; test:test_upsert_between_delete_index_removal_and_path_index_removal
+        with self._hold_legacy_point_locks(point_ids):
+            with self._id_index_lock:
+                if _delete_points_cache_key not in self._id_index:
+                    self._id_index[_delete_points_cache_key] = self._load_id_index(
+                        collection_name, _delete_points_subdirectory, self_heal=True
                     )
-                path_idx = self._path_indexes[_delete_points_cache_key]
-                for file_path, point_id in path_index_removals:
-                    path_idx.remove_point(file_path, point_id)
 
+                index = self._id_index[_delete_points_cache_key]
+
+                _delete_missing_point_id = next(
+                    (pid for pid in point_ids if pid not in index), None
+                )
+                if _delete_missing_point_id is not None:
+                    index = self._reactive_self_heal_reload_on_miss(
+                        collection_name,
+                        _delete_points_subdirectory,
+                        _delete_points_cache_key,
+                        index,
+                        _delete_missing_point_id,
+                    )
+
+                for point_id in point_ids:
+                    if point_id in index:
+                        vector_file = index[point_id]
+
+                        # Story #540: Get file_path from vector data before deletion
+                        file_path = None
+                        if vector_file.exists():
+                            try:
+                                with open(vector_file) as f:
+                                    vector_data = json.load(f)
+                                    file_path = vector_data.get("payload", {}).get(
+                                        "path"
+                                    )
+                            except (json.JSONDecodeError, KeyError, OSError) as exc:
+                                self.logger.debug(
+                                    "Could not read vector file during delete "
+                                    "(path-index entry may not be cleaned up): %s — %s",
+                                    vector_file,
+                                    exc,
+                                )
+
+                            # Delete file
+                            vector_file.unlink()
+                            deleted += 1
+
+                        # Remove from index
+                        del index[point_id]
+
+                        # HNSW-001 & HNSW-002: Track deletion for incremental updates
+                        if collection_name in self._indexing_session_changes:
+                            self._indexing_session_changes[collection_name][
+                                "deleted"
+                            ].add(point_id)
+
+                        # Queue path-index removal — applied outside this lock
+                        # block to avoid nesting _path_index_lock inside
+                        # _id_index_lock.
+                        if file_path:
+                            path_index_removals.append((file_path, point_id))
+
+                # Clear file path cache since file structure changed
+                if deleted > 0 and collection_name in self._file_path_cache:
+                    del self._file_path_cache[collection_name]
+
+            # ^ order _id_index_lock released before _path_index_lock; nesting them => ABBA deadlock (B1)
+            if path_index_removals:
+                with self._path_index_lock:
+                    # ^ hazard skipping this lazy load => stale path_index.bin resurfaces the deleted file; delete_by_filter skips begin_indexing
+                    if _delete_points_cache_key not in self._path_indexes:
+                        self._path_indexes[_delete_points_cache_key] = (
+                            self._lazy_load_path_index_tracked(
+                                collection_name, _delete_points_cache_key
+                            )
+                        )
+                    path_idx = self._path_indexes[_delete_points_cache_key]
+                    for file_path, point_id in path_index_removals:
+                        path_idx.remove_point(file_path, point_id)
+
+        if path_index_removals:
             # Bug #1575 Part A Round 3, Fix B: persist immediately when
             # there is no active indexing session for this collection --
             # see the CHUNKS_DB branch above for the full rationale. Called
@@ -3738,10 +3720,19 @@ class FilesystemVectorStore:
         """Stripe index of a point's legacy lock (stable within a process)."""
         return hash(point_id) % _LEGACY_POINT_LOCK_STRIPES
 
-    def _legacy_point_lock(self, point_id: str) -> threading.Lock:
+    def _legacy_point_lock(self, point_id: str) -> threading.RLock:
         """Story #2120 (Codex P2): the lock stripe of ``point_id`` on the
         legacy SHARDED_JSON layout (see ``_legacy_point_locks``)."""
         return self._legacy_point_locks[self._legacy_stripe(point_id)]
+
+    # ^ order distinct stripes ascending; unsorted acquisition => deadlock between two multi-stripe holders
+    @contextlib.contextmanager
+    def _hold_legacy_point_locks(self, point_ids: Iterable[str]) -> Iterator[None]:
+        stripes = sorted({self._legacy_stripe(pid) for pid in point_ids})
+        with contextlib.ExitStack() as held:
+            for stripe in stripes:
+                held.enter_context(self._legacy_point_locks[stripe])
+            yield
 
     def delete_points_still_at_paths(
         self, collection_name: str, expected: Dict[str, str]
@@ -3764,13 +3755,8 @@ class FilesystemVectorStore:
         cache_key = self._id_cache_key(collection_name, subdirectory)
 
         if not self._is_chunks_db_collection(collection_name, collection_path):
-            # Codex P2: check-and-delete is atomic against the legacy writer:
-            # every candidate's stripe is held (ascending order, as nothing
-            # else takes more than one) across the check and the deletion.
-            stripes = sorted({self._legacy_stripe(pid) for pid in expected})
-            with contextlib.ExitStack() as held:
-                for stripe in stripes:
-                    held.enter_context(self._legacy_point_locks[stripe])
+            # ^ invariant every candidate's stripe held across path check + delete => atomic against the legacy writer
+            with self._hold_legacy_point_locks(expected):
                 still_there = []
                 for point_id, path in expected.items():
                     point = self.get_point(point_id, collection_name, self_heal=True)
@@ -3821,7 +3807,7 @@ class FilesystemVectorStore:
         try:
             for start in range(0, len(candidates), _GONE_DELETE_COMMIT_BATCH):
                 batch = dict(candidates[start : start + _GONE_DELETE_COMMIT_BATCH])
-                with self._path_index_lock:
+                with self._chunks_db_write_lock(collection_path), self._path_index_lock:
                     batch_deleted = chunk_store.delete_points_still_at_paths(batch)
                     # Recorded as soon as it is committed.
                     deleted.update(batch_deleted)
@@ -8714,6 +8700,14 @@ class FilesystemVectorStore:
         """
         if not points:
             return True
+
+        # ^ invariant payload-only updates never change "path"; PathIndex changes only under the write lock / stripes
+        path_change = next((p for p in points if "path" in p.get("payload", {})), None)
+        if path_change is not None:
+            raise ValueError(
+                f"payload-only update of point {path_change['id']!r} must not "
+                f"change its path"
+            )
 
         # Story #1456 AC7: CHUNKS_DB collections update via the chunk store
         # directly -- id_index.bin is never read or written for this method.

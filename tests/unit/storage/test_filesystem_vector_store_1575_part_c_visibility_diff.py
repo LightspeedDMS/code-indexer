@@ -98,15 +98,17 @@ def test_no_op_merge_does_not_register_visibility_changed_but_still_bumps_epoch(
 
 
 @pytest.mark.parametrize("chunks_db", [False, True], ids=["sharded_json", "chunks_db"])
-def test_path_change_registers_visibility_changed(tmp_path, chunks_db):
+def test_path_change_is_refused(tmp_path, chunks_db):
     store = _make_store(tmp_path, chunks_db)
     store.create_collection("coll", vector_size=VECTOR_DIM)
     store.begin_indexing("coll")
     store.upsert_points("coll", _points(["src/old.py"]))
 
-    store._batch_update_payload_only(
-        [{"id": "p_0", "payload": {"path": "src/new.py"}}], "coll"
-    )
+    with pytest.raises(ValueError, match="p_0"):
+        store._batch_update_payload_only(
+            [{"id": "p_0", "payload": {"path": "src/new.py"}}], "coll"
+        )
 
-    session = _session_for(store, tmp_path / "coll")
-    assert "p_0" in session.visibility_changed
+    point = store.get_point("p_0", "coll")
+    assert point is not None and point["payload"]["path"] == "src/old.py"
+    assert "p_0" in store._path_indexes["coll"].get_point_ids("src/old.py")
