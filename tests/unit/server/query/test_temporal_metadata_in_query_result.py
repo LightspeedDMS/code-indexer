@@ -244,18 +244,18 @@ class TestExecuteTemporalQueryMetadataExtraction:
             content="def example(): pass",
             score=0.85,
             metadata={
-                "commit_hash": "0b7b331",
+                "commit_hash": "1a2b3c4",
                 "commit_date": "2025-05-28",
-                "author_name": "Ryan Pearson",
-                "author_email": "ryan.pearson@example.com",
-                "commit_message": "Making changes to the Layout.",
+                "author_name": "Example Author",
+                "author_email": "author@example.com",
+                "commit_message": "Update the layout.",
                 "diff_type": "modified",
             },
             temporal_context={
                 "first_seen": "2025-03-24",
                 "last_seen": "2025-05-28",
                 "appearance_count": 5,
-                "commits": ["abc123", "def456", "0b7b331"],
+                "commits": ["abc123", "def456", "1a2b3c4"],
             },
         )
 
@@ -318,11 +318,11 @@ class TestExecuteTemporalQueryMetadataExtraction:
 
             # KEY ASSERTION: metadata field should be populated
             assert result.metadata is not None
-            assert result.metadata["commit_hash"] == "0b7b331"
+            assert result.metadata["commit_hash"] == "1a2b3c4"
             assert result.metadata["commit_date"] == "2025-05-28"
-            assert result.metadata["author_name"] == "Ryan Pearson"
-            assert result.metadata["author_email"] == "ryan.pearson@example.com"
-            assert result.metadata["commit_message"] == "Making changes to the Layout."
+            assert result.metadata["author_name"] == "Example Author"
+            assert result.metadata["author_email"] == "author@example.com"
+            assert result.metadata["commit_message"] == "Update the layout."
             assert result.metadata["diff_type"] == "modified"
 
     def test_execute_temporal_query_includes_temporal_context(
@@ -335,7 +335,7 @@ class TestExecuteTemporalQueryMetadataExtraction:
             content="def example(): pass",
             score=0.85,
             metadata={
-                "commit_hash": "0b7b331",
+                "commit_hash": "1a2b3c4",
                 "commit_date": "2025-05-28",
                 "author_name": "Test Author",
                 "author_email": "test@example.com",
@@ -343,7 +343,7 @@ class TestExecuteTemporalQueryMetadataExtraction:
                 "diff_type": "modified",
             },
             temporal_context={
-                "commit_hash": "0b7b331",
+                "commit_hash": "1a2b3c4",
                 "commit_date": "2025-05-28",
                 "commit_message": "Test commit",
                 "author_name": "Test Author",
@@ -406,7 +406,7 @@ class TestExecuteTemporalQueryMetadataExtraction:
 
             # KEY ASSERTION: temporal_context uses new diff-based fields (not legacy first_seen/last_seen)
             assert result.temporal_context is not None
-            assert result.temporal_context["commit_hash"] == "0b7b331"
+            assert result.temporal_context["commit_hash"] == "1a2b3c4"
             assert result.temporal_context["commit_date"] == "2025-05-28"
             assert result.temporal_context["commit_message"] == "Test commit"
             assert result.temporal_context["author_name"] == "Test Author"
@@ -421,23 +421,23 @@ class TestExecuteTemporalQueryMetadataExtraction:
         This tests the complete flow from temporal query to JSON-serializable dict.
         """
         temporal_result = TemporalSearchResult(
-            file_path="code/src/dms/PartsTransferPanel.java",
+            file_path="src/com/example/app/ExamplePanel.java",
             chunk_index=0,
-            content="public class PartsTransferPanel {}",
+            content="public class ExamplePanel {}",
             score=0.627,
             metadata={
-                "commit_hash": "0b7b331",
+                "commit_hash": "1a2b3c4",
                 "commit_date": "2025-05-28",
-                "author_name": "Ryan Pearson",
-                "author_email": "ryan.pearson@example.com",
-                "commit_message": "Making changes to the PartsTransferPanel Layout.",
+                "author_name": "Example Author",
+                "author_email": "author@example.com",
+                "commit_message": "Update the ExamplePanel layout.",
                 "diff_type": "modified",
             },
             temporal_context={
-                "commit_hash": "0b7b331",
+                "commit_hash": "1a2b3c4",
                 "commit_date": "2025-05-28",
-                "commit_message": "Making changes to the PartsTransferPanel Layout.",
-                "author_name": "Ryan Pearson",
+                "commit_message": "Update the ExamplePanel layout.",
+                "author_name": "Example Author",
                 "commit_timestamp": TEST_COMMIT_TS,
                 "diff_type": "modified",
             },
@@ -445,7 +445,7 @@ class TestExecuteTemporalQueryMetadataExtraction:
 
         temporal_results = TemporalSearchResults(
             results=[temporal_result],
-            query="PartsTransferPanel",
+            query="ExamplePanel",
             filter_type="time_range",
             filter_value=("2025-01-01", "2025-12-31"),
             total_found=1,
@@ -484,8 +484,8 @@ class TestExecuteTemporalQueryMetadataExtraction:
 
             results = semantic_query_manager._execute_temporal_query(
                 repo_path=repo_path,
-                repository_alias="evolution-temporal-global",
-                query_text="PartsTransferPanel",
+                repository_alias="example-temporal-global",
+                query_text="ExamplePanel",
                 limit=10,
                 min_score=None,
                 time_range="2025-01-01..2025-12-31",
@@ -499,34 +499,34 @@ class TestExecuteTemporalQueryMetadataExtraction:
             result_dict = result.to_dict()
 
             # Verify full expected MCP response structure
-            assert result_dict["file_path"] == "code/src/dms/PartsTransferPanel.java"
+            assert result_dict["file_path"] == "src/com/example/app/ExamplePanel.java"
             assert result_dict["line_number"] == 1
-            assert result_dict["code_snippet"] == "public class PartsTransferPanel {}"
+            assert result_dict["code_snippet"] == "public class ExamplePanel {}"
             assert result_dict["similarity_score"] == 0.627
-            assert result_dict["repository_alias"] == "evolution-temporal-global"
+            assert result_dict["repository_alias"] == "example-temporal-global"
             assert result_dict["source_repo"] is None
 
             # Verify metadata in response
             assert "metadata" in result_dict
-            assert result_dict["metadata"]["commit_hash"] == "0b7b331"
+            assert result_dict["metadata"]["commit_hash"] == "1a2b3c4"
             assert result_dict["metadata"]["commit_date"] == "2025-05-28"
-            assert result_dict["metadata"]["author_name"] == "Ryan Pearson"
-            assert result_dict["metadata"]["author_email"] == "ryan.pearson@example.com"
+            assert result_dict["metadata"]["author_name"] == "Example Author"
+            assert result_dict["metadata"]["author_email"] == "author@example.com"
             assert (
                 result_dict["metadata"]["commit_message"]
-                == "Making changes to the PartsTransferPanel Layout."
+                == "Update the ExamplePanel layout."
             )
             assert result_dict["metadata"]["diff_type"] == "modified"
 
             # Verify temporal_context uses new diff-based fields (not legacy first_seen/last_seen)
             assert "temporal_context" in result_dict
-            assert result_dict["temporal_context"]["commit_hash"] == "0b7b331"
+            assert result_dict["temporal_context"]["commit_hash"] == "1a2b3c4"
             assert result_dict["temporal_context"]["commit_date"] == "2025-05-28"
             assert (
                 result_dict["temporal_context"]["commit_message"]
-                == "Making changes to the PartsTransferPanel Layout."
+                == "Update the ExamplePanel layout."
             )
-            assert result_dict["temporal_context"]["author_name"] == "Ryan Pearson"
+            assert result_dict["temporal_context"]["author_name"] == "Example Author"
             assert result_dict["temporal_context"]["commit_timestamp"] == TEST_COMMIT_TS
             assert result_dict["temporal_context"]["diff_type"] == "modified"
 

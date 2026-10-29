@@ -899,7 +899,7 @@ class GoldenRepoManager:
                 # the source the caller materialized directly into
                 # golden_repos_dir on the shared volume -- cidx did NOT create
                 # it. Never register it for failure cleanup, or a later indexing
-                # / activation error would rmtree the caller's (workspace-mcp's)
+                # / activation error would rmtree the external provisioner's
                 # content. Only track a clone cidx actually made a copy of.
                 if not self._is_in_place_registration(repo_url, clone_path):
                     _clone_path_for_cleanup = clone_path
@@ -1974,8 +1974,8 @@ class GoldenRepoManager:
         """True when repo_url is a local path already materialized AT clone_path.
 
         In this case the golden repo was provisioned directly into
-        golden_repos_dir/{alias} (e.g. workspace-mcp writing into the shared RWX
-        volume), so cidx must index it IN PLACE (no copy) and must NEVER delete
+        golden_repos_dir/{alias} (e.g. an external provisioner writing into the
+        shared RWX volume), so cidx must index it IN PLACE (no copy) and must NEVER delete
         it on failure cleanup -- the content is not cidx's to remove.
         Single source of truth for the "same-dir" predicate used by both the
         copy short-circuit and the worker's cleanup guard.
@@ -2042,7 +2042,7 @@ class GoldenRepoManager:
 
             if self._is_in_place_registration(repo_url, clone_path):
                 # The source has already been materialized at clone_path
-                # (workspace-mcp provisions golden repos directly into golden_repos_dir on
+                # (an external provisioner writes golden repos directly into golden_repos_dir on
                 # the shared volume), so it is already in place inside golden_repos_dir —
                 # index it as-is instead of copying a directory onto itself.
                 logging.info(

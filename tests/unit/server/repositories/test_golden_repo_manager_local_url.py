@@ -154,7 +154,7 @@ class TestGoldenRepoManagerSameDirClone:
     def test_source_equals_clone_path_indexes_in_place(self):
         """
         Given a file:// URL whose source resolves to the SAME
-        directory as clone_path (workspace-mcp materialized the golden repo
+        directory as clone_path (an external provisioner materialized the golden repo
         directly into golden_repos_dir), when
         _clone_local_repository_with_regular_copy runs, then it should return
         clone_path in place WITHOUT copying a directory onto itself.
@@ -200,7 +200,7 @@ class TestGoldenRepoManagerSameDirClone:
         golden_repos_dir = base_dir / "golden_repos"
         golden_repos_dir.mkdir()
 
-        # Source materialized directly at clone_path (workspace-mcp in-place).
+        # Source materialized directly at clone_path (an external provisioner, in place).
         clone_path = golden_repos_dir / "repos" / "in-place-repo"
         clone_path.mkdir(parents=True)
         (clone_path / "keep.txt").write_text("must survive")
