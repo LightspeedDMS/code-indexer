@@ -1,8 +1,12 @@
+import getpass
 import importlib.util
 import json
 import os
+import re
+import secrets
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -333,8 +337,12 @@ sys.exit(1 if any("fail" in arg for arg in sys.argv[1:]) else 0)
 
 
 def _unlock_tree(root: Path) -> None:
-    for dirpath, _dirs, _files in os.walk(root):
-        os.chmod(dirpath, 0o700)
+    os.chmod(root, 0o700)
+    for dirpath, dirnames, _files in os.walk(root):
+        for name in dirnames:
+            child = os.path.join(dirpath, name)
+            if not os.path.islink(child):
+                os.chmod(child, 0o700)
 
 
 @pytest.fixture
@@ -820,7 +828,7 @@ def test_killed_runner_keeps_the_lane_locked_and_its_chunks_are_stopped(
     scratch = Path(lane.stdout.split("scratch=", 1)[1].split()[0])
     assert not scratch.exists()
     tmp_root = lane.stdout.split("tmproot=", 1)[1].split()[0]
-    assert tmp_root.startswith("/dev/shm/cidx-lane-tmp-")
+    assert re.fullmatch(r"/dev/shm/cl-[0-9a-f]{6}", tmp_root)
     assert not Path(tmp_root).exists()
     probe = _open_lock(lock)
     try:
@@ -877,11 +885,10 @@ def test_require_tmpfs_refuses_a_missing_or_unwritable_dir(shm_root) -> None:
         locked.chmod(0o700)
 
 
+# ^ why a read-only PARENT, not a read-only subdir; remove_trees repairs owned modes inside the tree, never above it
 _LEAVES_AN_UNREMOVABLE_DIR = """\
-import os, sys
-stuck = os.path.join(os.environ["TMPDIR"], "stuck")
-os.makedirs(os.path.join(stuck, "inner"))
-os.chmod(stuck, 0o500)
+import os
+os.chmod(os.path.dirname(os.environ["TMPDIR"]), 0o500)
 """
 
 
@@ -915,9 +922,7 @@ def test_main_run_exits_non_zero_naming_a_leftover_tmpdir(
         tmp_path / "tests/unit/test_stuck.py",
         "import os\n"
         "def test_stuck():\n"
-        "    stuck = os.path.join(os.environ['TMPDIR'], 'stuck')\n"
-        "    os.makedirs(os.path.join(stuck, 'inner'))\n"
-        "    os.chmod(stuck, 0o500)\n",
+        "    os.chmod(os.path.dirname(os.environ['TMPDIR']), 0o500)\n",
     )
     scratch_root = tmp_path / "scratch"
     scratch_root.mkdir()
@@ -945,9 +950,7 @@ def test_interrupted_run_reports_a_leftover_tmpdir_and_keeps_exit_130(
         tmp_path / "tests/unit/test_stuck_then_sleep.py",
         "import os, time\n"
         "def test_stuck_then_sleep():\n"
-        "    stuck = os.path.join(os.environ['TMPDIR'], 'stuck')\n"
-        "    os.makedirs(os.path.join(stuck, 'inner'))\n"
-        "    os.chmod(stuck, 0o500)\n"
+        "    os.chmod(os.path.dirname(os.environ['TMPDIR']), 0o500)\n"
         f"    open({str(marker)!r}, 'w').write('ready')\n"
         "    time.sleep(60)\n",
     )
@@ -1000,32 +1003,39 @@ def _identity(pid: int) -> str:
 def test_sweep_removes_roots_of_dead_or_reused_owners_and_keeps_live_ones(
     shm_root,
 ) -> None:
-    dead = _tmp_root_with_owner(
-        shm_root, "cidx-lane-tmp-dead", f"{_dead_pid()} 12345\n"
-    )
-    reused = _tmp_root_with_owner(
-        shm_root, "cidx-lane-tmp-reused", f"{os.getpid()} 1\n"
-    )
-    live = _tmp_root_with_owner(shm_root, "cidx-lane-tmp-live", _identity(os.getpid()))
+    dead = _tmp_root_with_owner(shm_root, "cl-0dead0", f"{_dead_pid()} 12345\n")
+    reused = _tmp_root_with_owner(shm_root, "cl-0e05ed", f"{os.getpid()} 1\n")
+    live = _tmp_root_with_owner(shm_root, "cl-0a11fe", _identity(os.getpid()))
     dead_claim = _tmp_root_with_owner(
-        shm_root, ".cidx-lane-tmp-claim-dead", f"{_dead_pid()} 12345\n"
+        shm_root, ".cl-claim-0dead1", f"{_dead_pid()} 12345\n"
     )
-    other = _tmp_root_with_owner(shm_root, "cidx-lane-other", f"{_dead_pid()} 1\n")
+    legacy = _tmp_root_with_owner(
+        shm_root, "cidx-lane-tmp-old_dead", f"{_dead_pid()} 12345\n"
+    )
+    legacy_claim = _tmp_root_with_owner(
+        shm_root, ".cidx-lane-tmp-claim-old_dea2", f"{_dead_pid()} 12345\n"
+    )
+    lookalikes = [
+        _tmp_root_with_owner(shm_root, name, f"{_dead_pid()} 1\n")
+        for name in ("cl-notahex", "cl-0dead0x", "cidx-lane-other", "cl-0DEAD0")
+    ]
     target = _tmp_root_with_owner(shm_root, "elsewhere", f"{_dead_pid()} 1\n")
-    link = shm_root / "cidx-lane-tmp-link"
+    link = shm_root / "cl-11a4c0"
     link.symlink_to(target)
 
     removed = tool.sweep_stale_tmp_roots(shm_root)
 
-    assert sorted(removed) == sorted([dead, reused, dead_claim])
-    assert not dead.exists() and not reused.exists() and not dead_claim.exists()
-    assert live.exists() and other.exists() and link.is_symlink() and target.exists()
+    swept = [dead, reused, dead_claim, legacy, legacy_claim]
+    assert sorted(removed) == sorted(swept)
+    assert not any(path.exists() for path in swept)
+    assert live.exists() and all(path.exists() for path in lookalikes)
+    assert link.is_symlink() and target.exists()
 
 
 def test_sweep_waits_out_the_claim_grace_for_an_ownerless_root(shm_root) -> None:
-    young = shm_root / ".cidx-lane-tmp-claim-young"
+    young = shm_root / ".cl-claim-0b0b0b"
     young.mkdir()
-    old = shm_root / "cidx-lane-tmp-legacy"
+    old = shm_root / "cidx-lane-tmp-legacy01"
     old.mkdir()
     aged = time.time() - tool.OWNERLESS_GRACE_SECONDS - 5
     os.utime(old, (aged, aged))
@@ -1035,22 +1045,83 @@ def test_sweep_waits_out_the_claim_grace_for_an_ownerless_root(shm_root) -> None
 
 
 def test_sweep_fails_naming_a_stale_root_it_could_not_remove(shm_root) -> None:
-    dead = _tmp_root_with_owner(
-        shm_root, "cidx-lane-tmp-stuck", f"{_dead_pid()} 12345\n"
-    )
-    (dead / "inner").mkdir()
-    (dead / "inner" / "f").write_text("x")
-    os.chmod(dead / "inner", 0o500)
-    with pytest.raises(tool.TmpCleanupFailed, match=str(dead)):
-        tool.sweep_stale_tmp_roots(shm_root)
+    dead = _tmp_root_with_owner(shm_root, "cl-057c4c", f"{_dead_pid()} 12345\n")
+    os.chmod(shm_root, 0o500)
+    try:
+        with pytest.raises(tool.TmpCleanupFailed, match=str(dead)):
+            tool.sweep_stale_tmp_roots(shm_root)
+    finally:
+        os.chmod(shm_root, 0o700)
 
 
 def test_create_tmp_root_records_its_live_owner(shm_root) -> None:
     root = tool.create_tmp_root(shm_root, os.getpid())
-    assert root.parent == shm_root and root.name.startswith("cidx-lane-tmp-")
+    assert root.parent == shm_root and re.fullmatch(r"cl-[0-9a-f]{6}", root.name)
     assert (root / "owner").read_text() == _identity(os.getpid())
     assert list(shm_root.iterdir()) == [root]
     assert tool.sweep_stale_tmp_roots(shm_root) == []
+
+
+# ^ external Linux sun_path = 108 bytes incl. NUL => 107 usable; doc:man7-unix#address-format
+_SUN_PATH_USABLE = 107
+# ^ external pytest tmp_path = TMPDIR/pytest-of-USER/pytest-N/<test name[:30]><K>; doc:pytest#tmp-path
+_PYTEST_NAME_CHARS = 30
+
+
+def _worst_socket_path_length(tmpdir: Path) -> int:
+    user = getpass.getuser()
+    pytest_dirs = f"/pytest-of-{user}/pytest-99/"
+    test_dir = "x" * _PYTEST_NAME_CHARS + "999"
+    return len(str(tmpdir)) + len(pytest_dirs) + len(test_dir) + len("/daemon.sock")
+
+
+def test_chunk_tmpdir_leaves_room_for_pytest_unix_sockets() -> None:
+    root = tool.create_tmp_root(Path("/dev/shm"), os.getpid())
+    try:
+        tmpdir = tool.make_chunk_tmpdir(root, 99)
+        assert _worst_socket_path_length(tmpdir) <= _SUN_PATH_USABLE, (
+            f"chunk TMPDIR {tmpdir} ({len(str(tmpdir))} chars) leaves no room for "
+            "a tmp_path/daemon.sock Unix socket"
+        )
+    finally:
+        shutil.rmtree(root)
+
+
+def test_chunk_tmpdirs_are_short_and_unique(shm_root) -> None:
+    made = [tool.make_chunk_tmpdir(shm_root, 3) for _ in range(20)]
+    assert len(set(made)) == 20
+    assert all(re.fullmatch(r"c3-[0-9a-f]{4}", path.name) for path in made)
+    assert all(path.is_dir() and path.parent == shm_root for path in made)
+
+
+def test_remove_trees_repairs_owned_read_only_dirs(shm_root) -> None:
+    tree = shm_root / "tree"
+    (tree / "versioned" / "probe").mkdir(parents=True)
+    (tree / "versioned" / "probe" / "f").write_text("x")
+    (tree / "sealed").mkdir()
+    (tree / "sealed" / "f").write_text("x")
+    os.chmod(tree / "versioned" / "probe", 0o555)
+    os.chmod(tree / "versioned", 0o555)
+    os.chmod(tree / "sealed", 0o000)
+
+    assert tool.remove_trees([tree]) == []
+    assert not tree.exists()
+
+
+def test_remove_trees_never_follows_or_chmods_a_symlink_target(shm_root) -> None:
+    outside = shm_root / "outside"
+    outside.mkdir()
+    (outside / "kept").write_text("x")
+    os.chmod(outside, 0o500)
+    tree = shm_root / "tree"
+    (tree / "locked").mkdir(parents=True)
+    (tree / "link").symlink_to(outside)
+    os.chmod(tree / "locked", 0o500)
+
+    assert tool.remove_trees([tree]) == []
+    assert not tree.exists()
+    assert (outside / "kept").exists()
+    assert stat.S_IMODE(outside.stat().st_mode) == 0o500
 
 
 _LEADER_LEAVES_A_WRITER = """\
@@ -1122,7 +1193,7 @@ def test_sweep_keeps_a_root_whose_owner_cannot_be_read(
 ) -> None:
     owner_pid = 424242
     proc_root = _fake_proc_with_stat(tmp_path, owner_pid, readable=False)
-    root = _tmp_root_with_owner(shm_root, "cidx-lane-tmp-unknown", f"{owner_pid} 7\n")
+    root = _tmp_root_with_owner(shm_root, "cl-0c0c0c", f"{owner_pid} 7\n")
 
     assert tool.sweep_stale_tmp_roots(shm_root, proc_root=proc_root) == []
 
@@ -1136,7 +1207,7 @@ def test_sweep_treats_a_missing_proc_entry_as_a_dead_owner(
 ) -> None:
     proc_root = tmp_path / "proc"
     proc_root.mkdir()
-    root = _tmp_root_with_owner(shm_root, "cidx-lane-tmp-gone", "424243 7\n")
+    root = _tmp_root_with_owner(shm_root, "cl-0909e0", "424243 7\n")
 
     assert tool.sweep_stale_tmp_roots(shm_root, proc_root=proc_root) == [root]
     assert not root.exists()
@@ -1176,24 +1247,29 @@ def test_lane_start_sweeps_stale_tmpfs_roots_and_keeps_live_ones(
     tmp_path: Path,
 ) -> None:
     shm = Path("/dev/shm")
-    stale = Path(tempfile.mkdtemp(prefix="cidx-lane-tmp-teststale-", dir=shm))
-    (stale / "owner").write_text(f"{_dead_pid()} 12345\n")
-    live = Path(tempfile.mkdtemp(prefix="cidx-lane-tmp-testlive-", dir=shm))
-    (live / "owner").write_text(_identity(os.getpid()))
+    stale = _tmp_root_with_owner(
+        shm, f"cl-{secrets.token_hex(3)}", f"{_dead_pid()} 12345\n"
+    )
+    legacy = _tmp_root_with_owner(
+        shm, f"cidx-lane-tmp-{secrets.token_hex(4)}", f"{_dead_pid()} 12345\n"
+    )
+    live = _tmp_root_with_owner(
+        shm, f"cl-{secrets.token_hex(3)}", _identity(os.getpid())
+    )
     root = None
     try:
         lane = _run_lane_start(tmp_path)
         assert lane.returncode == 0, lane.stdout + lane.stderr
-        assert not stale.exists()
+        assert not stale.exists() and not legacy.exists()
         assert live.exists()
         root = Path(_field(lane.stdout, "tmproot"))
-        assert root.parent == shm and root.name.startswith("cidx-lane-tmp-")
+        assert root.parent == shm and re.fullmatch(r"cl-[0-9a-f]{6}", root.name)
         shell = int(_field(lane.stdout, "shell"))
         assert _field(lane.stdout, "owner").split()[0] == str(shell)
         # ^ invariant the lane shell has exited here => its EXIT trap removed its own root
         assert not root.exists()
     finally:
-        for leftover in (stale, live, root):
+        for leftover in (stale, legacy, live, root):
             if leftover is not None:
                 shutil.rmtree(leftover, ignore_errors=True)
 

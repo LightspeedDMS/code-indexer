@@ -364,13 +364,14 @@ class TestExactTieRoundTrip:
         sample = list(orphans_before_save)[:EXACT_TIE_SAMPLE_SIZE]
         discoverable = 0
         for oid in sample:
-            _, dists = twice_loaded.knn_query(vectors[oid], k=tied_block_k)
-            if any(d <= DIST_ZERO_EPSILON for d in dists[0]):
+            # ^ why k=1 under the wide ef, not k=ef; results ascend => dists[0][0] decides, k=500 raised on ~1.7% of multithreaded graphs
+            _, dists = twice_loaded.knn_query(vectors[oid], k=1)
+            if dists[0][0] <= DIST_ZERO_EPSILON:
                 discoverable += 1
         discover_rate = discoverable / len(sample)
         print(
             f"AC5 [{label}]: n_orphans={len(orphans_before_save)} "
-            f"sample={len(sample)} discoverable_rate={discover_rate:.2%} (k={tied_block_k})"
+            f"sample={len(sample)} discoverable_rate={discover_rate:.2%} (ef={tied_block_k}, k=1)"
         )
         assert discover_rate == PERFECT_HIT_RATE, (
             f"{label}: not all sampled orphans discoverable"

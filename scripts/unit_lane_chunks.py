@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 import argparse
+import errno
 import fcntl
 import fnmatch
 import os
 import re
+import secrets
 import shutil
 import signal
 import stat
@@ -267,8 +269,17 @@ def require_tmpfs(path: Path, mounts_file: Path = Path("/proc/self/mounts")) -> 
         )
 
 
-_TMP_ROOT_PREFIX = "cidx-lane-tmp-"
-_TMP_CLAIM_PREFIX = ".cidx-lane-tmp-claim-"
+# ^ why short names, not descriptive ones; pytest tmp_path sockets under TMPDIR must fit sun_path; test:test_chunk_tmpdir_leaves_room_for_pytest_unix_sockets
+_ROOT_PREFIX = "cl-"
+_CLAIM_PREFIX = ".cl-claim-"
+_ROOT_HEX_CHARS = 6
+_CHUNK_HEX_CHARS = 4
+_SHORT_NAME_ATTEMPTS = 100
+# ^ coupled legacy alternatives with the names of commit f84d987a8; still swept so its leftovers are freed
+_ROOT_NAME = re.compile(r"cl-[0-9a-f]{6}|cidx-lane-tmp-[A-Za-z0-9_]{8}")
+_CLAIM_NAME = re.compile(
+    r"\.cl-claim-[0-9a-f]{6}|\.cidx-lane-tmp-claim-[A-Za-z0-9_]{8}"
+)
 _OWNER_FILE = "owner"
 OWNERLESS_GRACE_SECONDS = 60.0
 # ^ external starttime = field 22 of /proc/PID/stat = index 19 after the ')' closing comm; doc:man5-proc#stat
@@ -322,7 +333,7 @@ def sweep_stale_tmp_roots(parent: Path, proc_root: Path = _PROC_ROOT) -> List[Pa
     now = time.time()
     stale = []
     for entry in sorted(parent.iterdir()):
-        if not entry.name.startswith((_TMP_ROOT_PREFIX, _TMP_CLAIM_PREFIX)):
+        if not (_ROOT_NAME.fullmatch(entry.name) or _CLAIM_NAME.fullmatch(entry.name)):
             continue
         try:
             info = entry.lstat()
@@ -340,15 +351,43 @@ def sweep_stale_tmp_roots(parent: Path, proc_root: Path = _PROC_ROOT) -> List[Pa
     return stale
 
 
+def _make_short_dir(parent: Path, prefix: str, hex_chars: int) -> Path:
+    for _ in range(_SHORT_NAME_ATTEMPTS):
+        path = parent / f"{prefix}{secrets.token_hex(hex_chars // 2)}"
+        try:
+            path.mkdir(mode=0o700)
+        except FileExistsError:
+            continue
+        return path
+    raise TmpRootRefused(
+        f"no free {prefix}* name under {parent} in {_SHORT_NAME_ATTEMPTS} tries"
+    )
+
+
+def make_chunk_tmpdir(tmp_root: Path, chunk_number: int) -> Path:
+    return _make_short_dir(tmp_root, f"c{chunk_number}-", _CHUNK_HEX_CHARS)
+
+
 def create_tmp_root(parent: Path, owner_pid: int) -> Path:
     ticks = process_start_ticks(owner_pid)
     if ticks is None:
         raise TmpRootRefused(f"lane owner pid {owner_pid} is not running")
-    claim = Path(tempfile.mkdtemp(prefix=_TMP_CLAIM_PREFIX, dir=parent))
-    (claim / _OWNER_FILE).write_text(f"{owner_pid} {ticks}\n", encoding="utf-8")
-    root = parent / (_TMP_ROOT_PREFIX + claim.name[len(_TMP_CLAIM_PREFIX) :])
-    os.rename(claim, root)
-    return root
+    for _ in range(_SHORT_NAME_ATTEMPTS):
+        claim = _make_short_dir(parent, _CLAIM_PREFIX, _ROOT_HEX_CHARS)
+        (claim / _OWNER_FILE).write_text(f"{owner_pid} {ticks}\n", encoding="utf-8")
+        root = parent / (_ROOT_PREFIX + claim.name[len(_CLAIM_PREFIX) :])
+        try:
+            # ^ invariant every root holds an owner file => a taken name is non-empty => rename fails, never replaces it
+            os.rename(claim, root)
+        except OSError as exc:
+            if exc.errno not in (errno.ENOTEMPTY, errno.EEXIST):
+                raise
+            shutil.rmtree(claim)
+            continue
+        return root
+    raise TmpRootRefused(
+        f"no free {_ROOT_PREFIX}* name under {parent} in {_SHORT_NAME_ATTEMPTS} tries"
+    )
 
 
 def _chunk_env(
@@ -451,11 +490,7 @@ def run_chunks(
                 )
             )
             scratches.append(scratch)
-            tmpdir = Path(
-                tempfile.mkdtemp(
-                    prefix=f"cidx-lane-chunk{index + 1}-tmp-", dir=tmp_root
-                )
-            )
+            tmpdir = make_chunk_tmpdir(tmp_root, index + 1)
             tmpdirs.append(tmpdir)
             log.parent.mkdir(parents=True, exist_ok=True)
             argv = [
@@ -526,16 +561,45 @@ class TmpCleanupFailed(RuntimeError):
         self.results = results or []
 
 
+def _rmtree_error(path: Path) -> Optional[OSError]:
+    try:
+        shutil.rmtree(path)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return exc
+    return None
+
+
+def _grant_owner_rwx(top: Path) -> None:
+    uid = os.getuid()
+
+    def grant(path: str) -> None:
+        try:
+            info = os.lstat(path)
+        except OSError:
+            return
+        # ^ security lstat-confirmed own directories only => no symlink followed, no other user's entry changed
+        if stat.S_ISDIR(info.st_mode) and info.st_uid == uid:
+            os.chmod(path, stat.S_IMODE(info.st_mode) | stat.S_IRWXU)
+
+    grant(str(top))
+    for dirpath, dirnames, _files in os.walk(top):
+        for name in dirnames:
+            grant(os.path.join(dirpath, name))
+
+
 def remove_trees(paths: Iterable[Path]) -> List[Path]:
     leftovers = []
     for path in paths:
-        try:
-            shutil.rmtree(path)
-        except FileNotFoundError:
-            pass
-        except OSError as exc:
+        error = _rmtree_error(path)
+        if isinstance(error, PermissionError):
+            # ^ why repair modes inside the tree, never its parent; tests leave read-only dirs on purpose
+            _grant_owner_rwx(path)
+            error = _rmtree_error(path)
+        if error is not None:
             print(
-                f"FAILED: could not remove {path} ({type(exc).__name__})",
+                f"FAILED: could not remove {path} ({type(error).__name__})",
                 file=sys.stderr,
             )
             leftovers.append(path)
