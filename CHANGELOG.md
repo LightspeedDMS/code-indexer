@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [12.100.0] - 2026-10-29
+
+### Upgrade notes
+
+- Server: the installer and the auto-updater add systemd drop-ins for `cidx-server`: an open-file limit of `LimitNOFILE=65536:524288`, `LimitCORE=infinity`, and a systemd-coredump configuration that keeps whole core dumps (up to 16G each, 20G total, leaving 10G free). The auto-updater applies them on deploy and restarts the service.
+- Server: a thread dump of every worker can be requested with SIGUSR1. Send it to one worker process ID, or use `systemctl kill --kill-whom=main`; never send it to the whole unit.
+- X-Ray: when Phase 1 stops early because of the read limit or the match cap, the result now says so: `phase1_truncated` is true, a warning of type `content_search_read_capped` or `phase1_match_cap_reached` explains why, `phase1_candidate_files` gives the number of files kept, and `files_total` is `null` (it was the size of the cut list). Clients that read `files_total` as a number must accept `null`.
+- Search: `multi_search_max_workers` now limits the threads of each search mode (semantic and temporal, full-text, regex), so a multi-repository search can use up to three times that many threads in total.
+
+### Fixed
+
+- Indexing: a delete and an upsert of the same point at the same moment could leave the chunk store and the path index disagreeing, so ownership checks and file counts could drift. Each point's path-index change and its store write are now one critical section, in both storage layouts. Concurrent writers to one `chunks.db` also queue instead of colliding, so parallel indexing writes are faster.
+- Dependency map: the MCP dependency-map tools now list domains in name order. Before, their answers (for example the consumer list) followed the filesystem's listing order and could differ between hosts.
+- Query: each server process keeps at most 4096 chunk-store handles open and closes stale ones on a dedicated thread, so long-running servers no longer accumulate open files.
+- Server: snapshot cleanup keeps working, one deletion per cycle, while descriptor use is high or unknown, and health reports DEGRADED with the reason; before, cleanup stopped entirely at high descriptor use.
+- Server: `/healthz` answers from a background evaluation refreshed every 30 seconds, so a slow health check no longer delays the load balancer's probe; a result older than 120 seconds reports unhealthy.
+- Server: the catalog repository, local repositories and repositories receiving a new index are initialised in process instead of by starting `cidx init`.
+- X-Ray: the include-pattern probe stops at the first matching file instead of listing every file.
+- Indexing: the Voyage and Cohere tokenizers load once per process instead of once per use, which shortens each indexing child's start.
+- Indexing: `TextChunker` creates its debug log directory before writing to it.
+- CLI: a command that is not available in the current mode now names the mode and gives the reason, for example "is not available in an uninitialized project (no configuration found - project needs initialization)". Before, the reason was pasted in place of the mode name.
+
+### Changed
+
+- Search: multi-repository searches run in one lane per search mode, and a free thread serves the request with the fewest running tasks, so a large fan-out no longer delays the requests behind it and full-text tasks no longer wait behind semantic ones.
+- Query: the HNSW label map is cached per process (bounded, keyed on the file's identity), so repeated queries on the same collection no longer re-read it.
+
+### Added
+
+- A read-only performance regression suite for operators (`scripts/analysis/perf_suite/run.py`) that measures REST and MCP side by side on a pinned corpus; see `docs/server/performance-suite.md`.
+
+### Development
+
+- The fast, server-fast and slow unit lanes run as parallel chunks balanced from measured durations, each chunk with its own temporary directory on tmpfs. The fast lane takes about 5 minutes instead of about 100, and the slow lane is now a required gate.
+- A unit test that starts a real `cidx` process now fails unless it is marked slow.
+
 ## [12.99.0] - 2026-10-27
 
 ### Upgrade notes
