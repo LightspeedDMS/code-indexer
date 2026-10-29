@@ -47,23 +47,20 @@ from ..app_helpers import (
 # Module-level logger
 logger = logging.getLogger(__name__)
 
-# Security fix (Bug #1433 follow-up): /healthz is deliberately unauthenticated
-# AND AdmissionControlMiddleware exempts any path starting with "/health"
-# (so "/healthz".startswith("/health") bypasses the one global backpressure
-# mechanism) -- without a cache here, an unauthenticated caller could flood
-# this route at unbounded concurrency, each request forking a subprocess
-# (golden-repos readability probe) and opening several fresh DB connections.
-# This short-TTL, process-local cache is scoped ONLY to /healthz's own
-# consumption of the computed status -- health_service.get_system_health()
-# itself is NOT touched/cached, so /health and /api/system/health (whose
-# docstrings explicitly say "uncached for real-time data") are unaffected.
-# 2 seconds is transparent to a real load balancer's probe cadence
-# (typically every 2-10s per backend) while collapsing a flood into
-# roughly one real computation per interval.
+# ^ security /healthz is unauthenticated and exempt from AdmissionControlMiddleware => evaluations per probe must stay bounded
+# ^ invariant 2 s TTL guards only the no-refresher path; a refresher => evaluations bounded whatever the probe rate
 _HEALTHZ_CACHE_TTL_SECONDS = 2.0
+# ^ perf get_system_health = 0.3-8.7 s; 2 s TTL < 2-10 s LB cadence => one full evaluation per probe; refresher = 1 per 30 s
+_HEALTHZ_REFRESH_INTERVAL_SECONDS = 30.0
+# ^ invariant _HEALTHZ_MAX_AGE_SECONDS = 4 refresh intervals >> 8.7 s worst measured evaluation; also the boot bound
+_HEALTHZ_MAX_AGE_SECONDS = 120.0
+HEALTHZ_REFRESHER_THREAD_NAME = "healthz-refresher"
 _healthz_cache_lock = threading.Lock()
 _healthz_cached_status: Optional[HealthStatus] = None
 _healthz_cached_at: float = 0.0
+_healthz_refresher_stop: Optional[threading.Event] = None
+_healthz_refresher_started_at: float = 0.0
+_healthz_stale_logged = False
 # Private alias so tests can control elapsed time deterministically by
 # patching ONLY this reference -- never the process-global time.monotonic,
 # which the ASGI test client's event loop also depends on for scheduling
@@ -80,49 +77,114 @@ def _search_event_health_block() -> Optional[dict]:
     return None if info is None else info.model_dump()
 
 
+def _store_healthz_status(
+    status_value: HealthStatus,
+    at: float,
+    stop: Optional[threading.Event] = None,
+) -> None:
+    global _healthz_cached_status, _healthz_cached_at, _healthz_stale_logged
+    with _healthz_cache_lock:
+        if stop is not None and stop.is_set():
+            return
+        _healthz_cached_status = status_value
+        _healthz_cached_at = at
+        _healthz_stale_logged = False
+
+
+def _refresh_healthz_status(stop: threading.Event) -> None:
+    try:
+        status_value = health_service.get_system_health().status
+    except Exception as e:
+        if stop.is_set():
+            logger.debug("Liveness evaluation failed during shutdown: %s", e)
+            return
+        logger.error(
+            format_error_log(
+                "APP-GENERAL-060",
+                f"Background liveness evaluation (/healthz) failed: {e}",
+            ),
+            exc_info=True,
+        )
+        status_value = HealthStatus.UNHEALTHY
+    # ^ hazard stamping at evaluation start => a slow evaluation reads as stale; test:test_status_is_stamped_when_the_evaluation_completes
+    _store_healthz_status(status_value, _healthz_monotonic(), stop)
+
+
+def _healthz_refresh_loop(stop: threading.Event) -> None:
+    while not stop.is_set():
+        _refresh_healthz_status(stop)
+        stop.wait(_HEALTHZ_REFRESH_INTERVAL_SECONDS)
+
+
+def start_healthz_refresher() -> None:
+    global _healthz_refresher_stop, _healthz_refresher_started_at
+    with _healthz_cache_lock:
+        if _healthz_refresher_stop is not None:
+            return
+        stop = threading.Event()
+        _healthz_refresher_stop = stop
+        _healthz_refresher_started_at = _healthz_monotonic()
+    threading.Thread(
+        target=_healthz_refresh_loop,
+        args=(stop,),
+        name=HEALTHZ_REFRESHER_THREAD_NAME,
+        daemon=True,
+    ).start()
+
+
+def stop_healthz_refresher() -> None:
+    global _healthz_refresher_stop
+    with _healthz_cache_lock:
+        stop, _healthz_refresher_stop = _healthz_refresher_stop, None
+    # ^ why set the event, not join; shutdown runs on the event loop and an evaluation can take seconds
+    if stop is not None:
+        stop.set()
+
+
 def _reset_healthz_cache() -> None:
-    """Test-support helper: clears the /healthz TTL cache state so tests
-    don't leak a cached status across test cases. Not used by production
-    code paths."""
-    global _healthz_cached_status, _healthz_cached_at
+    """Test-support helper: stops the refresher and clears the /healthz
+    cache state so tests don't leak a cached status across test cases.
+    Not used by production code paths."""
+    global _healthz_cached_status, _healthz_cached_at, _healthz_stale_logged
+    stop_healthz_refresher()
     with _healthz_cache_lock:
         _healthz_cached_status = None
         _healthz_cached_at = 0.0
+        _healthz_stale_logged = False
 
 
 def _get_healthz_status() -> HealthStatus:
-    """Returns the overall health status for the /healthz probe, served
-    from the short-TTL cache above whenever a prior real computation is
-    still fresh.
-
-    The lock only guards the small shared-state read/write -- it is
-    released before (and re-acquired after) the potentially slow real
-    health_service.get_system_health() call, so concurrent requests never
-    block on each other waiting for that computation; a benign race on a
-    cache miss can still result in more than one real computation, which
-    is an acceptable, self-correcting cost (not a correctness issue) for
-    this pure per-process performance optimization.
-
-    On a cache miss, calls health_service.get_system_health() for real and
-    updates the cache only on success -- if that call raises, the
-    exception propagates uncached (the cache is left exactly as it was),
-    so the very next request retries for real instead of being stuck
-    serving a stale error.
-    """
-    global _healthz_cached_status, _healthz_cached_at
+    global _healthz_stale_logged
     now = _healthz_monotonic()
     with _healthz_cache_lock:
-        if (
-            _healthz_cached_status is not None
-            and (now - _healthz_cached_at) < _HEALTHZ_CACHE_TTL_SECONDS
-        ):
-            return _healthz_cached_status
+        cached = _healthz_cached_status
+        refreshing = _healthz_refresher_stop is not None
+        since = (
+            _healthz_cached_at if cached is not None else _healthz_refresher_started_at
+        )
+        stale = refreshing and now - since >= _HEALTHZ_MAX_AGE_SECONDS
+        first_stale_answer = stale and not _healthz_stale_logged
+        if stale:
+            _healthz_stale_logged = True
+    # ^ invariant refresher running => no request-path evaluation; liveness before the first evaluation = process serving
+    if refreshing:
+        if stale:
+            if first_stale_answer:
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-060",
+                        f"Liveness status (/healthz) is {now - since:.0f}s old; "
+                        "the background evaluation is not completing",
+                    )
+                )
+            return HealthStatus.UNHEALTHY
+        return cached if cached is not None else HealthStatus.HEALTHY
 
+    if cached is not None and now - _healthz_cached_at < _HEALTHZ_CACHE_TTL_SECONDS:
+        return cached
+    # ^ order lock released around get_system_health; a raise propagates uncached so the next request retries
     status_value: HealthStatus = health_service.get_system_health().status
-
-    with _healthz_cache_lock:
-        _healthz_cached_status = status_value
-        _healthz_cached_at = now
+    _store_healthz_status(status_value, now)
     return status_value
 
 

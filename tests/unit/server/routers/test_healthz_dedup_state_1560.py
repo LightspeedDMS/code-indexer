@@ -270,6 +270,8 @@ def _call_real_healthz_with_active_dedup_row(tmp_path, monkeypatch) -> Response:
         server_app_module = importlib.import_module(SERVER_APP_MODULE_PATH)
         monkeypatch.setattr(server_app_module, "app", app, raising=False)
         app.state.golden_repos_dir = None
+        # ^ hazard lifespan's refresher answers healthy before its first evaluation => stop it so the probe evaluates this state
+        inline_misc._reset_healthz_cache()
         return client.get(HEALTHZ_PATH)
 
 

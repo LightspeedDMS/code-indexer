@@ -596,6 +596,21 @@ class HealthCheckService:
         reasons = catalog_pointer_health_reasons(golden)
         return bool(reasons), False, reasons
 
+    # ^ invariant cleanup fd reasons => DEGRADED only, never UNHEALTHY; reads the last cycle's sample, no I/O; #2219
+    def _collect_cleanup_fd_usage_failures(self) -> Tuple[bool, bool, List[str]]:
+        try:
+            from ..app import app as app_module
+
+            lifecycle = getattr(app_module.state, "global_lifecycle_manager", None)
+            if lifecycle is None:
+                return False, False, []
+            reasons = lifecycle.cleanup_manager.fd_usage_health_reasons()
+        except Exception as exc:
+            reasons = [
+                f"File descriptor usage health collection failed: {type(exc).__name__}"
+            ]
+        return bool(reasons), False, reasons
+
     def _read_fleet_migration_unrecoverable_aliases(self) -> List[str]:
         """
         Read every golden_alias currently recorded with the PERMANENT
@@ -1556,6 +1571,11 @@ class HealthCheckService:
         cap_warn, _cap_err, cap_reasons = self._collect_catalog_pointer_failures()
         has_warning = has_warning or cap_warn
         failure_reasons.extend(cap_reasons)
+
+        # Bug #2219: high descriptor usage throttles cleanup -- DEGRADED only.
+        cfd_warn, _cfd_err, cfd_reasons = self._collect_cleanup_fd_usage_failures()
+        has_warning = has_warning or cfd_warn
+        failure_reasons.extend(cfd_reasons)
 
         # Bug #2114: search events dropped recently on this node -- DEGRADED
         # only (a full recording queue never drains a node).

@@ -15,7 +15,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from .query_tracker import QueryTracker
 from .snapshot_deletion_errors import SnapshotDeleteError, SnapshotInUseError
@@ -59,6 +59,12 @@ class CleanupManager:
     MAX_BACKOFF_DELAY = 60.0  # seconds
     BASE_BACKOFF_DELAY = 1.0  # seconds
     FD_USAGE_THRESHOLD = 0.80  # 80%
+    # ^ why leave "high" only below 75%, not at 80%; usage hovering at 80% => a state flip and a log line every cycle
+    FD_USAGE_RECOVERY_THRESHOLD = 0.75
+    # ^ why bounded work above the threshold, not a skipped cycle; a cycle holds O(tree depth) fds and deleting releases handles; #2219
+    FD_HIGH_MAX_DELETIONS_PER_CYCLE = 1
+    FD_HIGH_LOG_INTERVAL_SECONDS = 600.0
+    _clock = staticmethod(time.monotonic)
 
     #: Bug #1844: a snapshot the storage backend refuses to delete because
     #: something still HOLDS it is not a failure, it is "not yet" -- the
@@ -152,6 +158,10 @@ class CleanupManager:
         # circuit-breaker budget reserved for genuine failures.
         self._in_use_deferrals: Dict[str, int] = {}
         self._stats_lock = threading.Lock()
+        self._fd_high_sample: Optional[Tuple[int, int]] = None
+        self._fd_high_last_logged = 0.0
+        self._fd_state = "normal"
+        self._fd_unknown_error: Optional[str] = None
         self._job_tracker = job_tracker  # Story #314: dashboard visibility
         # Bug #1084 Phase A5: backend-aware deletion. When set, snapshot-shaped
         # paths are deleted via VersionedSnapshotManager.delete_snapshot (daemon
@@ -367,23 +377,83 @@ class CleanupManager:
     # FD monitoring
     # ------------------------------------------------------------------
 
-    def _is_fd_usage_high(self) -> bool:
-        """Return True if process FD usage exceeds FD_USAGE_THRESHOLD. Non-Linux: always False."""
-        try:
-            fd_dir = "/proc/self/fd"
-            if not os.path.isdir(fd_dir):
-                return False
-            try:
-                import resource
+    # ^ invariant None = not applicable (no /proc/self/fd or no finite limit); a failed read raises => unknown, never recovery
+    def _measure_fd_usage(self) -> Optional[Tuple[int, int]]:
+        fd_dir = "/proc/self/fd"
+        if not os.path.isdir(fd_dir):
+            return None
+        import resource
 
-                soft_limit, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
-            except Exception:
-                return False
-            if soft_limit <= 0:
-                return False
-            return len(os.listdir(fd_dir)) / soft_limit >= self.FD_USAGE_THRESHOLD
-        except Exception:
-            return False
+        soft_limit, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft_limit <= 0:
+            return None
+        return len(os.listdir(fd_dir)), soft_limit
+
+    def _note_fd_usage(self) -> bool:
+        sample: Optional[Tuple[int, int]] = None
+        unknown_error: Optional[str] = None
+        try:
+            sample = self._measure_fd_usage()
+        except Exception as exc:
+            unknown_error = type(exc).__name__
+        with self._stats_lock:
+            was_high = self._fd_state == "high"
+        threshold = (
+            self.FD_USAGE_RECOVERY_THRESHOLD if was_high else self.FD_USAGE_THRESHOLD
+        )
+        high = sample is not None and sample[0] / sample[1] >= threshold
+        throttled = high or unknown_error is not None
+        state = "unknown" if unknown_error else ("high" if high else "normal")
+        now = self._clock()
+        with self._stats_lock:
+            previous = self._fd_state
+            due = state != previous or (
+                now - self._fd_high_last_logged >= self.FD_HIGH_LOG_INTERVAL_SECONDS
+            )
+            self._fd_state = state
+            self._fd_high_sample = sample if high else None
+            self._fd_unknown_error = unknown_error
+            if throttled and due:
+                self._fd_high_last_logged = now
+        limit_text = (
+            f"cleanup continues with at most "
+            f"{self.FD_HIGH_MAX_DELETIONS_PER_CYCLE} deletion per cycle"
+        )
+        if throttled and due and unknown_error is not None:
+            logger.warning(
+                f"File descriptor usage unknown (reading /proc/self/fd failed: "
+                f"{unknown_error}); {limit_text}"
+            )
+        elif throttled and due and sample is not None:
+            logger.warning(
+                f"File descriptor usage is above threshold ({sample[0]} of soft "
+                f"limit {sample[1]}); {limit_text}"
+            )
+        elif previous != "normal" and state == "normal":
+            logger.info("File descriptor usage is back below threshold")
+        return throttled
+
+    def fd_usage_health_reasons(self) -> List[str]:
+        with self._stats_lock:
+            sample = self._fd_high_sample
+            unknown_error = self._fd_unknown_error
+        limit_text = (
+            f"old index version cleanup is limited to "
+            f"{self.FD_HIGH_MAX_DELETIONS_PER_CYCLE} deletion per cycle"
+        )
+        if unknown_error is not None:
+            return [
+                f"File descriptor usage unknown in a server process (reading "
+                f"/proc/self/fd failed: {unknown_error}); {limit_text}"
+            ]
+        if sample is None:
+            return []
+        return [
+            f"File descriptor usage is {sample[0]} of soft limit {sample[1]} "
+            f"(high from {self.FD_USAGE_THRESHOLD:.0%}, clears below "
+            f"{self.FD_USAGE_RECOVERY_THRESHOLD:.0%}) in a server process; "
+            f"{limit_text}"
+        ]
 
     # ------------------------------------------------------------------
     # Deletion
@@ -654,21 +724,23 @@ class CleanupManager:
         """
         Process the cleanup queue and delete eligible paths.
 
-        Applies FD monitoring (skip cycle), circuit breaker (remove permanently
+        Applies FD monitoring (at most FD_HIGH_MAX_DELETIONS_PER_CYCLE
+        deletions while usage is high), circuit breaker (remove permanently
         after MAX_FAILURES), and exponential backoff (skip until delay elapses).
         Registers index_cleanup jobs in JobTracker for dashboard visibility (Story #314).
         """
-        if self._is_fd_usage_high():
-            logger.warning(
-                "File descriptor usage is above threshold; "
-                "skipping cleanup cycle to avoid FD exhaustion"
-            )
-            return
+        fd_usage_high = self._note_fd_usage()
+        deletion_attempts = 0
 
         with self._queue_lock:
             paths_to_check = list(self._cleanup_queue)
 
         for path in paths_to_check:
+            if (
+                fd_usage_high
+                and deletion_attempts >= self.FD_HIGH_MAX_DELETIONS_PER_CYCLE
+            ):
+                break
             failure_count = self._get_failure_count(path)
             if failure_count >= self.MAX_FAILURES:
                 with self._queue_lock:
@@ -810,6 +882,7 @@ class CleanupManager:
             if not claimed:
                 continue
 
+            deletion_attempts += 1
             try:
                 self._delete_index(path)
                 with self._queue_lock:

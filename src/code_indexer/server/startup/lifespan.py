@@ -5456,8 +5456,16 @@ def make_lifespan(
         # heartbeat advertises its capabilities).
         start_stored_secret_sweep(app, Path(server_data_dir), backend_registry)
 
+        from ..routers.inline_misc import (
+            start_healthz_refresher,
+            stop_healthz_refresher,
+        )
+
+        start_healthz_refresher()
+
         yield  # Server is now running
 
+        stop_healthz_refresher()
         await _stop_analysis_agent_credential_migration(app)
         await _stop_catalog_snapshot_mode_repair(app)
 
