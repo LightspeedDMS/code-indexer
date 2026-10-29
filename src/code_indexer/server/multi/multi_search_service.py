@@ -18,10 +18,11 @@ import subprocess
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
+from concurrent.futures import TimeoutError, as_completed
 from pathlib import Path
 from typing import Callable, Dict, List, Any, Optional
 
+from .fair_lane_executor import FairLaneExecutor
 from .multi_search_config import MultiSearchConfig
 from .multi_result_aggregator import MultiResultAggregator
 from .models import (
@@ -49,6 +50,12 @@ def _extension_deadline_of(request: MultiSearchRequest) -> Optional[float]:
         return request.extension_deadline
     return None
 
+
+SEMANTIC_LANE = "semantic"
+FTS_LANE = "fts"
+REGEX_LANE = "regex"
+# ^ why one lane per mode, not one shared pool; fts queued behind semantic => fts p95 5 s instead of 0.5 s; #2226
+_LANE_OF_SEARCH_TYPE = {"fts": FTS_LANE, "regex": REGEX_LANE}
 
 # Constants for timeout recommendations
 MAX_RECOMMENDED_REPOS = 10
@@ -140,7 +147,9 @@ class MultiSearchService:
         """
         self.config = config
         self.hnsw_index_cache = hnsw_index_cache
-        self.thread_executor = ThreadPoolExecutor(max_workers=config.max_workers)
+        self.thread_executor = FairLaneExecutor(
+            {lane: config.max_workers for lane in (SEMANTIC_LANE, FTS_LANE, REGEX_LANE)}
+        )
         self._shutdown = False
 
         # Repo-shard ownership (cluster sharding). None/solo -> caching stays off
@@ -277,10 +286,18 @@ class MultiSearchService:
         # identical contextvars.copy_context() pattern already used by
         # semantic_query_manager.py's "parallel" strategy dispatch.
         future_to_repo = {}
+        owner = object()
+        lane = _LANE_OF_SEARCH_TYPE.get(request.search_type, SEMANTIC_LANE)
         for repo_id in request.repositories:
             _ctx = contextvars.copy_context()
-            future = self.thread_executor.submit(
-                _ctx.run, self._start_unless_budget_spent, search_func, repo_id, request
+            future = self.thread_executor.submit_for(
+                lane,
+                owner,
+                _ctx.run,
+                self._start_unless_budget_spent,
+                search_func,
+                repo_id,
+                request,
             )
             future_to_repo[future] = repo_id
 

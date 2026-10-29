@@ -1500,7 +1500,7 @@ function saveLlmCredsConfig() {
                             {% if 'multi_search_max_workers' in restart_required_fields %}
                             <small class="restart-note">Requires server restart</small>
                             {% endif %}
-                            <small>Max concurrent threads for all multi-repository searches including REST API and MCP omni-search (default: 2)</small>
+                            <small>Max concurrent threads per search mode (semantic/temporal, FTS, regex) for multi-repository searches including REST API and MCP omni-search, shared fairly between requests (default: 8)</small>
                         </td>
                     </tr>
                     <tr>
@@ -1597,7 +1597,7 @@ function saveLlmCredsConfig() {
                 <label for="multi-search-max-workers">
                     Multi-Search Max Workers
                     <input type="number" id="multi-search-max-workers" name="multi_search_max_workers" value="{{ config.multi_search.multi_search_max_workers }}" min="1" max="50">
-                    <small>Range: 1-50 workers (default: 2). Applies to all multi-repository searches including REST API and MCP omni-search.</small>
+                    <small>Range: 1-50 workers (default: 8). Threads per search mode (semantic/temporal, FTS, regex), shared fairly between requests; applies to REST API and MCP omni-search.</small>
                 </label>
                 <label for="multi-search-timeout">
                     Multi-Search Timeout (seconds)

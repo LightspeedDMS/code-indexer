@@ -342,6 +342,12 @@ def initialize_caches(worker_count: int) -> None:
             extra={"correlation_id": get_correlation_id()},
         )
 
+    from code_indexer.storage.shared.id_mapping_cache import (
+        configure_global_id_mapping_cache,
+    )
+
+    configure_global_id_mapping_cache(worker_count)
+
 
 def get_global_cache() -> HNSWIndexCache:
     """

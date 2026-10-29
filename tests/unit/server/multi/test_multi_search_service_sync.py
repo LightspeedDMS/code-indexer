@@ -134,7 +134,10 @@ class TestMultiSearchServiceThreadPoolRetained:
 
         assert hasattr(service, "thread_executor")
         assert service.thread_executor is not None
-        assert service.thread_executor._max_workers == 5
+        # #2226: one fair lane per search mode, each bounded by max_workers
+        lanes = service.thread_executor.stats()
+        assert set(lanes) == {"semantic", "fts", "regex"}
+        assert all(lane["max_threads"] == 5 for lane in lanes.values())
 
     def test_thread_executor_used_for_parallel_search(self):
         """ThreadPoolExecutor should be used for parallel multi-repo search.
@@ -142,13 +145,12 @@ class TestMultiSearchServiceThreadPoolRetained:
         AC1: Keep internal ThreadPoolExecutor for parallel multi-repo search
         """
         from code_indexer.server.multi.multi_search_service import MultiSearchService
-        from concurrent.futures import ThreadPoolExecutor
+        from code_indexer.server.multi.fair_lane_executor import FairLaneExecutor
 
         config = MultiSearchConfig(max_workers=5, query_timeout_seconds=30)
         service = MultiSearchService(config)
 
-        # Verify service has a ThreadPoolExecutor
-        assert isinstance(service.thread_executor, ThreadPoolExecutor)
+        assert isinstance(service.thread_executor, FairLaneExecutor)
 
         request = MultiSearchRequest(
             repositories=["repo1", "repo2"],

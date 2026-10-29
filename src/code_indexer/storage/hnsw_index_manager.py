@@ -15,6 +15,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from code_indexer.storage.shared.chunk_layout import ChunkLayout
+from code_indexer.storage.shared.id_mapping_cache import (
+    get_global_id_mapping_cache,
+    read_id_mapping,
+)
 from code_indexer.utils.file_locking import (
     fsync_directory,
     nfs_safe_flock,
@@ -627,8 +631,8 @@ class HNSWIndexManager:
                 f"got {len(query_vector)}"
             )
 
-        # Load ID mapping from metadata (reflects actual non-deleted vectors)
-        id_mapping = self._load_id_mapping(collection_path)
+        # ^ why cached read-only map, not _load_id_mapping; per-query parse = 7.7% of GIL under fan-out; #2226
+        id_mapping = get_global_id_mapping_cache().get(collection_path)
 
         # Get actual queryable vector count (excludes soft-deleted)
         # Note: get_current_count() includes soft-deleted vectors, causing errors
@@ -1690,25 +1694,7 @@ class HNSWIndexManager:
         Returns:
             Dictionary mapping label (int) to vector ID (str)
         """
-        meta_file = collection_path / "collection_meta.json"
-
-        if not meta_file.exists():
-            return {}
-
-        try:
-            with open(meta_file) as f:
-                metadata = json.load(f)
-
-            if "hnsw_index" not in metadata:
-                return {}
-
-            id_mapping_str = metadata["hnsw_index"].get("id_mapping", {})
-
-            # Convert string keys back to int
-            return {int(k): v for k, v in id_mapping_str.items()}
-
-        except (json.JSONDecodeError, KeyError, ValueError):
-            return {}
+        return read_id_mapping(collection_path / "collection_meta.json")
 
     # === INCREMENTAL UPDATE METHODS (HNSW-001 & HNSW-002) ===
 
