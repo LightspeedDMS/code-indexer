@@ -4,6 +4,7 @@ Tests the minimal-import daemon delegation path that achieves
 <150ms startup for daemon-mode queries.
 """
 
+import subprocess
 import time
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -318,26 +319,39 @@ class TestLightweightDelegationPerformance:
         # Assert - should be <100ms (rpyc ~50ms + rich ~40ms)
         assert elapsed_ms < 150, f"Import took {elapsed_ms:.0f}ms, expected <150ms"
 
+    # ^ hazard unpatched subprocess.run => timed git fork+exec > 1 s under lane load; cost grows with parent heap
+    @patch("subprocess.run")
     @patch("code_indexer.cli_daemon_delegation._connect_to_daemon")
-    def test_execute_via_daemon_overhead(self, mock_connect):
+    def test_execute_via_daemon_overhead(self, mock_connect, mock_git_run, capsys):
         """Test that execute_via_daemon has minimal overhead."""
-        # Arrange
         mock_conn = Mock()
         mock_conn.root.exposed_query_fts.return_value = []
         mock_connect.return_value = mock_conn
+        git_branch_argv = ["git", "symbolic-ref", "--short", "HEAD"]
+        mock_git_run.return_value = subprocess.CompletedProcess(
+            args=git_branch_argv, returncode=0, stdout="example-branch\n", stderr=""
+        )
 
         from code_indexer.cli_daemon_fast import execute_via_daemon
 
         argv = ["cidx", "query", "test", "--fts"]
         config_path = Path("/fake/.code-indexer/config.json")
 
-        # Act - measure execution overhead
-        start = time.time()
+        # ^ order warm-up call before the clock; first call imports code_indexer.cli (~0.5 s cold)
         execute_via_daemon(argv, config_path)
-        elapsed_ms = (time.time() - start) * 1000
+        mock_git_run.reset_mock()
+        mock_conn.reset_mock()
+        capsys.readouterr()
 
-        # Assert - should be <50ms (just arg parsing + RPC call)
-        # Note: Actual RPC is mocked, so this is pure overhead
+        start = time.perf_counter()
+        exit_code = execute_via_daemon(argv, config_path)
+        elapsed_ms = (time.perf_counter() - start) * 1000
+
+        assert exit_code == 0
+        mock_git_run.assert_called_once()
+        assert mock_git_run.call_args.args[0] == git_branch_argv
+        assert "Current branch: example-branch" in capsys.readouterr().out
+        mock_conn.root.exposed_query_fts.assert_called_once()
         assert elapsed_ms < 100, f"Overhead was {elapsed_ms:.0f}ms, expected <100ms"
 
 
