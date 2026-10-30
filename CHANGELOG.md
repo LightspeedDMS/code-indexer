@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [12.101.0] - 2026-10-30
+
+### Upgrade notes
+
+- X-Ray: the Rust engine changes, so the auto-updater rebuilds `xray-cli` on deploy. Run without a target and without `XRAY_TARGET`, `xray-cli` now scans the current directory (it used a fixed directory under the user's home); it exits 1 with an error if the current directory cannot be determined. The server always passes `--files-from` and is not affected.
+- Server: every `cidx index` the server starts now carries a hidden `--exit-with-parent=<pid>` argument, and the child stops (SIGTERM) when the server process that started it exits. A wrapper that runs `cidx` as a child process instead of replacing itself (`exec`) makes every server-started index fail with exit code 241; the installed console script is not affected.
+- Server: snapshot cleanup never deletes a directory that is the current or previous target of a repository alias, so one superseded snapshot per repository is kept until the next refresh replaces it.
+- Correction to the 12.100.0 notes: a truncated X-Ray Phase 1 result also carries `phase1_truncation_reason` (`read_limit` or `match_cap`).
+
+### Fixed
+
+- Refresh (cluster): two runs of one golden-repository refresh could overlap and both write the shared chunk store. A refresh now stops as soon as it no longer owns the repository (its job was claimed by another run, or the alias write lease no longer carries its token), checked during the work and immediately before the alias swap. A stopped run publishes nothing, takes no failure strike and leaves the new owner's job record untouched. A `cidx index` child also stops when the server process that started it dies, so it can no longer outlive its run.
+- Refresh: snapshot directories are reserved with one atomic `mkdir`, and a destination that already exists is refused instead of copied into.
+- Server (solo): a store could close or use a SQLite connection owned by another live thread, which could crash the server process. Connections are now owned per thread; closing one store releases only the closing thread's connection, and cross-thread use is detected and reported.
+- Server: after one failed read, a repeated identical query could return no rows instead of raising (a Python 3.9 sqlite3 behaviour while the failed cursor stays referenced), so for example a broken job store read as "not cancelled" after a single warning. A failed statement now keeps failing until the store is readable again.
+- Server watch: files written through the MCP file tools (`create_file`, `edit_file`, `delete_file`) in an activated repository became unsearchable. The server watch now indexes them for every configured embedding provider, updates the full-text index each cycle, publishes the semantic index after each cycle (debounced), applies the repository's include and exclude rules to deletions, and never drops pending edits when it stops.
+
+### Security
+
+- CI scans every pushed commit range and every pull request for secrets with gitleaks and trufflehog (verified findings only), and a gitleaks pre-commit hook scans staged changes. Logs show only the rule or detector, the commit and the line, never the value or the file path. Tags and releases wait for the scan.
+
+### Development
+
+- A fast-lane unit test that builds the whole server app (reading a lazy `code_indexer.server.app` attribute) now fails with a message naming the fix; bind the attribute with the `bind_server_app_attr` fixture instead.
+- Several order-dependent and load-sensitive unit tests were fixed at their source: tests that built the server app now restore every process binding they change, and timing checks measure a long enough window or count operations instead of comparing wall-clock ratios.
+
 ## [12.100.0] - 2026-10-29
 
 ### Upgrade notes
