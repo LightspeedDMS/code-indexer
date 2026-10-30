@@ -18,6 +18,7 @@ from code_indexer.server.storage.sqlite_backends import BackgroundJobsSqliteBack
 POLLS = 20
 POLL_SECONDS = 0.05
 FINISH_BOUND_SECONDS = 30
+TERMINAL_STATUSES = {"completed", "completed_partial", "failed", "cancelled"}
 
 
 def _wait_for(predicate: Any, bound: float) -> bool:
@@ -55,8 +56,13 @@ def test_unreassigned_job_runs_to_completion(tmp_path: Path, node_id: Optional[s
             submitter_username="system",
             repo_alias="example-repo-global",
         )
+        # ^ why terminal status, not absence from _running_jobs; a queued job is absent until a worker picks it up
         assert _wait_for(
-            lambda: job_id not in manager._running_jobs, FINISH_BOUND_SECONDS
+            lambda: (manager.get_job_status(job_id, username="system") or {}).get(
+                "status"
+            )
+            in TERMINAL_STATUSES,
+            FINISH_BOUND_SECONDS,
         )
         assert answers == [False] * POLLS
         row = BackgroundJobsSqliteBackend(db_path).get_job(job_id)
