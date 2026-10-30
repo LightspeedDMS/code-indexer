@@ -141,6 +141,16 @@ def is_delegatable_command(command: str, args: list) -> bool:
     if command == "index" and "--index-commits" in args:
         return False
 
+    # ^ hazard delegating a server-stamped index => the daemon keeps writing after its server worker died; test:test_server_stamped_index_never_delegates_to_a_daemon
+    if command == "index":
+        from .utils.parent_death import EXIT_WITH_PARENT_OPTION
+
+        if any(
+            a == EXIT_WITH_PARENT_OPTION or a.startswith(f"{EXIT_WITH_PARENT_OPTION}=")
+            for a in args
+        ):
+            return False
+
     return command in delegatable
 
 

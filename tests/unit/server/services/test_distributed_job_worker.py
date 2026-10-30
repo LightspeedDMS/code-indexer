@@ -1,6 +1,7 @@
 """Tests for DistributedJobWorkerService (Bug #582)."""
 
 import time
+from datetime import datetime, timezone
 
 import pytest
 
@@ -23,7 +24,10 @@ class FakeClaimer:
         # excludes POD_PULL_OPS so it leaves those rows for the IndexJobClaimLoop.
         self.last_exclude_types = exclude_types
         if self.jobs_to_return:
-            return self.jobs_to_return.pop(0)
+            job = self.jobs_to_return.pop(0)
+            # ^ see src/code_indexer/server/services/distributed_job_claimer.py:DistributedJobClaimer.claim_next_job; stamps claimed_at
+            job.setdefault("claimed_at", datetime.now(timezone.utc))
+            return job
         return None
 
     def complete_job(self, job_id, result=None):
@@ -60,7 +64,12 @@ class FakeRefreshScheduler:
         self.refreshed_repos = []
 
     def execute_refresh_for_claimed_job(
-        self, alias, progress_callback=None, job_id=None, submitter_username="system"
+        self,
+        alias,
+        progress_callback=None,
+        job_id=None,
+        submitter_username="system",
+        job_owned=None,
     ):
         self.refreshed_repos.append(alias)
         return {"success": True, "alias": alias}
@@ -150,6 +159,7 @@ class TestProcessOneJob:
                 progress_callback=None,
                 job_id=None,
                 submitter_username="system",
+                job_owned=None,
             ):
                 raise RuntimeError("git pull failed")
 
@@ -297,7 +307,9 @@ class TestExecuteRetryableJobDirect:
         )
 
         with pytest.raises(ValueError, match="Unknown retryable job type"):
-            worker._execute_retryable_job("job-x", "weird_type", "repo", "system")
+            worker._execute_retryable_job(
+                "job-x", "weird_type", "repo", "system", datetime.now(timezone.utc)
+            )
 
 
 class TestRefreshResultInterpretation:
@@ -322,6 +334,7 @@ class TestRefreshResultInterpretation:
                 progress_callback=None,
                 job_id=None,
                 submitter_username="system",
+                job_owned=None,
             ):
                 return {"success": False, "message": "integrity gate quarantined"}
 
@@ -357,6 +370,7 @@ class TestRefreshResultInterpretation:
                 progress_callback=None,
                 job_id=None,
                 submitter_username="system",
+                job_owned=None,
             ):
                 return {
                     "success": False,
@@ -393,6 +407,7 @@ class TestRefreshResultInterpretation:
                 progress_callback=None,
                 job_id=None,
                 submitter_username="system",
+                job_owned=None,
             ):
                 assert progress_callback is not None
                 progress_callback(42, phase="scip", detail="halfway")
@@ -430,6 +445,7 @@ class TestRefreshResultInterpretation:
                 progress_callback=None,
                 job_id=None,
                 submitter_username="system",
+                job_owned=None,
             ):
                 self.seen_callback = progress_callback
                 return {"success": True}

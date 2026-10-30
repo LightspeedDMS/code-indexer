@@ -189,12 +189,18 @@ class TestExecuteRefreshCheckpointBeforePublish:
         create_snapshot_calls: list = []
         swap_alias_calls: list = []
 
+        from code_indexer.global_repos.refresh_fence import (
+            LEASE_LOST,
+            RefreshOwnershipLostError,
+        )
+
         with _publish_seams_patched(
             scheduler, source_repo, create_snapshot_calls, swap_alias_calls
         ):
-            with pytest.raises(RuntimeError, match="AliasLockOwnershipLostError"):
+            with pytest.raises(RefreshOwnershipLostError) as lost:
                 scheduler._execute_refresh(_ALIAS_NAME)
 
+        assert lost.value.reason == LEASE_LOST
         assert create_snapshot_calls == [], (
             "_create_snapshot must never run after ownership was lost mid-indexing"
         )

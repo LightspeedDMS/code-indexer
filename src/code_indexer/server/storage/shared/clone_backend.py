@@ -172,6 +172,47 @@ class CloneBackend(Protocol):
 # ---------------------------------------------------------------------------
 
 
+def reflink_copy_into_new_directory(
+    source_path: str, dest: Path, timeout: Optional[int], label: str
+) -> None:
+    """Copy the tree at ``source_path`` to ``dest``, which must not exist.
+
+    ``dest`` is reserved first with one ``mkdir`` (atomic across processes
+    and nodes, NFSv3 included), so two creators that picked the same name
+    can never copy into one tree: the second raises
+    CloneDestinationExistsError and touches nothing. On any copy failure the
+    reserved ``dest`` is removed and the error re-raised."""
+    try:
+        os.mkdir(dest)
+    except FileExistsError as exc:
+        raise CloneDestinationExistsError(
+            f"{label}: destination '{dest}' already exists; refusing to copy into it"
+        ) from exc
+    # ^ external `cp -a src/. dest` copies the contents and gives dest the source directory's attributes
+    try:
+        subprocess.run(
+            ["cp", "--reflink=auto", "-a", f"{source_path}/.", str(dest)],
+            check=True,
+            capture_output=True,
+            timeout=timeout,
+        )
+    except BaseException:
+        try:
+            shutil.rmtree(dest)
+            logger.info(
+                "%s: removed partial clone '%s' after a failed copy", label, dest
+            )
+        except OSError as cleanup_error:
+            logger.error(
+                "%s: could not remove partial clone '%s': %s: %s",
+                label,
+                dest,
+                type(cleanup_error).__name__,
+                cleanup_error,
+            )
+        raise
+
+
 class LocalCloneBackend:
     """Filesystem CoW clone backend using ``cp --reflink=auto``.
 
@@ -208,36 +249,7 @@ class LocalCloneBackend:
             name,
             source_path,
         )
-        # ^ cpl created_here=snapshot_manager.py:VersionedSnapshotManager._snapshot_lock;per-alias refresh job dedup
-        created_here = not dest.exists()
-        try:
-            subprocess.run(
-                ["cp", "--reflink=auto", "-a", source_path, str(dest)],
-                check=True,
-                capture_output=True,
-                timeout=timeout,
-            )
-        except BaseException:
-            # A failed copy must not leave a partial v_<ts> behind: it would be
-            # listed as the newest snapshot. Only a destination this call
-            # created is removed -- never one that existed before it.
-            if created_here and dest.exists():
-                try:
-                    shutil.rmtree(dest)
-                    logger.info(
-                        "LocalCloneBackend: removed partial clone '%s' after a "
-                        "failed copy",
-                        dest,
-                    )
-                except OSError as cleanup_error:
-                    logger.error(
-                        "LocalCloneBackend: could not remove partial clone '%s': "
-                        "%s: %s",
-                        dest,
-                        type(cleanup_error).__name__,
-                        cleanup_error,
-                    )
-            raise
+        reflink_copy_into_new_directory(source_path, dest, timeout, "LocalCloneBackend")
         return str(dest)
 
     def create_clone_at_path(

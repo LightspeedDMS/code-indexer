@@ -163,6 +163,8 @@ class GlobalReposLifecycleManager:
             # Story #2118: defers system refreshes of a runaway alias.
             index_spend_alarm=index_spend_alarm,
         )
+        # ^ why the scheduler's alias pointers; a fenced run can schedule a snapshot path another run published (#329)
+        self.cleanup_manager.set_alias_manager(self.refresh_scheduler.alias_manager)
 
         # Track running state
         self._running = False

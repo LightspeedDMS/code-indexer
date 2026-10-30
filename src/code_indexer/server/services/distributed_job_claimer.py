@@ -445,6 +445,27 @@ class DistributedJobClaimer:
             )
         return updated
 
+    def still_owns(self, job_id: str, claimed_at: Any) -> bool:
+        """True while ``job_id`` is still running under the claim this node
+        made at ``claimed_at`` (the claim generation returned by
+        claim_next_job). A re-claim, even by this node, a cancel or a
+        reclaim reset answers False. A store error propagates: the caller
+        treats it as unknown, never as lost."""
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT 1 FROM background_jobs
+                    WHERE job_id = %s
+                      AND executing_node = %s
+                      AND claimed_at = %s
+                      AND status = 'running'
+                    """,
+                    (job_id, self._node_id, claimed_at),
+                )
+                owned = cur.fetchone() is not None
+        return owned
+
     def get_node_jobs(self) -> List[Dict[str, Any]]:
         """
         Return all jobs currently claimed (running) by this node.

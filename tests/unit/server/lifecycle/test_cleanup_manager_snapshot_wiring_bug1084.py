@@ -33,3 +33,15 @@ def test_lifecycle_without_snapshot_manager_leaves_cleanup_unwired(tmp_path):
     )
 
     assert lifecycle.cleanup_manager._snapshot_manager is None
+
+
+def test_lifecycle_wires_alias_manager_into_cleanup_manager(tmp_path):
+    lifecycle = GlobalReposLifecycleManager(
+        golden_repos_dir=str(tmp_path / "golden-repos"),
+        snapshot_manager=None,
+    )
+
+    assert (
+        lifecycle.cleanup_manager._alias_manager
+        is lifecycle.refresh_scheduler.alias_manager
+    )

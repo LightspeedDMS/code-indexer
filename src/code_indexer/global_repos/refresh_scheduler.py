@@ -49,6 +49,7 @@ from .snapshot_retention import (
 )
 from .refresh_integrity_gate import RefreshIntegrityGateResult
 from . import refresh_failure_recovery as failure_recovery
+from .refresh_fence import LEASE_LOST, RefreshFence, RefreshOwnershipLostError
 from .shared_operations import DEFAULT_REFRESH_INTERVAL, GlobalRepoOperations
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
 from code_indexer.utils.subprocess_diagnostics import (
@@ -465,6 +466,27 @@ def _refresh_cancelled_error(alias_name: str, stage: str) -> Exception:
     return IndexingCancelledError(
         f"Refresh of {alias_name} cancelled {stage}; nothing was published"
     )
+
+
+def _ownership_lost_error(
+    exc: BaseException, fence: Optional[RefreshFence], alias_name: str
+) -> Optional[RefreshOwnershipLostError]:
+    """Issue #329: the ownership-lost outcome for a refresh step's exception,
+    or None. A cancellation raised by a fenced run, or a positive lease loss
+    at a checkpoint, is ownership lost -- never a cancel or a failure."""
+    from code_indexer.server.services.alias_lock_store.base import (
+        AliasLockOwnershipLostError,
+    )
+
+    if (
+        fence is not None
+        and fence.lost_reason is not None
+        and _is_refresh_cancellation(exc)
+    ):
+        return RefreshOwnershipLostError(alias_name, fence.lost_reason)
+    if isinstance(exc, AliasLockOwnershipLostError):
+        return RefreshOwnershipLostError(alias_name, LEASE_LOST)
+    return None
 
 
 def _is_git_repo_url(repo_url: str) -> bool:
@@ -1665,6 +1687,7 @@ class RefreshScheduler:
         alias: str,
         owner_name: str,
         owner_token: Optional[str] = None,
+        ttl_seconds: Optional[int] = None,
     ) -> None:
         """
         Issue #1546 AC5 ownership-loss checkpoint: call this at each
@@ -1692,6 +1715,9 @@ class RefreshScheduler:
                 the lock.
             owner_token: Must match the owner_token used when acquiring
                 the lock, if one was supplied.
+            ttl_seconds: the lease to renew to; None keeps the manager's
+                default. The file lock REWRITES its TTL on renew, so a
+                periodic probe of a long hold passes the hold's own TTL.
 
         Raises:
             AliasLockOwnershipLostError: ownership was lost (or the lock
@@ -1701,8 +1727,11 @@ class RefreshScheduler:
             AliasLockOwnershipLostError,
         )
 
+        renew_kwargs: Dict[str, Any] = (
+            {} if ttl_seconds is None else {"ttl_seconds": ttl_seconds}
+        )
         renewed = self.write_lock_manager.renew(
-            alias, owner_name=owner_name, owner_token=owner_token
+            alias, owner_name=owner_name, owner_token=owner_token, **renew_kwargs
         )
         if not renewed:
             raise AliasLockOwnershipLostError(
@@ -1884,8 +1913,13 @@ class RefreshScheduler:
         progress_callback: Optional[Callable[..., None]] = None,
         job_id: Optional[str] = None,
         submitter_username: str = "system",
+        job_owned: Optional[Callable[[], bool]] = None,
     ) -> Dict[str, Any]:
         """
+        Issue #329: ``job_owned`` answers whether this run still holds the
+        claim it was started under (claim generation); False fences the
+        run (RefreshOwnershipLostError), a raising check never does.
+
         Story #2118: ``submitter_username`` is the claimed job's submitter.
         A SYSTEM job of an alias whose refresh embedding volume alarms is not
         run: the strike-free deferral is persisted and the returned result
@@ -1943,6 +1977,7 @@ class RefreshScheduler:
             progress_callback=progress_callback,
             tracked_by_caller=True,
             job_id=job_id,
+            job_owned=job_owned,
         )
 
     def get_refresh_interval(self) -> int:
@@ -2392,8 +2427,13 @@ class RefreshScheduler:
         tracked_by_caller: bool = False,
         cancel_check: Optional[Callable[[], bool]] = None,
         job_id: Optional[str] = None,
+        job_owned: Optional[Callable[[], bool]] = None,
     ) -> Dict[str, Any]:
-        """Thin wrapper around _execute_refresh_impl(): times the call and
+        """Issue #329: a run fenced for lost ownership (RefreshOwnershipLostError)
+        is recorded as status="ownership_lost" and schedules no retry: the
+        run that took over owns the work.
+
+        Thin wrapper around _execute_refresh_impl(): times the call and
         records cidx.repos.refresh.duration via _record_refresh_duration_metric()
         in `finally`, exactly once regardless of outcome (Story #1586 AC4).
 
@@ -2430,12 +2470,15 @@ class RefreshScheduler:
                 tracked_by_caller=tracked_by_caller,
                 cancel_check=cancel_check,
                 job_id=job_id,
+                job_owned=job_owned,
             )
             _status = "success" if result.get("success") else "error"
             settle(result)
             return result
         except Exception as exc:
-            if _is_refresh_cancellation(exc):
+            if isinstance(exc, RefreshOwnershipLostError):
+                _status = "ownership_lost"
+            elif _is_refresh_cancellation(exc):
                 _status = "cancelled"  # Bug #2012: a cancel is not an error
             else:
                 self._schedule_retry_after_failed_refresh(alias_name, exc, covered)
@@ -2506,6 +2549,7 @@ class RefreshScheduler:
         tracked_by_caller: bool = False,
         cancel_check: Optional[Callable[[], bool]] = None,
         job_id: Optional[str] = None,
+        job_owned: Optional[Callable[[], bool]] = None,
     ) -> Dict[str, Any]:
         """
         Execute refresh for a repository (called by BackgroundJobManager).
@@ -2530,10 +2574,21 @@ class RefreshScheduler:
                 (global_repo_refresh, alias_name) in the job tracker. Registering
                 again here would insert a SECOND active row for the same pair --
                 see the tracker-registration note below.
+            job_owned: Issue #329 -- whether this run still owns its job;
+                with it or ``cancel_check`` every step runs under ONE
+                RefreshFence that also probes the alias lease while held.
 
         Returns:
             Dict with success status and details for BackgroundJobManager tracking
         """
+        fence: Optional[RefreshFence] = (
+            RefreshFence(cancel_check, job_owned, alias=alias_name)
+            if cancel_check is not None or job_owned is not None
+            else None
+        )
+        # ^ invariant every step below sees the fence as its cancel_check; a fenced step raises a cancellation
+        cancel_check = fence
+        published = False
         # Acquire per-repo lock to serialize concurrent refresh attempts
         repo_lock = self._get_repo_lock(alias_name)
 
@@ -3176,6 +3231,8 @@ class RefreshScheduler:
                                 "alias": alias_name,
                                 "message": "Skipped, write lock held",
                             }
+                        if fence is not None:
+                            fence.arm_lease_probe(self._ownership_check(repo_name))
 
                         # Index source first, then create versioned snapshot (Story #229)
                         # Story #482 PATH C: Forward progress_callback into _index_source
@@ -3332,9 +3389,7 @@ class RefreshScheduler:
                         # silently -- without this check, the code would
                         # still create and publish a snapshot as if it
                         # still held exclusive ownership.
-                        self.raise_if_write_lock_ownership_lost(
-                            repo_name, owner_name=REFRESH_LOCK_OWNER
-                        )
+                        self._ownership_check(repo_name)()
                         _raise_if_refresh_cancelled(
                             cancel_check, alias_name, "before the snapshot"
                         )
@@ -3354,10 +3409,15 @@ class RefreshScheduler:
                             **_snapshot_kwargs,
                         )
 
-                        # Bug #2012: last check before publishing. The new
-                        # snapshot was never published, so it is handed to
-                        # the refcount-gated cleanup instead of leaking.
-                        if cancel_check is not None and cancel_check():
+                        # ^ order lease + job checks after the snapshot, before swap_alias; the fence's lease probe is throttled
+                        # ^ why schedule_cleanup on a stop, not rmtree; cleanup skips any path an alias still targets (#329)
+                        try:
+                            self._ownership_check(repo_name)()
+                            stop = cancel_check is not None and cancel_check()
+                        except BaseException:
+                            self.cleanup_manager.schedule_cleanup(new_index_path)
+                            raise
+                        if stop:
                             self.cleanup_manager.schedule_cleanup(new_index_path)
                             raise _refresh_cancelled_error(
                                 alias_name, "during the snapshot"
@@ -3370,6 +3430,10 @@ class RefreshScheduler:
                             new_target=new_index_path,
                             old_target=current_target,
                         )
+                        published = True
+
+                    if fence is not None:
+                        fence.disarm_lease_probe()  # the lease was just released
 
                     # Bug #881 Phase 2 + Bug #1775: evict stale HNSW +
                     # chunk-store cache entries for the old snapshot
@@ -3497,6 +3561,16 @@ class RefreshScheduler:
                     return result
 
                 except Exception as e:
+                    # ^ invariant RefreshOwnershipLostError => nothing published; after swap_alias an error is a plain failure
+                    lost = (
+                        None
+                        if published
+                        else _ownership_lost_error(e, fence, alias_name)
+                    )
+                    if lost is not None:
+                        logger.warning("%s", lost)
+                        _tracker_raised = True
+                        raise lost from e
                     if _is_refresh_cancellation(e):
                         # Bug #2012: a cancellation is not a failure -- the
                         # job is finished as cancelled by its manager.
@@ -3766,6 +3840,7 @@ class RefreshScheduler:
             self.raise_if_write_lock_ownership_lost,
             repo_name,
             owner_name=REFRESH_LOCK_OWNER,
+            ttl_seconds=_REFRESH_PUBLISH_LOCK_TTL_SECONDS,
         )
 
     def _run_and_publish_integrity_gate(

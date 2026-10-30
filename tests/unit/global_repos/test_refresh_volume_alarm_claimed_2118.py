@@ -68,7 +68,14 @@ class _Claimer:
         self.failed: List[Tuple[str, str]] = []
 
     def claim_next_job(self, *args: Any, **kwargs: Any) -> Optional[Dict[str, Any]]:
-        return self._jobs.pop(0) if self._jobs else None
+        from datetime import datetime, timezone
+
+        if not self._jobs:
+            return None
+        job = self._jobs.pop(0)
+        # ^ see src/code_indexer/server/services/distributed_job_claimer.py:DistributedJobClaimer.claim_next_job; stamps claimed_at
+        job.setdefault("claimed_at", datetime.now(timezone.utc))
+        return job
 
     def complete_job(self, job_id: str, result: Optional[Dict[str, Any]] = None):
         self.completed.append((job_id, result))

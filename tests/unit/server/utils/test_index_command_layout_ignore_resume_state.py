@@ -26,6 +26,9 @@ duplicate.
 
 from __future__ import annotations
 
+import os
+
+from code_indexer.utils.parent_death import exit_with_parent_arg
 from code_indexer.server.services.embedding_stats_attribution import (
     StatsAttribution,
 )
@@ -62,6 +65,7 @@ class TestAppendServerLayoutArgsIgnoresResumeState:
             "--ignore-resume-state",
             "--server-managed-provider-settings",
             f"--stats-attribution={_ATTRIBUTION.to_json()}",
+            exit_with_parent_arg(os.getpid()),
         ]
 
     def test_does_not_mutate_input_list(self) -> None:

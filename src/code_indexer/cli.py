@@ -2868,6 +2868,24 @@ def _parse_stats_attribution_option(
         raise click.BadParameter(str(exc), ctx=ctx, param=param) from exc
 
 
+def _arm_exit_with_parent_option(
+    ctx: click.Context, param: click.Parameter, value: Optional[int]
+) -> Optional[int]:
+    """Click callback for `cidx index --exit-with-parent=<pid>`: the run is
+    SIGTERMed when that parent (the server worker) dies, or at once when it
+    is already gone. Unsupported platform or a failed prctl: usage error."""
+    if value is None:
+        return None
+    from .utils.parent_death import ParentDeathSignalUnsupported, exit_with_parent
+
+    # ^ why arm at parse time, not in index(); config loading before arming widens the orphan window
+    try:
+        exit_with_parent(value)
+    except (ParentDeathSignalUnsupported, OSError, ValueError) as exc:
+        raise click.UsageError(str(exc), ctx=ctx) from exc
+    return value
+
+
 def reject_sharded_json_for_temporal(
     *, index_commits: bool, new_collection_layout: Optional[str]
 ) -> None:
@@ -3124,6 +3142,20 @@ def _resolve_hnsw_sync_epoch_enabled_for_cli() -> bool:
     "Stamped by the server on every `cidx index` it spawns; a malformed "
     "value fails the run before any provider call.",
 )
+@click.option(
+    "--exit-with-parent",
+    "exit_with_parent",
+    type=int,
+    default=None,
+    hidden=True,
+    is_eager=True,
+    callback=_arm_exit_with_parent_option,
+    help="Internal (Linux): the PID of the server process that started this "
+    "run. The run is terminated (SIGTERM) when that process dies, or at once "
+    "when it is already gone, so it never outlives the server worker that "
+    "holds the repository's write lease. Stamped by the server on every "
+    "`cidx index` it spawns.",
+)
 @click.pass_context
 @require_mode("local")
 def index(
@@ -3149,6 +3181,7 @@ def index(
     ignore_resume_state: bool = False,
     server_managed_provider_settings: bool = False,
     stats_attribution=None,
+    exit_with_parent: Optional[int] = None,
 ):
     """Index the codebase for semantic search.
 

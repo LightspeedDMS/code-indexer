@@ -188,6 +188,7 @@ class _RealisticRefreshSchedulerDouble:
         progress_callback: Optional[ProgressCallback] = None,
         job_id: Optional[str] = None,
         submitter_username: str = "system",
+        job_owned: Optional[Callable[[], bool]] = None,
     ) -> Dict[str, Any]:
         self.claimed_execute_calls.append((alias_name, progress_callback))
         self.claimed_execute_job_ids.append(job_id)
@@ -198,7 +199,7 @@ class _FakeClaimer:
     """Mirrors the established FakeClaimer shape from test_distributed_job_worker.py."""
 
     def __init__(self) -> None:
-        self.jobs_to_return: List[Dict[str, str]] = []
+        self.jobs_to_return: List[Dict[str, Any]] = []
         self.completed_jobs: List[Tuple[str, Optional[Dict[str, Any]]]] = []
         self.failed_jobs: List[Tuple[str, str]] = []
 
@@ -208,9 +209,12 @@ class _FakeClaimer:
         *,
         job_types: Optional[List[str]] = None,
         exclude_types: Optional[List[str]] = None,
-    ) -> Optional[Dict[str, str]]:
+    ) -> Optional[Dict[str, Any]]:
         if self.jobs_to_return:
-            return self.jobs_to_return.pop(0)
+            job = self.jobs_to_return.pop(0)
+            # ^ see src/code_indexer/server/services/distributed_job_claimer.py:DistributedJobClaimer.claim_next_job; stamps claimed_at
+            job.setdefault("claimed_at", datetime.now(timezone.utc))
+            return job
         return None
 
     def complete_job(

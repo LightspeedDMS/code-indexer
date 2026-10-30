@@ -181,6 +181,45 @@ class CleanupManager:
         self._persistence_backend: Optional[Any] = None
         if persistence_backend is not None:
             self.set_persistence_backend(persistence_backend)
+        self._alias_manager: Optional[Any] = None
+
+    def set_alias_manager(self, alias_manager: Any) -> None:
+        """Wire the AliasManager whose current and previous targets cleanup
+        must never delete (post-hoc, like set_snapshot_manager)."""
+        self._alias_manager = alias_manager
+        self._alias_hold_logged: Set[str] = set()
+
+    def _held_by_an_alias(self, index_path: str) -> bool:
+        """True while any alias points at ``index_path`` (current or previous
+        target), or while the pointers cannot be read (fail closed). Checked
+        right before deleting: the path may have been published after it was
+        scheduled (two runs can produce the same snapshot path)."""
+        if self._alias_manager is None:
+            return False
+        key = os.path.normpath(index_path)
+        try:
+            held = key in self._alias_manager.alias_held_paths()
+        except Exception as exc:  # noqa: BLE001 - unknown pointers => keep the path
+            logger.warning(
+                "Deferring cleanup of %s: alias pointers unreadable (%s: %s)",
+                index_path,
+                type(exc).__name__,
+                exc,
+            )
+            return True
+        if not held:
+            self._alias_hold_logged.discard(key)
+            return False
+        if key not in self._alias_hold_logged:
+            self._alias_hold_logged.add(key)
+            logger.info(
+                "Deferring cleanup of %s: an alias still points at it (current "
+                "or previous target)",
+                index_path,
+            )
+        else:
+            logger.debug("Cleanup of %s still deferred: alias target", index_path)
+        return True
 
     def set_snapshot_manager(self, snapshot_manager: object) -> None:
         """Wire the VersionedSnapshotManager for backend-correct deletion (Bug #1084).
@@ -878,6 +917,10 @@ class CleanupManager:
             # Bug #1844 also makes the CLUSTER-ATOMIC claim on this path --
             # the durable pending-deletion queue is shared and unfiltered, so
             # without a claim every node issues this same DELETE.
+            # ^ order alias-target check after every other gate, right before the claim + delete; a scheduled path can be published later
+            if self._held_by_an_alias(path):
+                continue
+
             claimed, tracked_job_id = self._claim_path_for_deletion(path)
             if not claimed:
                 continue

@@ -57,7 +57,7 @@ _PROBE = ("192.0.2.1", 9)
 pytestmark = [pytest.mark.slow, pytest.mark.timeout(120)]
 
 _INNER = """
-import json, socket, subprocess, sys
+import json, os, socket, subprocess, sys
 sys.path.insert(0, {harness!r})
 from fake_voyage_server import FakeVoyageServer
 
@@ -75,6 +75,12 @@ server.start("127.0.0.1", {port})
 server.ledger.begin_run("child")
 try:
     args = [a for a in sys.argv[2:] if a != "--server-managed-provider-settings"]
+    # ^ why rewrite --exit-with-parent; this harness != the server => it is the real CLI's parent
+    args = [
+        "--exit-with-parent=" + str(os.getpid())
+        if a.startswith("--exit-with-parent=") else a
+        for a in args
+    ]
     rc = subprocess.run([sys.executable, "-m", "code_indexer.cli", *args]).returncode
     report = {{
         "argv": args[:1],

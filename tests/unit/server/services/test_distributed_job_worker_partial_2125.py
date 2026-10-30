@@ -36,6 +36,7 @@ class _RefreshReturning:
         progress_callback: Optional[Any] = None,
         job_id: Optional[str] = None,
         submitter_username: str = "system",
+        job_owned: Optional[Any] = None,
     ) -> Dict[str, Any]:
         return dict(self._result)
 

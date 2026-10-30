@@ -137,7 +137,7 @@ def test_create_snapshot_cow_calls_cp_reflink(tmp_path: Path) -> None:
     assert cmd[0] == "cp"
     assert "--reflink=auto" in cmd
     assert "-a" in cmd
-    assert "/golden-repos/myrepo" in cmd
+    assert "/golden-repos/myrepo/." in cmd
     expected_dest = str(tmp_path / ".versioned" / "myrepo" / "v_1700000000")
     assert expected_dest in cmd
     assert result == expected_dest

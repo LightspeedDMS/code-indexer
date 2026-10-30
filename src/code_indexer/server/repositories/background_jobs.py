@@ -1583,6 +1583,7 @@ class BackgroundJobManager:
                 job_id,
                 streak,
             )
+        # ^ todo fence a reassigned job here once D3 stamps claimed_at at run start (anchor there, never the first poll); #329
         if job_data and job_data.get("status") == "cancelled":
             with self._lock:
                 if job_id in self.jobs:

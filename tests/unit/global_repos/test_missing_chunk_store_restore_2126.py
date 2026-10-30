@@ -79,10 +79,14 @@ class _LoseLockAfterFirstCheck:
         self._real = real
         self.renew_calls = 0
 
-    def renew(self, alias: str, owner_name: str, owner_token: Any = None) -> bool:
+    def renew(
+        self, alias: str, owner_name: str, owner_token: Any = None, **kwargs: Any
+    ) -> bool:
         self.renew_calls += 1
         renewed = bool(
-            self._real.renew(alias, owner_name=owner_name, owner_token=owner_token)
+            self._real.renew(
+                alias, owner_name=owner_name, owner_token=owner_token, **kwargs
+            )
         )
         if self.renew_calls == 1:
             self._real.release(alias, owner_name=owner_name)

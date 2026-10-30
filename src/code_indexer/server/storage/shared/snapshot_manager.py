@@ -725,11 +725,12 @@ class VersionedSnapshotManager:
             source_path,
         )
 
-        subprocess.run(
-            ["cp", "--reflink=auto", "-a", source_path, str(versioned_path)],
-            check=True,
-            capture_output=True,
-            timeout=self._cow_timeout,
+        from code_indexer.server.storage.shared.clone_backend import (
+            reflink_copy_into_new_directory,
+        )
+
+        reflink_copy_into_new_directory(
+            source_path, versioned_path, self._cow_timeout, "VersionedSnapshotManager"
         )
 
         logger.info("CoW snapshot created at '%s'", versioned_path)

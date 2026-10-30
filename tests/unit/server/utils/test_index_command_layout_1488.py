@@ -16,12 +16,18 @@ endpoint or a daemon-mode override for server-spawned indexing -- only
 server-managed provider settings are used.
 """
 
+import os
+
 import pytest
 
 from code_indexer.server.services.embedding_stats_attribution import (
     StatsAttribution,
 )
 from code_indexer.server.utils.index_command_layout import append_server_layout_args
+from code_indexer.utils.parent_death import (
+    EXIT_WITH_PARENT_OPTION,
+    exit_with_parent_arg,
+)
 
 _ATTRIBUTION = StatsAttribution(
     golden_repo_alias="example-repo-global",
@@ -44,7 +50,14 @@ class TestAppendServerLayoutArgs:
             "--ignore-resume-state",
             "--server-managed-provider-settings",
             _STATS_ARG,
+            exit_with_parent_arg(os.getpid()),
         ]
+
+    def test_stamps_exit_with_parent_naming_this_process(self) -> None:
+        result = append_server_layout_args(["cidx", "index"], attribution=_ATTRIBUTION)
+
+        stamped = [t for t in result if t.startswith(f"{EXIT_WITH_PARENT_OPTION}=")]
+        assert stamped == [exit_with_parent_arg(os.getpid())]
 
     def test_preserves_prior_tokens_and_order(self) -> None:
         result = append_server_layout_args(
@@ -62,6 +75,7 @@ class TestAppendServerLayoutArgs:
             "--ignore-resume-state",
             "--server-managed-provider-settings",
             _STATS_ARG,
+            exit_with_parent_arg(os.getpid()),
         ]
 
     def test_does_not_mutate_input_list(self) -> None:

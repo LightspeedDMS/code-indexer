@@ -44,16 +44,25 @@ REQUIRES an ``attribution`` and stamps it as one
 provider call and records it on every embedding_call_stats row
 (``test_index_command_attribution_guard_2118.py`` enforces that every call
 site supplies one).
+
+A server-spawned child runs in its own session, so it would outlive a
+server worker that dies (several uvicorn workers per node is supported);
+a sibling worker could then judge the dead worker's lease stale and start
+a second writer while the orphan still writes. ``--exit-with-parent=<pid>``
+names THIS process: the child arms a parent-death SIGTERM and exits at
+once when that process is already gone.
 """
 
 from __future__ import annotations
 
+import os
 from typing import List
 
 from code_indexer.server.services.embedding_stats_attribution import (
     STATS_ATTRIBUTION_OPTION,
     StatsAttribution,
 )
+from code_indexer.utils.parent_death import exit_with_parent_arg
 
 #: The explicit server-context layout arg. Single `--opt=value` token so it
 #: is a single, greppable list element that Click parses identically to the
@@ -84,9 +93,9 @@ def append_server_layout_args(
 
     Returns:
         A new list equal to ``cmd`` with ``--new-collection-layout=chunks_db``,
-        ``--ignore-resume-state``, ``--server-managed-provider-settings`` and
-        ``--stats-attribution=<json>`` appended, in that order. The input
-        list is not mutated.
+        ``--ignore-resume-state``, ``--server-managed-provider-settings``,
+        ``--stats-attribution=<json>`` and ``--exit-with-parent=<this pid>``
+        appended, in that order. The input list is not mutated.
     """
     return [
         *cmd,
@@ -94,4 +103,6 @@ def append_server_layout_args(
         SERVER_IGNORE_RESUME_STATE_ARG,
         SERVER_MANAGED_PROVIDER_SETTINGS_ARG,
         f"{STATS_ATTRIBUTION_OPTION}={attribution.to_json()}",
+        # ^ hazard spawning from a thread that exits before the child => PDEATHSIG kills the child early; test:test_child_exits_when_parent_is_sigkilled
+        exit_with_parent_arg(os.getpid()),
     ]

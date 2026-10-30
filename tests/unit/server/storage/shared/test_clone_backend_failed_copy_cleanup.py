@@ -68,8 +68,11 @@ def test_failed_copy_never_removes_a_preexisting_destination(source: Path) -> No
     existing.mkdir(parents=True)
     (existing / "published.md").write_text("published", encoding="utf-8")
     backend = LocalCloneBackend(versioned_base=str(golden))
+    from code_indexer.server.storage.shared.clone_backend import (
+        CloneDestinationExistsError,
+    )
 
-    with pytest.raises(subprocess.CalledProcessError):
+    with pytest.raises(CloneDestinationExistsError):
         backend.create_clone(str(source), REPO, "v_1800000000")
 
     assert (existing / "published.md").read_text(encoding="utf-8") == "published"

@@ -94,7 +94,7 @@ class TestLocalCloneBackendCreateClone:
         assert cmd[0] == "cp"
         assert "--reflink=auto" in cmd
         assert "-a" in cmd
-        assert str(source) in cmd
+        assert f"{source}/." in cmd
 
     def test_create_clone_destination_is_namespace_name_under_versioned(
         self, tmp_path: Path

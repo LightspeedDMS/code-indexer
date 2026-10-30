@@ -536,3 +536,22 @@ class AliasManager:
         except (json.JSONDecodeError, IOError, KeyError) as e:
             logger.warning(f"Failed to read previous path for {alias_name}: {e}")
             return None
+
+    def alias_held_paths(self) -> "set[str]":
+        """Every alias pointer's current and previous target (normalised).
+
+        Raises:
+            AliasPointerUnusable: a pointer file cannot be read or decoded; the
+                caller cannot tell what it points at, so must not assume
+                "nothing"."""
+        held: "set[str]" = set()
+        for alias_file in sorted(self.aliases_dir.glob("*.json")):
+            alias_data = _load_alias_object(alias_file)
+            # ^ invariant None = the file vanished after the listing (alias deleted); unusable pointers raise above
+            if alias_data is None:
+                continue
+            for key in ("target_path", "previous_path"):
+                value = alias_data.get(key)
+                if isinstance(value, str) and value:
+                    held.add(os.path.normpath(value))
+        return held

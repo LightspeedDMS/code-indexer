@@ -10,7 +10,10 @@ Runs on the leader node only (gated by leader election callbacks).
 
 import logging
 import threading
+from datetime import datetime
 from typing import Any, Optional
+
+from code_indexer.global_repos.refresh_fence import RefreshOwnershipLostError
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +106,9 @@ class DistributedJobWorkerService:
         # a row without one is gated as a system job.
         submitter = job.get("username") or "system"
         try:
-            result = self._execute_retryable_job(job_id, op_type, repo_alias, submitter)
+            result = self._execute_retryable_job(
+                job_id, op_type, repo_alias, submitter, job.get("claimed_at")
+            )
             # Bug #2125: like BackgroundJobManager (Bug #679), a result with
             # partial exactly True ends the job completed_partial.
             if isinstance(result, dict) and result.get("partial") is True:
@@ -113,6 +118,14 @@ class DistributedJobWorkerService:
             else:
                 self._claimer.complete_job(job_id, result=result)
             logger.info("DistributedJobWorkerService: completed job %s", job_id)
+        except RefreshOwnershipLostError as exc:
+            # ^ hazard complete_job/fail_job here => overwrites a row this node re-claimed (they match node, not claim)
+            logger.warning(
+                "DistributedJobWorkerService: job %s fenced, its row is left to "
+                "the run that owns it now: %s",
+                job_id,
+                exc,
+            )
         except Exception as exc:
             logger.error(
                 "DistributedJobWorkerService: job %s failed: %s",
@@ -122,13 +135,22 @@ class DistributedJobWorkerService:
             self._claimer.fail_job(job_id, str(exc))
 
     def _execute_retryable_job(
-        self, job_id: str, op_type: str, repo_alias: str, submitter_username: str
+        self,
+        job_id: str,
+        op_type: str,
+        repo_alias: str,
+        submitter_username: str,
+        claimed_at: Optional[datetime],
     ) -> Any:
         """Execute a retryable job based on operation_type; return its result
-        (recorded on the completed job, e.g. why a refresh was deferred)."""
+        (recorded on the completed job, e.g. why a refresh was deferred).
+        ``claimed_at`` is the claim generation the run is fenced on (#329):
+        once the row no longer carries it, the refresh stops."""
         if op_type in ("global_repo_refresh", "refresh_golden_repo"):
             if not repo_alias:
                 raise ValueError(f"Job {job_id}: repo_alias is required for {op_type}")
+            if claimed_at is None:
+                raise ValueError(f"Job {job_id}: claim carries no claimed_at")
             # Bug #1839: the claim itself (claim_next_job's UPDATE) already
             # occupies this job's idx_active_job_per_repo dedup slot. Calling
             # trigger_refresh_for_repo() here would re-enter the SUBMISSION
@@ -144,6 +166,7 @@ class DistributedJobWorkerService:
                 progress_callback=self._make_progress_callback(job_id),
                 job_id=job_id,
                 submitter_username=submitter_username,
+                job_owned=lambda: self._claimer.still_owns(job_id, claimed_at),
             )
             # Mirror BackgroundJobManager._execute_job's own interpretation
             # of the refresh result dict (Story #1586 Finding 2): a real
