@@ -248,7 +248,7 @@ def _partial_publish_warning(
 # ENTIRE index -> integrity-gate -> snapshot -> swap-alias publish sequence,
 # which -- per CLAUDE.md's "Indexing Path Has No Job/Subprocess/Per-File
 # Timeouts" invariant (Bug #1218) -- can legitimately run for hours on a
-# large golden repo (e.g. evolution-scale). A short TTL would let another
+# large golden repo (e.g. a ~1M-file repository). A short TTL would let another
 # writer (DependencyMapService, LangfuseTraceSyncService, etc) evict the
 # lock as "stale" and acquire it while indexing is still genuinely
 # in-progress, defeating the exclusivity guarantee the lock exists to
