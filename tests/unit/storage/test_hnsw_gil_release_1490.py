@@ -624,19 +624,28 @@ class TestCheckIntegrityReleasesGIL:
 @pytest.mark.slow
 class TestRepairOrphansReleasesGIL:
     """repair_orphans() rescans + repairs zero-inbound nodes -- same
-    scaling requirement as check_integrity(). M=8/ef_construction=40 on
+    scaling requirement as check_integrity(). M=8/ef_construction=20 on
     random high-dimensional data reliably produces a real population of
     orphan nodes, so this exercises genuine repair work, not a fast
     already-clean no-op scan."""
 
     DIM = 128
     NUM_ELEMENTS = 250_000
-    MIN_CALL_SECONDS = 0.015
+    # ^ why ef_construction=20, not 40; efc 40 => a 0.03s call, where one loaded-host scheduler gap (0.02s) fails the 0.5 ratio
+    # ^ why num_threads=1, not 8; threaded build => stuck-orphan count varies, repair 0.26-0.85s; 1 thread => fixed 0.6s, build 15s
+    EF_CONSTRUCTION = 20
+    BUILD_THREADS = 1
+    MIN_CALL_SECONDS = 0.15
 
     @pytest.fixture(scope="class")
     def real_index_with_orphans(self):
         index, _data = _build_hnsw_index(
-            self.NUM_ELEMENTS, dim=self.DIM, m=8, ef_construction=40, seed=1494
+            self.NUM_ELEMENTS,
+            dim=self.DIM,
+            m=8,
+            ef_construction=self.EF_CONSTRUCTION,
+            seed=1494,
+            num_threads=self.BUILD_THREADS,
         )
         return index
 

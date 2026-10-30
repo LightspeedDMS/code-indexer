@@ -21,6 +21,9 @@ from code_indexer.global_repos.dependency_map_analyzer import (
     _VERIFICATION_SEMAPHORE_STATE,
     _get_verification_semaphore,
 )
+from code_indexer.server.services.mcp_self_registration_service import (
+    MCPSelfRegistrationService,
+)
 
 # Threading coordination timeouts (seconds).
 # Large enough to avoid false failures on slow CI; small enough to fail fast.
@@ -97,6 +100,14 @@ def _make_config(max_concurrent: int = 2) -> MagicMock:
     cfg.dependency_map_delta_max_turns = 5
     cfg.max_concurrent_claude_cli = max_concurrent
     return cfg
+
+
+def _pinned_config_service(cap: int) -> MagicMock:
+    service_config = MagicMock()
+    service_config.claude_integration_config.max_concurrent_claude_cli = cap
+    config_service = MagicMock()
+    config_service.get_config.return_value = service_config
+    return config_service
 
 
 def _make_blocking_fake_run(
@@ -202,7 +213,14 @@ def _run_concurrent_callers(
             with errors_lock:
                 errors.append(exc)
 
-    with patch("subprocess.run", side_effect=fake_run):
+    # ^ hazard leaked MCPSelfRegistrationService singleton => `claude --version` under _registration_lock blocks one caller in fake_run, starving the other
+    # ^ hazard ambient get_config_service() cap != cap => active never == cap; #1323
+    pin_cap = patch(
+        "code_indexer.server.services.config_service.get_config_service",
+        return_value=_pinned_config_service(cap),
+    )
+    no_registration = patch.object(MCPSelfRegistrationService, "_instance", None)
+    with patch("subprocess.run", side_effect=fake_run), pin_cap, no_registration:
         threads = [
             threading.Thread(target=caller, daemon=True) for _ in range(num_callers)
         ]
@@ -293,8 +311,9 @@ class TestSemaphoreConcurrencyCap(TestCase):
         with a different `max_concurrent_claude_cli` (or the machine's real
         `~/.cidx-server/config.json` can simply differ), silently changing the REAL
         cap out from under this test and producing the observed peak>cap /
-        peak>num_callers non-determinism.  Patching `get_config_service()` here
-        pins the actually-enforced cap to `cap`, making the assertions below
+        peak>num_callers non-determinism.  Patching `get_config_service()` in
+        `_run_concurrent_callers` pins the actually-enforced cap to `cap`, making
+        the assertions below
         meaningful and hermetic regardless of any other test's global config
         state.  The semaphore's own locking (`_get_verification_semaphore`) and its
         acquire/release wrapping of `subprocess.run` are correctly synchronized --
@@ -320,33 +339,21 @@ class TestSemaphoreConcurrencyCap(TestCase):
                 active_snapshot[0] = s.active
                 peak_snapshot[0] = s.peak
 
-        # Pin the REAL concurrency cap that _invoke_claude_cli reads via
-        # get_config_service() to `cap`, eliminating dependence on ambient/global
-        # config-service state left behind by other tests.
-        fake_service_config = MagicMock()
-        fake_service_config.claude_integration_config.max_concurrent_claude_cli = cap
-        fake_config_service = MagicMock()
-        fake_config_service.get_config.return_value = fake_service_config
-
-        with patch(
-            "code_indexer.server.services.config_service.get_config_service",
-            return_value=fake_config_service,
-        ):
-            _run_concurrent_callers(
-                num_callers=num_callers,
-                analyzer=analyzer,
-                config=config,
-                shared=shared,
-                fake_run=fake_run,
-                cap=cap,
-                completed_count=completed_count,
-                count_lock=count_lock,
-                errors=errors,
-                errors_lock=errors_lock,
-                doc_path_factory=doc_path_factory,
-                doc_path_local=doc_path_local,
-                at_cap_callback=assert_at_cap,
-            )
+        _run_concurrent_callers(
+            num_callers=num_callers,
+            analyzer=analyzer,
+            config=config,
+            shared=shared,
+            fake_run=fake_run,
+            cap=cap,
+            completed_count=completed_count,
+            count_lock=count_lock,
+            errors=errors,
+            errors_lock=errors_lock,
+            doc_path_factory=doc_path_factory,
+            doc_path_local=doc_path_local,
+            at_cap_callback=assert_at_cap,
+        )
 
         self.assertEqual(
             active_snapshot[0],
@@ -362,14 +369,7 @@ class TestSemaphoreConcurrencyCap(TestCase):
     @pytest.mark.slow
     @pytest.mark.timeout(360)
     def test_after_release_all_threads_complete(self) -> None:
-        """All callers eventually complete after the release signal is set.
-
-        Marked slow: intermittently flaky in fast-automation due to thread-timing
-        sensitivities when three threads coordinate via a shared semaphore and
-        condition variable.  Passes reliably in isolation; excluded from the
-        fast-automation suite via -m "not slow".  Known threading race to address
-        in follow-up.
-        """
+        """All callers eventually complete after the release signal is set."""
         cap = 2
         num_callers = 3
         config = _make_config(max_concurrent=cap)
