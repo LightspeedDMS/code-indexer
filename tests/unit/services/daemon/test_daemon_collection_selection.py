@@ -34,7 +34,7 @@ def test_daemon_selects_main_collection_not_temporal(creation_order):
     EXPECTED: Daemon should identify and load the MAIN collection (voyage-code-3),
     excluding temporal collections from consideration.
 
-    This test reproduces the exact bug from evolution repository.
+    This test reproduces the exact bug from a large repository.
     """
     # Create temporary project directory
     temp_dir = tempfile.mkdtemp()

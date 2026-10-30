@@ -186,7 +186,7 @@ def test_null_marker_refresh_forwards_existing_body_end_to_end(
         "lifecycle:\n  ci_system: github-actions\n"
         "lifecycle_schema_version: 4\n"
         "---\n\n"
-        "# Evolution Engine\n\n"
+        "# Example Engine\n\n"
         "Implements the QuasarReplication protocol via the orbital-sync module.\n"
     )
 

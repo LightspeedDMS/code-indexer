@@ -13,8 +13,8 @@ was healthy and simply needed more time.
 The fix drives the deadline from ``resource_config.cow_clone_timeout`` (the
 same knob ``GoldenRepoManager`` already uses for its own CoW operations,
 default 3600s / 1 hour — bumped from an initial 600s once measured
-extrapolation showed large production repos like evolution (~1M files,
-~17-19 min) and phoenix (40GB) need more headroom) instead of a fixed low
+extrapolation showed large production repos like a ~1M-file repository
+(~17-19 min) and a 40 GB repository need more headroom) instead of a fixed low
 literal, mirroring the Bug #1218 "no artificial clock on a legitimately
 long-running clone/index path" principle.
 

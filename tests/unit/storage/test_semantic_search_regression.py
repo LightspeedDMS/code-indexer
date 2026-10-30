@@ -37,7 +37,7 @@ def test_daemon_loads_correct_collection_not_temporal(vector_store, temp_index_d
     Test that daemon loads the MAIN collection, not temporal collection.
 
     REPRODUCES BUG: Daemon loads collections alphabetically and picks the FIRST one.
-    In evolution repo, 'code-indexer-temporal' comes before 'voyage-code-3' alphabetically,
+    In a large repository, 'code-indexer-temporal' comes before 'voyage-code-3' alphabetically,
     so daemon loads the wrong collection and returns NO results for semantic queries.
 
     ROOT CAUSE: _load_semantic_indexes() at line 1338 uses collections[0] which loads

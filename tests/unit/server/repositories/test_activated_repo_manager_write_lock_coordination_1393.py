@@ -423,14 +423,14 @@ class TestCompositeLoopParticipatesInLockCoordination:
         """The composite-activation loop must pass golden_repo_alias through
         for EVERY component repo, not just the single-repo path -- proven by
         observing the real scheduler's write lock engage per-component."""
-        phoenix_repo = GoldenRepo(
-            alias="phoenix",
-            repo_url="https://github.com/example/phoenix.git",
+        second_repo = GoldenRepo(
+            alias="example-repo-2",
+            repo_url="https://github.com/example/example-repo-2.git",
             default_branch="main",
-            clone_path="/path/to/golden/phoenix",
+            clone_path="/path/to/golden/example-repo-2",
             created_at=datetime.now(timezone.utc).isoformat(),
         )
-        golden_repo_manager_mock.golden_repos["phoenix"] = phoenix_repo
+        golden_repo_manager_mock.golden_repos["example-repo-2"] = second_repo
 
         lock_state_by_alias: dict = {}
 
@@ -444,14 +444,14 @@ class TestCompositeLoopParticipatesInLockCoordination:
 
         result = activated_repo_manager._do_activate_composite_repository(
             username="testuser",
-            golden_repo_aliases=["example-repo", "phoenix"],
+            golden_repo_aliases=["example-repo", "example-repo-2"],
             user_alias="my-composite",
         )
 
         assert result["success"] is True
-        assert lock_state_by_alias == {"example-repo": True, "phoenix": True}, (
+        assert lock_state_by_alias == {"example-repo": True, "example-repo-2": True}, (
             "the write lock must engage for EVERY component alias during "
             "its own clone call"
         )
         assert real_refresh_scheduler.is_write_locked("example-repo") is False
-        assert real_refresh_scheduler.is_write_locked("phoenix") is False
+        assert real_refresh_scheduler.is_write_locked("example-repo-2") is False
