@@ -25,14 +25,14 @@ class TestBuildEffectiveUrl:
             _build_effective_url,
         )
 
-        clone_url = "git@gitlab.com:lightspeeddms/private/cloud-engineering/terraform/cloud-infrastructure.git"
+        clone_url = "git@gitlab.com:example-org/example-group/example-repo.git"
         credentials = "glpat-test-token-12345"
         platform = "gitlab"
 
         result = _build_effective_url(clone_url, platform, credentials)
 
         # GitLab uses oauth2:<token> format
-        expected = "https://oauth2:glpat-test-token-12345@gitlab.com/lightspeeddms/private/cloud-engineering/terraform/cloud-infrastructure.git"
+        expected = "https://oauth2:glpat-test-token-12345@gitlab.com/example-org/example-group/example-repo.git"
         assert result == expected
 
     def test_ssh_url_to_https_github_with_credentials(self):

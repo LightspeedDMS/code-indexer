@@ -3,13 +3,13 @@ TDD regression tests for bug #1095: comma-separated exclude_path silently no-ops
 
 Reproduces the exact empirical failure:
   PathPatternMatcher().matches_pattern(
-      'code/dms-financial-management/Foo.cs',
-      'code/dms-financial-management/**,code/dms-rental-management/**'
+      'code/app-billing/Foo.cs',
+      'code/app-billing/**,code/app-scheduling/**'
   ) -> False  (wrong — treated as one pattern that matches nothing)
 
 After fix:
-  parse_exclude_patterns('code/dms-financial-management/**,code/dms-rental-management/**')
-  -> ['code/dms-financial-management/**', 'code/dms-rental-management/**']
+  parse_exclude_patterns('code/app-billing/**,code/app-scheduling/**')
+  -> ['code/app-billing/**', 'code/app-scheduling/**']
   and both legs apply match-ANY semantics.
 """
 
@@ -24,12 +24,10 @@ class TestParseExcludePatterns:
 
     def test_splits_comma_separated_patterns(self):
         """Core case: two patterns joined with comma produce two independent patterns."""
-        result = parse_exclude_patterns(
-            "code/dms-financial-management/**,code/dms-rental-management/**"
-        )
+        result = parse_exclude_patterns("code/app-billing/**,code/app-scheduling/**")
         assert result == [
-            "code/dms-financial-management/**",
-            "code/dms-rental-management/**",
+            "code/app-billing/**",
+            "code/app-scheduling/**",
         ]
 
     def test_trims_whitespace_around_each_pattern(self):
@@ -84,27 +82,17 @@ class TestBugReproduction1095:
         This test verifies the helper produces patterns that EACH individually match.
         """
         matcher = PathPatternMatcher()
-        patterns = parse_exclude_patterns(
-            "code/dms-financial-management/**,code/dms-rental-management/**"
-        )
+        patterns = parse_exclude_patterns("code/app-billing/**,code/app-scheduling/**")
         # Both patterns should be present
         assert len(patterns) == 2
         # Each pattern individually matches the right paths
-        assert matcher.matches_pattern(
-            "code/dms-financial-management/Poster.cs", patterns[0]
-        )
-        assert matcher.matches_pattern(
-            "code/dms-rental-management/Rental.cs", patterns[1]
-        )
+        assert matcher.matches_pattern("code/app-billing/Invoice.cs", patterns[0])
+        assert matcher.matches_pattern("code/app-scheduling/Booking.cs", patterns[1])
         # matches_any_pattern with the split list covers both dirs
-        assert matcher.matches_any_pattern(
-            "code/dms-financial-management/Poster.cs", patterns
-        )
-        assert matcher.matches_any_pattern(
-            "code/dms-rental-management/Rental.cs", patterns
-        )
+        assert matcher.matches_any_pattern("code/app-billing/Invoice.cs", patterns)
+        assert matcher.matches_any_pattern("code/app-scheduling/Booking.cs", patterns)
         # A path in neither excluded dir is NOT excluded
-        assert not matcher.matches_any_pattern("code/dms-other/Other.cs", patterns)
+        assert not matcher.matches_any_pattern("code/app-other/Other.cs", patterns)
 
 
 class TestSemanticLegMultiPatternExclusion:
@@ -135,13 +123,13 @@ class TestSemanticLegMultiPatternExclusion:
             path_filter=None,
             language=None,
             exclude_language=None,
-            exclude_path="code/dms-financial-management/**,code/dms-rental-management/**",
+            exclude_path="code/app-billing/**,code/app-scheduling/**",
         )
         must_not = conditions.get("must_not", [])
         assert len(must_not) == 2
         texts = {c["match"]["text"] for c in must_not}
-        assert "code/dms-financial-management/**" in texts
-        assert "code/dms-rental-management/**" in texts
+        assert "code/app-billing/**" in texts
+        assert "code/app-scheduling/**" in texts
 
     def test_whitespace_around_comma_patterns_is_trimmed(self):
         """Whitespace around patterns in exclude_path is trimmed."""
@@ -185,7 +173,7 @@ class TestSemanticLegMultiPatternExclusion:
             path_filter=None,
             language=None,
             exclude_language=None,
-            exclude_path="code/dms-financial-management/**,code/dms-rental-management/**",
+            exclude_path="code/app-billing/**,code/app-scheduling/**",
         )
         # The filter conditions are consumed by FilesystemVectorStore's evaluate_filter
         # We verify the must_not list contains two conditions (one per pattern).
@@ -194,14 +182,14 @@ class TestSemanticLegMultiPatternExclusion:
 
         # Verify each condition uses the pattern text that DOES match individual paths
         matcher = PathPatternMatcher()
-        financial_path = "code/dms-financial-management/Poster.cs"
-        rental_path = "code/dms-rental-management/Rental.cs"
+        billing_path = "code/app-billing/Invoice.cs"
+        scheduling_path = "code/app-scheduling/Booking.cs"
         other_path = "code/other-module/Other.cs"
 
-        financial_patterns = [c["match"]["text"] for c in must_not]
-        assert matcher.matches_any_pattern(financial_path, financial_patterns)
-        assert matcher.matches_any_pattern(rental_path, financial_patterns)
-        assert not matcher.matches_any_pattern(other_path, financial_patterns)
+        billing_patterns = [c["match"]["text"] for c in must_not]
+        assert matcher.matches_any_pattern(billing_path, billing_patterns)
+        assert matcher.matches_any_pattern(scheduling_path, billing_patterns)
+        assert not matcher.matches_any_pattern(other_path, billing_patterns)
 
 
 class TestTemporalLegMultiPatternExclusion:
@@ -494,19 +482,17 @@ class TestFTSLegMultiPatternExclusion:
         We test the helper integration directly (tantivy manager does path-per-pattern
         matching already via matches_any_pattern logic in tantivy_index_manager.py).
         """
-        patterns = parse_exclude_patterns(
-            "code/dms-financial-management/**,code/dms-rental-management/**"
-        )
+        patterns = parse_exclude_patterns("code/app-billing/**,code/app-scheduling/**")
         assert len(patterns) == 2
 
         matcher = PathPatternMatcher()
         # FTS leg uses matches_any_pattern over the exclude_paths list
-        financial = "code/dms-financial-management/SomeFile.java"
-        rental = "code/dms-rental-management/OtherFile.java"
-        unaffected = "code/dms-core/Core.java"
+        billing = "code/app-billing/SomeFile.java"
+        scheduling = "code/app-scheduling/OtherFile.java"
+        unaffected = "code/app-core/Core.java"
 
-        assert matcher.matches_any_pattern(financial, patterns)
-        assert matcher.matches_any_pattern(rental, patterns)
+        assert matcher.matches_any_pattern(billing, patterns)
+        assert matcher.matches_any_pattern(scheduling, patterns)
         assert not matcher.matches_any_pattern(unaffected, patterns)
 
     def test_single_pattern_fts_still_works(self):

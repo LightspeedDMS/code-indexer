@@ -391,11 +391,11 @@ class TestOriginalIncidentReproduction:
         # NOT expired.
         _install_hnsw_entry(
             cache,
-            "/fake/evolution-repo",
+            "/fake/example-repo",
             ttl_minutes=INITIAL_TTL_MINUTES,
             age_minutes=STALE_ENTRY_AGE_MINUTES,
         )
-        entry = cache._cache["/fake/evolution-repo"]
+        entry = cache._cache["/fake/example-repo"]
         assert not entry.is_expired(), (
             "Precondition: under the initial 10-minute TTL, a 5-minute-old "
             "entry must not be expired yet."
@@ -409,7 +409,7 @@ class TestOriginalIncidentReproduction:
 
         # The already-cached entry must now be expired under the new TTL
         # (5 minutes old > 2-minute new TTL) -- WITHOUT a server restart.
-        entry = cache._cache["/fake/evolution-repo"]
+        entry = cache._cache["/fake/example-repo"]
         assert entry.is_expired(), (
             "Bug #1399: after lowering index_cache_ttl_minutes, an "
             "already-cached entry older than the new TTL must report itself "
@@ -419,7 +419,7 @@ class TestOriginalIncidentReproduction:
         # The background cleanup cycle (simulated directly, no sleep) must
         # evict it.
         cache._cleanup_expired_entries()
-        assert "/fake/evolution-repo" not in cache._cache, (
+        assert "/fake/example-repo" not in cache._cache, (
             "Bug #1399: the live HNSW cache entry must evict on the new, "
             "shorter TTL schedule without a restart -- reproducing the fix "
             "for the original production incident."

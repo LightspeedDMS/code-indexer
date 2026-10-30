@@ -469,25 +469,25 @@ class TestRegenerateMixedCaseDomainEdges:
 
     def test_mixed_case_domains_produce_edges(self, tmp_path):
         """
-        Domains with mixed-case names (e.g., 'Core DMS Platform') must produce
+        Domains with mixed-case names (e.g., 'Core Example Platform') must produce
         cross-domain edges in the regenerated _index.md.
 
         Previously broken: case-sensitivity mismatch caused `if target in line_lower`
         to always fail for mixed-case domain names.
         """
-        source_domain = "Core DMS Platform"
-        target_domain = "Dealer Configuration"
+        source_domain = "Core Example Platform"
+        target_domain = "Tenant Configuration"
 
         domains = [
             {
                 "name": source_domain,
-                "description": "Core DMS platform services",
-                "participating_repos": ["dms-core", "dms-api"],
+                "description": "Core example platform services",
+                "participating_repos": ["app-core", "app-api"],
             },
             {
                 "name": target_domain,
-                "description": "Dealer configuration management",
-                "participating_repos": ["dealer-config"],
+                "description": "Tenant configuration management",
+                "participating_repos": ["tenant-config"],
             },
         ]
         make_domains_json(tmp_path, domains)
@@ -496,20 +496,20 @@ class TestRegenerateMixedCaseDomainEdges:
         (tmp_path / f"{source_domain}.md").write_text(
             make_domain_md_with_outgoing(
                 source_domain,
-                ["dms-core", "dms-api"],
+                ["app-core", "app-api"],
                 [
                     (
-                        "dms-core",
-                        "dealer-config",
+                        "app-core",
+                        "tenant-config",
                         target_domain,
                         "api-call",
-                        "Reads dealer config data",
+                        "Reads tenant config data",
                     )
                 ],
             )
         )
         (tmp_path / f"{target_domain}.md").write_text(
-            make_domain_md_with_no_outgoing(target_domain, ["dealer-config"])
+            make_domain_md_with_no_outgoing(target_domain, ["tenant-config"])
         )
 
         regenerator = _get_regenerator()

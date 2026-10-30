@@ -48,8 +48,8 @@ preserved either way:
 
   1. It keeps ``golden_repos_dir`` free of directories that look like repo
      clones but are not. That directory is scanned/listed by real code and by
-     operators; ``evolution-temporal-voyage_code_3-2024Q1`` sitting next to
-     ``evolution`` invites exactly the "is this a golden repo?" confusion the
+     operators; ``example-temporal-voyage_code_3-2024Q1`` sitting next to
+     ``example`` invites exactly the "is this a golden repo?" confusion the
      dot-prefixed ``.versioned/`` convention already exists to avoid.
   2. Because the per-repo root is a plain index root, the ENTIRE existing
      index-root abstraction is reused unchanged -- collection naming, shard

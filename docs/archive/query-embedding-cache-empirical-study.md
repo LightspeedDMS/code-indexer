@@ -110,7 +110,7 @@ shallow with top-1 essentially flat at ~47-50% at every distance.
 
 ### 3.4 Anchor-first-two is the recommended dial midpoint at about 77% top-1
 
-The anchoring-depth test (`anchor_depth.py`, 15 grounded 5-6 token DMS queries,
+The anchoring-depth test (`anchor_depth.py`, 15 grounded 5-6 token domain-specific queries,
 original case, vs RAW) measured fixing the first k tokens and reordering the tail:
 
 | anchor depth | n | chunk-overlap | file-overlap | top-1 same | RBO |

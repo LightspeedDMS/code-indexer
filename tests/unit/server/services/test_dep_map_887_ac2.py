@@ -81,12 +81,12 @@ class TestIsProseFragmentPureFunction:
 
     def test_normal_domains_pass_all_heuristics(self) -> None:
         fn = import_hygiene_symbol("is_prose_fragment")
-        for name in ("evolution-dms-core", "my-service", "domain123"):
+        for name in ("example-app-core", "my-service", "domain123"):
             assert fn(name) is False, f"Normal domain {name!r} incorrectly rejected"
 
     def test_rejects_parenthesised_self_annotation(self) -> None:
         fn = import_hygiene_symbol("is_prose_fragment")
-        assert fn("evolution-dms-core (self)") is True
+        assert fn("example-app-core (self)") is True
 
 
 # ===========================================================================

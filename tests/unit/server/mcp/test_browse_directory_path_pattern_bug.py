@@ -5,8 +5,8 @@ Bug: When both path and path_pattern are provided, the code incorrectly combines
 them when path_pattern is absolute (contains '/' or starts with repo base path).
 
 Example failure:
-- Input: path="code/src/dms/.../access", path_pattern="code/src/**/*.java"
-- Current: "code/src/dms/.../access/**/code/src/**/*.java" (WRONG)
+- Input: path="code/src/example/.../access", path_pattern="code/src/**/*.java"
+- Current: "code/src/example/.../access/**/code/src/**/*.java" (WRONG)
 - Expected: "code/src/**/*.java" (use absolute pattern directly)
 """
 
@@ -66,7 +66,7 @@ class TestBrowseDirectoryPathPatternCombination:
 
             params = {
                 "repository_alias": "test-repo",
-                "path": "code/src/dms/core/access",  # This should be IGNORED
+                "path": "code/src/example/core/access",  # This should be IGNORED
                 "path_pattern": "code/src/**/*.java",  # Absolute pattern
                 "recursive": True,
             }
@@ -136,8 +136,8 @@ class TestBrowseDirectoryPathPatternCombination:
         """
         Test the exact failing case from the bug report.
 
-        Input: path="code/src/dms/.../access", path_pattern="code/src/**/*.java"
-        Expected: "code/src/**/*.java" (NOT "code/src/dms/.../access/**/code/src/**/*.java")
+        Input: path="code/src/example/.../access", path_pattern="code/src/**/*.java"
+        Expected: "code/src/**/*.java" (NOT "code/src/example/.../access/**/code/src/**/*.java")
         """
         mock_file_service = create_mock_file_service()
         with patch(
@@ -147,7 +147,7 @@ class TestBrowseDirectoryPathPatternCombination:
 
             params = {
                 "repository_alias": "test-repo",
-                "path": "code/src/dms/core/access",
+                "path": "code/src/example/core/access",
                 "path_pattern": "code/src/**/*.java",
                 "recursive": True,
             }
@@ -160,7 +160,8 @@ class TestBrowseDirectoryPathPatternCombination:
             # Should NOT duplicate the base path
             assert query_params.path_pattern == "code/src/**/*.java"
             assert (
-                "code/src/dms/core/access/**/code/src" not in query_params.path_pattern
+                "code/src/example/core/access/**/code/src"
+                not in query_params.path_pattern
             )
 
     def test_path_pattern_without_path_unchanged(self, mock_user):

@@ -325,25 +325,25 @@ class TestFindFilesDoubleStarPattern:
     @pytest.fixture
     def deep_repo_structure(self, tmp_path):
         """Create repository with deep nested structure matching production evidence."""
-        repo_path = tmp_path / "evolution-repo"
+        repo_path = tmp_path / "example-repo"
         repo_path.mkdir()
 
-        # Create structure: v_*/code/src/dms/client/system/desktop/widgets/SalesGoalsWidget.java
+        # Create structure: v_*/code/src/example/client/system/desktop/widgets/ExampleWidget.java
         for version in ["v_1766032745", "v_1766034456", "v_1766035123", "v_1766036789"]:
             widget_path = (
                 repo_path
                 / version
                 / "code"
                 / "src"
-                / "dms"
+                / "example"
                 / "client"
                 / "system"
                 / "desktop"
                 / "widgets"
             )
             widget_path.mkdir(parents=True)
-            (widget_path / "SalesGoalsWidget.java").write_text(
-                "class SalesGoalsWidget { void render() {} }"
+            (widget_path / "ExampleWidget.java").write_text(
+                "class ExampleWidget { void render() {} }"
             )
 
         # Create other files that should NOT match
@@ -373,16 +373,16 @@ class TestFindFilesDoubleStarPattern:
         BUG REPRODUCTION: This test currently FAILS because the API returns 0 matches
         even though the underlying find command works correctly.
 
-        Expected: 4 matches (one SalesGoalsWidget.java in each version directory)
+        Expected: 4 matches (one ExampleWidget.java in each version directory)
         Actual: 0 matches (BUG)
         """
         result = await grep_service_deep.search(
-            pattern="class", include_patterns=["**/SalesGoalsWidget.java"]
+            pattern="class", include_patterns=["**/ExampleWidget.java"]
         )
 
-        # Should find all 4 SalesGoalsWidget.java files across different versions
+        # Should find all 4 ExampleWidget.java files across different versions
         assert result.total_matches == 4, (
-            f"Expected 4 matches for **/SalesGoalsWidget.java pattern, "
+            f"Expected 4 matches for **/ExampleWidget.java pattern, "
             f"got {result.total_matches}"
         )
 
@@ -391,8 +391,8 @@ class TestFindFilesDoubleStarPattern:
         # Verify each version's widget file was found
         for version in ["v_1766032745", "v_1766034456", "v_1766035123", "v_1766036789"]:
             assert any(
-                version in f and "SalesGoalsWidget.java" in f for f in matched_files
-            ), f"Should find SalesGoalsWidget.java in {version}"
+                version in f and "ExampleWidget.java" in f for f in matched_files
+            ), f"Should find ExampleWidget.java in {version}"
 
         # Should NOT find Main.java
         assert not any("Main.java" in f for f in matched_files), (
@@ -409,12 +409,12 @@ class TestFindFilesDoubleStarPattern:
         This provides evidence that the bug is specific to **/ prefix.
         """
         result = await grep_service_deep.search(
-            pattern="class", include_patterns=["SalesGoalsWidget.java"]
+            pattern="class", include_patterns=["ExampleWidget.java"]
         )
 
         # Simple pattern should find at least 1 match (current behavior)
         assert result.total_matches >= 1, (
-            "Simple pattern SalesGoalsWidget.java should find at least 1 match"
+            "Simple pattern ExampleWidget.java should find at least 1 match"
         )
 
     @pytest.mark.asyncio
@@ -494,12 +494,12 @@ class TestFindFilesDoubleStarPattern:
         coverage for the pattern matching logic.
         """
         result = await ripgrep_service_deep.search(
-            pattern="class", include_patterns=["**/SalesGoalsWidget.java"]
+            pattern="class", include_patterns=["**/ExampleWidget.java"]
         )
 
-        # Should find all 4 SalesGoalsWidget.java files
+        # Should find all 4 ExampleWidget.java files
         assert result.total_matches == 4, (
-            f"Ripgrep with **/SalesGoalsWidget.java should find 4 matches, "
+            f"Ripgrep with **/ExampleWidget.java should find 4 matches, "
             f"got {result.total_matches}"
         )
 
@@ -508,8 +508,8 @@ class TestFindFilesDoubleStarPattern:
         # Verify each version's widget file was found
         for version in ["v_1766032745", "v_1766034456", "v_1766035123", "v_1766036789"]:
             assert any(
-                version in f and "SalesGoalsWidget.java" in f for f in matched_files
-            ), f"Ripgrep should find SalesGoalsWidget.java in {version}"
+                version in f and "ExampleWidget.java" in f for f in matched_files
+            ), f"Ripgrep should find ExampleWidget.java in {version}"
 
 
 class TestGlobPatternParity:
@@ -525,11 +525,11 @@ class TestGlobPatternParity:
         repo_path = tmp_path / "glob-test-repo"
         repo_path.mkdir()
 
-        # Create nested structure: code/src/dms/client/widgets/SalesGoalsWidget.java
-        widget_path = repo_path / "code" / "src" / "dms" / "client" / "widgets"
+        # Create nested structure: code/src/example/client/widgets/ExampleWidget.java
+        widget_path = repo_path / "code" / "src" / "example" / "client" / "widgets"
         widget_path.mkdir(parents=True)
-        (widget_path / "SalesGoalsWidget.java").write_text(
-            "class SalesGoalsWidget { void render() {} }"
+        (widget_path / "ExampleWidget.java").write_text(
+            "class ExampleWidget { void render() {} }"
         )
 
         # Create explicit path file: code/src/Main.java
@@ -561,25 +561,25 @@ class TestGlobPatternParity:
     async def test_glob_pattern_with_double_star_in_middle_of_path(
         self, grep_service_glob, glob_test_repo
     ):
-        """Test pattern with ** in MIDDLE of path: code/**/SalesGoalsWidget.java
+        """Test pattern with ** in MIDDLE of path: code/**/ExampleWidget.java
 
         REQUIREMENT: Pattern dir/**/file.ext must match file under dir at any depth.
         CURRENT BUG: find -path doesn't expand ** in middle of path correctly.
         """
         result = await grep_service_glob.search(
-            pattern="class", include_patterns=["code/**/SalesGoalsWidget.java"]
+            pattern="class", include_patterns=["code/**/ExampleWidget.java"]
         )
 
-        # Should find SalesGoalsWidget.java under code/ at any depth
+        # Should find ExampleWidget.java under code/ at any depth
         assert result.total_matches == 1, (
-            f"Pattern code/**/SalesGoalsWidget.java should find 1 match, "
+            f"Pattern code/**/ExampleWidget.java should find 1 match, "
             f"got {result.total_matches}"
         )
 
         matched_files = {match.file_path for match in result.matches}
-        assert any(
-            "SalesGoalsWidget.java" in f and "code" in f for f in matched_files
-        ), "Should find code/src/dms/client/widgets/SalesGoalsWidget.java"
+        assert any("ExampleWidget.java" in f and "code" in f for f in matched_files), (
+            "Should find code/src/example/client/widgets/ExampleWidget.java"
+        )
 
     @pytest.mark.asyncio
     async def test_glob_pattern_explicit_path(self, grep_service_glob, glob_test_repo):
@@ -614,7 +614,7 @@ class TestGlobPatternParity:
         result = await grep_service_glob.search(
             pattern="class",
             include_patterns=[
-                "code/**/SalesGoalsWidget.java",  # ** in middle
+                "code/**/ExampleWidget.java",  # ** in middle
                 "code/src/Main.java",  # Explicit path
                 "**/TestHelper.java",  # ** at start
             ],
@@ -626,8 +626,8 @@ class TestGlobPatternParity:
         )
 
         matched_files = {match.file_path for match in result.matches}
-        assert any("SalesGoalsWidget.java" in f for f in matched_files), (
-            "Should find SalesGoalsWidget.java via code/**/pattern"
+        assert any("ExampleWidget.java" in f for f in matched_files), (
+            "Should find ExampleWidget.java via code/**/pattern"
         )
         assert any("Main.java" in f for f in matched_files), (
             "Should find Main.java via explicit path"

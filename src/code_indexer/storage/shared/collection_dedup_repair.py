@@ -1387,7 +1387,7 @@ def _plan_renumber(
     violation (a genuine line gap exceeding the real-chunker-derived
     overlap tolerance, or two distinct records sharing an identical
     (line_start, line_end) range) no longer fails the WHOLE collection.
-    Confirmed against a real evolution-repo census: 586 of 10,579 file
+    Confirmed against a real large-repo census: 586 of 10,579 file
     groups (5.5%) carry genuine historical line gaps -- chunks silently
     dropped by the pre-#1502-fix code -- so refusing the whole
     collection over ANY such group would make migration permanently

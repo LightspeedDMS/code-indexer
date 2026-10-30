@@ -231,9 +231,11 @@ class TestBranchChangeBinaryFiltering:
         files = {}
         # 13 source files (the real changes)
         for i in range(8):
-            files[f"code/src/dms/server/Service{i}.java"] = f"class Service{i} {{}}\n"
+            files[f"code/src/example/server/Service{i}.java"] = (
+                f"class Service{i} {{}}\n"
+            )
         for i in range(5):
-            files[f"code/src/dms/server/Module{i}.kt"] = f"class Module{i}\n"
+            files[f"code/src/example/server/Module{i}.kt"] = f"class Module{i}\n"
 
         # Hundreds of binary junk files (should NOT be indexed)
         for i in range(20):
