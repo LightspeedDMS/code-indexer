@@ -36,34 +36,28 @@ _FAULTHANDLER_ERRORS = (OSError, RuntimeError, ValueError)
 
 
 @dataclass
-class _ActiveDump:
+class DumpFile:
     pid: int
     path: Path
     # ^ hazard closing this file while faulthandler is armed => a crash dump lands in whatever reuses the fd
     file: IO[str]
 
 
-_active: Optional[_ActiveDump] = None
+_active: Optional[DumpFile] = None
 _lock = threading.Lock()
 _dumping = False
 
 
-# ^ invariant returns the dump path, or None after one logged WARNING; never raises
-def enable_crash_dumps(logs_dir: Path) -> Optional[Path]:
-    with _lock:
-        path = _enable_locked(logs_dir)
-    if path is not None:
-        _sweep_dead_empty_dumps(logs_dir, keep=path)
-    return path
-
-
-def _enable_locked(logs_dir: Path) -> Optional[Path]:
-    global _active
+# ^ invariant returns an open dump file, or None after one logged WARNING; never raises
+# ^ perf reads /proc, mkdir and open => async callers run it via anyio.to_thread
+def prepare_dump_file(logs_dir: Path) -> Optional[DumpFile]:
     pid = os.getpid()
-    if _active is not None and _active.pid == pid:
-        return _active.path
     try:
         path = logs_dir / f"{DUMP_FILE_PREFIX}{pid}-{read_start_ticks(pid)}.log"
+        active = _active
+        # ^ why reuse the armed handle, not open a second one; arm_crash_dumps then has nothing to close
+        if active is not None and active.pid == pid and active.path == path:
+            return active
         logs_dir.mkdir(parents=True, exist_ok=True)
         # ^ why append, not "w"; a reused pid+ticks after a reboot must not truncate an older crash
         dump_file = open(path, "a", encoding="utf-8")
@@ -75,26 +69,50 @@ def _enable_locked(logs_dir: Path) -> Optional[Path]:
             exc,
         )
         return None
+    return DumpFile(pid, path, dump_file)
+
+
+# ^ invariant returns the dump path, or None after one logged WARNING; never raises
+# ^ why the calling thread, not anyio.to_thread; faulthandler.enable sets its alternate signal stack per calling thread
+def arm_crash_dumps(prepared: DumpFile) -> Optional[Path]:
+    with _lock:
+        return _arm_locked(prepared)
+
+
+def _arm_locked(prepared: DumpFile) -> Optional[Path]:
+    global _active
+    current = _active
+    previous = current if current is not None and current.pid == prepared.pid else None
+    # ^ why reuse only for the same file, not any dir; a later app in this process (e2e create_app) dumps into its own logs dir
+    if previous is not None and previous.path == prepared.path:
+        # ^ invariant a racing second prepare => its duplicate handle never reached faulthandler
+        if prepared.file is not previous.file:
+            prepared.file.close()
+        return previous.path
     try:
-        faulthandler.enable(file=dump_file, all_threads=True)
+        faulthandler.enable(file=prepared.file, all_threads=True)
     except _FAULTHANDLER_ERRORS as exc:
-        dump_file.close()
+        prepared.file.close()
         logger.warning(
             "faulthandler crash dumps disabled: %s: %s", type(exc).__name__, exc
         )
         return None
-    _active = _ActiveDump(pid, path, dump_file)
+    _active = prepared
+    # ^ why keep the previous file open, not close it; a SIGUSR1 handler holding it mid-render must finish its write
+    # ^ why skip signal.signal on a dir move, not re-install; _dump_all_threads reads _active and the first enable reported SIGUSR1
+    if previous is not None:
+        return prepared.path
     try:
         signal.signal(DUMP_SIGNAL, _dump_all_threads)
     except (OSError, ValueError) as exc:
         logger.warning(
             "SIGUSR1 on-demand dumps unavailable (fatal-signal dumps still go to "
             "%s): %s: %s",
-            path,
+            prepared.path,
             type(exc).__name__,
             exc,
         )
-    return path
+    return prepared.path
 
 
 def _render_all_threads() -> str:
@@ -142,7 +160,8 @@ def _dump_all_threads(signum: int, frame: Optional[FrameType]) -> None:
         _dumping = False
 
 
-def _sweep_dead_empty_dumps(logs_dir: Path, keep: Path) -> None:
+# ^ perf sync scandir + stat of up to MAX_SWEEP_ENTRIES => async callers run it via anyio.to_thread
+def sweep_dead_empty_dumps(logs_dir: Path, keep: Path) -> None:
     try:
         booted_at = boot_time()
         with os.scandir(logs_dir) as entries:
@@ -152,7 +171,11 @@ def _sweep_dead_empty_dumps(logs_dir: Path, keep: Path) -> None:
                 match = _DUMP_NAME.match(entry.name)
                 if match is None or entry.path == str(keep):
                     continue
-                stat = entry.stat(follow_symlinks=False)
+                # ^ order workers starting together sweep the same dir; a peer may unlink after listing, before stat or unlink
+                try:
+                    stat = entry.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
                 if stat.st_size != 0:
                     continue
                 pid, ticks = int(match.group(1)), int(match.group(2))
@@ -160,7 +183,6 @@ def _sweep_dead_empty_dumps(logs_dir: Path, keep: Path) -> None:
                     continue
                 try:
                     os.unlink(entry.path)
-                # ^ order workers starting together sweep the same dir; a peer may unlink before this one
                 except FileNotFoundError:
                     continue
     except OSError as exc:

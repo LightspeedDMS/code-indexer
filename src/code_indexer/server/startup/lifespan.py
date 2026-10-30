@@ -930,12 +930,23 @@ def make_lifespan(
 
         attach_redacting_filter_to_all_handlers()
 
-        # ^ see src/code_indexer/server/utils/crash_dump.py:enable_crash_dumps; #2299 fatal-signal and SIGUSR1 dumps
-        # ^ why main thread, not anyio.to_thread; faulthandler.enable sets its alternate signal stack per calling thread
+        # ^ see src/code_indexer/server/utils/crash_dump.py:arm_crash_dumps; #2299 fatal-signal and SIGUSR1 dumps
+        # ^ order prepare_dump_file (worker thread, file I/O) before arm_crash_dumps (this thread, faulthandler + SIGUSR1)
         try:
-            from code_indexer.server.utils.crash_dump import enable_crash_dumps
+            from code_indexer.server.utils.crash_dump import (
+                arm_crash_dumps,
+                prepare_dump_file,
+                sweep_dead_empty_dumps,
+            )
 
-            enable_crash_dumps(Path(server_data_dir) / "logs")
+            prepared = await anyio.to_thread.run_sync(
+                prepare_dump_file, Path(server_data_dir) / "logs"
+            )
+            dump_path = None if prepared is None else arm_crash_dumps(prepared)
+            if dump_path is not None:
+                await anyio.to_thread.run_sync(
+                    sweep_dead_empty_dumps, dump_path.parent, dump_path
+                )
         except Exception:
             logger.error(
                 "Story #2299: faulthandler crash dumps failed to start; a native "
