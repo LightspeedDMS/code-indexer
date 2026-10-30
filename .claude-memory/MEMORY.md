@@ -134,6 +134,7 @@
 - [NFS host down](project_nfs_host_down_hangs_systemd.md) - hangs daemon-reload/sudo; timeout-wrap probes
 - [Temporal metadata PG](project_cluster_temporal_metadata_pg_backed.md) - PG-backed in cluster (#1313)
 - [Workers config](project_staging_workers_config_durability.md) - worker count = DB runtime.workers, web-UI only
+- [Multi-worker supported](project_multi_worker_is_supported.md) - `--workers N` is supported; a multi-worker-only defect is a real defect
 - [Local server solo](project_local_server_solo_sqlite.md) - local is solo/SQLite; PG needs staging
 - [Production solo SQLite](project_production_is_solo_sqlite.md) - verify SQLite first, PG is parity
 - [Backup scope](project_backup_scope_dev_staging_only.md) - backup-before-migration is dev/staging only
