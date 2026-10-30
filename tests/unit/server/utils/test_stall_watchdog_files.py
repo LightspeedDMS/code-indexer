@@ -36,6 +36,14 @@ _DUMP_SECTION_LINE = re.compile(r"^=== faulthandler dump.*===$", re.MULTILINE)
 _FAKE_DUMP = "Timeout (0:00:03)!\nThread 0x00007f0000000001 (most recent call first):\n"
 
 
+def _nonempty(path: Path) -> bool:
+    try:
+        return path.stat().st_size > 0
+    except FileNotFoundError:
+        # ^ why False, not raise; the watchdog reports and deletes planted stale evidence between glob and stat
+        return False
+
+
 def _run_watchdog_once(log_dir: Path) -> None:
     """Start a watchdog, wait for its first heartbeat evidence, then stop it."""
     watchdog = StallWatchdog(log_dir)
@@ -44,8 +52,7 @@ def _run_watchdog_once(log_dir: Path) -> None:
         deadline = time.monotonic() + _ARMED_WAIT_S
         own = f"worker-stall-{os.getpid()}-"
         while not any(
-            p.name.startswith(own) and p.stat().st_size > 0
-            for p in log_dir.glob("*.evidence")
+            p.name.startswith(own) and _nonempty(p) for p in log_dir.glob("*.evidence")
         ):
             assert time.monotonic() < deadline, "watchdog never armed"
             time.sleep(0.05)
