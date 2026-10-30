@@ -82,19 +82,48 @@ def _app_built() -> bool:
 def pytest_runtest_protocol(item: Any, nextitem: Any) -> Any:
     global _active
     _install_if_loaded()
-    marked = any(item.get_closest_marker(m) is not None for m in ALLOWING_MARKERS)
     item.stash[_built_before_key] = _app_built()
-    _active = item.nodeid if is_guarded(Path(str(item.path)), marked) else None
+    guarded = is_guarded(Path(str(item.path)), _has_allowing_marker(item))
+    _active = item.nodeid if guarded else None
     try:
         yield
     finally:
         _active = None
 
 
+def _fail_report(outcome: Any, nodeid: str) -> None:
+    messages = take_violations(nodeid)
+    if messages:
+        report = outcome.get_result()
+        report.outcome = "failed"
+        report.longrepr = "\n".join(messages)
+
+
+def _has_allowing_marker(node: Any) -> bool:
+    return any(node.get_closest_marker(m) is not None for m in ALLOWING_MARKERS)
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_make_collect_report(collector: Any) -> Any:
+    guarded = isinstance(collector, pytest.Module) and is_guarded(
+        Path(str(collector.path)), False
+    )
+    if not guarded:
+        yield
+        return
+    _install_if_loaded()
+    built_before = _app_built()
+    outcome = yield
+    # ^ why detect after import, not block during it; pytestmark unknown until imported; test:test_guard_allows_marked_module_that_builds_at_import
+    if not built_before and _app_built() and not _has_allowing_marker(collector):
+        _violation(collector.nodeid, "create_app ran while importing the module")
+    _fail_report(outcome, collector.nodeid)
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item: Any, call: Any) -> Any:
     outcome = yield
-    # ^ why also unbuilt-at-start + built-at-teardown check; server.app first imported in a test => create_app not yet wrapped
+    # ^ why also an unbuilt-to-built check, not the wrapper alone; server.app first imported in this test => create_app unwrapped
     if (
         call.when == "teardown"
         and _active == item.nodeid
@@ -102,8 +131,4 @@ def pytest_runtest_makereport(item: Any, call: Any) -> Any:
         and _app_built()
     ):
         _violation(item.nodeid, "create_app ran before the guard could wrap it")
-    messages = take_violations(item.nodeid)
-    if messages:
-        report = outcome.get_result()
-        report.outcome = "failed"
-        report.longrepr = "\n".join(messages)
+    _fail_report(outcome, item.nodeid)

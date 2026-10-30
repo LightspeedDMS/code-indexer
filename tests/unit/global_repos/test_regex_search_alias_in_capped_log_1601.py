@@ -185,7 +185,7 @@ class TestMcpHandlerThreadsAliasIntoRegexSearchService:
         user.role = UserRole.NORMAL_USER
         user.has_permission = Mock(return_value=True)
 
-        # ^ hazard dropping a seam patch below => app_module read => full create_app() per process; test:test_unit_test_cannot_build_server_app
+        # ^ hazard dropping a seam patch below => full create_app() per process; test:test_unit_test_cannot_build_server_app
         with (
             patch(f"{_REGEX_HANDLER}._get_access_filtering_service", return_value=None),
             patch(f"{_REGEX_HANDLER}._restrict_catalog_matches", return_value=None),
