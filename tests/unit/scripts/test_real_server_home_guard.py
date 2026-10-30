@@ -16,7 +16,7 @@ import os
 import pwd
 import subprocess
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import pytest
 
@@ -143,14 +143,15 @@ def test_lanes_compose_their_exit_code_with_the_guard(lane: str) -> None:
     assert "unset CIDX_REAL_HOME_GUARD_DIR" in text, lane
 
 
-def _lane_env(tmp_path: Path, preset: Dict[str, str]) -> Dict[str, str]:
-    """The environment ``real_home_lane_env SCRATCH`` leaves behind."""
+def _lane_env_run(
+    tmp_path: Path, preset: Dict[str, str]
+) -> subprocess.CompletedProcess:
     env: Dict[str, str] = dict(os.environ)
     for name in ("CIDX_SERVER_DATA_DIR", "CIDX_DATA_DIR", "PYTHONUSERBASE"):
         env.pop(name, None)
     env.update(preset)
     scratch = tmp_path / "lane"
-    result = subprocess.run(
+    return subprocess.run(
         [
             "bash",
             "-c",
@@ -163,6 +164,11 @@ def _lane_env(tmp_path: Path, preset: Dict[str, str]) -> Dict[str, str]:
         text=True,
         timeout=120,
     )
+
+
+def _lane_env(tmp_path: Path, preset: Dict[str, str]) -> Dict[str, str]:
+    """The environment ``real_home_lane_env SCRATCH`` leaves behind."""
+    result = _lane_env_run(tmp_path, preset)
     assert result.returncode == 0, result.stderr
     pairs = (item.split("=", 1) for item in result.stdout.split("\0") if "=" in item)
     return {name: value for name, value in pairs}
@@ -253,7 +259,11 @@ def test_lane_env_gives_git_a_scratch_copy_of_the_global_config(
     lane = _lane_env(tmp_path, {})
     assert "GIT_CONFIG_GLOBAL" not in lane
     scratch_config = Path(lane["HOME"]) / ".gitconfig"
-    assert _sha256(scratch_config) == _sha256(real)
+    assert _config_entries(scratch_config) == [
+        entry
+        for entry in _config_entries(real)
+        if not entry.startswith("core.hookspath=")
+    ]
     origin = subprocess.run(
         ["git", "config", "--global", "--list", "--show-origin"],
         env=lane,
@@ -264,6 +274,85 @@ def test_lane_env_gives_git_a_scratch_copy_of_the_global_config(
     )
     first = origin.stdout.splitlines()[0]
     assert first.startswith(f"file:{scratch_config}"), first.split("\t")[0]
+
+
+def _config_entries(path: Path) -> List[str]:
+    listing = subprocess.run(
+        ["git", "config", "--file", str(path), "--list"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    )
+    return listing.stdout.splitlines()
+
+
+_SYNTHETIC_GIT_CONFIG = """\
+[user]
+\tname = Example Developer
+\temail = developer@example.com
+[core]
+\tautocrlf = input
+{hooks}[alias]
+\tst = status
+"""
+
+
+@pytest.mark.parametrize("hooks", ["two-values", "none"])
+def test_lane_env_drops_core_hooks_path_from_the_git_config_copy(
+    tmp_path: Path, hooks: str
+) -> None:
+    hook_lines = (
+        "\thooksPath = ~/.config/git/hooks\n\thooksPath = /opt/example-hooks\n"
+        if hooks == "two-values"
+        else ""
+    )
+    source = tmp_path / "source.gitconfig"
+    source.write_text(_SYNTHETIC_GIT_CONFIG.format(hooks=hook_lines))
+    before = _sha256(source)
+    lane = _lane_env(tmp_path, {"GIT_CONFIG_GLOBAL": str(source)})
+    copy = Path(lane["HOME"]) / ".gitconfig"
+    assert _config_entries(copy) == [
+        "user.name=Example Developer",
+        "user.email=developer@example.com",
+        "core.autocrlf=input",
+        "alias.st=status",
+    ]
+    assert _sha256(source) == before
+
+
+def test_lane_env_git_runs_repo_local_hooks(tmp_path: Path) -> None:
+    source = tmp_path / "source.gitconfig"
+    source.write_text(
+        _SYNTHETIC_GIT_CONFIG.format(hooks="\thooksPath = ~/.config/git/hooks\n")
+    )
+    lane = _lane_env(tmp_path, {"GIT_CONFIG_GLOBAL": str(source)})
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", str(repo)], env=lane, check=True, timeout=60)
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+    commit = subprocess.run(
+        ["git", "commit", "-q", "--allow-empty", "-m", "blocked"],
+        cwd=repo,
+        env=lane,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert commit.returncode != 0, "the repo-local pre-commit hook did not run"
+
+
+def test_lane_env_fails_loudly_on_a_git_config_copy_it_cannot_edit(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.gitconfig"
+    source.write_text("[core\n\thooksPath = ~/.config/git/hooks\n")
+    result = _lane_env_run(tmp_path, {"GIT_CONFIG_GLOBAL": str(source)})
+    # ^ hazard asserting on result => its repr dumps the lane env (secrets); assert scalars
+    returncode, stderr = result.returncode, result.stderr
+    assert returncode != 0
+    assert "core.hooksPath" in stderr
 
 
 def test_lane_env_keeps_the_rust_toolchain_homes(tmp_path: Path) -> None:

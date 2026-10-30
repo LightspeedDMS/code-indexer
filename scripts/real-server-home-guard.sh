@@ -134,7 +134,7 @@ real_home_lane_env() {
         return 1
     }
     local scratch="$1" account_home real_server_home user_base data_dir
-    local git_config
+    local git_config unset_rc=0
     account_home="$(_real_home_account_home)" || return 1
     real_server_home="$(realpath -m -- "$account_home/.cidx-server")" || return 1
     # from the ACCOUNT home: the current HOME may already be redirected
@@ -161,6 +161,15 @@ real_home_lane_env() {
     git_config="${GIT_CONFIG_GLOBAL:-$account_home/.gitconfig}"
     if [[ -f "$git_config" ]]; then
         cp -- "$git_config" "$scratch/home/.gitconfig" || return 1
+        # ^ why unset core.hooksPath in the copy, not keep it; its dir is missing under the scratch HOME => git runs no hooks, .git/hooks too
+        # ^ hazard keeping it => tests that install repo or remote hooks pass or fail falsely; test:test_lane_env_git_runs_repo_local_hooks
+        # ^ external git config --unset-all exit 5 = key not set
+        git config --file "$scratch/home/.gitconfig" --unset-all core.hooksPath \
+            || unset_rc=$?
+        if [[ "$unset_rc" -ne 0 && "$unset_rc" -ne 5 ]]; then
+            echo "real-server-home-guard: cannot remove core.hooksPath from the scratch git config (git exit $unset_rc)" >&2
+            return 1
+        fi
     fi
     unset GIT_CONFIG_GLOBAL
     # rustup/cargo default to $HOME/.rustup and $HOME/.cargo: a fresh HOME
