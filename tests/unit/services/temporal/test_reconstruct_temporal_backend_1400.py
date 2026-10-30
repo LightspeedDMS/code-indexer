@@ -24,6 +24,13 @@ from code_indexer.server.query.semantic_query_manager import (
     reconstruct_temporal_backend,
 )
 
+_SERVER_HNSW_CACHE = object()
+
+
+@pytest.fixture(autouse=True)
+def _bound_server_hnsw_cache(bind_server_app_attr):
+    bind_server_app_attr("_server_hnsw_cache", _SERVER_HNSW_CACHE)
+
 
 class TestReconstructTemporalBackend:
     def test_returns_config_index_path_and_vector_store(self, tmp_path: Path):
@@ -75,7 +82,7 @@ class TestReconstructTemporalBackend:
             )
 
         _, kwargs = mock_create.call_args
-        assert kwargs["hnsw_cache"] is not None
+        assert kwargs["hnsw_cache"] is _SERVER_HNSW_CACHE
 
     def test_shard_ownership_denies_bypasses_cache(self, tmp_path: Path):
         mock_backend = MagicMock()

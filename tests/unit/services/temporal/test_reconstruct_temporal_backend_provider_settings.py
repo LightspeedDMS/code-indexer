@@ -51,8 +51,9 @@ def isolated_tmp_root():
 
 
 def test_reconstruct_temporal_backend_resets_provider_endpoints(
-    isolated_tmp_root,
+    isolated_tmp_root, bind_server_app_attr
 ) -> None:
+    bind_server_app_attr("_server_hnsw_cache", None)
     repo_path = isolated_tmp_root / "activated-repos" / "user1" / "myrepo"
     config_dir = repo_path / ".code-indexer"
     config_dir.mkdir(parents=True)

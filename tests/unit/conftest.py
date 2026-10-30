@@ -25,7 +25,27 @@ from tests.utils.real_process_guard import (  # noqa: F401
     pytest_runtest_protocol,
 )
 
+from tests.utils import server_app_build_guard as _server_app_build_guard
+
 _install_real_process_guard()
+
+
+def pytest_configure(config):
+    # ^ why register as plugin, not re-export; real_process_guard already owns this module's runtest hook names
+    config.pluginmanager.register(_server_app_build_guard, "server-app-build-guard")
+
+
+@pytest.fixture
+def bind_server_app_attr(monkeypatch):
+    from code_indexer.server import app as app_module
+
+    def bind(name, value):
+        # ^ why setitem on vars(app_module), not patch()/setattr; their getattr => PEP 562 create_app()
+        monkeypatch.setitem(vars(app_module), name, value)
+        return value
+
+    return bind
+
 
 # Bug #1800: bounded settle window for disposed non-daemon threads to exit.
 # Bounded on purpose (Messi Rule #14) -- a guard against hangs must not hang.

@@ -212,8 +212,14 @@ def _make_worker_input(repo_path: Path, **overrides) -> TemporalWorkerInput:
 
 class TestRunTemporalWorkerUsesGoldenConfig:
     def test_selects_golden_embedder_not_stale_clone_embedder(
-        self, tmp_path, payload_cache, _capture_queried_collections, monkeypatch
+        self,
+        tmp_path,
+        payload_cache,
+        _capture_queried_collections,
+        monkeypatch,
+        bind_server_app_attr,
     ):
+        bind_server_app_attr("_server_hnsw_cache", None)
         # run_temporal_worker constructs a bare ActivatedRepoManager()
         # internally (the SAME no-arg-construction convention this
         # codebase's own MCP handlers already use, e.g. files.py), which

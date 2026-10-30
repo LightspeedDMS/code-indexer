@@ -26,6 +26,7 @@ from code_indexer.global_repos.regex_search import RegexSearchService
 from code_indexer.server.auth.user_manager import User, UserRole
 
 _REGEX_SEARCH_LOGGER_NAME = "code_indexer.global_repos.regex_search"
+_REGEX_HANDLER = "code_indexer.server.mcp.handlers.search.regex_search"
 _TEST_ALIAS = "my-test-repo-global"
 _TEST_BYTE_CEILING = 4096
 _SYNTHETIC_LINE_COUNT = 5000
@@ -184,10 +185,16 @@ class TestMcpHandlerThreadsAliasIntoRegexSearchService:
         user.role = UserRole.NORMAL_USER
         user.has_permission = Mock(return_value=True)
 
+        # ^ hazard dropping a seam patch below => app_module read => full create_app() per process; test:test_unit_test_cannot_build_server_app
         with (
+            patch(f"{_REGEX_HANDLER}._get_access_filtering_service", return_value=None),
+            patch(f"{_REGEX_HANDLER}._restrict_catalog_matches", return_value=None),
+            patch(f"{_REGEX_HANDLER}._get_wiki_enabled_repos", return_value=set()),
             patch(
-                "code_indexer.server.mcp.handlers.search.regex_search.get_config_service"
-            ) as mock_get_config_service,
+                f"{_REGEX_HANDLER}._apply_regex_payload_truncation",
+                side_effect=lambda matches, owner=None: matches,
+            ),
+            patch(f"{_REGEX_HANDLER}.get_config_service") as mock_get_config_service,
             patch(
                 "code_indexer.global_repos.regex_search.RegexSearchService",
                 side_effect=_fake_regex_search_service,
