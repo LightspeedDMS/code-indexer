@@ -84,6 +84,7 @@ from contextlib import contextmanager
 from typing import Any, Callable, Iterator, NamedTuple, Optional, Tuple, Union
 
 from code_indexer.server.auth.token_bucket import TokenBucket
+from code_indexer.server.storage.sqlite_test_mode import apply_test_mode_synchronous
 
 logger = logging.getLogger(__name__)
 
@@ -262,6 +263,7 @@ class _SqliteStore:
                 timeout=RESERVATION_BUSY_TIMEOUT_SECONDS,
                 isolation_level=None,
             )
+            apply_test_mode_synchronous(conn)
             self._local.conn = conn
         return conn
 

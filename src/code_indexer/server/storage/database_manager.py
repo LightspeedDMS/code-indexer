@@ -18,6 +18,8 @@ import weakref
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple, TypeVar
 
+from code_indexer.server.storage.sqlite_test_mode import apply_test_mode_synchronous
+
 T = TypeVar("T")
 
 logger = logging.getLogger(__name__)
@@ -807,8 +809,7 @@ class DatabaseSchema:
             # In test mode (CIDX_TEST_FAST_SQLITE=1), keep synchronous=OFF to skip
             # fsync overhead while still allowing concurrent access.
             conn.execute("PRAGMA journal_mode = WAL")
-            if os.environ.get("CIDX_TEST_FAST_SQLITE") == "1":
-                conn.execute("PRAGMA synchronous = OFF")
+            apply_test_mode_synchronous(conn)
 
             # Create all tables
             conn.execute(self.CREATE_GLOBAL_REPOS_TABLE)
@@ -2040,6 +2041,7 @@ class DatabaseConnectionManager:
             )
             conn.execute("PRAGMA foreign_keys = ON")
             conn.execute("PRAGMA busy_timeout = 30000")
+            apply_test_mode_synchronous(conn)
             owner = _ThreadOwner()
             self._local.connection = conn
             self._local.owner = owner
