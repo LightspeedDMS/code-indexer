@@ -11,10 +11,12 @@ import contextlib
 import logging
 import os
 import sqlite3
+import sys
 import threading
 import time
+import weakref
 from pathlib import Path
-from typing import Callable, Dict, Iterator, Optional, TypeVar
+from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple, TypeVar
 
 T = TypeVar("T")
 
@@ -1536,6 +1538,128 @@ class DatabaseSchema:
         conn.commit()
 
 
+class _ThreadOwner:
+    __slots__ = ("__weakref__",)
+
+
+_FOREIGN_USE_MAX_SITES = 16
+_foreign_use_sites: Set[Tuple[str, int]] = set()
+_foreign_use_lock = threading.Lock()
+
+
+_thread_identity = threading.local()
+
+
+def _current_identity() -> object:
+    try:
+        return _thread_identity.token  # type: ignore[no-any-return]
+    except AttributeError:
+        token = object()
+        _thread_identity.token = token
+        return token
+
+
+# ^ why identity token, not thread id; a new thread can reuse a dead owner's id; test:test_new_thread_reusing_owner_thread_id_is_reported
+def _check_owner(owner: object, owner_tid: int) -> None:
+    if _current_identity() is not owner:
+        _report_foreign_use(owner_tid)
+
+
+def _report_foreign_use(owner_tid: int) -> None:
+    try:
+        # ^ invariant frame 0 = _report_foreign_use; frame 1 = _check_owner; frame 2 = an _OwnedCursor or _OwnedConnection method; frame 3 = the handle's user
+        caller = sys._getframe(3)
+        site = (caller.f_code.co_filename, caller.f_lineno)
+        with _foreign_use_lock:
+            if site in _foreign_use_sites:
+                return
+            if len(_foreign_use_sites) >= _FOREIGN_USE_MAX_SITES:
+                return
+            _foreign_use_sites.add(site)
+        logger.error(
+            "SQLite connection opened by thread %s used by thread %s at %s:%s; "
+            "connections must stay on their owner thread (#2228)",
+            owner_tid,
+            threading.get_ident(),
+            site[0],
+            site[1],
+            stack_info=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # ^ why swallow, not raise; the diagnostic must never fail the query it observes
+        logger.debug("foreign-use report failed: %s", type(exc).__name__)
+
+
+class _OwnedCursor(sqlite3.Cursor):
+    def __init__(self, connection: "_OwnedConnection") -> None:
+        super().__init__(connection)
+        self._owner = connection._owner
+        self._owner_tid = connection._owner_tid
+
+    def execute(self, *args: Any) -> "_OwnedCursor":  # type: ignore[override]
+        _check_owner(self._owner, self._owner_tid)
+        super().execute(*args)
+        return self
+
+    def executemany(self, *args: Any) -> "_OwnedCursor":  # type: ignore[override]
+        _check_owner(self._owner, self._owner_tid)
+        super().executemany(*args)
+        return self
+
+    def executescript(self, *args: Any) -> "_OwnedCursor":  # type: ignore[override]
+        _check_owner(self._owner, self._owner_tid)
+        super().executescript(*args)
+        return self
+
+    def fetchone(self) -> Any:
+        _check_owner(self._owner, self._owner_tid)
+        return super().fetchone()
+
+    def fetchmany(self, *args: Any, **kwargs: Any) -> List[Any]:
+        _check_owner(self._owner, self._owner_tid)
+        rows: List[Any] = super().fetchmany(*args, **kwargs)
+        return rows
+
+    def fetchall(self) -> List[Any]:
+        _check_owner(self._owner, self._owner_tid)
+        rows: List[Any] = super().fetchall()
+        return rows
+
+
+class _OwnedConnection(sqlite3.Connection):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        # ^ invariant _owner is held strongly => no later thread can get the same token
+        self._owner = _current_identity()
+        self._owner_tid = threading.get_ident()
+
+    # ^ external CPython Connection.execute/executemany/executescript call self.cursor()
+    def cursor(self, *args: Any, **kwargs: Any) -> sqlite3.Cursor:  # type: ignore[override]
+        _check_owner(self._owner, self._owner_tid)
+        if not args and not kwargs:
+            args = (_OwnedCursor,)
+        cursor: sqlite3.Cursor = super().cursor(*args, **kwargs)
+        return cursor
+
+    def commit(self) -> None:
+        _check_owner(self._owner, self._owner_tid)
+        super().commit()
+
+    def rollback(self) -> None:
+        _check_owner(self._owner, self._owner_tid)
+        super().rollback()
+
+    def __enter__(self) -> "_OwnedConnection":
+        _check_owner(self._owner, self._owner_tid)
+        super().__enter__()
+        return self
+
+    # ^ external C Connection.__exit__ commits/rolls back without calling the Python commit()/rollback()
+    def __exit__(self, *exc_info: Any) -> Any:
+        _check_owner(self._owner, self._owner_tid)
+        return super().__exit__(*exc_info)
+
+
 class DatabaseConnectionManager:
     """
     Thread-local connection pooling with atomic transaction support.
@@ -1790,6 +1914,8 @@ class DatabaseConnectionManager:
         self.db_path = db_path
         self._local = threading.local()
         self._connections: Dict[int, sqlite3.Connection] = {}
+        # ^ invariant _owners[tid]() is None => owner thread exited; its thread-local dict died with it
+        self._owners: Dict[int, "weakref.ref[_ThreadOwner]"] = {}
         # RLock (re-entrant) is required: _cleanup_stale_connections() holds
         # self._lock while logging (logger.warning / logger.info at lines 1191,
         # 1197).  If SQLiteLogHandler is at the root logger, those log calls
@@ -1802,6 +1928,10 @@ class DatabaseConnectionManager:
         self._last_cleanup: float = 0.0
         self.CLEANUP_INTERVAL: float = 60.0
 
+    def _owner_alive(self, tid: int) -> bool:
+        ref = self._owners.get(tid)
+        return ref is not None and ref() is not None
+
     def _cleanup_stale_connections(self) -> None:
         """
         Close and remove connections for threads that are no longer alive.
@@ -1811,10 +1941,8 @@ class DatabaseConnectionManager:
         """
         with self._lock:
             self._last_cleanup = time.time()
-            alive_thread_ids = {t.ident for t in threading.enumerate()}
-            stale_ids = [
-                tid for tid in self._connections if tid not in alive_thread_ids
-            ]
+            # ^ why owner weakref, not threading.enumerate(); a live thread absent from it lost its open connection; #2228
+            stale_ids = [tid for tid in self._connections if not self._owner_alive(tid)]
             for tid in stale_ids:
                 try:
                     self._connections[tid].close()
@@ -1823,6 +1951,7 @@ class DatabaseConnectionManager:
                         f"Failed to close stale connection for thread {tid}: {e}"
                     )
                 del self._connections[tid]
+                self._owners.pop(tid, None)
 
             if stale_ids:
                 logger.info(f"Cleaned up {len(stale_ids)} stale SQLite connections")
@@ -1858,6 +1987,7 @@ class DatabaseConnectionManager:
         tid = threading.get_ident()
         with self._lock:
             tracked = self._connections.pop(tid, None)
+            self._owners.pop(tid, None)
         local_conn = getattr(self._local, "connection", None)
         try:
             if local_conn is not None:
@@ -1895,10 +2025,14 @@ class DatabaseConnectionManager:
 
         # Check if connection exists for this thread
         if not hasattr(self._local, "connection") or self._local.connection is None:
-            conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            conn = sqlite3.connect(
+                self.db_path, check_same_thread=False, factory=_OwnedConnection
+            )
             conn.execute("PRAGMA foreign_keys = ON")
             conn.execute("PRAGMA busy_timeout = 30000")
+            owner = _ThreadOwner()
             self._local.connection = conn
+            self._local.owner = owner
 
             # Track connection for cleanup.
             # Bug #878 Fix A.1: Close-on-clobber. When a Linux OS thread ID
@@ -1924,6 +2058,7 @@ class DatabaseConnectionManager:
                             exc,
                         )
                 self._connections[thread_id] = conn
+                self._owners[thread_id] = weakref.ref(owner)
 
         # Bug #878 Fix A.2: The piggyback cleanup check that used to fire
         # here has been removed.  Cleanup is now driven by the dedicated
@@ -2019,20 +2154,15 @@ class DatabaseConnectionManager:
                 conn.rollback()
                 raise
 
+    # ^ invariant live owner's connection is untracked, never closed => closes at its thread exit; test:test_close_all_leaves_live_connection_open_until_owner_exits
+    # ^ why deregister, not keep; a restarted app (tests) must get fresh thread-local state, not closed handles
     def close_all(self) -> None:
-        """
-        Close all thread-local connections and deregister this instance.
-
-        Should be called during application shutdown to release resources.
-        Removes this instance from the singleton registry so that a subsequent
-        get_instance() call for the same path creates a fresh instance with
-        clean thread-local state.  Without deregistration, a stopped-and-
-        restarted app (common in tests) retrieves the same stale instance whose
-        connections are already closed, causing "Cannot operate on a closed
-        database" errors.
-        """
+        me = threading.get_ident()
         with self._lock:
-            for conn in self._connections.values():
+            for tid, conn in self._connections.items():
+                # ^ hazard closing a live thread's connection => SIGSEGV or closed-db errors in that thread; #2228
+                if tid != me and self._owner_alive(tid):
+                    continue
                 try:
                     conn.close()
                 except Exception as exc:
@@ -2040,6 +2170,7 @@ class DatabaseConnectionManager:
                         "Failed to close SQLite connection during shutdown: %s", exc
                     )
             self._connections.clear()
+            self._owners.clear()
 
         # Clear local connection reference
         if hasattr(self._local, "connection"):

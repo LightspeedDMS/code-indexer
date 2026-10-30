@@ -115,18 +115,10 @@ def _bare_read_after_signal(
         errors.append(exc)
 
 
-def test_bare_get_connection_races_with_close_all(tmp_path: Path) -> None:
-    """PASSES by pinning the OLD race: bare get_connection() (no
-    guarded_connection()) deterministically lets close_all() close the
-    connection out from under a concurrent reader, raising
-    sqlite3.ProgrammingError. This is a normal green regression test -- the
-    assertions below are on the CAUGHT exception's type/message, proving the
-    race is real and reproducible, not merely an AttributeError like the
-    pre-fix failure of test_guarded_connection_does_not_race_with_close_all
-    above. It complements that test: this one pins the OLD (buggy) call
-    pattern's behavior, that one proves the NEW (guarded_connection())
-    pattern avoids it.
-    """
+def test_bare_get_connection_survives_close_all_from_another_thread(
+    tmp_path: Path,
+) -> None:
+    # ^ hazard close_all() closing a live thread's bare connection => SIGSEGV in its next call; #2228
     db_path = tmp_path / "bare_race_1532.db"
     mgr = DatabaseConnectionManager.get_instance(str(db_path))
     mgr.execute_atomic(
@@ -155,6 +147,4 @@ def test_bare_get_connection_races_with_close_all(tmp_path: Path) -> None:
         reader_thread.join(timeout=_READER_JOIN_TIMEOUT_SECONDS)
 
     assert not reader_thread.is_alive()
-    assert len(errors) == 1, f"expected exactly one race error, got: {errors}"
-    assert isinstance(errors[0], sqlite3.ProgrammingError), type(errors[0])
-    assert "closed database" in str(errors[0]).lower(), errors[0]
+    assert errors == []

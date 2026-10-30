@@ -705,8 +705,7 @@ class _GoldenRepoMetadataExtraMixin:
         self._conn_manager.execute_atomic(operation)
 
     def close(self) -> None:
-        """Close database connections."""
-        self._conn_manager.close_all()
+        self._conn_manager.close_thread_connection()
 
 
 def _insert_new_dedup_row(

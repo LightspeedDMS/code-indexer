@@ -150,5 +150,4 @@ class GitCredentialsSqliteBackend(SqliteStoredSecretRowsMixin):
         return _row_to_credential_dict(row)
 
     def close(self) -> None:
-        """Close database connections."""
-        self._conn_manager.close_all()
+        self._conn_manager.close_thread_connection()

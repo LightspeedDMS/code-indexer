@@ -7,9 +7,15 @@ hasn't landed/seeded), and must reflect the marker's actual value once it
 does exist.
 """
 
+import os
+import sys
+import uuid
+from typing import Iterator
 from unittest.mock import MagicMock
 
+import pytest
 from psycopg import errors as psycopg_errors
+from psycopg.conninfo import make_conninfo
 
 from code_indexer.server.storage.postgres.groups_backend import GroupsPostgresBackend
 
@@ -29,16 +35,6 @@ def _pool(fetchone=None, fetchall=None, rowcount=1, execute_side_effect=None):
     return pool, connection, cursor
 
 
-def test_readiness_false_and_rolls_back_when_marker_table_missing() -> None:
-    pool, connection, cursor = _pool(
-        execute_side_effect=psycopg_errors.UndefinedTable("relation does not exist")
-    )
-    backend = GroupsPostgresBackend(pool)
-
-    assert backend.is_tool_access_enforcement_ready() is False
-    connection.rollback.assert_called_once()
-
-
 def test_readiness_true_when_marker_row_complete() -> None:
     pool, connection, cursor = _pool(fetchone=(True,))
     backend = GroupsPostgresBackend(pool)
@@ -51,3 +47,75 @@ def test_readiness_false_when_marker_row_absent() -> None:
     backend = GroupsPostgresBackend(pool)
 
     assert backend.is_tool_access_enforcement_ready() is False
+
+
+@pytest.fixture
+def real_pg_backend() -> Iterator[GroupsPostgresBackend]:
+    dsn = os.environ.get("TEST_POSTGRES_DSN")
+    if not dsn:
+        pytest.skip("TEST_POSTGRES_DSN not set")
+    import psycopg
+
+    from code_indexer.server.storage.postgres.connection_pool import ConnectionPool
+
+    schema = f"readiness_{uuid.uuid4().hex}"
+    with psycopg.connect(dsn, autocommit=True) as admin:
+        admin.execute(f'CREATE SCHEMA "{schema}"')
+    pool = ConnectionPool(
+        make_conninfo(dsn, options=f"-csearch_path={schema}"), min_size=1
+    )
+    try:
+        yield GroupsPostgresBackend(pool)
+    finally:
+        pool.close()
+        with psycopg.connect(dsn, autocommit=True) as admin:
+            admin.execute(f'DROP SCHEMA "{schema}" CASCADE')
+
+
+def _exceptions_raised_during(fn):
+    seen = []
+
+    def tracer(frame, event, arg):
+        if event == "exception":
+            seen.append(arg[0])
+        return tracer
+
+    previous = sys.gettrace()
+    sys.settrace(tracer)
+    try:
+        result = fn()
+    finally:
+        sys.settrace(previous)
+    return result, seen
+
+
+def test_real_pg_absent_marker_table_raises_nothing_inside_the_check(
+    real_pg_backend: GroupsPostgresBackend,
+) -> None:
+    result, seen = _exceptions_raised_during(
+        real_pg_backend.is_tool_access_enforcement_ready
+    )
+
+    assert result is False
+    assert [t for t in seen if issubclass(t, psycopg_errors.UndefinedTable)] == []
+
+
+def test_real_pg_marker_table_created_later_is_observed_live(
+    real_pg_backend: GroupsPostgresBackend,
+) -> None:
+    assert real_pg_backend.is_tool_access_enforcement_ready() is False
+
+    with real_pg_backend._pool.connection() as conn:
+        conn.execute(
+            "CREATE TABLE tool_access_migration_state "
+            "(id INTEGER PRIMARY KEY, complete BOOLEAN NOT NULL)"
+        )
+        conn.commit()
+    assert real_pg_backend.is_tool_access_enforcement_ready() is False
+
+    with real_pg_backend._pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO tool_access_migration_state (id, complete) VALUES (1, TRUE)"
+        )
+        conn.commit()
+    assert real_pg_backend.is_tool_access_enforcement_ready() is True

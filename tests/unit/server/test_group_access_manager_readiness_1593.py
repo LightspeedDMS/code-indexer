@@ -30,6 +30,7 @@ below is expected to fail with AttributeError until the method lands.
 """
 
 import sqlite3
+import sys
 import tempfile
 from pathlib import Path
 
@@ -99,3 +100,33 @@ class TestReadinessIsLiveNotCachedAtConstruction:
         _set_marker(temp_db_path, complete=True)
 
         assert manager.is_tool_access_enforcement_ready() is True
+
+
+def _exceptions_raised_during(fn):
+    seen = []
+
+    def tracer(frame, event, arg):
+        if event == "exception":
+            seen.append(arg[0])
+        return tracer
+
+    previous = sys.gettrace()
+    sys.settrace(tracer)
+    try:
+        result = fn()
+    finally:
+        sys.settrace(previous)
+    return result, seen
+
+
+class TestReadinessRunsNoFailingStatement:
+    # ^ why no failing statement, not catch "no such table"; its stale per-connection errcode => SystemError #2228
+    def test_absent_marker_table_raises_nothing_inside_the_check(self, temp_db_path):
+        manager = GroupAccessManager(temp_db_path)
+
+        result, seen = _exceptions_raised_during(
+            manager.is_tool_access_enforcement_ready
+        )
+
+        assert result is False
+        assert [t for t in seen if issubclass(t, sqlite3.Error)] == []

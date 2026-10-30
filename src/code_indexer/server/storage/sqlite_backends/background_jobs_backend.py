@@ -930,5 +930,4 @@ class BackgroundJobsSqliteBackend:
         return str(row[0]) if row is not None else None
 
     def close(self) -> None:
-        """Close database connections."""
-        self._conn_manager.close_all()
+        self._conn_manager.close_thread_connection()

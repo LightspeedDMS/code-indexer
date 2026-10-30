@@ -616,19 +616,18 @@ class GroupsPostgresBackend:
         returns False rather than raising -- callers fall back to the
         legacy role-based check. Live read every call, never cached.
         """
-        from psycopg import errors as psycopg_errors
-
         with self._conn() as conn:
-            try:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT complete FROM tool_access_migration_state WHERE id = 1"
-                    )
-                    row = cur.fetchone()
-                    return bool(row[0]) if row is not None else False
-            except psycopg_errors.UndefinedTable:
-                conn.rollback()
-                return False
+            with conn.cursor() as cur:
+                # ^ hazard probing by a failing SELECT => one server ERROR + rollback per MCP call; #2228
+                cur.execute("SELECT to_regclass('tool_access_migration_state')")
+                probe = cur.fetchone()
+                if probe is None or probe[0] is None:
+                    return False
+                cur.execute(
+                    "SELECT complete FROM tool_access_migration_state WHERE id = 1"
+                )
+                row = cur.fetchone()
+                return bool(row[0]) if row is not None else False
 
     def auto_assign_golden_repo(self, repo_name: str) -> None:
         """Auto-assign a new golden repo to admins and powerusers groups."""

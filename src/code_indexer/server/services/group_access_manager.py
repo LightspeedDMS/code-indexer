@@ -1273,8 +1273,7 @@ class GroupAccessManager(RepoAccessBatchMixin):
 
         Only an ABSENT marker table reads as not-ready (Bug #2076); any
         other read failure propagates, so a caller never reports "not
-        enforced" from a read that did not happen. The PostgreSQL backend
-        matches this (it maps only UndefinedTable to False).
+        enforced" from a read that did not happen.
         """
         if self._backend is not None:
             return self._backend.is_tool_access_enforcement_ready()  # type: ignore[no-any-return]
@@ -1282,14 +1281,17 @@ class GroupAccessManager(RepoAccessBatchMixin):
         conn = self._get_connection()
         cursor = conn.cursor()
         try:
-            try:
-                cursor.execute(
-                    "SELECT complete FROM tool_access_migration_state WHERE id = 1"
-                )
-            except sqlite3.OperationalError as exc:
-                if str(exc).startswith("no such table"):
-                    return False
-                raise
+            # ^ hazard probing by a failing SELECT => stale per-connection errcode => SystemError under load; #2228
+            # ^ coupled absent-table probe with GroupsPostgresBackend.is_tool_access_enforcement_ready; both read only an absent table as False
+            cursor.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'tool_access_migration_state'"
+            )
+            if cursor.fetchone() is None:
+                return False
+            cursor.execute(
+                "SELECT complete FROM tool_access_migration_state WHERE id = 1"
+            )
             row = cursor.fetchone()
             return bool(row[0]) if row is not None else False
         finally:

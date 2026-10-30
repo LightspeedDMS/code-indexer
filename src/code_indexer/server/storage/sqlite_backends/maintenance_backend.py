@@ -106,5 +106,4 @@ class MaintenanceSqliteBackend:
         }
 
     def close(self) -> None:
-        """Close the DatabaseConnectionManager connection."""
-        self._conn_manager.close_all()
+        self._conn_manager.close_thread_connection()
