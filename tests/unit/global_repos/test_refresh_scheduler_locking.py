@@ -12,6 +12,7 @@ Story #620 Priority 1B Acceptance Criteria:
 """
 
 import pytest
+import subprocess
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -364,23 +365,34 @@ def test_refresh_lock_released_on_exception(scheduler, mock_git_pull_updater):
 
 
 def test_refresh_lock_released_on_timeout(scheduler, mock_git_pull_updater):
-    """
-    Test that per-repo lock is released when refresh times out.
+    lock_held_during_index = []
 
-    Acceptance Criteria:
-    - Lock should be released if refresh takes too long
-    - Timeout should be configurable
-    - Subsequent refresh attempts should succeed
-    """
+    def index_source_times_out_once(
+        alias_name,
+        source_path,
+        progress_callback=None,
+        force_reconcile=False,
+        **kwargs,
+    ):
+        lock_held_during_index.append(
+            scheduler.write_lock_manager.is_locked("test-repo")
+        )
+        if len(lock_held_during_index) == 1:
+            raise subprocess.TimeoutExpired(cmd=["cidx", "index"], timeout=1)
+
     with (
         patch.object(scheduler.registry, "get_global_repo") as mock_get_repo,
         patch.object(scheduler.alias_manager, "read_alias") as mock_read_alias,
-        patch.object(scheduler, "_create_new_index") as mock_create_index,
+        patch.object(
+            scheduler, "_index_source", side_effect=index_source_times_out_once
+        ),
+        # ^ why _index_source, not _create_new_index; the refresh no longer calls it => a real cidx child starts
+        patch.object(scheduler, "_detect_existing_indexes", return_value={}),
+        patch.object(scheduler, "_reconcile_registry_with_filesystem"),
         patch(
             "code_indexer.global_repos.refresh_scheduler.GitPullUpdater"
         ) as mock_updater_class,
     ):
-        # Setup mocks
         mock_get_repo.return_value = {
             "alias_name": "test-repo-global",
             "repo_url": "https://github.com/user/test-repo.git",
@@ -388,42 +400,30 @@ def test_refresh_lock_released_on_timeout(scheduler, mock_git_pull_updater):
         mock_read_alias.return_value = "/path/to/current/index"
         mock_updater_class.return_value = mock_git_pull_updater()
 
-        # Track execution
-        execution_log = []
+        with pytest.raises(RuntimeError, match="Refresh failed.*TimeoutExpired"):
+            scheduler.refresh_repo("test-repo-global")
 
-        def slow_create_index(alias_name, source_path):
-            """Simulate very slow index creation."""
-            execution_log.append("start")
-            time.sleep(2.0)  # Simulate timeout
-            execution_log.append("end")
-            return "/path/to/new/index"
-
-        mock_create_index.side_effect = slow_create_index
-
-        # Start long-running refresh in background
-        thread1 = threading.Thread(
-            target=scheduler.refresh_repo, args=("test-repo-global",)
+        assert lock_held_during_index == [True], (
+            "the timed-out index must have run under the write lock"
         )
-        thread1.start()
-
-        # Wait a bit to ensure thread1 acquires lock
-        time.sleep(0.1)
-
-        # Second refresh should either wait for lock or timeout gracefully
-        thread2 = threading.Thread(
-            target=scheduler.refresh_repo, args=("test-repo-global",)
+        assert not scheduler.write_lock_manager.is_locked("test-repo"), (
+            "the write lock must be released after a timed-out refresh"
         )
-        thread2.start()
 
-        # Wait for both threads
-        thread1.join(timeout=3.0)
-        thread2.join(timeout=3.0)
+        with (
+            patch.object(
+                scheduler, "_create_snapshot", return_value="/path/to/new/index"
+            ),
+            patch.object(scheduler.alias_manager, "swap_alias"),
+            patch.object(scheduler.cleanup_manager, "schedule_cleanup"),
+            patch.object(scheduler.registry, "update_refresh_timestamp"),
+        ):
+            scheduler.refresh_repo("test-repo-global")
 
-        # Verify lock was eventually released (both threads completed or timed out gracefully)
-        assert not thread1.is_alive(), "Thread1 should have completed"
-        assert not thread2.is_alive(), (
-            "Thread2 should have completed or timed out gracefully"
+        assert lock_held_during_index == [True, True], (
+            "the next refresh must acquire the released write lock and index"
         )
+        assert not scheduler.write_lock_manager.is_locked("test-repo")
 
 
 def test_refresh_lock_prevents_duplicate_refresh(scheduler, mock_git_pull_updater):
