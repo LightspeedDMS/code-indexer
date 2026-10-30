@@ -1596,15 +1596,25 @@ class _OwnedCursor(sqlite3.Cursor):
         self._owner = connection._owner
         self._owner_tid = connection._owner_tid
 
+    # ^ hazard a retained traceback keeps this frame's failed cursor => its cached statement stays in use; external CPython 3.9 then runs the same SQL as no rows, not the error; test:test_failed_statement_stays_failed_while_its_error_is_retained
     def execute(self, *args: Any) -> "_OwnedCursor":  # type: ignore[override]
         _check_owner(self._owner, self._owner_tid)
-        super().execute(*args)
-        return self
+        try:
+            super().execute(*args)
+            return self
+        except BaseException:
+            del self
+            raise
 
+    # ^ see _OwnedCursor.execute
     def executemany(self, *args: Any) -> "_OwnedCursor":  # type: ignore[override]
         _check_owner(self._owner, self._owner_tid)
-        super().executemany(*args)
-        return self
+        try:
+            super().executemany(*args)
+            return self
+        except BaseException:
+            del self
+            raise
 
     def executescript(self, *args: Any) -> "_OwnedCursor":  # type: ignore[override]
         _check_owner(self._owner, self._owner_tid)

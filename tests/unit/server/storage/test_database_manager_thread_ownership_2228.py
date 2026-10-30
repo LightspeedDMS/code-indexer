@@ -230,3 +230,38 @@ def test_cleanup_keeps_live_unregistered_thread_connection(manager) -> None:
     )
 
     assert outcome == ["(1,)"]
+
+
+@pytest.mark.parametrize(
+    "method, sql, params",
+    [
+        ("execute", "SELECT id FROM t WHERE id = ?", ("a",)),
+        ("executemany", "INSERT INTO t (id) VALUES (?)", [("b",)]),
+    ],
+)
+def test_failed_statement_stays_failed_while_its_error_is_retained(
+    manager, method: str, sql: str, params: object
+) -> None:
+    conn = manager.get_connection()
+    conn.execute("CREATE TABLE t (id TEXT PRIMARY KEY)")
+    conn.execute("INSERT INTO t VALUES ('a')")
+    conn.commit()
+    if method == "execute":
+        conn.execute(sql, params).fetchone()
+    else:
+        conn.executemany(sql, params)
+        conn.rollback()
+    with sqlite3.connect(manager.db_path) as other:
+        other.execute("ALTER TABLE t RENAME TO t_away")
+
+    retained: List[BaseException] = []
+    outcomes: List[str] = []
+    for _ in range(3):
+        try:
+            getattr(conn, method)(sql, params)
+            outcomes.append("no error")
+        except sqlite3.OperationalError as exc:
+            retained.append(exc)
+            outcomes.append("raised")
+
+    assert outcomes == ["raised"] * 3
