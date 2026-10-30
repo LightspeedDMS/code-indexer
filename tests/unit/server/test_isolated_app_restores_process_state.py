@@ -20,6 +20,7 @@ so every binding has a pre-call value to compare with.  State is read with
 from __future__ import annotations
 
 import sys
+import threading
 import uuid
 from pathlib import PurePath
 from types import ModuleType
@@ -279,6 +280,21 @@ def test_no_code_indexer_binding_differs_after_isolated_app(cycles):
     the last)."""
     assert "code_indexer.server.auth.dependencies:jwt_manager" in cycles["guard_inside"]
     assert cycles["guard_after"] == []
+
+
+def test_isolated_app_stops_the_metrics_refresher_it_started(tmp_path):
+    """The throwaway app's metrics refresher calls get_config_service() every
+    few seconds; left running it rebuilds the config singleton after the
+    restore, so later state guards fail at random."""
+    before = {t.ident for t in threading.enumerate()}
+    with isolated_app(tmp_path):
+        pass
+    left = [
+        t.name
+        for t in threading.enumerate()
+        if t.ident not in before and t.name == "SystemMetricsRefresh"
+    ]
+    assert left == []
 
 
 def test_process_state_capture_imports_nothing(cycles):

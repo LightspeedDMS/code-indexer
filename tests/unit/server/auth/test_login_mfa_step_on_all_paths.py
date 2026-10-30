@@ -27,6 +27,7 @@ import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Iterator
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -39,29 +40,14 @@ from fastapi.testclient import TestClient
 
 
 @pytest.fixture(autouse=True)
-def _restore_process_singletons(monkeypatch: pytest.MonkeyPatch) -> None:
-    import code_indexer.server.app as app_module
-    import code_indexer.server.app_helpers as app_helpers
-    import code_indexer.server.cache as cache
-    from code_indexer.server.auth import elevated_session_manager as elevated
-    from code_indexer.server.auth.oidc import routes as oidc_routes
-    from code_indexer.server.auth.oidc import state_manager as oidc_state
-    from code_indexer.server.web import auth as web_auth
+def _restore_process_state() -> Iterator[None]:
+    from code_indexer.server.auth.oidc import routes  # noqa: F401
+    from code_indexer.server.web import mfa_routes  # noqa: F401
+    from tests.unit.server._isolated_app import restored_process_state
 
-    # ^ hazard dropping an entry => later tests inherit this file's deleted temp dirs; src/code_indexer/server/startup/service_init.py
-    rewired = (
-        (oidc_routes, "oidc_manager"),
-        (oidc_routes, "state_manager"),
-        (oidc_state, "_configured_sqlite_path"),
-        (elevated.elevated_session_manager, "_db_path"),
-        (app_module.get_token_blacklist(), "_sqlite_db_path"),
-        (web_auth, "_session_manager"),
-        (cache, "_global_cache_instance"),
-        (cache, "_global_fts_cache_instance"),
-        (app_helpers, "_server_start_time"),
-    )
-    for owner, name in rewired:
-        monkeypatch.setattr(owner, name, getattr(owner, name))
+    # ^ why every binding, not a hand list; the list missed server.app.golden_repo_manager => later MCP git tests read this file's deleted registry
+    with restored_process_state():
+        yield
 
 
 def _extract_csrf(html: str) -> str:

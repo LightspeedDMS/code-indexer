@@ -18,12 +18,21 @@ import logging
 import subprocess
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, List, Tuple
+from typing import Any, AsyncIterator, Dict, Iterator, List, Tuple
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 _GIT_READ_LOGGER = "code_indexer.server.mcp.handlers.git_read"
+
+
+@pytest.fixture(scope="module")
+def process_app(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Any]:
+    from tests.unit.server._isolated_app import isolated_app
+
+    # ^ why own app; dispatch reads server.app lazily and the bare-alias fallback queries its golden repo registry => an earlier file's app on a deleted home failed this file
+    with isolated_app(tmp_path_factory.mktemp("git-read-app")) as app:
+        yield app
 
 
 def _git(args: List[str], cwd: Path) -> None:
@@ -119,7 +128,12 @@ _CASES: List[Tuple[str, str, Dict[str, Any]]] = [
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tool,handler_name,extra_args", _CASES)
 async def test_rejection_logged_at_warning_without_traceback(
-    tmp_path: Path, caplog: Any, tool: str, handler_name: str, extra_args: Dict
+    process_app: Any,
+    tmp_path: Path,
+    caplog: Any,
+    tool: str,
+    handler_name: str,
+    extra_args: Dict,
 ) -> None:
     repo = _make_repo(tmp_path)
     caplog.set_level(logging.DEBUG, logger=_GIT_READ_LOGGER)

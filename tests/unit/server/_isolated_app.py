@@ -233,33 +233,51 @@ def _install_as_process_app(app_module: Any) -> Any:
 
 
 @contextmanager
+def restored_process_state() -> Iterator[None]:
+    """On exit put back every process-wide ``code_indexer`` binding the body
+    changed -- for a test that calls ``create_app()`` or wires routers and
+    stores itself instead of using ``isolated_app``."""
+    from code_indexer.server.services import system_metrics_collector as metrics
+
+    _import_what_create_app_imports_first()
+    collector_before = metrics._metrics_collector
+    state = ProcessState.capture()
+    try:
+        yield
+    finally:
+        started = metrics._metrics_collector
+        try:
+            # ^ why stop, not only unbind; its thread calls get_config_service() every 5 s => rebuilds the config singleton after restore; test:test_isolated_app_stops_the_metrics_refresher_it_started
+            if started is not None and started is not collector_before:
+                started.stop()
+        finally:
+            state.restore()
+
+
+@contextmanager
 def isolated_app(root: Path) -> Iterator[Any]:
     """Yield a real ``create_app()`` app whose server home is under *root*
-    (never ~/.cidx-server); on exit restore every process-wide binding the
-    app installed, then the environment."""
+    (never ~/.cidx-server); on exit restore the environment and every
+    process-wide binding the app installed."""
     from code_indexer.server import app as app_module
     from code_indexer.server.services import config_service
 
-    _import_what_create_app_imports_first()
-    state = ProcessState.capture()
-    patcher = pytest.MonkeyPatch()
-    try:
-        patcher.setenv("HOME", str(root / "home"))
-        patcher.setenv("CIDX_SERVER_DATA_DIR", str(root / "server"))
-        # create_app() takes get_config_service()'s singleton as is; one left
-        # bound to another server home (a module-scoped fixture runs before
-        # the per-test reset) would boot the app on that home's config.json
-        # and send every get_config_service() lookup of the body there.
-        # restore() puts the caller's singleton back.
-        config_service.reset_config_service()
-        app = _install_as_process_app(app_module)
-        store = app.state.user_manager._sqlite_backend._conn_manager.db_path
-        assert str(store).startswith(str(root)), store
-        config_home = config_service.get_config_service().config_manager.server_dir
-        assert str(config_home).startswith(str(root)), config_home
-        yield app
-    finally:
+    with restored_process_state():
+        patcher = pytest.MonkeyPatch()
         try:
-            state.restore()
+            patcher.setenv("HOME", str(root / "home"))
+            patcher.setenv("CIDX_SERVER_DATA_DIR", str(root / "server"))
+            # create_app() takes get_config_service()'s singleton as is; one
+            # left bound to another server home (a module-scoped fixture runs
+            # before the per-test reset) would boot the app on that home's
+            # config.json and send every get_config_service() lookup of the
+            # body there.  The restore puts the caller's singleton back.
+            config_service.reset_config_service()
+            app = _install_as_process_app(app_module)
+            store = app.state.user_manager._sqlite_backend._conn_manager.db_path
+            assert str(store).startswith(str(root)), store
+            config_home = config_service.get_config_service().config_manager.server_dir
+            assert str(config_home).startswith(str(root)), config_home
+            yield app
         finally:
             patcher.undo()

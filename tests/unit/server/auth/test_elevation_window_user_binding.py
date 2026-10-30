@@ -27,11 +27,10 @@ Covers:
 
 import contextlib
 import json
-import tempfile
 import time
 import types
 from datetime import datetime, timezone
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
@@ -199,29 +198,21 @@ def test_require_elevation_still_expires_the_creating_users_own_window(manager, 
 
 
 @pytest.fixture
-def tmpdir_path():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        yield tmpdir
+def real_app(tmp_path):
+    from tests.unit.server._isolated_app import isolated_app
 
-
-def _get_app(tmpdir: str):
-    """Lazy-import app with isolated DB to avoid collection-time DB lock."""
-    from code_indexer.server.services.config_service import reset_config_service
-
-    with patch.dict("os.environ", {"CIDX_SERVER_DATA_DIR": tmpdir}):
-        reset_config_service()
-        from code_indexer.server.app import app as _app
-
-        return _app
+    # ^ why isolated_app, not server.app.app; the lazy shared app built here outlived its deleted home => later MCP git tests read a missing registry
+    with isolated_app(tmp_path) as app:
+        yield app
 
 
 def test_rest_route_rejects_window_opened_by_a_different_authenticated_user(
-    manager, user_b, tmpdir_path
+    manager, user_b, real_app
 ):
     """POST /api/admin/users, authenticated as user_b, presenting a session
     key whose elevation window belongs to user_a, must return 403
     elevation_required rather than performing the mutation."""
-    app = _get_app(tmpdir_path)
+    app = real_app
     _deps.elevated_session_manager = manager
     manager.create(_SESSION_KEY, _USER_A, _IP)
     app.dependency_overrides[_deps.get_current_admin_user_hybrid] = lambda: user_b
@@ -244,43 +235,30 @@ def test_rest_route_rejects_window_opened_by_a_different_authenticated_user(
 
 
 def test_rest_route_accepts_window_opened_by_the_same_authenticated_user(
-    manager, user_a, tmpdir_path
+    manager, user_a, real_app
 ):
     """Regression guard: the front-door route still succeeds for the
     legitimate owner of the elevation window."""
-    from tests.unit.server.routers.inline_routes_test_helpers import (
-        _find_route_handler,
-        _patch_closure,
-    )
-
-    app = _get_app(tmpdir_path)
+    app = real_app
     _deps.elevated_session_manager = manager
     manager.create(_SESSION_KEY, _USER_A, _IP)
     app.dependency_overrides[_deps.get_current_admin_user_hybrid] = lambda: user_a
-    handler = _find_route_handler("/api/admin/users", "POST")
-    mock_um = Mock()
-    mock_um.create_user_audited.return_value = User(
-        username="newuser",
-        password_hash="hashed",
-        role=UserRole.NORMAL_USER,
-        created_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
-    )
     try:
         client = TestClient(app, raise_server_exceptions=False)
         with _elevation_ctx(enforcement=True):
-            with _patch_closure(handler, "user_manager", mock_um):
-                resp = client.post(
-                    "/api/admin/users",
-                    json={
-                        "username": "newuser",
-                        "password": "P@ss1234!",
-                        "role": "normal_user",
-                    },
-                    cookies={"cidx_session": _SESSION_KEY},
-                )
+            resp = client.post(
+                "/api/admin/users",
+                json={
+                    "username": "newuser",
+                    "password": _STRONG_PASSWORD,
+                    "role": "normal_user",
+                },
+                cookies={"cidx_session": _SESSION_KEY},
+            )
     finally:
         app.dependency_overrides.pop(_deps.get_current_admin_user_hybrid, None)
     assert resp.status_code == 201, resp.text
+    assert app.state.user_manager.get_user("newuser") is not None
 
 
 # ---------------------------------------------------------------------------
@@ -386,7 +364,7 @@ def _stub_api_key_identity(user: User):
 
 
 def test_real_auth_chain_api_key_user_with_cross_user_cookie_is_denied(
-    manager, user_a, user_b, tmpdir_path
+    manager, user_a, user_b, real_app
 ):
     """API-key caller with another user's window key in the cookie is
     denied, through the real auth chain: user_b authenticates with their
@@ -395,7 +373,7 @@ def test_real_auth_chain_api_key_user_with_cross_user_cookie_is_denied(
     verifier and the user store are stubbed -- get_current_admin_user_hybrid
     and get_current_user run for real. POST /api/admin/users must return 403
     elevation_required, never perform the mutation."""
-    app = _get_app(tmpdir_path)
+    app = real_app
     _deps.elevated_session_manager = manager
     manager.create(_SESSION_KEY, _USER_A, _IP)
     with _stub_api_key_identity(user_b):
@@ -416,7 +394,7 @@ def test_real_auth_chain_api_key_user_with_cross_user_cookie_is_denied(
 
 
 def test_real_auth_chain_web_session_with_cross_user_window_is_denied(
-    manager, user_a, user_b, tmpdir_path
+    manager, user_a, user_b, real_app
 ):
     """Same invariant via the Web UI session-cookie auth path. The elevation
     window is keyed by the "session" cookie's own raw value -- exactly how
@@ -426,7 +404,7 @@ def test_real_auth_chain_web_session_with_cross_user_window_is_denied(
     runs for real."""
     from code_indexer.server.web.auth import SessionData
 
-    app = _get_app(tmpdir_path)
+    app = real_app
     _deps.elevated_session_manager = manager
     manager.create(_WEB_SESSION_COOKIE_VALUE, _USER_A, _IP)
 
@@ -464,57 +442,39 @@ def test_real_auth_chain_web_session_with_cross_user_window_is_denied(
 
 
 def test_real_auth_chain_api_key_users_own_window_still_succeeds(
-    manager, user_b, tmpdir_path
+    manager, user_b, real_app
 ):
     """Regression guard: the real auth chain still succeeds when the
     API-key caller's own window is presented (the legitimate case)."""
-    from tests.unit.server.routers.inline_routes_test_helpers import (
-        _find_route_handler,
-        _patch_closure,
-    )
-
-    app = _get_app(tmpdir_path)
+    app = real_app
     _deps.elevated_session_manager = manager
     manager.create(_SESSION_KEY, _USER_B, _IP)
-    handler = _find_route_handler("/api/admin/users", "POST")
-    mock_um = Mock()
-    mock_um.create_user_audited.return_value = User(
-        username="newuser",
-        password_hash="hashed",
-        role=UserRole.NORMAL_USER,
-        created_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
-    )
     with _stub_api_key_identity(user_b):
         client = TestClient(app, raise_server_exceptions=False)
         with _elevation_ctx(enforcement=True):
-            with _patch_closure(handler, "user_manager", mock_um):
-                resp = client.post(
-                    "/api/admin/users",
-                    json={
-                        "username": "newuser",
-                        "password": "P@ss1234!",
-                        "role": "normal_user",
-                    },
-                    headers={"Authorization": f"Bearer {_API_KEY_TOKEN}"},
-                    cookies={"cidx_session": _SESSION_KEY},
-                )
+            resp = client.post(
+                "/api/admin/users",
+                json={
+                    "username": "newuser",
+                    "password": _STRONG_PASSWORD,
+                    "role": "normal_user",
+                },
+                headers={"Authorization": f"Bearer {_API_KEY_TOKEN}"},
+                cookies={"cidx_session": _SESSION_KEY},
+            )
     assert resp.status_code == 201, resp.text
+    assert app.state.user_manager.get_user("newuser") is not None
 
 
 def test_real_auth_chain_cross_user_denial_depends_on_user_bound_lookup(
-    manager, user_a, user_b, tmpdir_path
+    manager, user_a, user_b, real_app
 ):
     """Mutation check: the cross-user denial proven above is not a tautology
     of the test harness -- it depends on touch_atomic_for_user's username
     binding. Swapping touch_atomic_for_user to delegate to the unqualified
     touch_atomic() in memory must make the exact same request succeed
     instead of being denied."""
-    from tests.unit.server.routers.inline_routes_test_helpers import (
-        _find_route_handler,
-        _patch_closure,
-    )
-
-    app = _get_app(tmpdir_path)
+    app = real_app
     _deps.elevated_session_manager = manager
     manager.create(_SESSION_KEY, _USER_A, _IP)
 
@@ -524,29 +484,20 @@ def test_real_auth_chain_cross_user_denial_depends_on_user_bound_lookup(
         lambda self, session_key, username: self.touch_atomic(session_key)
     )
 
-    handler = _find_route_handler("/api/admin/users", "POST")
-    mock_um = Mock()
-    mock_um.create_user_audited.return_value = User(
-        username="irrelevant",
-        password_hash="hashed",
-        role=UserRole.NORMAL_USER,
-        created_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
-    )
     try:
         with _stub_api_key_identity(user_b):
             client = TestClient(app, raise_server_exceptions=False)
             with _elevation_ctx(enforcement=True):
-                with _patch_closure(handler, "user_manager", mock_um):
-                    resp = client.post(
-                        "/api/admin/users",
-                        json={
-                            "username": "irrelevant",
-                            "password": _STRONG_PASSWORD,
-                            "role": "normal_user",
-                        },
-                        headers={"Authorization": f"Bearer {_API_KEY_TOKEN}"},
-                        cookies={"cidx_session": _SESSION_KEY},
-                    )
+                resp = client.post(
+                    "/api/admin/users",
+                    json={
+                        "username": "irrelevant",
+                        "password": _STRONG_PASSWORD,
+                        "role": "normal_user",
+                    },
+                    headers={"Authorization": f"Bearer {_API_KEY_TOKEN}"},
+                    cookies={"cidx_session": _SESSION_KEY},
+                )
     finally:
         manager_cls.touch_atomic_for_user = original_touch_atomic_for_user
 
@@ -554,6 +505,7 @@ def test_real_auth_chain_cross_user_denial_depends_on_user_bound_lookup(
         "Mutation check failed: an unbound touch_atomic() lookup should "
         f"grant this request, but got {resp.status_code}: {resp.text}"
     )
+    assert app.state.user_manager.get_user("irrelevant") is not None
 
 
 # ---------------------------------------------------------------------------
