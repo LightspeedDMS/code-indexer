@@ -172,7 +172,7 @@ Without such evidence, omit `branch_environment_map` entirely or set it to `{}`.
 
 When your output includes scalar values starting with a YAML reserved indicator (`@`, `` ` ``, `!`, `&`, `*`, `?`, `|`, `>`, `%`, `#`) — including scoped package names like `@org/pkg` — you MUST wrap them in double quotes.
 
-- CORRECT: `- "@lightspeed/webhook-producer-nod"` or `key: "@vendia/serverless-express"`
-- INCORRECT: `- @lightspeed/webhook-producer-nod` (causes `yaml.scanner.ScannerError` on read)
+- CORRECT: `- "@example/webhook-producer"` or `key: "@vendia/serverless-express"`
+- INCORRECT: `- @example/webhook-producer` (causes `yaml.scanner.ScannerError` on read)
 
 Apply this to every list item and scalar value that starts with a reserved indicator. Your frontmatter MUST parse cleanly via `yaml.safe_load()` — unquoted reserved-indicator scalars break the entire metadata file, not just the offending line.
