@@ -8,17 +8,21 @@ but with continuous watching capabilities.
 import logging
 import time
 import threading
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import (
+    TYPE_CHECKING,
     Any,
     Callable,
     ContextManager,
     Dict,
+    FrozenSet,
     Generic,
     Hashable,
+    Iterator,
     List,
     Optional,
+    Sequence,
     Set,
     Tuple,
     TypeVar,
@@ -30,13 +34,39 @@ from .smart_indexer import SmartIndexer
 from .git_topology_service import GitTopologyService
 from ..utils.never_indexed_paths import is_never_indexed
 
+if TYPE_CHECKING:
+    from ..indexing import FileFinder
+    from .tantivy_index_manager import TantivyIndexManager
+
 logger = logging.getLogger(__name__)
 
 # ^ why a code constant, not a setting; one operator, no knobs; bounds a permanently failing path to one attempt per 5 min
 _RETRY_BACKOFF_CAP_SECONDS = 300.0
 _RETRY_BACKOFF_MAX_DOUBLINGS = 32
 
+# ^ why publish only when the queue is quiet, not per cycle; a burst of writes costs one publish (a full rebuild on large or epoch-dirty collections)
+# ^ invariant oldest unpublished change age <= HNSW_PUBLISH_MAX_DELAY_SECONDS before its publish starts
+HNSW_PUBLISH_MAX_DELAY_SECONDS = 30.0
+# ^ perf bounds publishing to <= 1/(1+4) of the watch thread's time on a repo whose rebuild is slow; a small repo still publishes at once
+HNSW_PUBLISH_IDLE_FACTOR = 4.0
+# ^ invariant a busy processing thread outlives this join and drains itself; see _process_changes_loop
+STOP_JOIN_SECONDS = 5.0
+_TRANSITION_KEY = "transition"
+
 _Key = TypeVar("_Key", bound=Hashable)
+
+
+def hnsw_publish_due(
+    now: float,
+    owed_since: float,
+    last_publish_end: float,
+    last_publish_seconds: float,
+    changes_queued: bool,
+) -> bool:
+    """Whether a watch cycle publishes its owed HNSW now (#2093)."""
+    if now - last_publish_end < HNSW_PUBLISH_IDLE_FACTOR * last_publish_seconds:
+        return False
+    return not changes_queued or now - owed_since >= HNSW_PUBLISH_MAX_DELAY_SECONDS
 
 
 class _RetryBackoff(Generic[_Key]):
@@ -86,6 +116,9 @@ class GitAwareWatchHandler(FileSystemEventHandler):
         watch_metadata: WatchMetadata,
         debounce_seconds: float = 2.0,
         mutation_lock: Optional[threading.RLock] = None,
+        extra_indexers: Sequence[SmartIndexer] = (),
+        maintain_fts: bool = False,
+        hold_indexing_lock: bool = False,
     ):
         """Initialize git-aware watch handler.
 
@@ -108,10 +141,17 @@ class GitAwareWatchHandler(FileSystemEventHandler):
         super().__init__()
         self.config = config
         self.smart_indexer = smart_indexer
+        self.indexers: List[SmartIndexer] = [smart_indexer, *extra_indexers]
         self.git_topology_service = git_topology_service
         self.watch_metadata = watch_metadata
         self.debounce_seconds = debounce_seconds
         self._mutation_lock = mutation_lock
+        # ^ hazard True beside cidx watch's FTSWatchHandler => two writers on one Tantivy index; only the server watch sets it
+        self._maintain_fts = maintain_fts
+        self._hold_indexing_lock = hold_indexing_lock
+
+        self._finder: Optional["FileFinder"] = None
+        self._finder_lock = threading.Lock()
 
         # Thread-safe change tracking
         self.pending_changes: Set[Path] = set()
@@ -138,6 +178,14 @@ class GitAwareWatchHandler(FileSystemEventHandler):
         self._clock: Callable[[], float] = time.monotonic
         self._unhide_backoff: _RetryBackoff[str] = _RetryBackoff(debounce_seconds)
         self._change_backoff: _RetryBackoff[Path] = _RetryBackoff(debounce_seconds)
+        self._publish_owed_since: Optional[float] = None
+        self._last_publish_end = float("-inf")
+        self._last_publish_seconds = 0.0
+        self._in_flight: FrozenSet[Path] = frozenset()
+        self._deferred_branch_change: Optional[Dict[str, Any]] = None
+        self._change_generation = 0
+        self._queued_at: Dict[Path, int] = {}
+        self._branch_backoff: _RetryBackoff[str] = _RetryBackoff(debounce_seconds)
 
     def start_watching(self):
         """Start the git-aware watch process."""
@@ -146,11 +194,25 @@ class GitAwareWatchHandler(FileSystemEventHandler):
         # Reset stop event
         self._stop_processing.clear()
 
+        # ^ invariant work an earlier watch could not finish is re-queued; its HNSW publish is owed too (#2093)
+        owed = self.watch_metadata.get_recovery_files()
+        if owed:
+            logger.info(f"Re-queueing {len(owed)} change(s) owed by the last watch")
+            self.queue_changes([Path(p) for p in owed])
+        if self.watch_metadata.processing_interrupted:
+            self._publish_owed_since = self._clock()
+        if self.watch_metadata.pending_branch_change is not None:
+            self._deferred_branch_change = dict(
+                self.watch_metadata.pending_branch_change
+            )
+            logger.info("Replaying the branch transition owed by the last watch")
+
         # Start git monitoring
         if self.git_monitor.start_monitoring():
             logger.info(
                 f"Git monitoring started for branch: {self.git_monitor.current_branch}"
             )
+            self._retarget_restored_transition()
         else:
             logger.warning("Git not available - proceeding with file-only monitoring")
 
@@ -171,6 +233,25 @@ class GitAwareWatchHandler(FileSystemEventHandler):
 
         logger.info("Git-aware watch handler started successfully")
 
+    def _retarget_restored_transition(self) -> None:
+        """A transition owed by the last watch replays from its saved base
+        to the branch the repository is on now."""
+        transition = self._deferred_branch_change
+        current = (self.git_monitor.current_branch, self.git_monitor.current_commit)
+        if transition is None or current[0] is None:
+            return
+        # ^ hazard replaying the saved destination => the monitor starts at the current branch and never reports the switch made while stopped
+        if (transition["new_branch"], transition.get("new_commit")) != current:
+            logger.info(
+                f"Owed branch transition retargeted from {transition['new_branch']} "
+                f"to the current branch {current[0]}"
+            )
+            self._deferred_branch_change = {
+                **transition,
+                "new_branch": current[0],
+                "new_commit": current[1],
+            }
+
     def stop_watching(self):
         """Stop the git-aware watch process."""
         logger.info("Stopping git-aware watch handler")
@@ -187,15 +268,48 @@ class GitAwareWatchHandler(FileSystemEventHandler):
         # Stop git monitoring
         self.git_monitor.stop_monitoring()
 
-        # Wait for processing thread to finish
-        if self.processing_thread and self.processing_thread.is_alive():
-            self.processing_thread.join(timeout=5.0)
-            logger.info("Processing thread stopped")
-
-        # Process any remaining changes
-        self._process_pending_changes(final_cleanup=True)
+        if self.processing_thread is None:
+            self._drain_on_stop()
+        else:
+            # ^ invariant the processing thread drains on exit (_process_changes_loop); a bounded join, never a clock on its indexing (#1218)
+            self.processing_thread.join(timeout=STOP_JOIN_SECONDS)
+            if self.processing_thread.is_alive():
+                logger.info(
+                    "Watch processing thread is finishing a cycle; it drains the "
+                    "queue and publishes before it exits"
+                )
+                # ^ why no lock, not change_lock; _in_flight is a frozenset the cycle replaces, never mutates
+                self._persist_owed_changes(set(self._in_flight))
 
         logger.info("Git-aware watch handler stopped")
+
+    def _drain_on_stop(self) -> None:
+        """The watch's last work: process every queued and retry-scheduled
+        change and publish, then durably record whatever is still owed."""
+        self._process_pending_changes(final_cleanup=True)
+        self._persist_owed_changes(set())
+
+    def _persist_owed_changes(self, extra: Set[Path]) -> None:
+        """Record in watch_metadata.json the changes this watch has not
+        indexed (the next watch start re-queues them), or clear the record."""
+        with self.change_lock:
+            owed = set(self.pending_changes) | extra
+        owed |= self._change_backoff.scheduled()
+        transition = self._deferred_branch_change
+        self.watch_metadata.pending_branch_change = transition
+        self.watch_metadata.files_being_processed = sorted(str(p) for p in owed)
+        if owed or transition is not None:
+            self.watch_metadata.mark_processing_interrupted(
+                f"{len(owed)} change(s) and "
+                f"{'a' if transition else 'no'} branch transition owed when the "
+                f"watch stopped"
+            )
+        try:
+            self.watch_metadata.save_to_disk(
+                Path(self.config.codebase_dir) / ".code-indexer" / "watch_metadata.json"
+            )
+        except OSError as e:
+            logger.error(f"Could not record the watch's owed changes: {e}")
 
     def on_modified(self, event):
         """Handle file modification events."""
@@ -236,6 +350,12 @@ class GitAwareWatchHandler(FileSystemEventHandler):
         self._add_pending_change(old_path, "deleted")
         self._add_pending_change(new_path, "created")
 
+    def queue_changes(self, paths: Sequence[Path]) -> None:
+        """Queue writes the observer may not have seen (made before it was
+        scheduled), under the same rules as observer events."""
+        for path in paths:
+            self._add_pending_change(path, "modified" if path.exists() else "deleted")
+
     def _add_pending_change(self, file_path: Path, change_type: str):
         """Add a file change to pending queue if it should be indexed."""
         try:
@@ -262,6 +382,8 @@ class GitAwareWatchHandler(FileSystemEventHandler):
 
             with self.change_lock:
                 self.pending_changes.add(file_path)
+                self._change_generation += 1
+                self._queued_at[file_path] = self._change_generation
                 print(f"📂 Added pending change: {change_type} {file_path}")
                 logger.debug(f"Added pending change: {change_type} {file_path}")
 
@@ -269,23 +391,26 @@ class GitAwareWatchHandler(FileSystemEventHandler):
             print(f"❌ Failed to add pending change for {file_path}: {e}")
             logger.warning(f"Failed to add pending change for {file_path}: {e}")
 
+    def _file_finder(self) -> "FileFinder":
+        with self._finder_lock:
+            if self._finder is None:
+                from ..indexing import FileFinder
+
+                self._finder = FileFinder(self.config)
+            return self._finder
+
     def _should_include_file(self, file_path: Path) -> bool:
         """Check if file should be included in indexing."""
         try:
-            # Use the same logic as regular indexing
-            from ..indexing import FileFinder
-
-            file_finder = FileFinder(self.config)
-            return file_finder._should_include_file(file_path)
+            return bool(self._file_finder()._should_include_file(file_path))
         except Exception as e:
             logger.warning(f"Failed to check if file should be included: {e}")
             return False
 
     def _should_include_deleted_file(self, file_path: Path) -> bool:
-        """Check if a deleted file would have been included in indexing."""
+        """Whether the full walk would have indexed `file_path` (gone, so no
+        size or content check): extension, exclude patterns, override."""
         try:
-            # For deleted files, just check the file extension
-            # This is a simplified check since we can't access file contents or size
             extension = file_path.suffix.lstrip(".")
             if extension not in self.config.file_extensions:
                 return False
@@ -293,13 +418,30 @@ class GitAwareWatchHandler(FileSystemEventHandler):
                 relative_path = file_path.relative_to(self.config.codebase_dir)
             except ValueError:
                 return False
-            return not is_never_indexed(str(relative_path))
+            if is_never_indexed(str(relative_path)):
+                return False
+            finder = self._file_finder()
+            # ^ invariant same exclusion as find_files (#1467); else the store's own .code-indexer files are queued as deleted sources (#2093)
+            base_result = not finder.matches_exclude_pattern(str(relative_path))
+            if finder.override_filter_service is not None:
+                return bool(
+                    finder.override_filter_service.should_include_file(
+                        relative_path, base_result
+                    )
+                )
+            return base_result
         except Exception as e:
             logger.warning(f"Failed to check if deleted file should be included: {e}")
             return False
 
     def _process_changes_loop(self):
         """Main loop for processing file changes with debouncing."""
+        try:
+            self._run_changes_loop()
+        finally:
+            self._drain_on_stop()
+
+    def _run_changes_loop(self) -> None:
         while not self._stop_processing.is_set():
             try:
                 # Use wait instead of sleep to be interruptible
@@ -327,6 +469,13 @@ class GitAwareWatchHandler(FileSystemEventHandler):
 
     def _process_pending_changes(self, final_cleanup: bool = False):
         """Process all pending file changes using git-aware indexing."""
+        if (
+            self._deferred_branch_change is not None
+            and not self.processing_in_progress
+            and self._branch_backoff.is_due(_TRANSITION_KEY, self._clock())
+        ):
+            # ^ order before the queue snapshot and before this cycle's lock; the lock is not re-entrant
+            self._handle_branch_change(self._deferred_branch_change)
         retry_due = (
             self._change_backoff.scheduled()
             if final_cleanup
@@ -336,6 +485,7 @@ class GitAwareWatchHandler(FileSystemEventHandler):
             self.pending_changes.update(retry_due)
             changes_to_process = self.pending_changes.copy()
             self.pending_changes.clear()
+            self._queued_at.clear()
 
         # ^ hazard taking the mutation lock before this check => stop's final cleanup waits forever on a stuck cycle
         if self.processing_in_progress:
@@ -344,101 +494,221 @@ class GitAwareWatchHandler(FileSystemEventHandler):
                 self.pending_changes.update(changes_to_process)
             return
 
-        if not changes_to_process and not final_cleanup and not self._pending_unhides:
+        if (
+            not changes_to_process
+            and not final_cleanup
+            and not self._pending_unhides
+            and self._publish_owed_since is None
+        ):
             return
 
+        self.processing_in_progress = True
         try:
-            self.processing_in_progress = True
+            with self._repository_lock() as locked:
+                if locked:
+                    self._run_cycle(changes_to_process, final_cleanup)
+                else:
+                    self._requeue_failed_changes(set(changes_to_process))
+        finally:
+            self.processing_in_progress = False
+
+    @contextmanager
+    def _repository_lock(self) -> Iterator[bool]:
+        """The repository indexing lock `cidx index` holds, for one cycle
+        (server watch only); yields False when another run holds it."""
+        if not self._hold_indexing_lock:
+            yield True
+            return
+        from .indexing_lock import IndexingLockError, create_indexing_lock
+
+        lock = create_indexing_lock(Path(self.config.codebase_dir) / ".code-indexer")
+        try:
+            lock.acquire(str(self.config.codebase_dir))
+        except IndexingLockError as e:
+            # ^ invariant never two writers on one repository's stores (#2093); the changes wait their backoff
+            logger.info(f"Watch cycle deferred, the repository is being indexed: {e}")
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            lock.release()
+
+    def _run_cycle(self, changes_to_process: Set[Path], final_cleanup: bool) -> None:
+        self._in_flight = frozenset(changes_to_process)
+        try:
             with self._mutation_lock_ctx():
                 self._retry_pending_unhides()
-            if not changes_to_process and not final_cleanup:
-                return
-            self.watch_metadata.mark_processing_start(
-                [str(p) for p in changes_to_process]
-            )
-            failed_changes: Set[Path] = set()
-
-            if changes_to_process:
-                print(
-                    f"🔄 Processing {len(changes_to_process)} file changes using git-aware indexing"
+            if changes_to_process or final_cleanup:
+                self.watch_metadata.mark_processing_start(
+                    [str(p) for p in changes_to_process]
                 )
-                logger.info(
-                    f"Processing {len(changes_to_process)} file changes using git-aware indexing"
-                )
-
-                # Convert paths to relative paths for smart indexer
-                relative_paths = []
-                by_relative: Dict[str, Path] = {}
-                for file_path in changes_to_process:
-                    try:
-                        relative_path = str(
-                            file_path.relative_to(self.config.codebase_dir)
-                        )
-                        relative_paths.append(relative_path)
-                        by_relative[relative_path] = file_path
-                    except ValueError:
-                        # File outside codebase directory
-                        continue
-
-                if relative_paths:
-                    # Use SmartIndexer for git-aware processing (same as index command)
-                    #
-                    # Codex Finding (16th review, Story #1488): when the daemon
-                    # injects its mutation_lock, this per-event mutation cycle
-                    # must hold the SAME lock a manual daemon `cidx index` /
-                    # `clean_data` acquires, so the two cannot race on the
-                    # same collection. Held only for this one mutation call,
-                    # not the whole watch lifetime. `nullcontext()` makes
-                    # standalone (non-daemon) `cidx watch` -- which never
-                    # injects a lock -- byte-identical to before.
-                    lock_ctx = self._mutation_lock_ctx()
-                    with lock_ctx:
-                        stats = self.smart_indexer.process_files_incrementally(
-                            relative_paths,
-                            force_reprocess=False,  # Use normal timestamp-based change detection
-                            quiet=False,  # Show processing output for debugging
-                            watch_mode=True,  # Enable verified deletion for reliability
-                        )
-
-                    self.files_processed_count += stats.files_processed
-                    self.indexing_cycles_count += 1
-                    failed_changes = self._failed_changes(stats, by_relative)
-                    for path in set(by_relative.values()) - failed_changes:
-                        self._change_backoff.clear(path)
-
-                    # Print processing status to console for visibility
-                    print(
-                        f"📝 Processed {stats.files_processed} files: {', '.join(relative_paths)}"
-                    )
-                    logger.info(
-                        f"Processed {stats.files_processed} files in git-aware mode"
-                    )
-
-            # ^ invariant a failed change => re-queued, cycle not successful
-            if failed_changes:
-                self._requeue_failed_changes(failed_changes)
-            else:
-                # Update metadata after successful processing
-                self.watch_metadata.update_after_sync_cycle(
-                    files_processed=len(changes_to_process)
-                )
-                # ^ invariant processing_interrupted stays set while any watch retry is owed
-                owed = len(self._change_backoff.scheduled()) + len(
-                    self._pending_unhides
-                )
-                if owed:
-                    self.watch_metadata.mark_processing_interrupted(
-                        f"{owed} watch retr(ies) still owed"
-                    )
-
+                failed_changes = self._index_changes(changes_to_process)
+                self._finish_cycle(failed_changes, len(changes_to_process))
         except Exception as e:
             logger.error(f"Failed to process file changes: {e}")
             # ^ hazard re-adding at once => a permanently broken store re-pays every embedding each cycle; back off
             self._requeue_failed_changes(set(changes_to_process))
             self.watch_metadata.mark_processing_interrupted(str(e))
-
         finally:
-            self.processing_in_progress = False
+            self._in_flight = frozenset()
+            self._publish_hnsw_if_due(final_cleanup)
+
+    def _relative_changes(self, changes: Set[Path]) -> Dict[str, Path]:
+        by_relative: Dict[str, Path] = {}
+        for file_path in changes:
+            try:
+                by_relative[str(file_path.relative_to(self.config.codebase_dir))] = (
+                    file_path
+                )
+            except ValueError:
+                # File outside codebase directory
+                continue
+        return by_relative
+
+    def _index_changes(self, changes: Set[Path]) -> Set[Path]:
+        """Run the cycle's changes through every indexer (one per configured
+        provider; the primary first). Returns the changes any indexer failed."""
+        by_relative = self._relative_changes(changes)
+        if not by_relative:
+            return set()
+        relative_paths = list(by_relative)
+        print(
+            f"🔄 Processing {len(relative_paths)} file changes using git-aware indexing"
+        )
+        logger.info(f"Processing {len(relative_paths)} file changes")
+        # ^ see Story #1488; held for this mutation only, never the watch lifetime
+        with self._mutation_lock_ctx():
+            # ^ invariant every write leaves an HNSW publish owed until _publish_hnsw_if_due runs (#2093)
+            if self._publish_owed_since is None:
+                self._publish_owed_since = self._clock()
+            all_stats = [
+                indexer.process_files_incrementally(
+                    relative_paths, force_reprocess=False, quiet=False, watch_mode=True
+                )
+                for indexer in self.indexers
+            ]
+            fts_failed = (
+                self._update_fts(list(by_relative.values()))
+                if self._maintain_fts
+                else set()
+            )
+        # ^ why the primary's counts, not a sum over indexers; every indexer processes the same paths
+        primary = all_stats[0]
+        self.files_processed_count += primary.files_processed
+        self.indexing_cycles_count += 1
+        print(
+            f"📝 Processed {primary.files_processed} files: {', '.join(relative_paths)}"
+        )
+        logger.info(f"Processed {primary.files_processed} files in git-aware mode")
+        failed: Set[Path] = set(fts_failed)
+        for stats in all_stats:
+            failed |= self._failed_changes(stats, by_relative)
+        for path in set(by_relative.values()) - failed:
+            self._change_backoff.clear(path)
+        return failed
+
+    def _update_fts(self, paths: List[Path]) -> Set[Path]:
+        """One FTS writer for the cycle (#2093): replace each path's
+        documents with its current chunks (none once deleted), through the
+        same decision and settling as `cidx index --fts`. Returns the paths
+        it could not index. A failure leaves the content marker dropped, so
+        the next run rebuilds the index from disk.
+
+        Raises:
+            FtsIndexError: the index could not be opened or committed.
+        """
+        from .fts_lifecycle import fts_index_dir, open_fts_index_for_run
+
+        if not (fts_index_dir(self.config) / "meta.json").exists():
+            return set()
+        # ^ order a failed open raises before the try: no writer exists to close
+        fts_manager, rebuilt = open_fts_index_for_run(self.config, force_full=False)
+        try:
+            failed = self._write_fts_documents(fts_manager, rebuilt, paths)
+        finally:
+            fts_manager.close()
+        return failed & set(paths)
+
+    def _write_fts_documents(
+        self, fts_manager: "TantivyIndexManager", rebuilt: bool, paths: List[Path]
+    ) -> Set[Path]:
+        from .fts_file_documents import FileFtsDocuments, FtsReplaceError
+        from .fts_lifecycle import bootstrap_fts_from_disk, finish_fts_run
+
+        source_files: Optional[List[Path]] = None
+        if rebuilt:
+            source_files = list(self._file_finder().find_files())
+            failed = bootstrap_fts_from_disk(fts_manager, self.config, source_files)
+        else:
+            failed = []
+            documents = FileFtsDocuments(self.config)
+            for path in paths:
+                try:
+                    documents.replace_in_index(fts_manager, path)
+                except (ValueError, OSError, FtsReplaceError) as e:
+                    logger.error(f"FTS could not index {path}: {e}")
+                    failed.append((path, str(e)))
+        finish_fts_run(
+            fts_manager,
+            self.config,
+            run_raised=False,
+            failed_files=failed,
+            source_files=(
+                source_files
+                if source_files is not None
+                else self._file_finder().find_files()
+            ),
+        )
+        return {Path(path) for path, _error in failed}
+
+    def _finish_cycle(self, failed_changes: Set[Path], change_count: int) -> None:
+        # ^ invariant a failed change => re-queued, cycle not successful
+        if failed_changes:
+            self._requeue_failed_changes(failed_changes)
+            return
+        self.watch_metadata.update_after_sync_cycle(files_processed=change_count)
+        # ^ invariant processing_interrupted stays set while any watch retry is owed
+        owed = len(self._change_backoff.scheduled()) + len(self._pending_unhides)
+        if owed:
+            self.watch_metadata.mark_processing_interrupted(
+                f"{owed} watch retr(ies) still owed"
+            )
+
+    def _publish_hnsw_if_due(self, final_cleanup: bool) -> None:
+        """Publish every indexer's owed HNSW (#2093): debounced while the
+        watch runs (hnsw_publish_due), always on its final cleanup. A failed
+        publish stays owed; the durable pending signal also makes the next
+        `cidx index` publish it."""
+        owed_since = self._publish_owed_since
+        start = self._clock()
+        if not final_cleanup:
+            if owed_since is None:
+                return
+            with self.change_lock:
+                queued = bool(self.pending_changes)
+            if not hnsw_publish_due(
+                start,
+                owed_since,
+                self._last_publish_end,
+                self._last_publish_seconds,
+                queued,
+            ):
+                return
+        try:
+            with self._mutation_lock_ctx():
+                for indexer in self.indexers:
+                    indexer.publish_owed_hnsw()
+        except Exception as e:
+            logger.error(f"Publishing the watch's HNSW changes failed: {e}")
+            self.watch_metadata.mark_processing_interrupted(
+                f"HNSW publish failed; retried next cycle: {e}"
+            )
+            return
+        finally:
+            self._last_publish_end = self._clock()
+            self._last_publish_seconds = self._last_publish_end - start
+        self._publish_owed_since = None
 
     def _handle_branch_change(self, change_event: Dict[str, Any]):
         """Handle git branch change events."""
@@ -447,96 +717,127 @@ class GitAwareWatchHandler(FileSystemEventHandler):
 
         logger.info(f"Git branch change detected: {old_branch} → {new_branch}")
 
-        try:
-            # Stop current processing
-            self.processing_in_progress = False
+        owed = self._deferred_branch_change
+        # ^ invariant an unapplied transition keeps its base: A->B then B->C is applied as A->C, since the index still reflects A
+        transition = (
+            change_event
+            if owed is None or owed is change_event
+            else {
+                **change_event,
+                "old_branch": owed["old_branch"],
+                "old_commit": owed.get("old_commit"),
+            }
+        )
+        # ^ invariant owed until applied; the git monitor has already moved on and never reports it again
+        self._deferred_branch_change = transition
+        with self._repository_lock() as locked:
+            if not locked:
+                self.watch_metadata.mark_processing_interrupted(
+                    f"Branch change to {new_branch} deferred: the repository is being indexed"
+                )
+                return
+            try:
+                self._apply_branch_change(transition)
+            except Exception as e:
+                logger.error(f"Failed to handle branch change, retried later: {e}")
+                self._branch_backoff.record_failure(_TRANSITION_KEY, self._clock())
+                self.watch_metadata.mark_processing_interrupted(
+                    f"Branch change error: {e}"
+                )
+                return
+            self._deferred_branch_change = None
+            self._branch_backoff.clear(_TRANSITION_KEY)
 
-            # Wait for any ongoing processing to complete
-            time.sleep(0.5)
+    def _apply_branch_change(self, change_event: Dict[str, Any]) -> None:
+        old_branch = change_event["old_branch"]
+        new_branch = change_event["new_branch"]
+        with self.change_lock:
+            started_at_generation = self._change_generation
+        # ^ invariant transition recorded only after every un-hide succeeded; a newer transition supersedes owed un-hides
+        self._pending_git_state = (
+            new_branch or "unknown",
+            change_event["new_commit"] or "unknown",
+        )
+        self._pending_unhides = {}
+        self._unhide_backoff = _RetryBackoff(self.debounce_seconds)
+        reindex_failed: Set[Path] = set()
+        covered: Set[Path] = set()
 
-            # ^ invariant transition recorded only after every un-hide succeeded; a newer transition supersedes owed un-hides
-            self._pending_git_state = (
-                new_branch or "unknown",
-                change_event["new_commit"] or "unknown",
+        if old_branch and new_branch:
+            analysis = self.git_topology_service.analyze_branch_change(
+                old_branch,
+                new_branch,
+                old_commit=change_event.get("old_commit"),
+                new_commit=change_event.get("new_commit"),
             )
-            self._pending_unhides = {}
-            self._unhide_backoff = _RetryBackoff(self.debounce_seconds)
-            reindex_failed: Set[Path] = set()
+            by_relative = {
+                p: self.config.codebase_dir / p for p in analysis.files_to_reindex
+            }
+            covered = set(by_relative.values()) | {
+                self.config.codebase_dir / p for p in analysis.files_to_update_metadata
+            }
+            with self._mutation_lock_ctx():
+                if analysis.files_to_reindex:
+                    for indexer in self.indexers:
+                        stats = indexer.process_files_incrementally(
+                            analysis.files_to_reindex
+                        )
+                        reindex_failed |= self._failed_changes(stats, by_relative)
+                for file_path in analysis.files_to_update_metadata:
+                    self._unhide_in_every_collection(file_path, new_branch)
+                if self._maintain_fts:
+                    # ^ why the raw diff, not only the analysis; the analysis drops files the new branch removed, whose FTS documents must go
+                    removed = {
+                        self.config.codebase_dir / p
+                        for p in self.git_topology_service.files_changed_between(
+                            old_branch, new_branch
+                        )
+                        if not (self.config.codebase_dir / p).exists()
+                    }
+                    reindex_failed |= self._update_fts(sorted(covered | removed))
+            if self._publish_owed_since is None:
+                self._publish_owed_since = self._clock()
+            logger.info(
+                f"Branch transition complete: {len(analysis.files_to_reindex)} "
+                f"file(s) re-indexed, {len(analysis.files_to_update_metadata)} "
+                f"made visible"
+            )
 
-            # Use git topology analysis for branch transition (same as index command)
-            if old_branch and new_branch:
-                # Pass commit hashes to enable same-branch commit detection
-                old_commit = change_event.get("old_commit")
-                new_commit = change_event.get("new_commit")
+        # ^ invariant only covered changes queued before the transition started leave the queue; a later edit was not read by it
+        with self.change_lock:
+            for path in covered:
+                if self._queued_at.get(path, 0) <= started_at_generation:
+                    self.pending_changes.discard(path)
+                    self._queued_at.pop(path, None)
 
-                branch_analysis = self.git_topology_service.analyze_branch_change(
-                    old_branch, new_branch, old_commit=old_commit, new_commit=new_commit
+        self._record_transition_if_complete()
+        self._requeue_failed_changes(reindex_failed)
+        self._publish_hnsw_if_due(final_cleanup=True)
+
+    def _collection_of(self, indexer: SmartIndexer) -> str:
+        return str(
+            indexer.vector_store_client.resolve_collection_name(
+                indexer.config, indexer.embedding_provider
+            )
+        )
+
+    def _unhide_in_every_collection(self, file_path: str, branch: str) -> None:
+        try:
+            for indexer in self.indexers:
+                indexer._ensure_file_visible_in_branch_thread_safe(
+                    file_path, branch, self._collection_of(indexer)
                 )
-
-                # Use HighThroughputProcessor for proper branch transition
-                collection_name = (
-                    self.smart_indexer.vector_store_client.resolve_collection_name(
-                        self.config, self.smart_indexer.embedding_provider
-                    )
-                )
-
-                # Process branch changes using SmartIndexer functionality
-                content_points_created = 0
-                content_points_reused = 0
-
-                # Process files that need reindexing
-                if branch_analysis.files_to_reindex:
-                    reindex_stats = self.smart_indexer.process_files_incrementally(
-                        branch_analysis.files_to_reindex
-                    )
-                    content_points_created += reindex_stats.chunks_created
-                    reindex_failed = self._failed_changes(
-                        reindex_stats,
-                        {
-                            p: self.config.codebase_dir / p
-                            for p in branch_analysis.files_to_reindex
-                        },
-                    )
-
-                # Update metadata for files that don't need reindexing
-                if branch_analysis.files_to_update_metadata:
-                    for file_path in branch_analysis.files_to_update_metadata:
-                        try:
-                            # Ensure file is visible in new branch
-                            self.smart_indexer._ensure_file_visible_in_branch_thread_safe(
-                                file_path, new_branch, collection_name
-                            )
-                            content_points_reused += 1
-                        except Exception as e:
-                            logger.warning(
-                                f"Failed to update metadata for {file_path}: {e}"
-                            )
-                            self._pending_unhides[file_path] = (
-                                new_branch,
-                                collection_name,
-                            )
-                            self._unhide_backoff.record_failure(
-                                file_path, self._clock()
-                            )
-
-                logger.info(
-                    f"Branch transition complete: {content_points_created} content points created, {content_points_reused} content points reused"
-                )
-
-            # Clear pending changes as they might be from the old branch context
-            with self.change_lock:
-                self.pending_changes.clear()
-
-            self._record_transition_if_complete()
-            self._requeue_failed_changes(reindex_failed)
-
         except Exception as e:
-            logger.error(f"Failed to handle branch change: {e}")
-            self.watch_metadata.mark_processing_interrupted(f"Branch change error: {e}")
+            logger.warning(f"Failed to update metadata for {file_path}: {e}")
+            self._pending_unhides[file_path] = (
+                branch,
+                self._collection_of(self.smart_indexer),
+            )
+            self._unhide_backoff.record_failure(file_path, self._clock())
 
     def _retry_pending_unhides(self) -> None:
         now = self._clock()
-        for file_path, (branch, collection_name) in list(self._pending_unhides.items()):
+        for file_path, (branch, _collection) in list(self._pending_unhides.items()):
             # ^ hazard un-hiding a file gone from disk => its stale points return to search; the deletion path owns it
             if not (self.config.codebase_dir / file_path).exists():
                 logger.info(f"Dropping the owed un-hide of removed file {file_path}")
@@ -546,9 +847,11 @@ class GitAwareWatchHandler(FileSystemEventHandler):
             if not self._unhide_backoff.is_due(file_path, now):
                 continue
             try:
-                self.smart_indexer._ensure_file_visible_in_branch_thread_safe(
-                    file_path, branch, collection_name
-                )
+                # ^ why every collection, not the recorded one; an un-hide is idempotent and any provider's may have failed
+                for indexer in self.indexers:
+                    indexer._ensure_file_visible_in_branch_thread_safe(
+                        file_path, branch, self._collection_of(indexer)
+                    )
             except Exception as e:
                 logger.warning(f"Retrying the un-hide of {file_path} failed: {e}")
                 self._unhide_backoff.record_failure(file_path, now)

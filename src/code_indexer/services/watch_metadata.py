@@ -5,17 +5,26 @@ Provides resumable watch functionality with timestamp tracking, git state monito
 and crash recovery capabilities.
 """
 
+import contextlib
 import json
+import logging
+import os
+import tempfile
+import threading
 import time
 from pathlib import Path
-from typing import Dict, Any, Optional, List, Callable
+from typing import ClassVar, Dict, Any, Optional, List, Callable
 from datetime import datetime, timezone
 from dataclasses import dataclass, asdict
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
 class WatchMetadata:
     """Persistent metadata for resumable watch operations."""
+
+    _save_lock: ClassVar[threading.Lock] = threading.Lock()
 
     # Timestamp tracking
     last_sync_timestamp: float = 0.0
@@ -35,6 +44,7 @@ class WatchMetadata:
     files_being_processed: Optional[List[str]] = None
     processing_interrupted: bool = False
     last_error: Optional[str] = None
+    pending_branch_change: Optional[Dict[str, Any]] = None
 
     # Statistics
     total_files_processed: int = 0
@@ -48,26 +58,63 @@ class WatchMetadata:
 
     @classmethod
     def load_from_disk(cls, metadata_path: Path) -> "WatchMetadata":
-        """Load watch metadata from disk or create new instance."""
+        """Load watch metadata from disk or create new instance. An
+        unreadable file is moved aside and reported at ERROR: the work it
+        recorded as owed is unknown, so the session starts interrupted."""
         if metadata_path.exists():
             try:
                 with open(metadata_path, "r") as f:
                     data = json.load(f)
                     return cls(**data)
-            except (json.JSONDecodeError, IOError, TypeError) as e:
-                # Corrupt metadata, start fresh but log the issue
-                print(f"Warning: Corrupt watch metadata, starting fresh: {e}")
+            except (ValueError, OSError, TypeError) as e:
+                return cls._unreadable(metadata_path, e)
 
         return cls()
 
-    def save_to_disk(self, metadata_path: Path):
-        """Save watch metadata to disk."""
-        # Ensure parent directory exists
-        metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    @classmethod
+    def _unreadable(cls, metadata_path: Path, error: Exception) -> "WatchMetadata":
+        # ^ invariant one name per occurrence => an earlier set-aside record is never replaced
+        kept = metadata_path.with_name(
+            f"{metadata_path.name}.unreadable-{time.time_ns()}"
+        )
+        try:
+            os.replace(metadata_path, kept)
+        except OSError as move_error:
+            kept = metadata_path
+            logger.error(f"Could not set aside {metadata_path}: {move_error}")
+        logger.error(
+            f"Watch metadata {metadata_path} is unreadable ({error}); the changes "
+            f"it recorded as owed are unknown (kept at {kept}); run `cidx index` "
+            f"to reconcile the index with the working tree"
+        )
+        metadata = cls()
+        metadata.mark_processing_interrupted(
+            "watch metadata unreadable: owed work unknown; `cidx index` reconciles it"
+        )
+        return metadata
 
-        # Convert to dict and save
-        with open(metadata_path, "w") as f:
-            json.dump(asdict(self), f, indent=2)
+    def save_to_disk(self, metadata_path: Path):
+        """Save watch metadata atomically (temp file + fsync + replace),
+        one writer at a time: it carries the watch's owed work."""
+        metadata_path.parent.mkdir(parents=True, exist_ok=True)
+        # ^ invariant one save at a time, never in place => a reader or crash sees the old or the new record, never a torn one (#2093)
+        with WatchMetadata._save_lock:
+            payload = json.dumps(asdict(self), indent=2)
+            fd, temp_name = tempfile.mkstemp(
+                prefix=f".{metadata_path.name}.",
+                suffix=".tmp",
+                dir=metadata_path.parent,
+            )
+            try:
+                with os.fdopen(fd, "w") as f:
+                    f.write(payload)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(temp_name, metadata_path)
+            except BaseException:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(temp_name)
+                raise
 
     def start_watch_session(
         self,

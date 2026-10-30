@@ -11,7 +11,7 @@ import logging
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Optional, cast
+from typing import Dict, Any, Optional, Sequence, cast
 
 from code_indexer.daemon.watch_manager import DaemonWatchManager
 from code_indexer.config import ConfigManager
@@ -106,6 +106,23 @@ class AutoWatchManager:
             return watch_running
 
     def start_watch(
+        self,
+        repo_path: str,
+        timeout: Optional[int] = None,
+        changed_paths: Sequence[Path] = (),
+    ) -> Dict[str, Any]:
+        """Start watch mode with auto-stop timer (or reset it), then hand the
+        watch `changed_paths`: files just written, whose events a watch that
+        is only starting never sees (#2093)."""
+        result = self._start_or_reset_watch(repo_path, timeout)
+        if changed_paths and result.get("status") == "success":
+            with self._lock:
+                state = self._watch_state.get(repo_path)
+            if state is not None:
+                state["watch_instance"].queue_changes(list(changed_paths))
+        return result
+
+    def _start_or_reset_watch(
         self,
         repo_path: str,
         timeout: Optional[int] = None,
@@ -260,6 +277,7 @@ class AutoWatchManager:
                     watch_instance.start_watch(
                         project_path=repo_path,
                         config=config,
+                        server_watch=True,
                     ),
                 )
 

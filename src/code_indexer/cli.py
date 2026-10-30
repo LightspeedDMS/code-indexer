@@ -2771,53 +2771,10 @@ def show_global_config():
 
 
 def _get_provider_metadata_path(config_dir: Path, provider_name: str) -> Path:
-    """Return per-provider metadata path with backward-compat migration.
+    """See services/provider_metadata_path.py (shared with the server watch)."""
+    from .services.provider_metadata_path import provider_metadata_path
 
-    Returns config_dir / f"metadata-{provider_name}.json".
-
-    Migration for voyage-ai: if metadata-voyage-ai.json does not exist but
-    metadata.json does, the legacy file is copied (byte-for-byte) to the
-    provider path so existing incremental state is preserved. New
-    providers always receive a fresh metadata file, which forces a full
-    index on first use.
-
-    Bug #1624 (reverted): an earlier version of this migration normalized
-    a stale status=in_progress/failed recorded in the legacy file to
-    "completed" in the copy, on the theory that a frozen stale status
-    would otherwise force a reconcile forever once the status check
-    became provider-aware (Bug #1623). Code review rejected that as
-    actively dangerous -- `status` is the SOLE gate on
-    ProgressiveMetadata.can_resume_interrupted_operation(), which
-    SmartIndexer branches on to decide whether to resume an interrupted
-    index; normalizing it silently disabled that resume path while the
-    actual files_to_index/current_file_index/completed_files resume
-    payload was still copied over intact and now unused, causing files
-    that were mid-index at migration time to permanently never get
-    indexed while the metadata falsely claimed "completed" -- a silent
-    partial index. The premise was also false: complete_indexing()/
-    start_indexing() overwrite status on every single index run, so a
-    migrated stale status self-heals on the very next index run with no
-    special-casing needed here. The migration copy is therefore a plain,
-    unconditional byte-for-byte copy with no status manipulation.
-
-    Story #2121: resume-from-list is retired. A stored status of
-    in_progress/failed now routes the next run to a reconcile of the store
-    against disk (the stored list fields are dropped on load), so the copy
-    must still carry the status unchanged: normalizing it would skip that
-    recovery.
-    """
-    provider_metadata = config_dir / f"metadata-{provider_name}.json"
-    if provider_metadata.exists():
-        return provider_metadata
-
-    legacy_metadata = config_dir / "metadata.json"
-    if provider_name == "voyage-ai" and legacy_metadata.exists():
-        import shutil
-
-        shutil.copy2(str(legacy_metadata), str(provider_metadata))
-        return provider_metadata
-
-    return provider_metadata
+    return provider_metadata_path(config_dir, provider_name)
 
 
 def _install_embedding_stats_writer_for_index() -> None:

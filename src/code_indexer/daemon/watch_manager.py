@@ -8,7 +8,7 @@ import logging
 import threading
 import time
 from pathlib import Path
-from typing import Dict, Any, Optional, Union
+from typing import Dict, Any, List, Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +39,52 @@ class _WatchError:
     def get_stats(self) -> Dict[str, Any]:
         """Return error status."""
         return {"status": "error", "error": self.error}
+
+
+def _server_watch_indexers(
+    config: Any, project_root: Path, code_indexer_dir: Path
+) -> List[Any]:
+    """One SmartIndexer per configured provider that has an API key, the
+    primary first, each with the per-provider metadata file the server's
+    `cidx index` children write (#2093). Same provider selection as
+    `cidx index`: a provider without a key is skipped with a WARNING.
+
+    Raises:
+        ValueError: no configured provider has an API key.
+    """
+    from code_indexer.backends.backend_factory import BackendFactory
+    from code_indexer.services.embedding_factory import EmbeddingProviderFactory
+    from code_indexer.services.provider_metadata_path import provider_metadata_path
+    from code_indexer.services.smart_indexer import SmartIndexer
+
+    keyed: List[str] = []
+    for name in config.get_embedding_providers():
+        if EmbeddingProviderFactory.resolve_api_key(name) is None:
+            logger.warning(
+                f"Watch of {project_root} does not index provider {name}: no API "
+                f"key; its collection keeps what the last `cidx index` wrote"
+            )
+        else:
+            keyed.append(name)
+    if not keyed:
+        raise ValueError(
+            f"No configured embedding provider of {project_root} has an API key"
+        )
+    indexers: List[Any] = []
+    for position, name in enumerate(keyed):
+        # ^ invariant the primary keeps the handler's own config object; each other provider gets a copy so its provider choice never leaks
+        provider_config = config if position == 0 else config.model_copy(deep=True)
+        provider_config.embedding_provider = name
+        backend = BackendFactory.create(provider_config, project_root)
+        indexers.append(
+            SmartIndexer(
+                provider_config,
+                EmbeddingProviderFactory.create(config=provider_config),
+                backend.get_vector_store_client(),
+                provider_metadata_path(code_indexer_dir, name),
+            )
+        )
+    return indexers
 
 
 # Global sentinel instances
@@ -88,6 +134,17 @@ class DaemonWatchManager:
         self._lock = threading.Lock()  # Thread safety for state management
         self._stop_event = threading.Event()  # Signal to stop watch thread
         self._stopping: Optional[_StopInProgress] = None
+        self._early_changes: List[Path] = []
+
+    def queue_changes(self, paths: List[Path]) -> None:
+        """Hand the watch writes its observer may have missed; buffered
+        until the starting watch has its handler."""
+        with self._lock:
+            handler = self.watch_handler
+            if handler is None or isinstance(handler, (_WatchStarting, _WatchError)):
+                self._early_changes.extend(paths)
+                return
+        handler.queue_changes(paths)
 
     def is_running(self) -> bool:
         """Check if watch is currently running.
@@ -389,6 +446,9 @@ class DaemonWatchManager:
             # Store handler reference
             with self._lock:
                 self.watch_handler = handler
+                early, self._early_changes = self._early_changes, []
+            if early:
+                handler.queue_changes(early)
 
             # Start watching
             handler.start_watching()
@@ -486,23 +546,24 @@ class DaemonWatchManager:
             # create_with_backtrack() call.
             code_indexer_dir = Path(project_path).resolve() / ".code-indexer"
 
-            # Create embedding provider and vector store
-            embedding_provider = EmbeddingProviderFactory.create(config=config)
-            backend = BackendFactory.create(config, Path(project_path))
-            vector_store_client = backend.get_vector_store_client()
-
-            # Initialize SmartIndexer
-            # Bug #1979 (round 5 -- SUPERSEDED by the round-4 revert): bare
-            # legacy filename, matching daemon/service.py's own index path
-            # (also reverted back to the bare name). Round 4's coordinator
-            # ruling reverted the daemon-write per-provider filename
-            # entirely rather than propagate it to every reader (cidx
-            # status, foreground cidx watch, config_fixer); watch mode
-            # follows the SAME reverted convention here.
-            metadata_path = code_indexer_dir / "metadata.json"
-            smart_indexer = SmartIndexer(
-                config, embedding_provider, vector_store_client, metadata_path
-            )
+            server_watch = bool(kwargs.get("server_watch", False))
+            if server_watch:
+                indexers = _server_watch_indexers(
+                    config, Path(project_path), code_indexer_dir
+                )
+            else:
+                embedding_provider = EmbeddingProviderFactory.create(config=config)
+                backend = BackendFactory.create(config, Path(project_path))
+                # ^ see Bug #1979 round 4; the daemon's watch and index share the bare metadata.json
+                indexers = [
+                    SmartIndexer(
+                        config,
+                        embedding_provider,
+                        backend.get_vector_store_client(),
+                        code_indexer_dir / "metadata.json",
+                    )
+                ]
+            smart_indexer = indexers[0]
 
             debounce_seconds = kwargs.get("debounce_seconds", 2.0)
 
@@ -524,6 +585,9 @@ class DaemonWatchManager:
                 watch_metadata=watch_metadata,
                 debounce_seconds=debounce_seconds,
                 mutation_lock=mutation_lock,
+                extra_indexers=indexers[1:],
+                maintain_fts=server_watch,
+                hold_indexing_lock=server_watch,
             )
 
             logger.info(f"Git-aware watch handler created for {project_path}")

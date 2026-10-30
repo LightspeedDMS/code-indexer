@@ -309,6 +309,12 @@ class GitTopologyService:
             logger.warning(f"Failed to get merge base for {branch1}..{branch2}: {e}")
             return None
 
+    def files_changed_between(self, old_branch: str, new_branch: str) -> List[str]:
+        """Repository-relative paths that differ between the two branches,
+        including files the new branch removed (the branch analysis keeps
+        only files that still exist)."""
+        return self._get_changed_files(old_branch, new_branch)
+
     def _get_changed_files(self, old_branch: str, new_branch: str) -> List[str]:
         """Get files that changed between branches using efficient git diff.
 

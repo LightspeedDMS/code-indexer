@@ -105,7 +105,10 @@ def _is_write_mode_active(repo_alias: str, golden_repos_dir: Optional[str]) -> b
 
 
 def _start_auto_watch_if_needed(
-    repository_alias: str, user: User, error_code: str
+    repository_alias: str,
+    user: User,
+    error_code: str,
+    file_path: Optional[str] = None,
 ) -> None:
     """Start auto-watch for a repository unless write mode is active.
 
@@ -214,7 +217,13 @@ def _start_auto_watch_if_needed(
             None,
         )
         if not _is_write_mode_active(repository_alias, golden_repos_dir):
-            auto_watch_manager.start_watch(repo_path)
+            if file_path is None:
+                auto_watch_manager.start_watch(repo_path)
+            else:
+                # ^ hazard the write that starts a watch precedes its observer => never seen unless handed over (#2093)
+                auto_watch_manager.start_watch(
+                    repo_path, changed_paths=[Path(repo_path) / file_path]
+                )
     except Exception as e:
         logger.warning(
             format_error_log(
@@ -1260,7 +1269,9 @@ def handle_create_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             access_for=lambda served: _judge(repository_alias, served, user),
             pattern_writer=_pattern_writer(user),
         )
-        _start_auto_watch_if_needed(repository_alias, user, "MCP-GENERAL-041")
+        _start_auto_watch_if_needed(
+            repository_alias, user, "MCP-GENERAL-041", file_path
+        )
 
         _invalidate_wiki_cache(repository_alias, file_path)
         return _mcp_response(result)
@@ -1304,7 +1315,9 @@ def handle_edit_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             access_for=lambda served: _judge(repository_alias, served, user),
             pattern_writer=_pattern_writer(user),
         )
-        _start_auto_watch_if_needed(repository_alias, user, "MCP-GENERAL-046")
+        _start_auto_watch_if_needed(
+            repository_alias, user, "MCP-GENERAL-046", file_path
+        )
 
         _invalidate_wiki_cache(repository_alias, file_path)
         return _mcp_response(result)
@@ -1332,7 +1345,9 @@ def handle_delete_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             access_for=lambda served: _judge(repository_alias, served, user),
             pattern_writer=_pattern_writer(user),
         )
-        _start_auto_watch_if_needed(repository_alias, user, "MCP-GENERAL-052")
+        _start_auto_watch_if_needed(
+            repository_alias, user, "MCP-GENERAL-052", file_path
+        )
 
         _invalidate_wiki_cache(repository_alias, file_path)
         return _mcp_response(result)

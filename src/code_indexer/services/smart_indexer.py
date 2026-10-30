@@ -1213,6 +1213,28 @@ class SmartIndexer(HighThroughputProcessor):
         )
         return True
 
+    def publish_owed_hnsw(self) -> bool:
+        """Publish every collection of this indexer whose HNSW publish is
+        owed (a watch cycle only marks it, #2093). Embeds nothing. Returns
+        whether anything was published."""
+        from ..config import COHERE_MULTIMODAL_MODEL, VOYAGE_MULTIMODAL_MODEL
+
+        store = self.vector_store_client
+        published = self._republish_owed_hnsw_publish(None)
+        # ^ why unfiltered, not branch-filtered, for non-git and multimodal; _finalize_indexing_session gives them no branch context either
+        owed_plain: List[str] = [VOYAGE_MULTIMODAL_MODEL, COHERE_MULTIMODAL_MODEL]
+        if not self.git_topology_service.is_git_available():
+            owed_plain.insert(
+                0, store.resolve_collection_name(self.config, self.embedding_provider)
+            )
+        for collection_name in owed_plain:
+            if store.collection_exists(collection_name) and store.hnsw_publish_pending(
+                collection_name
+            ):
+                self._publish_in_session(collection_name, None, None)
+                published = True
+        return published
+
     # ^ coupled with _do_reconcile_with_database preserved_outside_root; both publishes keep the same outside-root paths
     def _preserved_outside_root_paths(
         self, collection_name: str, current_branch: str
