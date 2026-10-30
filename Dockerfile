@@ -57,7 +57,7 @@ ENV PYTHONUNBUFFERED=1 \
 #    (still common) only supports Java <=17 (Java 21 -> "Unsupported class file
 #    major version 65"), and Java 17 also runs Gradle 8.x and scip-java itself.
 #  - JDK 21 (Temurin, tarball at /opt/jdk-21) is available as a Gradle TOOLCHAIN
-#    for projects that compile at languageVersion=21 (e.g. the Evolution
+#    for projects that compile at languageVersion=21 (e.g. a large Java
 #    monolith). Gradle launched with 17 picks 21 up via installations.paths
 #    (set in the cidx user's gradle.properties below).
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -108,7 +108,7 @@ WORKDIR /home/cidx
 #    projects requiring languageVersion=21 compile without "No matching toolchains".
 #  - init.d repositoriesMode=PREFER_PROJECT: let scip-java's SemanticdbGradlePlugin
 #    add its own repository (to fetch semanticdb-javac) on projects that set
-#    dependencyResolutionManagement FAIL_ON_PROJECT_REPOS (e.g. Evolution). cidx
+#    dependencyResolutionManagement FAIL_ON_PROJECT_REPOS (common in large builds). cidx
 #    only runs Gradle for SCIP indexing, so relaxing this globally is safe.
 RUN mkdir -p /home/cidx/.gradle/init.d \
     && printf 'org.gradle.java.installations.paths=/opt/jdk-21\n' \

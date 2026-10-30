@@ -90,10 +90,10 @@ class AdmissionController:
 
 
 class PerConsumerRateLimiter:
-    """Per-consumer token-bucket rate limiter (dealer-wide fairness).
+    """Per-consumer token-bucket rate limiter (tenant-wide fairness).
 
     The global :class:`AdmissionController` cap is fleet-wide: one abusive client
-    (e.g. a single dealer hammering the support agent) can consume every in-flight
+    (e.g. a single tenant flooding the support agent) can consume every in-flight
     slot and get everyone else shed. This limiter throttles each caller
     INDIVIDUALLY, keyed by a hash of its presented credential. It reuses the
     tested ``TokenBucketManager`` (auth/token_bucket) — ``capacity`` is the

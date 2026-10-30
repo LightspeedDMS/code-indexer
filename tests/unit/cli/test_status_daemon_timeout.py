@@ -19,7 +19,7 @@ class TestStatusDaemonTimeout:
     def test_status_command_timeout_when_daemon_not_running(self):
         """Test that status doesn't hang when daemon enabled but not running.
 
-        This test reproduces the evolution repository issue:
+        This test reproduces the large repository issue:
         - daemon.enabled=true in config
         - Stale socket file exists but daemon is not running
         - cidx status should timeout and fallback, not hang indefinitely
@@ -113,7 +113,7 @@ class TestStatusDaemonTimeout:
                         # Cancel alarm
                         signal.alarm(0)
                         pytest.fail(
-                            f"TEST FAILURE: {e} - This reproduces the evolution hang bug!"
+                            f"TEST FAILURE: {e} - This reproduces the large-repository hang bug!"
                         )
 
     def test_connect_to_daemon_timeout_on_missing_socket(self):

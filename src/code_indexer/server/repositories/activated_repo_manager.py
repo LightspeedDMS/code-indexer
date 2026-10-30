@@ -223,7 +223,7 @@ class ActivatedRepoManager:
     # Bug #1285: fallback CoW clone timeout (seconds) used only when
     # golden_repo_manager.resource_config is unavailable. Kept in sync with
     # ServerResourceConfig.cow_clone_timeout (1 hour, sized for very large
-    # repos e.g. evolution ~1M files, phoenix 40GB). Real deployments always
+    # repos e.g. a ~1M-file repository, a 40 GB repository). Real deployments always
     # have resource_config wired, so this is defense-in-depth, never the
     # primary source of truth.
     _COW_CLONE_TIMEOUT_DEFAULT: int = 3600  # 1 hour
@@ -3867,7 +3867,7 @@ class ActivatedRepoManager:
             # from the same resource_config.cow_clone_timeout knob
             # GoldenRepoManager already uses for its own CoW operations
             # (default 3600s / 1 hour, sized for very large repos e.g.
-            # evolution ~1M files, phoenix 40GB) instead of a fixed low
+            # a ~1M-file repository, a 40 GB repository) instead of a fixed low
             # literal.
             rc = getattr(self.golden_repo_manager, "resource_config", None)
             clone_timeout = (

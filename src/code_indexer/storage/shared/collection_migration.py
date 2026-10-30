@@ -849,7 +849,7 @@ def _cross_check_manifest_count(
     safety net, and it is structurally VACUOUS when ``manifest_keys`` is
     empty: an empty manifest bypasses the whole check, so a
     corrupt-but-substantial chunks.db would be silently "rebuilt" as
-    empty (the confirmed ``evolution`` incident). A NON-empty manifest
+    empty (a confirmed production incident). A NON-empty manifest
     is still checked against legacy presence (recoverable when every
     record's source survives, unrecoverable otherwise), so it needs no
     extra guard. Therefore, when this flag is set, the manifest is empty
@@ -1298,7 +1298,7 @@ class UnrecoverableConsolidationCorruptionError(Exception):
 
     This is PERMANENT, UNRECOVERABLE data loss for those records --
     retrying the exact same migration attempt can never succeed (this is
-    the confirmed real-world incident: the ``evolution`` golden repo was
+    the confirmed real-world incident: a large golden repo was
     retried on every single scheduler tick, 481 consecutive failures,
     because nothing distinguished this terminal state from an ordinary
     retryable verification failure).
@@ -1764,8 +1764,8 @@ def _handle_corrupt_chunks_db_on_resume(
     one record's ONLY source was inside the now-untrustworthy
     chunks.db, and its legacy source is already gone) -- never
     conflates the two, and never silently loops forever on the
-    unrecoverable case (this is the confirmed real-world incident: the
-    ``evolution`` golden repo was retried on every single scheduler
+    unrecoverable case (this is the confirmed real-world incident: a
+    large golden repo was retried on every single scheduler
     tick, 481 consecutive failures, for exactly this reason).
 
     Returns normally (having discarded and fully rebuilt chunks.db, with
