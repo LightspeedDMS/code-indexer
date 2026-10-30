@@ -48,6 +48,7 @@ from pydantic import BaseModel
 
 from .golden_repo_manager import GoldenRepoManager, GoldenRepoError
 from .background_jobs import BackgroundJobManager
+from .watch_leftover import remove_watch_leftover
 from ..services.committer_resolution_service import CommitterResolutionService
 from ..services.deactivation_query_drain import wait_for_activated_repo_query_drain
 from ..services.job_tracker import DuplicateJobError
@@ -2665,6 +2666,9 @@ class ActivatedRepoManager:
             # The CoW daemon (a different OS user, reached via the service
             # group) must be able to create the clone inside this directory.
             ensure_activated_user_dir(user_dir)
+            # ^ security registry row present => never removed; a live repo's directory is not a leftover (#2323)
+            if self._load_metadata(username, user_alias) is None:
+                remove_watch_leftover(Path(activated_repo_path), user_alias)
 
             update_progress(30, "Creating user directory structure")
 
@@ -2915,7 +2919,17 @@ class ActivatedRepoManager:
         Returns:
             Result dictionary with success status and message including resource cleanup details
         """
+        from code_indexer.server.services.auto_watch_manager import (
+            auto_watch_manager,
+        )
+
+        watch_key: Optional[str] = None
         try:
+            # ^ coupled path key with mcp/handlers/files.py:_start_auto_watch_if_needed; both use get_activated_repo_path
+            watch_key = self.get_activated_repo_path(username, user_alias)
+            # ^ order watch exited before any removal below; a live cycle recreates the workspace (#2323)
+            auto_watch_manager.stop_watch_for_removal(watch_key)
+
             # Load metadata to determine repository type
             metadata = self._load_metadata(username, user_alias)
 
@@ -3007,6 +3021,9 @@ class ActivatedRepoManager:
             )
 
             raise ActivatedRepoError(error_msg)
+        finally:
+            if watch_key is not None:
+                auto_watch_manager.finish_removal(watch_key)
 
     def _do_deactivate_single(
         self, username: str, user_alias: str, metadata: Dict[str, Any]

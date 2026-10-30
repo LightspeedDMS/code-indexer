@@ -93,10 +93,12 @@ class WatchMetadata:
         )
         return metadata
 
-    def save_to_disk(self, metadata_path: Path):
+    def save_to_disk(self, metadata_path: Path, create_parents: bool = True):
         """Save watch metadata atomically (temp file + fsync + replace),
-        one writer at a time: it carries the watch's owed work."""
-        metadata_path.parent.mkdir(parents=True, exist_ok=True)
+        one writer at a time: it carries the watch's owed work.
+        create_parents=False never creates the metadata directory's parent
+        (raises FileNotFoundError instead)."""
+        metadata_path.parent.mkdir(parents=create_parents, exist_ok=True)
         # ^ invariant one save at a time, never in place => a reader or crash sees the old or the new record, never a torn one (#2093)
         with WatchMetadata._save_lock:
             payload = json.dumps(asdict(self), indent=2)

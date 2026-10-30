@@ -32,7 +32,7 @@ class _FakeStats:
     files_processed = 1
 
 
-def _make_handler(smart_indexer, mutation_lock=None):
+def _make_handler(smart_indexer, root: Path, mutation_lock=None):
     """Build a real GitAwareWatchHandler with only non-core dependencies stubbed.
 
     `config` and `git_topology_service` are unrelated to the mutation-lock
@@ -45,7 +45,8 @@ def _make_handler(smart_indexer, mutation_lock=None):
     from code_indexer.services.watch_metadata import WatchMetadata
 
     config = MagicMock()
-    config.codebase_dir = Path("/fake/repo")
+    # ^ hazard a nonexistent root => the handler reads its workspace as removed and runs no cycle (#2323)
+    config.codebase_dir = root
     config.file_extensions = ["py"]
 
     git_topology = MagicMock()
@@ -63,7 +64,9 @@ def _make_handler(smart_indexer, mutation_lock=None):
     return handler
 
 
-def test_process_pending_changes_holds_injected_mutation_lock_across_cycle():
+def test_process_pending_changes_holds_injected_mutation_lock_across_cycle(
+    tmp_path: Path,
+):
     """A concurrent thread must NOT acquire the SAME injected mutation lock
     while a per-event mutation cycle (_process_pending_changes) is running."""
     lock = threading.RLock()
@@ -77,7 +80,7 @@ def test_process_pending_changes_holds_injected_mutation_lock_across_cycle():
             release_gate.wait(timeout=5)
             return _FakeStats()
 
-    handler = _make_handler(_BlockingSmartIndexer(), mutation_lock=lock)
+    handler = _make_handler(_BlockingSmartIndexer(), tmp_path, mutation_lock=lock)
     handler.pending_changes.add(handler.config.codebase_dir / "some_file.py")
 
     t = threading.Thread(target=handler._process_pending_changes)
@@ -102,7 +105,9 @@ def test_process_pending_changes_holds_injected_mutation_lock_across_cycle():
     lock.release()
 
 
-def test_process_pending_changes_without_injected_lock_is_unaffected():
+def test_process_pending_changes_without_injected_lock_is_unaffected(
+    tmp_path: Path,
+):
     """A handler constructed WITHOUT an injected lock (standalone `cidx watch`)
     must run its mutation cycle unaffected -- byte-identical to before."""
     entered = threading.Event()
@@ -112,7 +117,7 @@ def test_process_pending_changes_without_injected_lock_is_unaffected():
             entered.set()
             return _FakeStats()
 
-    handler = _make_handler(_ImmediateSmartIndexer(), mutation_lock=None)
+    handler = _make_handler(_ImmediateSmartIndexer(), tmp_path, mutation_lock=None)
     handler.pending_changes.add(handler.config.codebase_dir / "some_file.py")
 
     handler._process_pending_changes()

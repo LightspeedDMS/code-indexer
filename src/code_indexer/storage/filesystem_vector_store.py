@@ -6764,6 +6764,14 @@ class FilesystemVectorStore:
             # Get point IDs for the requested path (copy under lock for safety)
             with self._path_index_lock:
                 target_ids = path_index.get_point_ids(target_path)
+            fast_path_collection = self._get_collection_path(
+                collection_name, subdirectory
+            )
+            if self._is_chunks_db_collection(collection_name, fast_path_collection):
+                # ^ hazard trusting the cached PathIndex here => a long-lived watch fails closed on ids another worker removed (#2324)
+                target_ids = self._stored_point_ids_by_path(
+                    fast_path_collection, [target_path]
+                ).get(target_path, set())
 
             # MEDIUM fix (Codex, Messi #13): the PathIndex is used ONLY to
             # obtain candidate ids. Evaluate the COMPLETE ORIGINAL filter (every

@@ -104,11 +104,13 @@ class _StopInProgress:
         handler: Optional[Any],
         project_path: Optional[str],
         stats: Dict[str, Any],
+        discard: bool = False,
     ):
         self.thread = thread
         self.handler = handler
         self.project_path = project_path
         self.stats = stats
+        self.discard = discard
         self.done = threading.Event()
         self.result: Dict[str, Any] = {
             "status": "error",
@@ -134,6 +136,7 @@ class DaemonWatchManager:
         self._lock = threading.Lock()  # Thread safety for state management
         self._stop_event = threading.Event()  # Signal to stop watch thread
         self._stopping: Optional[_StopInProgress] = None
+        self._discard_requested = False
         self._early_changes: List[Path] = []
 
     def queue_changes(self, paths: List[Path]) -> None:
@@ -230,8 +233,9 @@ class DaemonWatchManager:
             logger.info(f"Watch started in background for project: {project_path}")
             return {"status": "success", "message": "Watch started in background"}
 
-    def stop_watch(self) -> Dict[str, Any]:
-        """Stop watch mode gracefully.
+    def stop_watch(self, discard: bool = False) -> Dict[str, Any]:
+        """Stop watch mode gracefully. discard=True (the workspace is being
+        removed): no new work, and return only once the watch has exited.
 
         Returns:
             Status dictionary with success/error status, message, and statistics
@@ -245,7 +249,7 @@ class DaemonWatchManager:
                 # ^ ord done is set before _stopping clears: seen.result is final
                 return dict(seen.result)
             if pending is None:
-                begun = self._begin_stop_locked()
+                begun = self._begin_stop_locked(discard)
                 if not isinstance(begun, _StopInProgress):
                     return begun
                 self._stopping = owned = begun
@@ -268,6 +272,14 @@ class DaemonWatchManager:
     def _finish_stop(self, stop: _StopInProgress) -> Dict[str, Any]:
         """Join the stopped watch thread, then clear its state."""
         try:
+            if stop.discard:
+                if stop.handler is not None and not isinstance(
+                    stop.handler, (_WatchStarting, _WatchError)
+                ):
+                    stop.handler.stop_watching(discard=True)
+                if stop.thread is not None:
+                    # ^ invariant finite: the thread leaves its loop within 1 s of _stop_event, or right after constructing its handler
+                    stop.thread.join()
             # ^ inv join outside _lock: the worker's exit path takes _lock
             if stop.thread is not None and stop.thread.is_alive():
                 stop.thread.join(timeout=_STOP_JOIN_TIMEOUT_SECONDS)
@@ -298,9 +310,12 @@ class DaemonWatchManager:
                 stop.done.set()
                 self._stopping = None
 
-    def _begin_stop_locked(self) -> Union[_StopInProgress, Dict[str, Any]]:
+    def _begin_stop_locked(
+        self, discard: bool = False
+    ) -> Union[_StopInProgress, Dict[str, Any]]:
         """Signal the watch to stop and stop its handler (caller holds
-        _lock). Returns the stop to finish, or an error result."""
+        _lock); a discard only flags it. Returns the stop to finish, or an
+        error result."""
         # Bug #1717: a _WatchError sentinel means the previous start
         # attempt's construction FAILED -- nothing ever actually
         # started, and the sentinel has no stop_watching() method.
@@ -340,6 +355,7 @@ class DaemonWatchManager:
                 logger.error(f"Failed to get watch stats: {e}")
 
         # Signal stop
+        self._discard_requested = discard
         self._stop_event.set()
 
         # Stop the watch handler
@@ -347,12 +363,16 @@ class DaemonWatchManager:
             self.watch_handler, (_WatchStarting, _WatchError)
         ):
             try:
-                self.watch_handler.stop_watching()
+                if discard:
+                    # ^ why flag only, not stop here; the discard waits for the cycle, never under _lock
+                    self.watch_handler.request_discard()
+                else:
+                    self.watch_handler.stop_watching()
             except Exception as e:
                 logger.error(f"Error stopping watch handler: {e}")
 
         return _StopInProgress(
-            self.watch_thread, self.watch_handler, self.project_path, stats
+            self.watch_thread, self.watch_handler, self.project_path, stats, discard
         )
 
     def get_stats(self) -> Dict[str, Any]:
@@ -447,8 +467,16 @@ class DaemonWatchManager:
             with self._lock:
                 self.watch_handler = handler
                 early, self._early_changes = self._early_changes, []
+                stopped, discard = self._stop_event.is_set(), self._discard_requested
             if early:
                 handler.queue_changes(early)
+            if stopped:
+                # ^ invariant a handler built after the stop began never starts; a plain stop still drains its early changes (#2093)
+                if discard:
+                    handler.request_discard()
+                else:
+                    handler.stop_watching()
+                return
 
             # Start watching
             handler.start_watching()

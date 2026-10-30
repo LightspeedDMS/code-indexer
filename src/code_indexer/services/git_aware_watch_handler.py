@@ -6,6 +6,7 @@ but with continuous watching capabilities.
 """
 
 import logging
+import os
 import time
 import threading
 from contextlib import contextmanager, nullcontext
@@ -51,9 +52,21 @@ HNSW_PUBLISH_MAX_DELAY_SECONDS = 30.0
 HNSW_PUBLISH_IDLE_FACTOR = 4.0
 # ^ invariant a busy processing thread outlives this join and drains itself; see _process_changes_loop
 STOP_JOIN_SECONDS = 5.0
+_OBSERVER_JOIN_SECONDS = 5.0
 _TRANSITION_KEY = "transition"
 
 _Key = TypeVar("_Key", bound=Hashable)
+
+
+_stat_workspace: Callable[[Path], os.stat_result] = os.stat
+
+
+def _directory_identity(path: Path) -> Optional[Tuple[int, int]]:
+    try:
+        stat = _stat_workspace(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    return (stat.st_dev, stat.st_ino)
 
 
 def hnsw_publish_due(
@@ -186,10 +199,57 @@ class GitAwareWatchHandler(FileSystemEventHandler):
         self._change_generation = 0
         self._queued_at: Dict[Path, int] = {}
         self._branch_backoff: _RetryBackoff[str] = _RetryBackoff(debounce_seconds)
+        self._workspace_identity = _directory_identity(Path(config.codebase_dir))
+        self._workspace_removal_logged = False
+        self._workspace_probe_failing = False
+        self._discarding = threading.Event()
+
+    def request_discard(self) -> None:
+        """The workspace is being removed: no new cycle, publish, drain or
+        metadata write from now on."""
+        self._discarding.set()
+        self._stop_processing.set()
+
+    def _workspace_removed(self) -> bool:
+        try:
+            stat = _stat_workspace(Path(self.config.codebase_dir))
+        except (FileNotFoundError, NotADirectoryError):
+            removed = True
+        except OSError as e:
+            # ^ invariant ESTALE/EIO = cannot tell this cycle; never removal, probed again next cycle (#2323)
+            if not self._workspace_probe_failing:
+                self._workspace_probe_failing = True
+                logger.warning(
+                    f"Watch of {self.config.codebase_dir} cannot check its workspace: {e}"
+                )
+            return False
+        else:
+            self._workspace_probe_failing = False
+            identity = (stat.st_dev, stat.st_ino)
+            with self.change_lock:
+                recorded = self._workspace_identity
+                if recorded is None or recorded[0] != identity[0]:
+                    # ^ invariant another st_dev = a remount of the same storage, not removal; the identity is re-recorded
+                    self._workspace_identity = identity
+                    removed = False
+                else:
+                    # ^ invariant same st_dev + another inode at the same path = a re-activated workspace, never this watch's
+                    removed = recorded[1] != identity[1]
+        with self.change_lock:
+            first_report = removed and not self._workspace_removal_logged
+            self._workspace_removal_logged |= removed
+        if first_report:
+            logger.info(
+                f"Watch of {self.config.codebase_dir} stops: its workspace was "
+                f"removed; nothing more is indexed or written"
+            )
+        return removed
 
     def start_watching(self):
         """Start the git-aware watch process."""
         logger.info("Starting git-aware watch handler")
+        if self._discarding.is_set():
+            return
 
         # Reset stop event
         self._stop_processing.clear()
@@ -252,23 +312,23 @@ class GitAwareWatchHandler(FileSystemEventHandler):
                 "new_commit": current[1],
             }
 
-    def stop_watching(self):
-        """Stop the git-aware watch process."""
+    def stop_watching(self, discard: bool = False):
+        """Stop the git-aware watch process. discard=True (the workspace is
+        being removed) does no new work and returns only once the processing
+        thread has exited."""
         logger.info("Stopping git-aware watch handler")
 
         # Signal processing thread to stop
+        if discard:
+            self.request_discard()
         self._stop_processing.set()
+        self._stop_observing()
 
-        # Stop Observer if running
-        if self.observer and self.observer.is_alive():
-            self.observer.stop()
-            self.observer.join(timeout=5.0)
-            logger.info("File system observer stopped")
-
-        # Stop git monitoring
-        self.git_monitor.stop_monitoring()
-
-        if self.processing_thread is None:
+        if discard:
+            if self.processing_thread is not None:
+                # ^ invariant finite wait, no clock (#1218): the in-flight cycle ends, then every step returns at once
+                self.processing_thread.join()
+        elif self.processing_thread is None:
             self._drain_on_stop()
         else:
             # ^ invariant the processing thread drains on exit (_process_changes_loop); a bounded join, never a clock on its indexing (#1218)
@@ -283,15 +343,28 @@ class GitAwareWatchHandler(FileSystemEventHandler):
 
         logger.info("Git-aware watch handler stopped")
 
+    def _stop_observing(self) -> None:
+        if self.observer and self.observer.is_alive():
+            self.observer.stop()
+            self.observer.join(timeout=_OBSERVER_JOIN_SECONDS)
+            logger.info("File system observer stopped")
+        self.git_monitor.stop_monitoring()
+
     def _drain_on_stop(self) -> None:
         """The watch's last work: process every queued and retry-scheduled
         change and publish, then durably record whatever is still owed."""
-        self._process_pending_changes(final_cleanup=True)
-        self._persist_owed_changes(set())
+        if self._discarding.is_set():
+            return
+        try:
+            self._process_pending_changes(final_cleanup=True)
+        finally:
+            self._persist_owed_changes(set())
 
     def _persist_owed_changes(self, extra: Set[Path]) -> None:
         """Record in watch_metadata.json the changes this watch has not
         indexed (the next watch start re-queues them), or clear the record."""
+        if self._discarding.is_set() or self._workspace_removed():
+            return
         with self.change_lock:
             owed = set(self.pending_changes) | extra
         owed |= self._change_backoff.scheduled()
@@ -306,9 +379,14 @@ class GitAwareWatchHandler(FileSystemEventHandler):
             )
         try:
             self.watch_metadata.save_to_disk(
-                Path(self.config.codebase_dir) / ".code-indexer" / "watch_metadata.json"
+                Path(self.config.codebase_dir)
+                / ".code-indexer"
+                / "watch_metadata.json",
+                create_parents=False,
             )
         except OSError as e:
+            if self._workspace_removed():
+                return
             logger.error(f"Could not record the watch's owed changes: {e}")
 
     def on_modified(self, event):
@@ -439,7 +517,11 @@ class GitAwareWatchHandler(FileSystemEventHandler):
         try:
             self._run_changes_loop()
         finally:
-            self._drain_on_stop()
+            try:
+                self._drain_on_stop()
+            finally:
+                # ^ invariant always: whatever the drain or the workspace probe did, the observer never outlives this thread
+                self._stop_observing()
 
     def _run_changes_loop(self) -> None:
         while not self._stop_processing.is_set():
@@ -447,6 +529,10 @@ class GitAwareWatchHandler(FileSystemEventHandler):
                 # Use wait instead of sleep to be interruptible
                 if self._stop_processing.wait(timeout=self.debounce_seconds):
                     break  # Stop signal received
+
+                # ^ order before the git check; a removed repository reads as a branch change (#2323)
+                if self._workspace_removed():
+                    break
 
                 # Check for git state changes before processing files
                 git_change = self.git_monitor.check_for_changes()
@@ -469,6 +555,8 @@ class GitAwareWatchHandler(FileSystemEventHandler):
 
     def _process_pending_changes(self, final_cleanup: bool = False):
         """Process all pending file changes using git-aware indexing."""
+        if self._discarding.is_set():
+            return
         if (
             self._deferred_branch_change is not None
             and not self.processing_in_progress
@@ -501,6 +589,8 @@ class GitAwareWatchHandler(FileSystemEventHandler):
             and self._publish_owed_since is None
         ):
             return
+        if self._workspace_removed():
+            return
 
         self.processing_in_progress = True
         try:
@@ -519,9 +609,15 @@ class GitAwareWatchHandler(FileSystemEventHandler):
         if not self._hold_indexing_lock:
             yield True
             return
+        if self._workspace_removed():
+            yield False
+            return
         from .indexing_lock import IndexingLockError, create_indexing_lock
 
-        lock = create_indexing_lock(Path(self.config.codebase_dir) / ".code-indexer")
+        # ^ hazard create_parents=True => a lock taken after deactivation recreates the workspace (#2323)
+        lock = create_indexing_lock(
+            Path(self.config.codebase_dir) / ".code-indexer", create_parents=False
+        )
         try:
             lock.acquire(str(self.config.codebase_dir))
         except IndexingLockError as e:
@@ -680,6 +776,8 @@ class GitAwareWatchHandler(FileSystemEventHandler):
         watch runs (hnsw_publish_due), always on its final cleanup. A failed
         publish stays owed; the durable pending signal also makes the next
         `cidx index` publish it."""
+        if self._discarding.is_set():
+            return
         owed_since = self._publish_owed_since
         start = self._clock()
         if not final_cleanup:
@@ -869,11 +967,13 @@ class GitAwareWatchHandler(FileSystemEventHandler):
                 "retried next cycle"
             )
             return
+        if self._workspace_removed():
+            return
         self.watch_metadata.update_git_state(*self._pending_git_state)
         metadata_path = (
             self.config.codebase_dir / ".code-indexer" / "watch_metadata.json"
         )
-        self.watch_metadata.save_to_disk(metadata_path)
+        self.watch_metadata.save_to_disk(metadata_path, create_parents=False)
         self._pending_git_state = None
 
     @staticmethod

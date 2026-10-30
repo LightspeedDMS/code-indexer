@@ -9,9 +9,10 @@ from code_indexer.server.middleware.correlation import get_correlation_id
 
 import logging
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Optional, Sequence, cast
+from typing import Callable, Dict, Any, Optional, Sequence, Set, cast
 
 from code_indexer.daemon.watch_manager import DaemonWatchManager
 from code_indexer.config import ConfigManager
@@ -48,6 +49,10 @@ class AutoWatchManager:
         self.auto_watch_enabled = auto_watch_enabled
         self.default_timeout = default_timeout
         self._watch_state: Dict[str, Dict[str, Any]] = {}
+        self._clock: Callable[[], float] = time.monotonic
+        self._failed_start_at: Dict[str, float] = {}
+        self._owed_writes: Dict[str, Set[Path]] = {}
+        self._removing: Set[str] = set()
         self._lock = threading.RLock()  # Use RLock to allow reentrant calls
         self._shutdown_event = threading.Event()
 
@@ -100,10 +105,12 @@ class AutoWatchManager:
         with self._lock:
             if repo_path not in self._watch_state:
                 return False
-            watch_running: bool = self._watch_state[repo_path].get(
-                "watch_running", False
+            state = self._watch_state[repo_path]
+            # ^ hazard trusting watch_running alone => a watch that stopped itself (workspace removed) only gets its timeout reset (#2323)
+            return bool(
+                state.get("watch_running", False)
+                and state["watch_instance"].is_running()
             )
-            return watch_running
 
     def start_watch(
         self,
@@ -114,13 +121,59 @@ class AutoWatchManager:
         """Start watch mode with auto-stop timer (or reset it), then hand the
         watch `changed_paths`: files just written, whose events a watch that
         is only starting never sees (#2093)."""
-        result = self._start_or_reset_watch(repo_path, timeout)
-        if changed_paths and result.get("status") == "success":
-            with self._lock:
+        with self._lock:
+            if repo_path in self._removing:
+                return {
+                    "status": "error",
+                    "message": "Workspace is being deactivated; no watch started",
+                }
+            self._prune_failed_starts()
+            result = self._refuse_recently_failed_start(repo_path, timeout)
+            if result is None:
+                result = self._start_or_reset_watch(repo_path, timeout)
+                if result.get("status") == "success":
+                    self._failed_start_at.pop(repo_path, None)
+                elif result.get("status") == "error":
+                    self._failed_start_at[repo_path] = self._clock()
+            if result.get("status") == "success":
+                changes = self._owed_writes.pop(repo_path, set()) | set(changed_paths)
                 state = self._watch_state.get(repo_path)
-            if state is not None:
-                state["watch_instance"].queue_changes(list(changed_paths))
+            else:
+                # ^ invariant a write whose watch could not start is handed to the next start that succeeds (#2324)
+                if changed_paths:
+                    self._owed_writes.setdefault(repo_path, set()).update(changed_paths)
+                changes, state = set(), None
+        if changes and state is not None:
+            state["watch_instance"].queue_changes(sorted(changes))
         return result
+
+    def _prune_failed_starts(self) -> None:
+        now = self._clock()
+        for path, failed_at in list(self._failed_start_at.items()):
+            if now - failed_at >= self.default_timeout:
+                del self._failed_start_at[path]
+
+    def _refuse_recently_failed_start(
+        self, repo_path: str, timeout: Optional[int]
+    ) -> Optional[Dict[str, Any]]:
+        state = self._watch_state.get(repo_path)
+        if (
+            state is not None
+            and state["watch_instance"].get_stats().get("status") == "error"
+        ):
+            # ^ invariant a watch whose construction failed in its thread counts as failed at its start
+            self._failed_start_at[repo_path] = state["started_at"]
+            del self._watch_state[repo_path]
+        failed_at = self._failed_start_at.get(repo_path)
+        window = timeout if timeout is not None else self.default_timeout
+        if failed_at is None or self._clock() - failed_at >= window:
+            return None
+        # ^ why DEBUG, not the start ERROR again; one ERROR per attempt, at most one attempt per idle-timeout window (#2324)
+        logger.debug(f"Watch start for {repo_path} failed recently; next try later")
+        return {
+            "status": "error",
+            "message": f"Watch start failed recently; retried after {window}s",
+        }
 
     def _start_or_reset_watch(
         self,
@@ -293,6 +346,7 @@ class AutoWatchManager:
                 # Track watch state
                 self._watch_state[repo_path] = {
                     "watch_running": True,
+                    "started_at": self._clock(),
                     "last_activity": datetime.now(),
                     "timeout_seconds": timeout_seconds,
                     "watch_instance": watch_instance,
@@ -370,6 +424,33 @@ class AutoWatchManager:
                     "status": "error",
                     "message": f"Failed to stop watch: {str(e)}",
                 }
+
+    def stop_watch_for_removal(self, repo_path: str) -> None:
+        """The workspace is about to be removed: refuse new watches for it
+        until finish_removal, and stop this process's watch, waiting until it
+        has exited; it does no new work. Silent when there is no watch."""
+        with self._lock:
+            self._removing.add(repo_path)
+            self._failed_start_at.pop(repo_path, None)
+            self._owed_writes.pop(repo_path, None)
+            state = self._watch_state.pop(repo_path, None)
+        # ^ hazard asking a self-stopped instance to stop => DaemonWatchManager logs a WARNING the log audit fails on
+        if state is None or not state["watch_instance"].is_running():
+            return
+        # ^ order outside _lock => other workspaces' writes never wait on this cycle; _removing keeps this one from restarting
+        # ^ invariant a watch in ANOTHER worker or node cannot be waited for; its _workspace_removed check stops it between cycles (#2324)
+        result = state["watch_instance"].stop_watch(discard=True)
+        if result.get("status") != "success":
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-070",
+                    f"Stopping the watch of {repo_path} before removal: {result}",
+                )
+            )
+
+    def finish_removal(self, repo_path: str) -> None:
+        with self._lock:
+            self._removing.discard(repo_path)
 
     def reset_timeout(self, repo_path: str) -> Dict[str, Any]:
         """

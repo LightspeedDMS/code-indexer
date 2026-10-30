@@ -36,6 +36,7 @@ class IndexingLock:
         metadata_dir: Path,
         heartbeat_interval: float = 30.0,
         timeout: float = 300.0,
+        create_parents: bool = True,
     ):
         """
         Initialize the indexing lock.
@@ -49,6 +50,7 @@ class IndexingLock:
         self.heartbeat_interval = heartbeat_interval
         self.timeout = timeout
         self.heartbeat_path = metadata_dir / "indexing_heartbeat.json"
+        self.create_parents = create_parents
         self.lock_acquired = False
         self.heartbeat_thread: Optional[threading.Thread] = None
         self.stop_heartbeat = threading.Event()
@@ -125,7 +127,7 @@ class IndexingLock:
             "last_heartbeat": time.time(),
         }
 
-        self.metadata_dir.mkdir(parents=True, exist_ok=True)
+        self.metadata_dir.mkdir(parents=self.create_parents, exist_ok=True)
         with open(self.heartbeat_path, "w") as f:
             json.dump(heartbeat_data, f, indent=2)
 
@@ -216,12 +218,16 @@ class IndexingLock:
         self.release()
 
 
-def create_indexing_lock(metadata_dir: Path) -> IndexingLock:
+def create_indexing_lock(
+    metadata_dir: Path, create_parents: bool = True
+) -> IndexingLock:
     """
     Factory function to create an IndexingLock with sensible defaults.
 
     Args:
         metadata_dir: Directory where lock files are stored
+        create_parents: False => acquiring never creates metadata_dir's
+            parent (a removed project root stays removed; acquire raises)
 
     Returns:
         Configured IndexingLock instance
@@ -230,4 +236,5 @@ def create_indexing_lock(metadata_dir: Path) -> IndexingLock:
         metadata_dir=metadata_dir,
         heartbeat_interval=30.0,  # Update every 30 seconds
         timeout=300.0,  # 5 minute timeout
+        create_parents=create_parents,
     )
