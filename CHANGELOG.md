@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Refresh: snapshot directories are reserved with one atomic `mkdir`, and a destination that already exists is refused instead of copied into.
 - Server (solo): a store could close or use a SQLite connection owned by another live thread, which could crash the server process. Connections are now owned per thread; closing one store releases only the closing thread's connection, and cross-thread use is detected and reported.
 - Server: after one failed read, a repeated identical query could return no rows instead of raising (a Python 3.9 sqlite3 behaviour while the failed cursor stays referenced), so for example a broken job store read as "not cancelled" after a single warning. A failed statement now keeps failing until the store is readable again.
+- Server: at startup, preparing the crash-dump file and sweeping old dump files ran synchronous filesystem work on the event loop; both now run on a worker thread. A dump file another worker removes during its startup sweep is skipped instead of stopping the sweep.
 - Server watch: files written through the MCP file tools (`create_file`, `edit_file`, `delete_file`) in an activated repository became unsearchable. The server watch now indexes them for every configured embedding provider, updates the full-text index each cycle, publishes the semantic index after each cycle (debounced), applies the repository's include and exclude rules to deletions, and never drops pending edits when it stops.
 
 ### Security
@@ -29,7 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Development
 
 - A fast-lane unit test that builds the whole server app (reading a lazy `code_indexer.server.app` attribute) now fails with a message naming the fix; bind the attribute with the `bind_server_app_attr` fixture instead.
-- Several order-dependent and load-sensitive unit tests were fixed at their source: tests that built the server app now restore every process binding they change, and timing checks measure a long enough window or count operations instead of comparing wall-clock ratios.
+- Several order-dependent and load-sensitive unit tests were fixed at their source: tests that built the server app now restore every process binding they change, and timing checks measure a long enough window or count operations instead of comparing wall-clock ratios. The MCP self-registration singleton is reset around every unit test.
+- `CIDX_TEST_FAST_SQLITE=1` (test servers only) now applies to every SQLite connection, not only the schema bootstrap connection.
+- The unit lanes drop a developer's global `core.hooksPath` from the git config they copy into each chunk, so tests always use git's default hooks.
 
 ## [12.100.0] - 2026-10-29
 
