@@ -54,11 +54,26 @@ struct ParsedArgs {
 /// Compile vs Infrastructure problem) on read/compilation/load failure.
 type EvaluatorsResult = Result<(Vec<Box<dyn Evaluator>>, u128, bool), xray_core::compiler::CompileError>;
 
-fn default_target() -> String {
-    let home = std::env::var("HOME").unwrap_or_else(|_| std::env::current_dir()
+fn default_target() -> Result<String, String> {
+    std::env::current_dir()
         .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| ".".to_string()));
-    format!("{}/Dev/evolution", home)
+        .map_err(|e| {
+            format!(
+                "cannot determine the current directory to use as the default target ({}); \
+                 pass a target directory or set XRAY_TARGET",
+                e
+            )
+        })
+}
+
+fn resolve_target(
+    env_target: Option<String>,
+    remaining_args: &[String],
+    default: impl FnOnce() -> Result<String, String>,
+) -> Result<String, String> {
+    env_target
+        .or_else(|| remaining_args.first().cloned())
+        .map_or_else(default, Ok)
 }
 
 /// Read a newline-delimited candidate file list from disk (Bug #1612).
@@ -1316,9 +1331,11 @@ fn main() {
 
     // Determine target directory (only used when neither --files nor
     // --files-from is provided)
-    let target = std::env::var("XRAY_TARGET")
-        .or_else(|_| parsed.remaining_args.first().cloned().ok_or(()))
-        .unwrap_or_else(|_| default_target());
+    let target = resolve_target(
+        std::env::var("XRAY_TARGET").ok(),
+        &parsed.remaining_args,
+        default_target,
+    );
 
     // Collect files: --files-from (Bug #1612 -- avoids argv overflow) takes
     // precedence, then --files, then a full directory walk of `target`.
@@ -1347,10 +1364,31 @@ fn main() {
     } else if !parsed.file_list.is_empty() {
         parsed.file_list.iter().map(PathBuf::from).collect()
     } else {
-        let target_path = PathBuf::from(&target);
+        let walk_target = match &target {
+            Ok(t) => t.clone(),
+            Err(msg) => {
+                if json_output {
+                    print_json_output(&JsonOutput {
+                        findings: vec![],
+                        files_parsed: 0,
+                        files_errored: 0,
+                        parse_scan_ms: 0,
+                        compile_ms: 0,
+                        cached: false,
+                        error: Some(msg.clone()),
+                        error_kind: Some("infrastructure".to_string()),
+                        debug_messages: vec![],
+                    });
+                } else {
+                    eprintln!("Error: {}", msg);
+                }
+                std::process::exit(1);
+            }
+        };
+        let target_path = PathBuf::from(&walk_target);
         if !json_output {
             println!("=== Rust XRay Scanner ===");
-            println!("Target: {}", target);
+            println!("Target: {}", walk_target);
         }
         let collect_start = Instant::now();
         let collected = scanner::collect_files(&target_path);
@@ -1478,9 +1516,15 @@ fn main() {
                 sorted.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
 
                 println!("\nSample findings (first 10):");
-                let prefix = format!("{}/", target.trim_end_matches('/'));
+                let prefix = target
+                    .as_ref()
+                    .ok()
+                    .map(|t| format!("{}/", t.trim_end_matches('/')));
                 for f in sorted.iter().take(10) {
-                    let rel = f.file.strip_prefix(&prefix).unwrap_or(&f.file);
+                    let rel = prefix
+                        .as_deref()
+                        .and_then(|p| f.file.strip_prefix(p))
+                        .unwrap_or(&f.file);
                     println!("  [{}] {}:{} -- {}", f.pattern, rel, f.line, f.snippet);
                 }
             }
@@ -2359,6 +2403,42 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
     fn test_parse_args_remaining_target() {
         let parsed = parse_args(&sv(&["/some/path"]));
         assert_eq!(parsed.remaining_args, sv(&["/some/path"]));
+    }
+
+    #[test]
+    fn test_default_target_is_current_dir() {
+        let cwd = std::env::current_dir().expect("test process has a cwd");
+        assert_eq!(default_target(), Ok(cwd.to_string_lossy().to_string()));
+    }
+
+    #[test]
+    fn test_resolve_target_env_wins_over_positional_and_default() {
+        let resolved = resolve_target(
+            Some("/from/env".to_string()),
+            &sv(&["/from/arg"]),
+            || panic!("default must not be consulted"),
+        );
+        assert_eq!(resolved, Ok("/from/env".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_target_positional_wins_over_default() {
+        let resolved = resolve_target(None, &sv(&["/from/arg"]), || {
+            panic!("default must not be consulted")
+        });
+        assert_eq!(resolved, Ok("/from/arg".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_target_uses_default_when_nothing_given() {
+        let resolved = resolve_target(None, &sv(&[]), || Ok("/the/cwd".to_string()));
+        assert_eq!(resolved, Ok("/the/cwd".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_target_propagates_default_error() {
+        let resolved = resolve_target(None, &sv(&[]), || Err("no cwd".to_string()));
+        assert_eq!(resolved, Err("no cwd".to_string()));
     }
 
     #[test]
