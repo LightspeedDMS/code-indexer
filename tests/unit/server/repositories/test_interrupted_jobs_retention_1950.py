@@ -278,9 +278,27 @@ def _make_retention_config_service(background_jobs_retention_hours: int = 1) -> 
     return config_service
 
 
+def _wire_process_stores_to(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import code_indexer.server.app as app_module
+    from code_indexer.server.auth import elevated_session_manager as elevated_module
+    from code_indexer.server.auth.oidc import routes as oidc_routes
+    from code_indexer.server.auth.oidc import state_manager as state_module
+
+    blacklist = app_module.TokenBlacklist()
+    blacklist.set_sqlite_path(str(db_path))
+    monkeypatch.setattr(app_module, "_token_blacklist", blacklist)
+    monkeypatch.setattr(
+        elevated_module,
+        "elevated_session_manager",
+        elevated_module.ElevatedSessionManager(db_path=str(db_path)),
+    )
+    monkeypatch.setattr(state_module, "_configured_sqlite_path", str(db_path))
+    monkeypatch.setattr(oidc_routes, "state_manager", state_module.StateManager())
+
+
 class TestDataRetentionSchedulerBackgroundJobsCleanup:
     def test_execute_cleanup_sqlite_deletes_old_interrupted_row(
-        self, tmp_path: Path
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from code_indexer.server.services.data_retention_scheduler import (
             DataRetentionScheduler,
@@ -292,18 +310,8 @@ class TestDataRetentionSchedulerBackgroundJobsCleanup:
             str(main_db_path), "interrupted-retention", "interrupted", _OLD_ISO
         )
 
-        # token_blacklist and elevated_session_manager are process-wide
-        # singletons (code_indexer.server.app._token_blacklist and
-        # code_indexer.server.auth.elevated_session_manager.elevated_session_manager)
-        # touched by _execute_cleanup_sqlite() below. This test used to
-        # defensively save/set/restore their SQLite path itself because
-        # tests under tests/unit/server/web/ could leak a deleted tempdir
-        # path into them. That leak is now prevented centrally by
-        # tests/unit/server/web/conftest.py's autouse
-        # _restore_dependency_globals fixture, which restores both
-        # singletons' path state after every web/ test -- so by the time
-        # this test runs, both are back to their process-default state and
-        # no per-test workaround is needed here.
+        # ^ hazard dropping this => prune hits store paths an earlier test left on deleted dirs; tests/unit/server/auth/test_login_mfa_step_on_all_paths.py
+        _wire_process_stores_to(main_db_path, monkeypatch)
         scheduler = DataRetentionScheduler(
             log_db_path=tmp_path / "logs.db",
             main_db_path=main_db_path,
