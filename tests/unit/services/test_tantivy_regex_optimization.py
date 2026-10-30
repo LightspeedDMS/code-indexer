@@ -40,7 +40,6 @@ Tests follow TDD methodology:
 
 import pytest
 import time
-import re
 from code_indexer.services.tantivy_index_manager import TantivyIndexManager
 
 pytestmark = pytest.mark.slow
@@ -400,43 +399,32 @@ class Manager_{i}:
                 f"match_text should include characters after 'auth', got: {match_text}"
             )
 
-    def test_performance_benchmark_uncompiled_vs_compiled(self):
-        """
-        BENCHMARK TEST: Measure performance difference between compiling
-        inside loop vs outside loop.
+    # ^ why count compiles, not a wall-clock speedup ratio; a loaded lane measured 4.8x < 5.0 with the optimisation intact
+    def test_regex_search_compiles_pattern_once_for_many_results(
+        self, indexed_manager_many_docs, monkeypatch
+    ):
+        from code_indexer.services import tantivy_index_manager
+        from code_indexer.utils.bounded_regex import BoundedPattern
 
-        This is a micro-benchmark to quantify the optimization benefit.
-        """
-        pattern_str = r"auth\w+"
-        content_samples = [f"authenticate_{i}" for i in range(100)]
+        constructions = []
 
-        # Scenario 1: Compile inside loop (current bug)
-        start_unoptimized = time.time()
-        for content in content_samples:
-            flags = re.IGNORECASE
-            pattern = re.compile(pattern_str, flags)  # Compiled 100 times
-            pattern.search(content)
-        time_unoptimized = time.time() - start_unoptimized
+        class _CountingBoundedPattern(BoundedPattern):
+            def __init__(self, *args, **kwargs):
+                constructions.append(args[0] if args else kwargs.get("pattern"))
+                super().__init__(*args, **kwargs)
 
-        # Scenario 2: Compile outside loop (optimized)
-        start_optimized = time.time()
-        flags = re.IGNORECASE
-        compiled_pattern = re.compile(pattern_str, flags)  # Compiled once
-        for content in content_samples:
-            compiled_pattern.search(content)
-        time_optimized = time.time() - start_optimized
-
-        # Calculate speedup
-        speedup = time_unoptimized / time_optimized if time_optimized > 0 else 0
-
-        print(
-            f"\nPerformance Benchmark:\n"
-            f"  Unoptimized (compile in loop): {time_unoptimized * 1000:.2f}ms\n"
-            f"  Optimized (compile once):      {time_optimized * 1000:.2f}ms\n"
-            f"  Speedup:                       {speedup:.1f}x\n"
+        monkeypatch.setattr(
+            tantivy_index_manager, "BoundedPattern", _CountingBoundedPattern
         )
 
-        # Optimized should be significantly faster (at least 10x for 100 iterations)
-        assert speedup > 5.0, (
-            f"Expected significant speedup from optimization, got {speedup:.1f}x"
+        results = indexed_manager_many_docs.search(
+            query_text=r"auth\w+",
+            use_regex=True,
+            limit=30,
+        )
+
+        assert len(results) >= 20, f"Expected 20+ results, got {len(results)}"
+        assert constructions == [r"auth\w+"], (
+            f"Regex must be compiled once per search, not per result; "
+            f"compiled {len(constructions)} times for {len(results)} results"
         )

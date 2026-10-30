@@ -26,7 +26,9 @@ contention.
 Test (c) exercises the genuine closed-database terminal path directly
 against the REAL production DependencyLatencyBackend / DatabaseConnectionManager
 -- closing a connection raises immediately regardless of busy_timeout, so no
-speed workaround is needed there.
+speed workaround is needed there. The writer thread closes its OWN
+connection: close_all() from another thread leaves a live thread's
+connection open (#2228), so it no longer closes the writer's database.
 """
 
 import logging
@@ -269,14 +271,19 @@ def _make_db(tmp_path: Path, filename: str = DB_FILENAME) -> str:
     return db_path
 
 
-def _make_production_backend(tmp_path: Path, filename: str = DB_FILENAME):
-    """Create a real, initialized production DependencyLatencyBackend."""
+def _make_closing_production_backend(tmp_path: Path, close_requested: threading.Event):
     from code_indexer.server.storage.dependency_latency_backend import (
         DependencyLatencyBackend,
     )
 
-    db_path = _make_db(tmp_path, filename)
-    return DependencyLatencyBackend(db_path), db_path
+    class _ClosesOwnConnectionBackend(DependencyLatencyBackend):
+        def delete_older_than(self, cutoff_timestamp: float) -> None:
+            if close_requested.is_set():
+                # ^ why close on the writer thread, not close_all() from the test; close_all() leaves a live thread's connection open (#2228)
+                self._conn_manager.get_connection().close()
+            super().delete_older_than(cutoff_timestamp)
+
+    return _ClosesOwnConnectionBackend(_make_db(tmp_path))
 
 
 def _make_tracker(backend, flush_interval_s: float = FLUSH_INTERVAL_S):
@@ -427,23 +434,18 @@ class TestTerminalStateIsObservable:
     def test_closed_database_termination_is_observable_not_silent(
         self, tmp_path: Path, caplog_tracker
     ) -> None:
-        from code_indexer.server.storage.database_manager import (
-            DatabaseConnectionManager,
-        )
-
-        backend, db_path = _make_production_backend(tmp_path)
+        close_requested = threading.Event()
+        backend = _make_closing_production_backend(tmp_path, close_requested)
         tracker = _make_tracker(backend)
         tracker.start()
         try:
-            # Let the writer thread run at least one real cycle so its own
-            # thread-local SQLite connection is created and registered.
-            time.sleep(FLUSH_INTERVAL_S * 4)
+            ran_a_cycle = _wait_until(
+                lambda: tracker.get_health_status()["total_flush_attempts"] >= 2,
+                timeout_s=5.0,
+            )
+            assert ran_a_cycle, "Writer thread must run a real cycle first"
 
-            # Genuinely close every registered real connection (including
-            # the writer thread's own thread-local connection object) -- a
-            # real sqlite3.Connection.close(), not a mock.
-            conn_manager = DatabaseConnectionManager.get_instance(db_path)
-            conn_manager.close_all()
+            close_requested.set()
 
             stopped = _wait_until(
                 lambda: tracker._writer_thread is not None
