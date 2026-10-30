@@ -239,6 +239,26 @@ def _guard_no_leaked_non_daemon_threads_1800():
         )
 
 
+_MCP_SELF_REGISTRATION_MODULE = (
+    "code_indexer.server.services.mcp_self_registration_service"
+)
+
+
+def _clear_mcp_self_registration_singleton() -> None:
+    # ^ why sys.modules lookup, not import; unimported => no instance, and tests assert code_indexer.server.app stays unimported
+    module = sys.modules.get(_MCP_SELF_REGISTRATION_MODULE)
+    if module is not None:
+        module.MCPSelfRegistrationService.set_instance(None)
+
+
+# ^ hazard leaked singleton => ClaudeInvoker.invoke adds `claude --version` to a patched subprocess.run; test:test_bug1069_mtime_unchanged_noop_does_not_retry
+@pytest.fixture(autouse=True)
+def _reset_mcp_self_registration_singleton():
+    _clear_mcp_self_registration_singleton()
+    yield
+    _clear_mcp_self_registration_singleton()
+
+
 _DAEMON_CACHE_MODULE = "code_indexer.daemon.cache"
 _TTL_THREAD_JOIN_TIMEOUT_S = 5.0
 

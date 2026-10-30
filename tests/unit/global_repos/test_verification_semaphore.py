@@ -21,9 +21,6 @@ from code_indexer.global_repos.dependency_map_analyzer import (
     _VERIFICATION_SEMAPHORE_STATE,
     _get_verification_semaphore,
 )
-from code_indexer.server.services.mcp_self_registration_service import (
-    MCPSelfRegistrationService,
-)
 
 # Threading coordination timeouts (seconds).
 # Large enough to avoid false failures on slow CI; small enough to fail fast.
@@ -213,14 +210,12 @@ def _run_concurrent_callers(
             with errors_lock:
                 errors.append(exc)
 
-    # ^ hazard leaked MCPSelfRegistrationService singleton => `claude --version` under _registration_lock blocks one caller in fake_run, starving the other
     # ^ hazard ambient get_config_service() cap != cap => active never == cap; #1323
     pin_cap = patch(
         "code_indexer.server.services.config_service.get_config_service",
         return_value=_pinned_config_service(cap),
     )
-    no_registration = patch.object(MCPSelfRegistrationService, "_instance", None)
-    with patch("subprocess.run", side_effect=fake_run), pin_cap, no_registration:
+    with patch("subprocess.run", side_effect=fake_run), pin_cap:
         threads = [
             threading.Thread(target=caller, daemon=True) for _ in range(num_callers)
         ]
