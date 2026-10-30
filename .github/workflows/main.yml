@@ -1,10 +1,11 @@
 name: CI/CD with Auto Release
 
+# ^ why broad triggers, not a second workflow; secret-scan must stay in create-tag needs => other jobs gate via legacy_triggers
 on:
   push:
-    branches: [ master, main, develop, development, staging ]
+    branches: [ '**' ]
   pull_request:
-    branches: [ master, main ]
+    branches: [ master, main, development, staging ]
 
 permissions:
   contents: write  # Allow creating tags and releases
@@ -12,6 +13,8 @@ permissions:
 
 jobs:
   test:
+    # ^ coupled legacy_triggers with lint, rust, check-version (aliases); = the on: set before secret-scan widened it
+    if: &legacy_triggers ${{ (github.event_name == 'push' && contains(fromJSON('["refs/heads/master","refs/heads/main","refs/heads/develop","refs/heads/development","refs/heads/staging"]'), github.ref)) || (github.event_name == 'pull_request' && contains(fromJSON('["master","main"]'), github.base_ref)) }}
     #^ why ubuntu-24.04, not ubuntu-latest; latest = 26.04 has no Python 3.9 for setup-python
     runs-on: ubuntu-24.04
     strategy:
@@ -39,6 +42,7 @@ jobs:
         python3 -m pytest tests/unit/server/storage/test_factory.py tests/unit/server/mcp/test_protocol.py tests/unit/services/test_database_health_cluster.py -v --tb=short --deselect=tests/unit/server/storage/test_factory.py::TestSQLiteProtocolSatisfaction::test_dependency_map_tracking_satisfies_protocol
 
   lint:
+    if: *legacy_triggers
     #^ coupled Python 3.9 (mypy python_version) with ubuntu-24.04; ubuntu-latest = 26.04 lacks 3.9
     runs-on: ubuntu-24.04
 
@@ -77,6 +81,118 @@ jobs:
     - name: Run ./lint.sh (ruff check + ruff format check + mypy over src/ and tests/)
       run: ./lint.sh
 
+  # ^ why own job, not inside lint; needs no Python env => runs in parallel and fails under its own name
+  # ^ why push range only, not full history; history holds an unresolved finding => full scan stays red
+  secret-scan:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      # ^ coupled GITLEAKS_VERSION with .pre-commit-config.yaml:gitleaks rev; bump both together
+      GITLEAKS_VERSION: 8.30.1
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+      TRUFFLEHOG_VERSION: 3.99.2
+      TRUFFLEHOG_SHA256: 3c7b0d1dc4278294269bfdd7594bca8bb28c78da0a4a06ad202ded37b48deca4
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    # ^ why release tarballs, not gitleaks/gitleaks-action; the action needs a licence key for organisation accounts
+    - name: Install pinned gitleaks and trufflehog (sha256-verified)
+      run: |
+        set -euo pipefail
+        mkdir -p "$RUNNER_TEMP/scanners/bin"
+        cd "$RUNNER_TEMP/scanners"
+        curl -fsSL -o gitleaks.tar.gz \
+          "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+        echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+        tar -xzf gitleaks.tar.gz -C bin gitleaks
+        curl -fsSL -o trufflehog.tar.gz \
+          "https://github.com/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG_VERSION}/trufflehog_${TRUFFLEHOG_VERSION}_linux_amd64.tar.gz"
+        echo "${TRUFFLEHOG_SHA256}  trufflehog.tar.gz" | sha256sum -c -
+        tar -xzf trufflehog.tar.gz -C bin trufflehog
+        echo "$RUNNER_TEMP/scanners/bin" >> "$GITHUB_PATH"
+
+    - name: Determine commit range to scan
+      id: range
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+        PUSH_BEFORE: ${{ github.event.before }}
+        PUSH_AFTER: ${{ github.sha }}
+        PR_BASE: ${{ github.event.pull_request.base.sha }}
+        PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      run: |
+        set -euo pipefail
+        zero=0000000000000000000000000000000000000000
+        # ^ invariant merge-base exit 1 = no common ancestor => empty base (full scan); any other git error fails the step
+        merge_base() {
+          local rc=0
+          git merge-base "$1" "$2" || rc=$?
+          [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ] || { echo "git merge-base $1 $2 failed rc=$rc" >&2; return "$rc"; }
+        }
+        if [ "$EVENT_NAME" = "pull_request" ]; then
+          base="$PR_BASE"; after="$PR_HEAD"
+        else
+          base="$PUSH_BEFORE"; after="$PUSH_AFTER"
+        fi
+        # ^ hazard a missing scanned commit => git log of nothing => silent pass; check it exists first
+        git cat-file -e "${after}^{commit}"
+        if [ "$EVENT_NAME" != "pull_request" ] && { [ -z "$base" ] || [ "$base" = "$zero" ]; }; then
+          # New branch: scan only commits not already on the default branch;
+          # the default branch's own first push (or unrelated history) scans everything.
+          if [ "$GITHUB_REF_NAME" = "$DEFAULT_BRANCH" ]; then
+            base=""
+          else
+            git rev-parse --verify --quiet "origin/$DEFAULT_BRANCH^{commit}" >/dev/null
+            base="$(merge_base "$after" "origin/$DEFAULT_BRANCH")"
+          fi
+        elif ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+          # Forced push: the old tip is on no ref any more; fetch it by SHA (fails the job if impossible).
+          git fetch --no-tags origin "$base"
+        fi
+        # ^ external trufflehog --since-commit must be an ancestor of --branch, else it scans 0 commits
+        if [ -n "$base" ]; then base="$(merge_base "$base" "$after")"; fi
+        if [ -n "$base" ]; then log_opts="${base}..${after}"; else log_opts="${after}"; fi
+        count="$(git rev-list --count "$log_opts")"
+        echo "Scanning ${count} commit(s): $log_opts"
+        {
+          echo "base=$base"
+          echo "after=$after"
+          echo "log_opts=$log_opts"
+        } >> "$GITHUB_OUTPUT"
+
+    # ^ hazard dropping --diff-merges=first-parent => git log -p omits merge diffs => secret added in conflict resolution passes
+    # ^ security file paths can carry secrets => public log gets rule, commit and line only; never --verbose
+    - name: gitleaks (pushed commits incl. merge diffs, redacted)
+      env:
+        LOG_OPTS: ${{ steps.range.outputs.log_opts }}
+      run: |
+        set -euo pipefail
+        report="$RUNNER_TEMP/gitleaks.json"
+        rc=0
+        gitleaks git --no-banner --redact --config .gitleaks.toml \
+          --log-opts="--diff-merges=first-parent $LOG_OPTS" -f json -r "$report" . || rc=$?
+        if [ -s "$report" ]; then
+          jq -r '.[] | "FINDING gitleaks rule=\(.RuleID) commit=\(.Commit) line=\(.StartLine) (path withheld; run gitleaks locally)"' "$report"
+        fi
+        exit "$rc"
+
+    # ^ external trufflehog verification calls each detected credential's provider or host => outbound network calls from CI
+    # ^ security plain output prints raw values and file paths can carry secrets => public log gets detector, commit, line only
+    - name: trufflehog (pushed commits, verified-live credentials only)
+      if: ${{ !cancelled() && steps.range.outcome == 'success' }}
+      env:
+        BASE: ${{ steps.range.outputs.base }}
+        AFTER: ${{ steps.range.outputs.after }}
+      run: |
+        set -euo pipefail
+        trufflehog git "file://$GITHUB_WORKSPACE" --branch "$AFTER" ${BASE:+--since-commit "$BASE"} \
+          --only-verified --fail --fail-on-scan-errors --no-update --json \
+          | jq -r '"FINDING trufflehog detector=\(.DetectorName) commit=\(.SourceMetadata.Data.Git.commit // "-") line=\(.SourceMetadata.Data.Git.line // "-") (path withheld; run trufflehog locally)"'
+
   # Before this job existed, NO gate anywhere (local or CI) ran `cargo test` or
   # `cargo clippy` -- the entire 447-test Rust suite under rust/ (xray-core,
   # xray-cli), including the AC18 structural-parity check
@@ -87,6 +203,7 @@ jobs:
   # the Python jobs' matrix, and it gates create-tag/create-release below
   # exactly like `lint` and `test` already do.
   rust:
+    if: *legacy_triggers
     runs-on: ubuntu-latest
 
     steps:
@@ -132,6 +249,7 @@ jobs:
       run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
   check-version:
+    if: *legacy_triggers
     runs-on: ubuntu-latest
     outputs:
       version_changed: ${{ steps.check_version.outputs.version_changed }}
@@ -191,7 +309,7 @@ jobs:
     # check-version, so a red `test` job still produced a tag and a green-looking
     # release. If lint/test go red no tag is created and staging will not deploy
     # until the failure is fixed -- that is the intended semantics of a gate.
-    needs: [check-version, lint, test, rust]
+    needs: [check-version, lint, test, rust, secret-scan]
     if: |
       needs.check-version.outputs.version_changed == 'true' &&
       github.ref == 'refs/heads/development'
@@ -226,7 +344,7 @@ jobs:
     runs-on: ubuntu-latest
     # Bug #1552: a production release must not be publishable from a tree that
     # failed lint or tests (see the create-tag rationale above).
-    needs: [check-version, lint, test, rust]
+    needs: [check-version, lint, test, rust, secret-scan]
     if: |
       needs.check-version.outputs.version_changed == 'true' &&
       github.ref == 'refs/heads/master'

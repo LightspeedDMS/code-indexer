@@ -24,6 +24,8 @@ from code_indexer.server.services.ci_token_manager import (
 GITHUB_TOKEN_SUFFIX_LEN = 36
 GITLAB_TOKEN_SUFFIX_LEN = 20
 GITHUB_PAT_SUFFIX_LEN = 22
+# ^ security crc32 segment deliberately invalid => no GitLab or verifying scanner accepts it; see .gitleaks.toml
+GITLAB_VERSIONED_FAKE = "glpat-EXAMPLEfakeTOKENpayloadEXAMPLEfakeTOKE.01.00invalid"
 
 
 class TestCITokenManagerEncryption:
@@ -277,10 +279,8 @@ class TestCITokenManagerValidation:
     def test_validate_gitlab_token_valid_versioned_format(self, token_manager):
         """Test validation accepts newer GitLab versioned token format with periods."""
         # Given a valid glpat- format token with versioned suffix (newer GitLab format)
-        # Example: glpat-x5DbmTJCwT6wqLXX6DxdmG86MQp1OmN5dG5qCw.01.120qe28y8
-        valid_versioned_token = (
-            "glpat-x5DbmTJCwT6wqLXX6DxdmG86MQp1OmN5dG5qCw.01.120qe28y8"
-        )
+        # Example: GITLAB_VERSIONED_FAKE (glpat-<payload>.<version>.<checksum>)
+        valid_versioned_token = GITLAB_VERSIONED_FAKE
 
         # When validating
         # Then no exception should be raised

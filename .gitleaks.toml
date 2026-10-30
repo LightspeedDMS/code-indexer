@@ -1,0 +1,139 @@
+# gitleaks configuration: default ruleset plus narrow, rule-targeted allowlists.
+# ^ hazard allowlisting a value that may be real => republishes it publicly; see .claude-memory/feedback_never_store_leaked_literals_in_public_guards.md
+# ^ invariant every entry = anchored exact fake value or one generated path; never a directory such as tests/
+# ^ coupled pinned gitleaks version with .pre-commit-config.yaml:gitleaks and .github/workflows/main.yml:secret-scan
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Generated SHA-256 tool-doc fingerprints"
+targetRules = ["generic-api-key", "jfrog-identity-token"]
+# ^ security path AND digest shape => a non-digest value added to this file is still reported
+condition = "AND"
+paths = [
+  '''^reports/mcp/tool_doc_fingerprint_pre_s3\.json$''',
+]
+regexes = [
+  '''^[0-9a-f]{64}$''',  # ^ invariant allowed secret = lowercase 64-hex SHA-256 digest only
+]
+
+[[allowlists]]
+description = "Documentation placeholders in curl examples"
+targetRules = ["curl-auth-header"]
+regexes = [
+  '''^YOUR_[A-Z0-9_]+$''',  # ^ why shape, not exact list; docs write YOUR_TOKEN-style placeholders => never a live value
+  '''^invalid_token_here$''',  # ^ security reports/mcp-401-authentication-fix.md placeholder => not a credential
+]
+
+[[allowlists]]
+description = "Truncated documentation examples"
+targetRules = ["generic-api-key"]
+regexes = [
+  '''\.\.\.$''',  # ^ why value-free suffix rule, not exact values; a secret ending in literal "..." is truncated => unusable
+]
+
+[[allowlists]]
+description = "Fake private keys in tests"
+targetRules = ["private-key"]
+regexes = [
+  '''^-----BEGIN OPENSSH PRIVATE KEY-----\\nFAKE\\n''',  # ^ security body = literal FAKE in tests/unit/server/startup/ => no key material
+  '''^-----BEGIN PRIVATE KEY-----\\n\{_KEY_BODY\}''',  # ^ security f-string template in tests/unit/utils/test_redact_secret_fields.py => no key material
+]
+
+[[allowlists]]
+description = "Fake AWS key id"
+targetRules = ["aws-access-token"]
+regexes = [
+  '''^AKIAABCDEFGHIJKLMNOP$''',  # ^ security sequential alphabet sentinel in tests/unit/server/services/ => not issued by AWS
+]
+
+[[allowlists]]
+description = "Fake GitHub PATs"
+targetRules = ["github-pat", "generic-api-key"]
+regexes = [
+  # ^ invariant real ghp_ tokens carry a CRC32 suffix; each value below fails it => fabricated
+  '''^ghp_0987654321zyxwvutsrqponmlkjihgfedcba$''',  # ^ security tests/unit/services/test_token_authenticator.py fixture
+  '''^ghp_aB1cD2eF3gH4iJ5kL6mN7oP8qR9sT0uV1wX2$''',  # ^ security tests/integration/server/ alternating pattern fixture
+  '''^ghp_original1234567890123456789012345678$''',  # ^ security tests/e2e/server/web/test_api_keys_ui_e2e.py fixture
+  '''^ghp_todelete1234567890123456789012345678$''',  # ^ security tests/e2e/server/web/test_api_keys_ui_e2e.py fixture
+]
+
+[[allowlists]]
+description = "Fake GitLab PATs"
+targetRules = ["gitlab-pat", "generic-api-key"]
+regexes = [
+  '''^glpat-1234567890abcdefghij$''',  # ^ security tests/e2e/ sequential fixture
+  '''^glpat-Sentinel7f3aRejected$''',  # ^ security tests/unit/server/audit/ named sentinel
+  '''^glpat-abcdefghijklmnopqrst$''',  # ^ security tests/unit/services/ alphabet fixture
+  '''^glpat-EXAMPLEfakeTOKENpayl$''',  # ^ security rule's 20-char capture of test_ci_token_manager.py:GITLAB_VERSIONED_FAKE; crc32 checksum deliberately invalid => fake
+  '''^glpat-newtoken987654321098$''',  # ^ security tests/e2e/ named fixture
+  '''^glpat-oldtoken123456789012$''',  # ^ security tests/e2e/ named fixture
+  '''^glpat-selfhosted1234567890$''',  # ^ security tests/e2e/ named fixture
+  '''^glpat-test-token-123456789$''',  # ^ security tests/unit/server/services/repository_providers/ named fixture
+  '''^glpat-test1234567890123456$''',  # ^ security tests/unit/server/services/ named fixture
+  '''^glpat-testtokenabcdefghijk$''',  # ^ security tests/unit/services/ named fixture
+  '''^glpat-todelete123456789012$''',  # ^ security tests/e2e/ named fixture
+]
+
+[[allowlists]]
+description = "Fake JWTs in tests"
+targetRules = ["jwt", "generic-api-key"]
+regexes = [
+  # ^ invariant claims = test subjects; signatures < 30 chars => unsigned by any real key
+  '''^eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9\.eyJzdWIiOiJ0ZXN0dXNlciIsImlhdCI6MTYzMDAwMDAwMCwiZXhwIjoxNjMwMDg2NDAwfQ\.dGVzdF9zaWduYXR1cmU$''',  # ^ security tests/unit/remote/ sub=testuser
+  '''^eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9\.eyJzdWIiOiJ3ZWJkZXYiLCJpYXQiOjE2MzAwMDAwMDAsImV4cCI6MTYzMDA4NjQwMH0\.dGVzdF9zaWduYXR1cmVfd2Vi$''',  # ^ security tests/unit/remote/ sub=webdev
+  '''^eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9\.eyJzdWIiOiJtb2JpbGVkZXYiLCJpYXQiOjE2MzAwMDAwMDAsImV4cCI6MTYzMDA4NjQwMH0\.dGVzdF9zaWduYXR1cmVfbW9iaWxl$''',  # ^ security tests/unit/remote/ sub=mobiledev
+  '''^eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.eyJ1c2VybmFtZSI6InRlc3R1c2VyIiwicm9sZSI6InVzZXIiLCJleHAiOjE3MDAwMDAwMDB9\.fake_signature$''',  # ^ security tests/unit/cli/ signature=fake_signature
+  '''^eyJhbGciOiJub25lIn0\.eyJzdWIiOiJleGFtcGxlIn0\.$''',  # ^ security tests/unit/utils/ alg=none sub=example
+  '''^eyJhbGciOiJub25lIn0\.eyJzdWIiOiJleGFtcGxlIn0\.ExampleSignature_-1$''',  # ^ security tests/unit/utils/ alg=none sub=example
+]
+
+[[allowlists]]
+description = "Generic-rule hits on identifiers and fake fixture values"
+targetRules = ["generic-api-key"]
+regexes = [
+  # identifiers and expressions the generic rule reads as keys
+  '''^24\.hours\.from_now$''',  # ^ security Ruby expression in tests/unit/parsers/ => not a secret
+  '''^PBKDF2_ITERATIONS$''',  # ^ security constant name in tests/unit/server/services/ => not a secret
+  '''^Shift/Alt\+Enter$''',  # ^ security keyboard shortcut in CHANGELOG.md => not a secret
+  '''^max_results=1000$''',  # ^ security kwarg in tests/unit/global_repos/ => not a secret
+  '''^rerank_instruction=$''',  # ^ security kwarg name in tests/unit/ => not a secret
+  '''^voyageai_api_key=None$''',  # ^ security kwarg with None in tests/unit/server/mcp/ => not a secret
+  '''^voyageai_key=VALID_VOYAGEAI_KEY$''',  # ^ security kwarg naming a constant in tests/unit/server/routers/ => not a secret
+  '''^mgr2\._cipher\._v2_key$''',  # ^ security attribute path in tests/unit/server/services/ => not a secret
+  '''^mgr2\._encryption_key$''',  # ^ security attribute path in tests/unit/server/services/ => not a secret
+  '''^mgr_standalone\._cipher\._v2_key$''',  # ^ security attribute path in tests/unit/server/services/ => not a secret
+  # named sentinels and fake keys in tests
+  '''^Fz8failClosedSecret31$''',  # ^ security redaction sentinel in tests/unit/server/services/ => fake
+  '''^SECRET-MARKER-c0nfig-9f1$''',  # ^ security named sentinel in tests/unit/scripts/ => fake
+  '''^ZORPTASTIC1763$''',  # ^ security unique search token in tests/unit/services/ => fake
+  '''^abcd1234efgh5678$''',  # ^ security sequential fixture in tests/unit/server/middleware/ => fake
+  '''^api_key=abcd1234$''',  # ^ security sequential fixture in tests/unit/server/middleware/ => fake
+  '''^capability-0123456789abcdef$''',  # ^ security sequential fixture in tests/unit/server/services/ => fake
+  '''^complex_pass_123$''',  # ^ security named fixture in tests/unit/server/middleware/ => fake
+  '''^env-secret-key-67890$''',  # ^ security named fixture in tests/unit/server/ => fake
+  '''^eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.(secret|sensitive|test)$''',  # ^ security header-only JWT stubs in tests/unit/server/clients/ => fake
+  '''^ghp_SENTINEL-other-secret-67890$''',  # ^ security named sentinel in tests/unit/utils/ => fake
+  '''^ghp_roundtrip_test_12345678901234567890$''',  # ^ security named fixture in tests/unit/services/ => fake
+  '''^ghp_test123456789012345678901234567890$''',  # ^ security named fixture in tests/unit/server/services/ => fake
+  '''^ghp_test1234567890123456789012345678901$''',  # ^ security named fixture in tests/e2e/ => fake
+  '''^glpat-1234567890abcdefghijklmn$''',  # ^ security sequential fixture in tests/e2e/ => fake
+  '''^jti-test-(gate1-kwargs|passthrough-dec|shape-v10-4-6)-001$''',  # ^ security session ids in tests/unit/server/mcp/auth/ => fake
+  '''^key_live_abc123$''',  # ^ security named fixture in tests/unit/server/middleware/ => fake
+  '''^mcp_sec_(old456|replacement456|xyz789)$''',  # ^ security short fixtures in tests/unit/server/services/ => fake
+  '''^mcp_sec_abcdef1234567890abcdef1234567890abcdef$''',  # ^ security sequential fixture in tests/unit/server/services/ => fake
+  '''^mcp_sec_abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890$''',  # ^ security sequential fixture in tests/unit/cli/ => fake
+  '''^pa-(existingvoyage123|idempotent123456789|persistedkey12345)$''',  # ^ security named Voyage fixtures in tests/unit/server/ => fake
+  '''^pa-(testvoyageaikey123|testvoyagekey123|validvoyageaikey123)$''',  # ^ security named Voyage fixtures in tests/unit/server/ => fake
+  '''^pk_test_xyz789$''',  # ^ security named fixture in tests/unit/server/middleware/ => fake
+  '''^rotated-voyage-key-1083$''',  # ^ security named fixture in tests/unit/services/ => fake
+  '''^sk-1234567890(abcdef)?$''',  # ^ security sequential fixtures in tests/unit/server/middleware/ => fake
+  '''^sk-live_1234567890abcdef$''',  # ^ security sequential fixture in tests/integration/server/ => fake
+  '''^sk-secret-key-12345$''',  # ^ security named fixture in tests/unit/server/services/ => fake
+  '''^test-api-key-12345678901234567890$''',  # ^ security named fixture in tests/unit/server/services/ => fake
+  '''^test-key-abc123$''',  # ^ security named fixture in tests/unit/server/services/ => fake
+  '''^test-voyage-key-(1079A|1083|1210|1482)$''',  # ^ security issue-numbered fixtures in tests/unit/ => fake
+  '''^sentinel-voyage-2093$''',  # ^ security named sentinel in tests/unit/daemon/ => fake
+  '''^test_api_key_12345$''',  # ^ security named fixture in tests/unit/services/ => fake
+]

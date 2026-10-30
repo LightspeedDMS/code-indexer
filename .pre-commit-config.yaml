@@ -15,6 +15,15 @@ repos:
         always_run: false
         files: ^skills/
 
+  # Gitleaks - secret scan of STAGED changes only (fast); CI re-scans every push
+  # ^ coupled rev with .github/workflows/main.yml:GITLEAKS_VERSION; bump both together
+  # ^ external golang hook builds gitleaks at rev => needs Go >= 1.21 (GOTOOLCHAIN=auto fetches 1.24)
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+        args: [--config=.gitleaks.toml]
+
   # Ruff - Fast Python linter (replaces flake8, isort, etc.)
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.14.1
