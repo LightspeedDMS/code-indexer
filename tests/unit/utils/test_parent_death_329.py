@@ -82,7 +82,8 @@ def _readline(proc: subprocess.Popen) -> str:
 def _process_gone(pid: int) -> bool:
     try:
         stat = Path(f"/proc/{pid}/stat").read_text()
-    except FileNotFoundError:
+    # ^ external exit between open and read of /proc/<pid>/stat => ESRCH = ProcessLookupError, also gone
+    except (FileNotFoundError, ProcessLookupError):
         return True
     # ^ external a dead child reparented to a subreaper may linger as a zombie (state Z)
     return stat.rsplit(")", 1)[1].split()[0] == "Z"
