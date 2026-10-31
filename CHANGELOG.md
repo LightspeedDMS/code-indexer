@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [12.102.0] - 2026-10-30
+
+### Fixed
+
+- Server watch: deactivating an activated repository left its auto-watch running; the watch then recreated the removed workspace, and activating the same alias again failed permanently ("destination ... already exists as a directory"). Deactivation now stops the repository's watch and waits for it to finish before removing anything. A watch whose workspace is gone or replaced stops without recreating it, and an activation whose destination holds only a watch's leftovers removes them and proceeds; a destination holding anything else is still refused.
+- Server watch: with several workers (or nodes), each worker's watch kept its own copy of a file's index entries, so a change another worker's watch had already applied failed and was retried until the watch timed out (repeated ERROR lines). A file's entries are now read from the chunk store each time, and removing entries that are already gone succeeds as a no-op. Search results were correct before and after.
+- Server watch: a watch that fails to start (for example with no embedding API key) is retried at most once per idle-timeout window instead of logging an ERROR on every file write, and the writes made meanwhile are indexed once it starts.
+
 ## [12.101.0] - 2026-10-30
 
 ### Upgrade notes
