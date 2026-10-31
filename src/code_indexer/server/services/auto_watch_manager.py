@@ -17,6 +17,7 @@ from typing import Callable, Dict, Any, Optional, Sequence, Set, cast
 from code_indexer.daemon.watch_manager import DaemonWatchManager
 from code_indexer.config import ConfigManager
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.server.utils.registry_factory import is_postgres_storage_mode
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,7 @@ class AutoWatchManager:
         self._failed_start_at: Dict[str, float] = {}
         self._owed_writes: Dict[str, Set[Path]] = {}
         self._removing: Set[str] = set()
+        self._cluster_refusal_logged = False
         self._lock = threading.RLock()  # Use RLock to allow reentrant calls
         self._shutdown_event = threading.Event()
 
@@ -121,6 +123,9 @@ class AutoWatchManager:
         """Start watch mode with auto-stop timer (or reset it), then hand the
         watch `changed_paths`: files just written, whose events a watch that
         is only starting never sees (#2093)."""
+        # ^ hazard a watch per cluster node => indexing_lock liveness is a local PID check; nodes take over live locks and write one chunks.db (#2327)
+        if is_postgres_storage_mode():
+            return self._refuse_cluster_watch()
         with self._lock:
             if repo_path in self._removing:
                 return {
@@ -146,6 +151,22 @@ class AutoWatchManager:
         if changes and state is not None:
             state["watch_instance"].queue_changes(sorted(changes))
         return result
+
+    def _refuse_cluster_watch(self) -> Dict[str, Any]:
+        with self._lock:
+            first_refusal = not self._cluster_refusal_logged
+            self._cluster_refusal_logged = True
+        if first_refusal:
+            logger.info(
+                "Server auto-watch indexing is disabled in cluster mode (#2327): "
+                "files written through MCP become searchable after the "
+                "repository is synced or re-indexed",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        return {
+            "status": "disabled",
+            "message": "Server auto-watch is disabled in cluster mode",
+        }
 
     def _prune_failed_starts(self) -> None:
         now = self._clock()
