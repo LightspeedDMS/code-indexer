@@ -15,7 +15,7 @@ indexing and querying, and where each subsystem is described in detail. Rules th
 | Temporal indexer | `src/code_indexer/services/temporal/` | one document per commit, quarterly shards per embedder |
 | Embedding providers | `src/code_indexer/services/voyage_ai.py`, `cohere_embedding.py` and multimodal variants | VoyageAI and Cohere, plus rerankers |
 | SCIP | `src/code_indexer/scip/` | precise definitions, references and call chains from `index.scip.db` |
-| X-Ray | `src/code_indexer/xray/`, `rust/xray-core`, `rust/xray-cli` | AST-aware search with user-supplied Rust evaluators |
+| X-Ray | `packages/features/cidx-xray/` (distribution `cidx-xray`, see [cidx-xray.md](cidx-xray.md)), `rust/xray-core`, `rust/xray-cli` | AST-aware search with user-supplied Rust evaluators |
 | Daemon | `src/code_indexer/daemon/` | per-project RPyC service that keeps indexes in memory |
 | Server | `src/code_indexer/server/` | FastAPI app: REST API, MCP endpoint (`/mcp`), Web UI, background jobs, schedulers |
 | Auto-updater | `src/code_indexer/server/auto_update/` | per-node systemd timer that deploys new code and applies launch settings |
@@ -90,6 +90,8 @@ Detail: [Query Path](query-path.md).
 | Refresh failure handling | [Refresh Recovery](refresh-recovery.md) |
 | Cluster mode | [Cluster](cluster.md) |
 | Dependency map and cidx-meta backup | [Dependency Map](dependency-map.md) |
+| Feature add-ons: SDK and loader | [Feature SDK](feature-sdk.md) |
+| Seams: Protocols, resolver, conformance | [Seams as built](seams.md) |
 | X-Ray | [X-Ray architecture](xray/architecture.md), [Sandbox](xray/sandbox.md), [Graph binder](xray/graph-binder-internals.md) |
 | CLI reference | [CLI Reference](../reference/cli/README.md) |
 | Server operation | [Deployment](../server/deployment.md) |

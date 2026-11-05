@@ -35,6 +35,8 @@ main() {
     # Define paths to lint
     local src_path="src"
     local tests_path="tests"
+    # Feature distributions (modular plan phase 4b): their sources and tests.
+    local feature_paths="packages/features/cidx-xray packages/features/cidx-scip packages/features/cidx-wiki packages/features/cidx-memory packages/features/cidx-depmap"
 
     # Check if paths exist
     if [[ ! -d "$src_path" ]]; then
@@ -50,17 +52,40 @@ main() {
     local all_passed=true
 
     # Run ruff check
-    if ! run_command "ruff check $src_path $tests_path tools/docs" "ruff check"; then
+    if ! run_command "ruff check $src_path $tests_path tools/docs $feature_paths" "ruff check"; then
         all_passed=false
     fi
 
     # Run ruff format check
-    if ! run_command "ruff format --check $src_path $tests_path tools/docs" "ruff format check"; then
+    if ! run_command "ruff format --check $src_path $tests_path tools/docs $feature_paths" "ruff format check"; then
         all_passed=false
     fi
 
     # Run mypy with explicit package bases (moderate strictness) - exclude problematic test file
     if ! run_command "mypy --explicit-package-bases --check-untyped-defs $src_path $tests_path --exclude=tests/unit/services/test_vector_data_structures_thread_safety.py" "mypy type check"; then
+        all_passed=false
+    fi
+
+    # The X-Ray feature's sources and tests, as their own mypy run: its test
+    # tree has no __init__.py (a "tests" package would collide with the
+    # repository's), so it is checked on its own; the core it imports is checked
+    # by the run above (--follow-imports=silent).
+    if ! run_command "mypy --explicit-package-bases --check-untyped-defs --follow-imports=silent packages/features/cidx-xray/src/cidx_xray packages/features/cidx-xray/tests" "mypy type check (cidx-xray)"; then
+        all_passed=false
+    fi
+
+    # The wiki feature's sources and tests, the same way.
+    if ! run_command "mypy --explicit-package-bases --check-untyped-defs --follow-imports=silent packages/features/cidx-wiki/src/cidx_wiki packages/features/cidx-wiki/tests" "mypy type check (cidx-wiki)"; then
+        all_passed=false
+    fi
+
+    # The memory feature's sources and tests, the same way.
+    if ! run_command "mypy --explicit-package-bases --check-untyped-defs --follow-imports=silent packages/features/cidx-memory/src/cidx_memory packages/features/cidx-memory/tests" "mypy type check (cidx-memory)"; then
+        all_passed=false
+    fi
+
+    # The dependency map feature's sources and tests, the same way.
+    if ! run_command "mypy --explicit-package-bases --check-untyped-defs --follow-imports=silent packages/features/cidx-depmap/src/cidx_depmap packages/features/cidx-depmap/tests" "mypy type check (cidx-depmap)"; then
         all_passed=false
     fi
 
@@ -70,6 +95,15 @@ main() {
         echo -e "${GREEN}✅ AC15 anti-orphan check passed${NC}"
     else
         echo -e "${RED}❌ AC15 anti-orphan check failed${NC}"
+        all_passed=false
+    fi
+
+    # Package dependency contracts (.importlinter) against their ratchet baseline
+    echo -e "${BLUE}Running import contracts ratchet...${NC}"
+    if python3 scripts/check_import_contracts.py; then
+        echo -e "${GREEN}✅ Import contracts ratchet passed${NC}"
+    else
+        echo -e "${RED}❌ Import contracts ratchet failed${NC}"
         all_passed=false
     fi
 

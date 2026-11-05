@@ -65,7 +65,7 @@ A request may land on any worker of any node, so state another request must see 
 ## Repository discovery jobs
 
 `POST /api/discovery/{platform}/start` and `GET /api/discovery/{platform}/result/{job_id}`
-(`src/code_indexer/server/web/routes.py`) store the result in `app.state.payload_cache` under `discovery:{job_id}`,
+(`src/code_indexer/server/web/pages/discovery.py`) store the result in `app.state.payload_cache` under `discovery:{job_id}`,
 never in a module-level dict. These jobs pass `repo_alias=None`, so the route deduplicates by scanning pending and
 running jobs of the same operation type. Workers that report progress declare `progress_callback=None` for the job
 manager to inject it.
