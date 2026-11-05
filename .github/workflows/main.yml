@@ -14,7 +14,7 @@ permissions:
 jobs:
   test:
     # ^ coupled legacy_triggers with lint, rust, check-version (aliases); = the on: set before secret-scan widened it
-    if: &legacy_triggers ${{ (github.event_name == 'push' && contains(fromJSON('["refs/heads/master","refs/heads/main","refs/heads/develop","refs/heads/development","refs/heads/staging"]'), github.ref)) || (github.event_name == 'pull_request' && contains(fromJSON('["master","main"]'), github.base_ref)) }}
+    if: &legacy_triggers ${{ (github.event_name == 'push' && contains(fromJSON('["refs/heads/master","refs/heads/main","refs/heads/develop","refs/heads/development","refs/heads/staging"]'), github.ref)) || (github.event_name == 'pull_request' && contains(fromJSON('["master","main","development"]'), github.base_ref)) }}
     #^ why ubuntu-24.04, not ubuntu-latest; latest = 26.04 has no Python 3.9 for setup-python
     runs-on: ubuntu-24.04
     strategy:
