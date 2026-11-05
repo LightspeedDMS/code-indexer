@@ -137,3 +137,10 @@ regexes = [
   '''^sentinel-voyage-2093$''',  # ^ security named sentinel in tests/unit/daemon/ => fake
   '''^test_api_key_12345$''',  # ^ security named fixture in tests/unit/services/ => fake
 ]
+
+[[allowlists]]
+description = "Python kwargs in test_clone_backend_wiring.py misread as secrets"
+targetRules = ["generic-api-key"]
+regexes = [
+  '''^wait_seconds=0$''',  # ^ security Python kwarg in _check_workspace_mcp_health() call => not a secret
+]
