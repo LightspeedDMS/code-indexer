@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from ..login_outcome import complete_login, reject_login
 from ...web.auth import get_session_manager
-from ...web.routes import _get_user_mfa_status
+from ...web.pages._shared import _get_user_mfa_status
 
 if TYPE_CHECKING:
     from .oidc_manager import OIDCManager
