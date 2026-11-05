@@ -29,12 +29,32 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 
-# Install cidx. v11.30 declares the custom hnswlib fork + psycopg as direct deps
-# in pyproject (git+https hnswlib, psycopg[binary]/psycopg-pool), so a plain
-# `pip install .` pulls everything (git + gcc/g++ present above for the git dep).
+# Install cidx. v12.103.0 declares modular local packages under packages/
+# (cidx-sdk, backends, features) as path dependencies in pyproject.toml, so
+# the packages/ directory must be present before `pip install .`.
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN pip install ".[cluster,cohere]"
+COPY packages ./packages
+COPY plugins/cidx_git_backend ./plugins/cidx_git_backend
+COPY plugins/cidx_orchestrator_invoker ./plugins/cidx_orchestrator_invoker
+RUN pip install ".[cluster,cohere]" ./plugins/cidx_git_backend ./plugins/cidx_orchestrator_invoker
+
+# cidx-content-backend: provides delegated backends for content, ripgrep,
+# xray, and scip. Registers on code_indexer.content_backend,
+# code_indexer.ripgrep_backend, code_indexer.xray_backend, and
+# code_indexer.scip_backend entry points. Without it, any *_backend=delegated
+# config crashes the server at startup.
+ARG CIDX_CONTENT_BACKEND_VERSION=0.11.0
+ARG _PLUGIN_CACHE_KEY=v3
+RUN --mount=type=secret,id=plugin_index \
+    if [ -f /run/secrets/plugin_index ]; then \
+      pip install --no-cache-dir --no-deps \
+        --index-url "$(cat /run/secrets/plugin_index)" \
+        "cidx-content-backend==${CIDX_CONTENT_BACKEND_VERSION}"; \
+    else \
+      echo "WARNING: no plugin_index secret -- cidx-content-backend NOT installed;" \
+           "content_backend=delegated will fail loud in this image" >&2; \
+    fi
 
 # ---- Runtime stage ----
 FROM python:3.11-slim-bookworm

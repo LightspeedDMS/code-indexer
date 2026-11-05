@@ -14,17 +14,44 @@ Usage:
 """
 
 import logging
+import re
 from typing import Any, Dict
 
 # Bug #2012: the single, layer-neutral credential redaction implementation
 # lives in code_indexer.utils (CLI-side utilities use it without importing
 # server code); re-exported here for existing server importers.
-from code_indexer.utils.credential_redaction import (  # noqa: F401 - re-export
-    mask_url_credentials,
-    redact_command,
-    redact_command_output,
-    redact_secret_fields,
+# (``name as name`` marks each as an explicit re-export.)
+from code_indexer.utils.credential_redaction import (
+    mask_url_credentials as mask_url_credentials,
+    redact_command as redact_command,
+    redact_command_output as redact_command_output,
+    redact_secret_fields as redact_secret_fields,
 )
+
+
+# The userinfo of a ``scheme://`` URL, under the same rule mask_url_credentials
+# applies: everything up to the LAST '@' before the host, never crossing '/',
+# '?', '#' or whitespace (a password holding '@' is removed whole; an '@' in a
+# path, query or fragment is not userinfo).
+_URL_USERINFO_RE = re.compile(r"(://)[^/?#\s]+@")
+
+
+def strip_url_credentials(url: Any) -> Any:
+    """Return a git/HTTP URL with any embedded credentials REMOVED (not masked).
+
+    ``https://oauth2:glpat-XXXX@gitlab.com/org/repo.git`` ->
+    ``https://gitlab.com/org/repo.git`` — a still-valid, credential-free URL,
+    unlike :func:`mask_url_credentials` which yields a display-only ``***`` form.
+
+    Used when a URL will be PERSISTED (golden-repo metadata / ``.git/config``) in a
+    deployment whose git backend supplies its own credentials (git-mcp),
+    so the token lives only in git-mcp and never in cidx's stored state. Non-string
+    input, credential-free URLs, and scheme-only forms (``local://alias``) are
+    returned unchanged; idempotent.
+    """
+    if not isinstance(url, str):
+        return url
+    return _URL_USERINFO_RE.sub(r"\1", url)
 
 
 def format_error_log(error_code: str, message: str, **context) -> str:

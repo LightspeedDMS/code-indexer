@@ -152,6 +152,7 @@ dev/debug/
 config.json
 docker-compose.yml
 *.lock
+!rust/Cargo.lock
 .env.local.new
 /.swarm
 debug_data_cleaner/
