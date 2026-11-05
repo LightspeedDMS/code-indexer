@@ -1,0 +1,141 @@
+<!-- Story #213: Dependency Map Repository Coverage Partial -->
+<!-- AC1: Table of repos sorted alphabetically, AC2: Color-coded badges -->
+<!-- AC3: Progress bar, AC6: Legend + refresh button -->
+<div id="depmap-repo-coverage-content">
+
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+    <h2 style="margin: 0;">Repository Coverage</h2>
+    <!-- AC6: Manual refresh button with HTMX -->
+    <button hx-get="/admin/partials/depmap-repo-coverage"
+            hx-target="#depmap-repo-coverage-content"
+            hx-swap="outerHTML"
+            class="outline secondary"
+            style="font-size: 0.85rem; padding: 0.3rem 0.8rem;">
+        Refresh
+    </button>
+</div>
+
+<!-- AC3: Progress bar -->
+<div style="margin-bottom: 1.5rem;">
+    <div style="display: flex; justify-content: space-between; margin-bottom: 0.4rem;">
+        <span>
+            {{ coverage.covered_count }}/{{ coverage.total_count }} repos covered
+            ({{ "%.0f"|format(coverage.coverage_pct) }}%)
+        </span>
+        <span style="color: var(--pico-muted-color); font-size: 0.9rem;">
+            {% if coverage.total_count == 0 %}No repos tracked{% endif %}
+        </span>
+    </div>
+    <progress
+        value="{{ coverage.covered_count }}"
+        max="{{ [coverage.total_count, 1]|max }}"
+        style="width: 100%;
+               {% if coverage.coverage_color == 'green' %}
+               accent-color: var(--pico-color-green-550);
+               {% elif coverage.coverage_color == 'yellow' %}
+               accent-color: var(--pico-color-amber-550);
+               {% else %}
+               accent-color: var(--pico-color-red-550);
+               {% endif %}">
+    </progress>
+</div>
+
+<!-- AC1: Repository table -->
+<div style="overflow-x: auto;">
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Status</th>
+            <th>Domains</th>
+            <th>Last Analyzed</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for repo in coverage.repos %}
+        <tr>
+            <td>{{ repo.alias }}</td>
+            <td>
+                <!-- AC2: Color-coded status badges -->
+                {% if repo.status_color == "GREEN" %}
+                <span style="background: var(--pico-color-green-550); color: white;
+                             padding: 0.15rem 0.5rem; border-radius: 0.25rem;
+                             font-size: 0.85rem; font-weight: 600;">
+                    {{ repo.status }}
+                </span>
+                {% elif repo.status_color == "YELLOW" %}
+                <span style="background: var(--pico-color-amber-550); color: white;
+                             padding: 0.15rem 0.5rem; border-radius: 0.25rem;
+                             font-size: 0.85rem; font-weight: 600;">
+                    {{ repo.status }}
+                </span>
+                {% elif repo.status_color == "BLUE" %}
+                <span style="background: var(--pico-color-blue-550); color: white;
+                             padding: 0.15rem 0.5rem; border-radius: 0.25rem;
+                             font-size: 0.85rem; font-weight: 600;">
+                    {{ repo.status }}
+                </span>
+                {% else %}
+                <span style="background: var(--pico-muted-color); color: white;
+                             padding: 0.15rem 0.5rem; border-radius: 0.25rem;
+                             font-size: 0.85rem; font-weight: 600;">
+                    {{ repo.status }}
+                </span>
+                {% endif %}
+            </td>
+            <td>
+                {% if repo.domains %}
+                    {{ repo.domains | join(", ") }}
+                {% else %}
+                    <span style="color: var(--pico-muted-color);">--</span>
+                {% endif %}
+            </td>
+            <td style="color: var(--pico-muted-color); font-size: 0.9rem;">
+                {% if repo.last_analyzed %}
+                    {{ repo.last_analyzed }}
+                {% else %}
+                    Never
+                {% endif %}
+            </td>
+        </tr>
+        {% else %}
+        <tr>
+            <td colspan="4" style="text-align: center; color: var(--pico-muted-color);">
+                No repositories tracked yet.
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+</div>
+
+<!-- AC6: Legend explaining status colors -->
+<details style="margin-top: 1rem;">
+    <summary style="cursor: pointer; color: var(--pico-muted-color); font-size: 0.9rem;">
+        Legend
+    </summary>
+    <div style="display: flex; flex-wrap: wrap; gap: 1rem; margin-top: 0.5rem; font-size: 0.9rem;">
+        <span>
+            <span style="background: var(--pico-color-green-550); color: white;
+                         padding: 0.1rem 0.4rem; border-radius: 0.2rem;">OK</span>
+            Commit hash matches stored hash
+        </span>
+        <span>
+            <span style="background: var(--pico-color-amber-550); color: white;
+                         padding: 0.1rem 0.4rem; border-radius: 0.2rem;">CHANGED</span>
+            Commit hash differs from stored hash
+        </span>
+        <span>
+            <span style="background: var(--pico-color-blue-550); color: white;
+                         padding: 0.1rem 0.4rem; border-radius: 0.2rem;">NEW</span>
+            Repo not yet in tracking data
+        </span>
+        <span>
+            <span style="background: var(--pico-muted-color); color: white;
+                         padding: 0.1rem 0.4rem; border-radius: 0.2rem;">REMOVED</span>
+            In tracking data but no longer a golden repo
+        </span>
+    </div>
+</details>
+
+</div>

@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cidx-depmap"
+dynamic = ["version"]
+description = "The dependency map: cross-repository domains analysed by an LLM, with MCP tools and admin pages -- a code-indexer feature add-on"
+readme = "README.md"
+license = {text = "MIT"}
+# Tracks the core's requires-python (see the root pyproject.toml).
+requires-python = ">=3.10,<3.13"
+# The SDK by path, as the core references it (the name is not ours on public
+# indexes). A feature depends on the SDK and third-party packages only --
+# never on code-indexer; see src/cidx_depmap/_platform.py for the one
+# transitional exception and how it goes away.
+dependencies = [
+    "cidx-sdk @ {root:parent:parent:uri}/cidx-sdk",
+    # Routes, templates and the MCP handlers' request plumbing.
+    "fastapi>=0.116.0",
+    "jinja2>=3.1.0",
+    # Domain documents: front matter and markdown rendering.
+    "pyyaml>=6.0",
+    "markdown>=3.4",
+]
+
+[project.entry-points."code_indexer.features"]
+depmap = "cidx_depmap.feature:make_feature"
+
+[tool.hatch.version]
+path = "src/cidx_depmap/_version.py"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cidx_depmap"]

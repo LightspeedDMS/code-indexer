@@ -1,0 +1,398 @@
+"""SCIP Code Intelligence API Client for CLI Remote Mode (Story #736).
+
+Provides API client for SCIP operations via REST endpoints.
+All operations support repository_alias for multi-repository queries.
+"""
+
+import logging
+from typing import Dict, Any, Optional
+from pathlib import Path
+
+from cidx_scip._platform import APIClientError, CIDXRemoteAPIClient
+
+logger = logging.getLogger(__name__)
+
+# Bug #1603: real, server-enforced upper bound for callchain's max_depth.
+# The combinatorial-path query (trace_call_chain_v2) is unsafe above this
+# depth regardless of front door -- see MAX_DEPTH_CAP in
+# scip/database/queries.py, which this mirrors.
+_MAX_CALLCHAIN_DEPTH = 3
+
+# Bug #1639: real, server-enforced upper bound for impact's depth -- see
+# MAX_TRAVERSAL_DEPTH in scip/query/composites.py, which this mirrors.
+# A deliberately DIFFERENT constant from _MAX_CALLCHAIN_DEPTH above (both
+# operations happen to have their own independent caps).
+_MAX_IMPACT_DEPTH = 10
+
+
+class SCIPQueryError(APIClientError):
+    """Exception raised when SCIP query execution fails."""
+
+    pass
+
+
+class SCIPNotFoundError(APIClientError):
+    """Exception raised when SCIP resource is not found."""
+
+    pass
+
+
+class SCIPAPIClient(CIDXRemoteAPIClient):
+    """API client for SCIP code intelligence operations."""
+
+    def __init__(
+        self,
+        server_url: str,
+        credentials: Dict[str, Any],
+        project_root: Optional[Path] = None,
+    ):
+        """Initialize SCIP API client.
+
+        Args:
+            server_url: Base URL of the CIDX server
+            credentials: Authentication credentials dictionary
+            project_root: Optional project root for persistent token storage
+        """
+        super().__init__(server_url, credentials, project_root)
+
+    def _build_request_payload(
+        self,
+        symbol: str,
+        repositories: list,
+        limit: Optional[int] = None,
+        max_depth: Optional[int] = None,
+        project: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Build request payload for SCIP multi-repository endpoints."""
+        payload: Dict[str, Any] = {
+            "repositories": repositories,
+            "symbol": symbol,
+        }
+        if limit is not None:
+            payload["limit"] = limit
+        if max_depth is not None:
+            payload["max_depth"] = max_depth
+        if project:
+            payload["project"] = project
+        return payload
+
+    def _execute_scip_request(
+        self, endpoint: str, payload: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Execute SCIP request and handle responses."""
+        try:
+            response = self._authenticated_request("POST", endpoint, json=payload)
+
+            if response.status_code == 200:
+                return dict(response.json())
+            elif response.status_code == 404:
+                error_detail = self._extract_error_detail(
+                    response, "Resource not found"
+                )
+                raise SCIPNotFoundError(error_detail, status_code=404)
+            elif response.status_code == 422:
+                error_detail = self._extract_error_detail(response, "Invalid request")
+                raise ValueError(f"Request validation failed: {error_detail}")
+            else:
+                error_detail = self._extract_error_detail(
+                    response, f"HTTP {response.status_code}"
+                )
+                raise SCIPQueryError(
+                    f"SCIP query failed: {error_detail}",
+                    status_code=response.status_code,
+                )
+        except (SCIPQueryError, SCIPNotFoundError, ValueError):
+            raise
+        except APIClientError as e:
+            raise SCIPQueryError(f"SCIP query failed: {e}")
+        except Exception as e:
+            raise SCIPQueryError(f"Unexpected error in SCIP query: {e}")
+
+    def _extract_error_detail(self, response, default: str) -> str:
+        """Extract error detail from response JSON."""
+        try:
+            detail = response.json().get("detail", default)
+            return str(detail) if detail is not None else default
+        except Exception:
+            return default
+
+    def definition(
+        self,
+        symbol: str,
+        repository_alias: Optional[str] = None,
+        project: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Find symbol definition via SCIP multi-repository endpoint.
+
+        Args:
+            symbol: Symbol name to search for
+            repository_alias: Repository alias to query (required for remote)
+            project: Optional project path filter
+
+        Returns:
+            Dictionary with results, metadata, and errors from server
+        """
+        if not symbol or not isinstance(symbol, str):
+            raise ValueError("Symbol cannot be empty")
+        if not repository_alias:
+            raise ValueError("repository_alias is required for remote SCIP queries")
+
+        payload = self._build_request_payload(
+            symbol=symbol, repositories=[repository_alias], project=project
+        )
+        return self._execute_scip_request("/api/scip/multi/definition", payload)
+
+    def references(
+        self,
+        symbol: str,
+        repository_alias: Optional[str] = None,
+        limit: int = 100,
+        project: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Find all references to a symbol via SCIP multi-repository endpoint.
+
+        Args:
+            symbol: Symbol name to search for
+            repository_alias: Repository alias to query (required for remote)
+            limit: Maximum number of results per repository
+            project: Optional project path filter
+
+        Returns:
+            Dictionary with results, metadata, and errors from server
+        """
+        if not symbol or not isinstance(symbol, str):
+            raise ValueError("Symbol cannot be empty")
+        if not repository_alias:
+            raise ValueError("repository_alias is required for remote SCIP queries")
+
+        payload = self._build_request_payload(
+            symbol=symbol, repositories=[repository_alias], limit=limit, project=project
+        )
+        return self._execute_scip_request("/api/scip/multi/references", payload)
+
+    def dependencies(
+        self,
+        symbol: str,
+        repository_alias: Optional[str] = None,
+        depth: int = 1,
+        project: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Get symbols that this symbol depends on.
+
+        Args:
+            symbol: Symbol name to analyze
+            repository_alias: Repository alias to query (required for remote)
+            depth: Depth of transitive dependencies (default: 1 = direct only)
+            project: Optional project path filter
+
+        Returns:
+            Dictionary with results, metadata, and errors from server
+        """
+        if not symbol or not isinstance(symbol, str):
+            raise ValueError("Symbol cannot be empty")
+        if not repository_alias:
+            raise ValueError("repository_alias is required for remote SCIP queries")
+
+        payload = self._build_request_payload(
+            symbol=symbol,
+            repositories=[repository_alias],
+            max_depth=depth,
+            project=project,
+        )
+        return self._execute_scip_request("/api/scip/multi/dependencies", payload)
+
+    def dependents(
+        self,
+        symbol: str,
+        repository_alias: Optional[str] = None,
+        depth: int = 1,
+        project: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Get symbols that depend on this symbol.
+
+        Args:
+            symbol: Symbol name to analyze
+            repository_alias: Repository alias to query (required for remote)
+            depth: Depth of transitive dependents (default: 1 = direct only)
+            project: Optional project path filter
+
+        Returns:
+            Dictionary with results, metadata, and errors from server
+        """
+        if not symbol or not isinstance(symbol, str):
+            raise ValueError("Symbol cannot be empty")
+        if not repository_alias:
+            raise ValueError("repository_alias is required for remote SCIP queries")
+
+        payload = self._build_request_payload(
+            symbol=symbol,
+            repositories=[repository_alias],
+            max_depth=depth,
+            project=project,
+        )
+        return self._execute_scip_request("/api/scip/multi/dependents", payload)
+
+    def impact(
+        self,
+        symbol: str,
+        repository_alias: Optional[str] = None,
+        depth: int = 3,
+        project: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Analyze impact of changes to a symbol (shows what depends on it).
+
+        Args:
+            symbol: Symbol name to analyze
+            repository_alias: Repository alias to query (required for remote)
+            depth: Analysis depth (default: 3, must be between 1 and
+                _MAX_IMPACT_DEPTH inclusive -- Bug #1639)
+            project: Optional project path filter
+
+        Returns:
+            Dictionary with results, metadata, and errors from server
+
+        Raises:
+            ValueError: if depth is outside [1, _MAX_IMPACT_DEPTH]
+        """
+        if not symbol or not isinstance(symbol, str):
+            raise ValueError("Symbol cannot be empty")
+        if not repository_alias:
+            raise ValueError("repository_alias is required for remote SCIP queries")
+        if depth < 1:
+            raise ValueError(f"depth must be at least 1, got {depth}")
+        if depth > _MAX_IMPACT_DEPTH:
+            # Bug #1639: reject symmetrically with the < 1 case above
+            # instead of silently clamping -- a caller asking for depth 15
+            # should get a clear rejection, not a silently downgraded
+            # depth-10 result.
+            raise ValueError(f"depth must be at most {_MAX_IMPACT_DEPTH}, got {depth}")
+
+        payload = self._build_request_payload(
+            symbol=symbol,
+            repositories=[repository_alias],
+            max_depth=depth,
+            project=project,
+        )
+        return self._execute_scip_request("/api/scip/multi/dependents", payload)
+
+    def callchain(
+        self,
+        from_symbol: str,
+        to_symbol: str,
+        repository_alias: Optional[str] = None,
+        max_depth: int = _MAX_CALLCHAIN_DEPTH,
+        project: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Trace call chains between two symbols.
+
+        Args:
+            from_symbol: Starting symbol for chain tracing
+            to_symbol: Target symbol for chain tracing
+            repository_alias: Repository alias to query (required for remote)
+            max_depth: Maximum chain length (default: 3, max: 3)
+            project: Optional project path filter
+
+        Returns:
+            Dictionary with results, metadata, and errors from server
+        """
+        if not from_symbol or not isinstance(from_symbol, str):
+            raise ValueError("from_symbol cannot be empty")
+        if not to_symbol or not isinstance(to_symbol, str):
+            raise ValueError("to_symbol cannot be empty")
+        if not repository_alias:
+            raise ValueError("repository_alias is required for remote SCIP queries")
+        if max_depth < 1:
+            raise ValueError(f"max_depth must be at least 1, got {max_depth}")
+        if max_depth > _MAX_CALLCHAIN_DEPTH:
+            # Bug #1603 code review Priority 4 / O2: reject symmetrically
+            # with the < 1 case above instead of silently clamping -- a
+            # caller asking for depth 5 should get a clear rejection, not
+            # a silently downgraded depth-3 result.
+            raise ValueError(
+                f"max_depth must be at most {_MAX_CALLCHAIN_DEPTH}, got {max_depth}"
+            )
+
+        payload = {
+            "repositories": [repository_alias],
+            "symbol": from_symbol,
+            "from_symbol": from_symbol,
+            "to_symbol": to_symbol,
+            "max_depth": max_depth,
+        }
+        if project:
+            payload["project"] = project
+
+        return self._execute_scip_request("/api/scip/multi/callchain", payload)
+
+    def _combine_context_results(
+        self, def_result: Dict[str, Any], ref_result: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Combine definition and references results into context response."""
+        combined: Dict[str, Any] = {
+            "results": {},
+            "metadata": {
+                "total_results": 0,
+                "repos_searched": 1,
+                "execution_time_ms": 0,
+            },
+            "errors": {},
+        }
+        for repo_id, results in def_result.get("results", {}).items():
+            combined["results"].setdefault(repo_id, [])
+            for r in results:
+                item = dict(r)  # Copy to avoid mutating input
+                item["role"] = "definition"
+                combined["results"][repo_id].append(item)
+        for repo_id, results in ref_result.get("results", {}).items():
+            combined["results"].setdefault(repo_id, [])
+            for r in results:
+                item = dict(r)  # Copy to avoid mutating input
+                item["role"] = "reference"
+                combined["results"][repo_id].append(item)
+        combined["metadata"]["total_results"] = sum(
+            len(r) for r in combined["results"].values()
+        )
+        for src in [def_result, ref_result]:
+            for repo_id, error in src.get("errors", {}).items():
+                if repo_id not in combined["errors"]:
+                    combined["errors"][repo_id] = error
+        return combined
+
+    def context(
+        self,
+        symbol: str,
+        repository_alias: Optional[str] = None,
+        limit: int = 20,
+        project: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Get smart context for a symbol (combines definition and references).
+
+        Args:
+            symbol: Symbol name to get context for
+            repository_alias: Repository alias to query (required for remote)
+            limit: Maximum number of reference results (default: 20, min: 1)
+            project: Optional project path filter
+
+        Returns:
+            Dictionary with results, metadata, and errors from server
+        """
+        if not symbol or not isinstance(symbol, str):
+            raise ValueError("Symbol cannot be empty")
+        if not repository_alias:
+            raise ValueError("repository_alias is required for remote SCIP queries")
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
+
+        def_payload = self._build_request_payload(
+            symbol=symbol, repositories=[repository_alias], project=project
+        )
+        def_result = self._execute_scip_request(
+            "/api/scip/multi/definition", def_payload
+        )
+        ref_payload = self._build_request_payload(
+            symbol=symbol, repositories=[repository_alias], limit=limit, project=project
+        )
+        ref_result = self._execute_scip_request(
+            "/api/scip/multi/references", ref_payload
+        )
+        return self._combine_context_results(def_result, ref_result)

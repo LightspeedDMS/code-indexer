@@ -1,0 +1,279 @@
+"""xray_dump_ast MCP handler (Issue #1935 Part 2).
+
+Moved verbatim out of the monolithic xray.py (git show HEAD:.../xray.py:
+1825-2001). The file is now read through the content seam when the server's
+content backend is delegated (`_seam_dump_target`); with the default local
+backend the checks and the read are the original ones (`_local_dump_target`).
+"""
+
+from __future__ import annotations
+
+import posixpath
+from pathlib import Path, PurePosixPath
+from typing import Any, Callable, Dict, Optional, Tuple
+
+from cidx_xray._platform import ContentSeamSource, has_git_segment, server_platform
+from cidx_xray.search_engine import XRaySearchEngine, xray_content_source
+
+from ._catalog_guard import catalog_xray_refusal, xray_access_service
+from ._infra import (
+    _DUMP_AST_MAX_NODES_DEFAULT,
+    _DUMP_AST_MAX_NODES_MIN,
+    _DUMP_AST_MAX_NODES_MAX,
+    _DUMP_AST_MAX_FILE_SIZE_BYTES,
+    _resolve_repo_path,
+    logger,  # shared logger name -- see _infra.py's own comment
+)
+
+from .._common import _mcp_response, promote_bare_alias
+
+
+def handle_xray_dump_ast(params: Dict[str, Any], user: Any) -> Dict[str, Any]:
+    """MCP handler for the xray_dump_ast tool (Issue #19).
+
+    Synchronous single-file AST dump — no background job.  Returns the
+    parse tree of a single file within a repository snapshot inline.
+
+    Auth: query_repos permission required.
+
+    Inputs:
+        repository_alias (str): Global repository alias.
+        file_path (str): Relative path within the repository.
+
+    Output:
+        {ast_tree: <BFS-serialised root node>} on success, or an error dict.
+
+    Error codes:
+        auth_required              — unauthenticated or missing query_repos.
+        repository_not_found       — alias cannot be resolved.
+        invalid_file_path          — file_path is empty or absolute.
+        path_traversal_rejected    — file_path escapes the repository root.
+        file_not_found             — resolved path does not exist.
+        unsupported_language       — no tree-sitter grammar for the extension.
+        xray_extras_not_installed  — tree-sitter extras not installed.
+        parse_error                — unexpected failure during AST parsing.
+    """
+    # 1. Auth + permission check
+    if user is None or not user.has_permission("query_repos"):
+        return _mcp_response({"error": "auth_required"})
+
+    # 2. Parameter extraction
+    repo_alias: str = params.get("repository_alias", "")
+    file_path_raw: str = params.get("file_path", "")
+    catalog_refusal = catalog_xray_refusal(
+        repo_alias, user.username, xray_access_service()
+    )
+    if catalog_refusal is not None:
+        return _mcp_response(catalog_refusal)
+
+    # max_nodes: optional int, default 500, range [1, 2000] (Finding 3.2, v10.4.4)
+    max_nodes_raw = params.get("max_nodes", _DUMP_AST_MAX_NODES_DEFAULT)
+    try:
+        max_nodes = int(max_nodes_raw)
+    except (TypeError, ValueError):
+        return _mcp_response(
+            {
+                "error": "max_nodes_invalid",
+                "message": f"max_nodes must be int, got {max_nodes_raw!r}",
+            }
+        )
+    if not (_DUMP_AST_MAX_NODES_MIN <= max_nodes <= _DUMP_AST_MAX_NODES_MAX):
+        return _mcp_response(
+            {
+                "error": "max_nodes_out_of_range",
+                "message": (
+                    f"max_nodes must be in "
+                    f"[{_DUMP_AST_MAX_NODES_MIN}, {_DUMP_AST_MAX_NODES_MAX}]"
+                ),
+            }
+        )
+
+    if not file_path_raw:
+        return _mcp_response(
+            {"error": "invalid_file_path", "message": "file_path must not be empty"}
+        )
+
+    # Story #1039: bare-to-global alias fallback (read-only handler).
+    if isinstance(repo_alias, str):
+        _promoted = promote_bare_alias(repo_alias, user.username, logger)
+        if _promoted != repo_alias:
+            repo_alias = _promoted
+            params["repository_alias"] = _promoted
+
+    # 3. Repository alias resolution
+    repo_path_str = _resolve_repo_path(repo_alias)
+    if repo_path_str is None:
+        return _mcp_response(
+            {
+                "error": "repository_not_found",
+                "message": f"Repository alias {repo_alias!r} not found",
+            }
+        )
+
+    repo_root = Path(repo_path_str)
+    seam = xray_content_source(repo_root)
+    if seam is None:
+        target, read_source, refusal = _local_dump_target(repo_root, file_path_raw)
+    else:
+        target, read_source, refusal = _seam_dump_target(seam, file_path_raw)
+    if refusal is not None:
+        return _mcp_response(refusal)
+
+    # 6. Parse and serialise
+    try:
+        engine = XRaySearchEngine()
+        lang = engine.ast_engine.detect_language(target)
+        if lang is None:
+            return _mcp_response(
+                {
+                    "error": "unsupported_language",
+                    "message": (
+                        f"No tree-sitter grammar for extension {target.suffix!r}"
+                    ),
+                }
+            )
+        root = engine.ast_engine.parse(read_source(), lang)
+        ast_tree = XRaySearchEngine._serialize_ast(root, max_nodes=max_nodes)
+        return _mcp_response(
+            {
+                "ast_tree": ast_tree,
+                "file_path": file_path_raw,
+                "language": lang,
+            }
+        )
+    except ImportError as exc:
+        return _mcp_response(
+            {
+                "error": "xray_extras_not_installed",
+                "message": str(exc),
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("xray_dump_ast parse error for %s: %s", file_path_raw, exc)
+        return _mcp_response(
+            {
+                "error": "parse_error",
+                "message": str(exc),
+            }
+        )
+
+
+#: (target path, reader of its bytes, refusal or None). The reader runs only
+#: once the language is known, inside the parse's error handling, as the read
+#: always has.
+_DumpTarget = Tuple[Path, Callable[[], bytes], Optional[Dict[str, Any]]]
+
+
+def _no_source() -> bytes:
+    raise AssertionError("a refused dump target is never read")
+
+
+def _file_too_large(file_size: int) -> Dict[str, Any]:
+    return {
+        "error": "file_too_large",
+        "message": (
+            f"AST dump refused: file exceeds the in-process parse "
+            f"size limit of {_DUMP_AST_MAX_FILE_SIZE_BYTES} bytes "
+            f"(file is {file_size} bytes). Narrow to a smaller "
+            f"file, or use xray_search/xray_explore (the Rust "
+            f"subprocess scan path) which has no such limit."
+        ),
+    }
+
+
+def _file_not_found(file_path_raw: str) -> Dict[str, Any]:
+    return {
+        "error": "file_not_found",
+        "message": f"File not found: {file_path_raw!r}",
+    }
+
+
+def _traversal_rejected(file_path_raw: str) -> Dict[str, Any]:
+    return {
+        "error": "path_traversal_rejected",
+        "message": (
+            f"file_path {file_path_raw!r} resolves outside the repository root"
+        ),
+    }
+
+
+def _local_dump_target(repo_root: Path, file_path_raw: str) -> _DumpTarget:
+    """The file to dump, checked on this pod's disk (a local repository)."""
+    # 4. Path traversal protection — resolve and verify the path stays within repo root.
+    target = (repo_root / file_path_raw).resolve()
+
+    def _read() -> bytes:
+        return target.read_bytes()
+
+    try:
+        target_relative = target.relative_to(repo_root.resolve())
+    except ValueError:
+        return target, _no_source, _traversal_rejected(file_path_raw)
+
+    # 5. File existence check. A path inside the repository's .git is
+    # answered exactly as a missing file.
+    if has_git_segment(target_relative.parts) or not target.is_file():
+        return target, _no_source, _file_not_found(file_path_raw)
+
+    # 5.5. File-size cap (Story #1494 AC1, Finding A2): refuse BEFORE
+    # touching tree-sitter at all -- os.stat() is a cheap syscall, so a
+    # file above the cap is rejected near-instantly instead of triggering
+    # an unbounded, GIL-held in-process parse (159ms measured on a 759KB
+    # file per the report; scales with file size, with no upper bound).
+    file_size = target.stat().st_size
+    if file_size > _DUMP_AST_MAX_FILE_SIZE_BYTES:
+        return target, _no_source, _file_too_large(file_size)
+    return target, _read, None
+
+
+def _seam_dump_target(seam: ContentSeamSource, file_path_raw: str) -> _DumpTarget:
+    """The file to dump, fetched through the content seam (no local read).
+
+    Containment is lexical -- the path never touches this pod's disk -- and
+    the backend refuses anything else that escapes (symlinks included), which
+    is reported as the per-file error it is.
+
+    The size cap is checked BEFORE the fetch against the manifest entry's
+    size -- the TTL-cached manifest the file tools (and the filename driver)
+    share -- so an oversized file is refused without moving its
+    bytes, as the local path refuses it on a stat. It is checked again on the
+    bytes fetched: a file absent from the manifest (a pruned directory), a
+    symlink (its entry's size is the link's), or one that grew since the
+    manifest was taken.
+    """
+    platform = server_platform()
+    rel = posixpath.normpath(file_path_raw)
+    if PurePosixPath(rel).is_absolute() or rel == ".." or rel.startswith("../"):
+        return Path(rel), _no_source, _traversal_rejected(file_path_raw)
+    if has_git_segment(PurePosixPath(rel).parts):
+        # Answered exactly as a missing file, as on the local path.
+        return Path(rel), _no_source, _file_not_found(file_path_raw)
+
+    # The size pre-check reads ONE directory's listing (or the manifest the
+    # file tools already hold) -- never a fresh walk of the whole repository
+    # to describe a single file. Without either, the bytes check below decides.
+    prune = list(platform.always_excluded_dirs())
+    if platform.supports_scoped_manifest(seam.backend):
+        described = platform.scoped_manifest_entries(
+            seam, posixpath.dirname(rel), max_depth=1, prune_dirs=prune
+        )
+    else:
+        described = platform.manifest_entries_cached(seam, prune) or ()
+    entry = next((e for e in described if e.path == rel and not e.is_symlink), None)
+    if entry is not None and entry.size > _DUMP_AST_MAX_FILE_SIZE_BYTES:
+        return Path(rel), _no_source, _file_too_large(entry.size)
+
+    fetched = platform.fetch_one(seam, rel)
+    if fetched.error is not None:
+        return (
+            Path(rel),
+            _no_source,
+            {
+                "error": "file_not_found",
+                "message": f"File not found: {file_path_raw!r} ({fetched.error})",
+            },
+        )
+    if len(fetched.data) > _DUMP_AST_MAX_FILE_SIZE_BYTES:
+        return Path(rel), _no_source, _file_too_large(len(fetched.data))
+    data = fetched.data
+    return Path(rel), lambda: data, None

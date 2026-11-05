@@ -1,0 +1,42 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cidx-scip"
+dynamic = ["version"]
+description = "SCIP code intelligence (definitions, references, call chains): a code-indexer feature add-on"
+readme = "README.md"
+license = {text = "MIT"}
+# Tracks the core's requires-python (see the root pyproject.toml).
+requires-python = ">=3.10,<3.13"
+# The SDK by path, as the core references it: the name is not ours on public
+# indexes, so pip must never resolve it from one. A feature depends on the SDK
+# and third-party packages only -- never on code-indexer (the core depends on
+# this distribution, not the reverse; see src/cidx_scip/_platform.py for the
+# one transitional exception and how it goes away).
+dependencies = [
+    "cidx-sdk @ {root:parent:parent:uri}/cidx-sdk",
+    # The SCIP index format (cidx_scip.protobuf).
+    "protobuf>=3.20.0",
+    # The `cidx scip` CLI group (cidx_scip.cli) and its output.
+    "click>=8.0.0",
+    "rich>=13.0.0",
+    # The server side (cidx_scip.server): REST routes and request models.
+    # Loaded only by the server, through the feature's hooks; the core
+    # depends on the same.
+    "fastapi>=0.116.0",
+    "pydantic>=2.0.0",
+]
+
+[project.entry-points."code_indexer.features"]
+scip = "cidx_scip.feature:make_feature"
+
+[tool.hatch.version]
+path = "src/cidx_scip/_version.py"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cidx_scip"]

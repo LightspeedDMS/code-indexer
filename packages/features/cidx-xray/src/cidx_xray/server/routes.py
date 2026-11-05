@@ -1,0 +1,571 @@
+"""REST route POST /api/xray/search (Story #974).
+
+Thin shim: validate inputs, pre-flight check evaluator, submit background job.
+Mirrors the MCP xray_search handler (cidx_xray.server.mcp.xray) — same
+validation logic, HTTP-shaped response. Returns HTTP 202 with
+{"job_id": "<uuid>"}; clients poll the existing GET /api/jobs/{job_id}
+endpoint for progress and final results.
+
+Contributed through the feature's ``routers()`` (modular plan phase 4c): the
+core mounts :data:`router` under :data:`ROUTER_PREFIX`, authenticates every
+request (bearer token, API key or Web UI session) and requires
+:data:`ROUTE_PERMISSION` before a handler runs, and puts the caller on the
+request state (``cidx_sdk.web.PRINCIPAL_STATE_ATTR``). A caller without the
+permission gets the core's 403, as on every feature route.
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Union
+
+from cidx_sdk import PRINCIPAL_STATE_ATTR, Principal
+from fastapi import APIRouter, HTTPException, Request, status
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
+
+from code_indexer.server.services.api_metrics_service import api_metrics_service
+from code_indexer.server.services.search_event_recording import xray_engine_started
+from cidx_xray._platform import server_platform
+from cidx_xray.sandbox import validate_rust_evaluator
+from cidx_xray.server import runtime
+
+logger = logging.getLogger(__name__)
+
+# Timeout range enforced here — matches the MCP handler constants.
+_TIMEOUT_MIN = 10
+_TIMEOUT_MAX = 600
+_DEFAULT_TIMEOUT_SECONDS = 120
+
+#: Where the core mounts :data:`router`.
+ROUTER_PREFIX = "/api/xray"
+#: The permission the core checks before any route here runs.
+ROUTE_PERMISSION = "query_repos"
+
+router = APIRouter(tags=["xray"])
+
+
+class RouteCaller:
+    """The authenticated caller of a route here, in the shape the X-Ray
+    handlers take (``username``, ``role``, ``has_permission``).
+
+    :data:`ROUTE_PERMISSION` was checked by the core against the live account
+    for this very request; any other permission is asked of the
+    ``permissions`` capability (False when the feature has not started).
+    """
+
+    def __init__(self, principal: Principal) -> None:
+        self.username = principal.username
+        self.role = principal.role
+
+    def has_permission(self, permission: Optional[str]) -> bool:
+        if permission is None or permission == ROUTE_PERMISSION:
+            return True
+        permissions = runtime.permissions()
+        return permissions is not None and permissions.has_permission(
+            self.username, permission
+        )
+
+
+def _caller(request: Request) -> RouteCaller:
+    """The caller the core authenticated for *request*."""
+    principal = getattr(request.state, PRINCIPAL_STATE_ATTR, None)
+    if not isinstance(principal, Principal):
+        # Never reached through the core (it sets the principal first): a
+        # router mounted some other way is refused rather than served.
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing authentication credentials",
+        )
+    return RouteCaller(principal)
+
+
+# ---------------------------------------------------------------------------
+# Request / Response models
+# ---------------------------------------------------------------------------
+
+
+class XRaySearchRequest(BaseModel):
+    """Pydantic request body for POST /api/xray/search."""
+
+    repository_alias: str
+    driver_regex: str
+    evaluator_code: Optional[str] = None
+    pattern_name: Optional[str] = None
+    pattern_params: Optional[Dict[str, Any]] = None
+    search_target: str  # validated manually; Literal requires py3.8+ typing compat
+    include_patterns: List[str] = Field(default_factory=list)
+    exclude_patterns: List[str] = Field(default_factory=list)
+    timeout_seconds: Optional[int] = None
+    max_files: Optional[int] = None
+
+
+class XRaySearchResponse(BaseModel):
+    """HTTP 202 response body for POST /api/xray/search."""
+
+    job_id: str
+
+
+# ---------------------------------------------------------------------------
+# Helpers — extracted for easy mocking in tests
+# ---------------------------------------------------------------------------
+
+
+def _enforce_repo_access(
+    access_filtering_service: Optional[Any],
+    username: str,
+    aliases: Union[str, List[str]],
+) -> None:
+    """Enforce repo-level access for one or more requested aliases.
+
+    /api/xray/search authorizes every requested golden repo against the
+    caller's group grants via AccessFilteringService before any X-Ray AST
+    search. Delegates the actual access decision to the shared
+    require_repo_access() guard (same semantics as the MCP dispatcher's
+    _check_repository_access()) and shapes the result into this route's
+    existing HTTPException error-envelope convention.
+
+    Called UNCONDITIONALLY, before repository/evaluator resolution or job
+    submission, so the check can never be silently skipped.
+
+    Raises:
+        HTTPException 403: caller lacks access to the requested alias.
+        HTTPException 500: access_filtering_service is unavailable --
+            fails closed rather than skipping the check.
+    """
+    refusal = server_platform().require_repo_access(
+        access_filtering_service, username, aliases
+    )
+    if refusal is None:
+        return
+    error_code, message = refusal
+    raise HTTPException(
+        status_code=(
+            status.HTTP_403_FORBIDDEN
+            if error_code == "access_denied"
+            else status.HTTP_500_INTERNAL_SERVER_ERROR
+        ),
+        detail={"error_code": error_code, "detail": message},
+    )
+
+
+def _resolve_repo_path(alias: str) -> Optional[str]:
+    """Resolve a global repo alias to its versioned snapshot path.
+
+    Returns None when the alias is unknown.
+    """
+    return server_platform().resolve_golden_repo_path(alias)
+
+
+def _get_background_job_manager() -> Any:
+    """Return the live BackgroundJobManager from the app module."""
+    return server_platform().app_attr("background_job_manager")
+
+
+def _resolve_evaluator_code_or_raise(body: "XRaySearchRequest") -> str:
+    """Resolve evaluator_code from pattern_name or raw evaluator_code (Bug #1812).
+
+    Delegates to cidx_xray.server.mcp.xray._resolve_evaluator_code — the SAME shared
+    helper the MCP xray_search handler uses — so pattern lookup (repo-scoped
+    with an __any__ fallback), the mutual-exclusion check, and
+    XrayPatternService's path-traversal guard are never re-implemented here.
+
+    H5 (consolidated review, Issue #1811/Bug #1812): the "neither
+    evaluator_code nor pattern_name supplied" rejection used to be a
+    hand-rolled duplicate check here that had to independently agree with
+    _resolve_evaluator_code's own default-substitution behavior forever.
+    That duplication is gone -- _resolve_evaluator_code itself now rejects
+    this case UNLESS the caller explicitly opts into the default-evaluator
+    fallback via allow_default_evaluator=True, which this REST route
+    deliberately never passes (unlike the MCP xray_search/xray_explore
+    handlers, which do document and want that fallback).
+
+    Raises:
+        HTTPException: 422 when neither evaluator_code nor pattern_name is
+            supplied (evaluator_code_required), when both are supplied
+            (mutually_exclusive_params), or when pattern resolution itself
+            fails (e.g. pattern_not_found).
+    """
+    import json as _json
+
+    from cidx_xray.server.mcp.xray import _resolve_evaluator_code
+
+    params = {
+        "evaluator_code": body.evaluator_code,
+        "pattern_name": body.pattern_name,
+        "pattern_params": body.pattern_params,
+    }
+    evaluator_code, err_resp = _resolve_evaluator_code(
+        params,
+        body.repository_alias,
+        expected_execution_mode="legacy",
+    )
+    if err_resp is not None:
+        error_data = _json.loads(err_resp["content"][0]["text"])
+        error_code = error_data.get("error", "pattern_resolution_failed")
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error_code": error_code,
+                "detail": error_data.get("message", error_code),
+            },
+        )
+    return evaluator_code
+
+
+# ---------------------------------------------------------------------------
+# Route handler
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/search",
+    response_model=XRaySearchResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def xray_search(
+    body: XRaySearchRequest,
+    *,
+    http_request: Request,
+) -> XRaySearchResponse:
+    """Submit an X-Ray AST search job and return its job_id.
+
+    1. Permission check (query_repos).
+    2. Repo-level access check.
+    3. Field validation (search_target, timeout_seconds range, max_files).
+    4. Evaluator resolution — evaluator_code or pattern_name (Bug #1812).
+    5. Repository alias resolution.
+    6. Pre-flight evaluator validation via validate_rust_evaluator.
+    7. Job submission via BackgroundJobManager.
+    8. Return HTTP 202 with {job_id}.
+
+    Error codes:
+        auth_required              — missing query_repos permission (403)
+        access_denied              — caller lacks access to a requested repo (403)
+        access_control_unavailable — access_filtering_service missing (500)
+        invalid_search_target      — search_target not 'content' or 'filename' (422)
+        timeout_out_of_range       — timeout_seconds outside [10, 600] (422)
+        max_files_out_of_range     — max_files provided but < 1 (422)
+        evaluator_code_required    — neither evaluator_code nor pattern_name given (422)
+        mutually_exclusive_params  — both evaluator_code and pattern_name given (422)
+        pattern_not_found          — pattern_name not found in repo or __any__ scope (422)
+        repository_not_found       — alias cannot be resolved (404)
+        xray_extras_not_installed  — tree-sitter extras not available (503)
+        xray_evaluator_validation_failed — Rust evaluator forbidden-construct violation (422)
+    """
+    # ------------------------------------------------------------------
+    # 1. Permission check
+    # ------------------------------------------------------------------
+    user = _caller(http_request)
+    if not user.has_permission("query_repos"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error_code": "auth_required",
+                "detail": "query_repos permission required",
+            },
+        )
+
+    # ------------------------------------------------------------------
+    # 1b. Repo-level access check — UNCONDITIONAL,
+    #     BEFORE repository/evaluator resolution or job submission.
+    # ------------------------------------------------------------------
+    access_filtering_service = getattr(
+        http_request.app.state, "access_filtering_service", None
+    )
+    _enforce_repo_access(access_filtering_service, user.username, body.repository_alias)
+    from cidx_xray.server.mcp.xray._catalog_guard import (
+        catalog_xray_refusal,
+    )
+
+    catalog_refusal = catalog_xray_refusal(
+        body.repository_alias, user.username, access_filtering_service
+    )
+    if catalog_refusal is not None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error_code": catalog_refusal["error"],
+                "detail": catalog_refusal["message"],
+            },
+        )
+
+    # ------------------------------------------------------------------
+    # 2. Field validation
+    # ------------------------------------------------------------------
+    if body.search_target not in ("content", "filename"):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error_code": "invalid_search_target",
+                "detail": (
+                    f"search_target must be 'content' or 'filename', "
+                    f"got {body.search_target!r}"
+                ),
+            },
+        )
+
+    if body.max_files is not None and body.max_files < 1:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error_code": "max_files_out_of_range",
+                "detail": "max_files must be >= 1",
+            },
+        )
+
+    effective_timeout: int = (
+        body.timeout_seconds
+        if body.timeout_seconds is not None
+        else _DEFAULT_TIMEOUT_SECONDS
+    )
+    if not (_TIMEOUT_MIN <= effective_timeout <= _TIMEOUT_MAX):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error_code": "timeout_out_of_range",
+                "detail": (
+                    f"timeout_seconds must be between {_TIMEOUT_MIN} and "
+                    f"{_TIMEOUT_MAX}, got {effective_timeout}"
+                ),
+            },
+        )
+
+    # ------------------------------------------------------------------
+    # 3. Evaluator resolution — evaluator_code or pattern_name (Bug #1812)
+    # ------------------------------------------------------------------
+    evaluator_code = _resolve_evaluator_code_or_raise(body)
+
+    # ------------------------------------------------------------------
+    # 4. Repository alias resolution
+    # ------------------------------------------------------------------
+    repo_path_str = _resolve_repo_path(body.repository_alias)
+    if repo_path_str is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error_code": "repository_not_found",
+                "detail": f"Repository alias {body.repository_alias!r} not found",
+            },
+        )
+
+    # ------------------------------------------------------------------
+    # 5. Pre-flight evaluator validation
+    # ------------------------------------------------------------------
+    validation = validate_rust_evaluator(evaluator_code)
+    if not validation.ok:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error_code": "xray_evaluator_validation_failed",
+                "detail": validation.reason,
+            },
+        )
+
+    # ------------------------------------------------------------------
+    # 6. Submit background job
+    # ------------------------------------------------------------------
+    api_metrics_service.increment_xray_search(username=user.username)
+    repo_path = Path(repo_path_str)
+    include_patterns = list(body.include_patterns)
+    exclude_patterns = list(body.exclude_patterns)
+    max_files = body.max_files
+
+    # Story #2107: the job records its search event when its result is known.
+    from cidx_xray.server.mcp._common import run_recorded_xray, xray_recorder
+
+    record_event = xray_recorder(
+        tool="POST /api/xray/search",
+        door="rest",
+        username=user.username,
+        repo_alias=body.repository_alias,
+        pattern=body.driver_regex,
+        app=http_request.app,
+    )
+
+    # cancel_check: BackgroundJobManager injects its cancellation check into
+    # any job that declares it; a cancelled job records no search event.
+    def job_fn(progress_callback, cancel_check=None):  # type: ignore[no-untyped-def]
+        from cidx_xray.search_engine import XRaySearchEngine as _Engine
+
+        return run_recorded_xray(
+            record_event,
+            lambda: xray_engine_started(record_event, _Engine()).run(
+                repo_path=repo_path,
+                driver_regex=body.driver_regex,
+                evaluator_code=evaluator_code,
+                search_target=body.search_target,
+                include_patterns=include_patterns,
+                exclude_patterns=exclude_patterns,
+                timeout_seconds=effective_timeout,
+                progress_callback=progress_callback,
+                max_files=max_files,
+            ),
+            cancel_check,
+        )
+
+    bjm = _get_background_job_manager()
+    job_id: str = bjm.submit_job(
+        operation_type="xray_search",
+        func=job_fn,
+        submitter_username=user.username,
+        repo_alias=body.repository_alias,
+    )
+
+    logger.info(
+        "xray_search REST job submitted",
+        extra={
+            "user_id": user.username,
+            "repo_alias": body.repository_alias,
+            "driver_regex": body.driver_regex[:100],
+            "search_target": body.search_target,
+        },
+    )
+
+    return XRaySearchResponse(job_id=job_id)
+
+
+# ---------------------------------------------------------------------------
+# Batch request / response models (Story #1055)
+# ---------------------------------------------------------------------------
+
+
+class XRayBatchScanBundle(BaseModel):
+    """One scan bundle for xray_search_batch."""
+
+    driver_regex: str
+    evaluator_code: Optional[str] = None
+    pattern_name: Optional[str] = None
+    pattern_params: Optional[Dict[str, Any]] = None
+    search_target: str = "content"
+    case_sensitive: bool = True
+    multiline: bool = False
+    pcre2: bool = False
+
+
+class XRayBatchSearchRequest(BaseModel):
+    """Pydantic request body for POST /api/xray/search/batch."""
+
+    repository_alias: Any  # str | list[str] -- validated by handler
+    scans: List[XRayBatchScanBundle]
+    max_results: Optional[int] = None
+    timeout_seconds: Optional[int] = None
+    await_seconds: Optional[float] = None
+
+
+class XRayBatchSearchResponse(BaseModel):
+    """HTTP 202 response body for POST /api/xray/search/batch."""
+
+    job_id: str
+
+
+# ---------------------------------------------------------------------------
+# Batch route handler (Story #1055)
+# ---------------------------------------------------------------------------
+
+# Map synchronous MCP error codes to HTTP status codes.
+_BATCH_ERROR_HTTP_STATUS = {
+    "auth_required": status.HTTP_403_FORBIDDEN,
+    "access_denied": status.HTTP_403_FORBIDDEN,
+    "access_control_unavailable": status.HTTP_500_INTERNAL_SERVER_ERROR,
+    "alias_required": status.HTTP_422_UNPROCESSABLE_ENTITY,
+    "scans_required": status.HTTP_422_UNPROCESSABLE_ENTITY,
+    "too_many_repositories": status.HTTP_422_UNPROCESSABLE_ENTITY,
+    "too_many_scans": status.HTTP_422_UNPROCESSABLE_ENTITY,
+    "timeout_out_of_range": status.HTTP_422_UNPROCESSABLE_ENTITY,
+    "await_seconds_out_of_range": status.HTTP_422_UNPROCESSABLE_ENTITY,
+    "driver_regex_required": status.HTTP_422_UNPROCESSABLE_ENTITY,
+    "mutually_exclusive_params": status.HTTP_422_UNPROCESSABLE_ENTITY,
+    "xray_evaluator_validation_failed": status.HTTP_422_UNPROCESSABLE_ENTITY,
+    "no_repositories_resolved": status.HTTP_404_NOT_FOUND,
+}
+
+
+@router.post(
+    "/search/batch",
+    response_model=XRayBatchSearchResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def xray_search_batch(
+    body: XRayBatchSearchRequest,
+    http_request: Request,
+) -> Union[XRayBatchSearchResponse, JSONResponse]:
+    """Submit a cross-repo multi-expression X-Ray batch job.
+
+    Delegates to handle_xray_search_batch (same logic as the MCP tool).
+    Returns HTTP 202 with {"job_id": "<uuid>"}; poll GET /api/jobs/{job_id}.
+
+    Error codes follow the batch contract (distinct from the single-search
+    xray_search endpoint's error codes, though both now support pattern_name
+    and evaluator_code — Bug #1812). Repo-level access enforcement
+    lives inside handle_xray_search_batch itself, since this
+    route calls that handler directly rather than routing through the MCP
+    dispatcher.
+    """
+    import json as _json
+
+    from cidx_xray.server.mcp.xray_batch import handle_xray_search_batch
+
+    # Convert Pydantic model to the params dict expected by the MCP handler.
+    scans_list = [
+        {
+            "driver_regex": s.driver_regex,
+            "evaluator_code": s.evaluator_code,
+            "pattern_name": s.pattern_name,
+            "pattern_params": s.pattern_params,
+            "search_target": s.search_target,
+            "case_sensitive": s.case_sensitive,
+            "multiline": s.multiline,
+            "pcre2": s.pcre2,
+        }
+        for s in body.scans
+    ]
+
+    params: dict = {
+        "repository_alias": body.repository_alias,
+        "scans": scans_list,
+    }
+    if body.max_results is not None:
+        params["max_results"] = body.max_results
+    if body.timeout_seconds is not None:
+        params["timeout_seconds"] = body.timeout_seconds
+    if body.await_seconds is not None:
+        params["await_seconds"] = body.await_seconds
+
+    from cidx_xray.server.mcp._common import SearchOrigin
+
+    mcp_resp = handle_xray_search_batch(
+        params,
+        _caller(http_request),
+        origin=SearchOrigin(tool="POST /api/xray/search/batch", door="rest"),
+    )
+
+    # Unwrap MCP envelope.
+    try:
+        resp_data = _json.loads(mcp_resp["content"][0]["text"])
+    except (KeyError, IndexError, _json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "internal_error", "detail": str(exc)},
+        ) from exc
+
+    if "error" in resp_data:
+        error_code = resp_data["error"]
+        http_status = _BATCH_ERROR_HTTP_STATUS.get(
+            error_code, status.HTTP_400_BAD_REQUEST
+        )
+        raise HTTPException(
+            status_code=http_status,
+            detail=resp_data,
+        )
+
+    # Inline-result parity: when await_seconds > 0 and the job completed
+    # before the poll window expired, the MCP handler returns the full result
+    # dict (matches, errors, …) instead of {"job_id": …}.  In that case we
+    # return HTTP 200 with the complete result so REST callers get the same
+    # data without needing to poll.
+    if "job_id" not in resp_data:
+        return JSONResponse(content=resp_data, status_code=status.HTTP_200_OK)
+
+    return XRayBatchSearchResponse(job_id=resp_data["job_id"])
