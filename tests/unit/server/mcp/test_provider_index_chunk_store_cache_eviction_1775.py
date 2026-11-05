@@ -35,6 +35,7 @@ from code_indexer.storage.shared.chunk_store_cache import (
     reset_global_chunk_store_cache,
 )
 from code_indexer.storage.sqlite_chunk_store import ChunkStore
+from tests.unit.server.app_state_patch import patch_app_state
 
 VECTOR = [0.1, 0.2, 0.3, 0.4]
 CHUNKS_DB_FILENAME = "chunks.db"
@@ -115,8 +116,8 @@ def _wire_scheduler_into_app_state(monkeypatch, scheduler) -> None:
     production accessor reads from, rather than patching the accessor
     function itself."""
     lifecycle = SimpleNamespace(refresh_scheduler=scheduler)
-    monkeypatch.setattr(
-        app_module.app.state, "global_lifecycle_manager", lifecycle, raising=False
+    patch_app_state(
+        monkeypatch, app_module.app.state, "global_lifecycle_manager", lifecycle
     )
 
 

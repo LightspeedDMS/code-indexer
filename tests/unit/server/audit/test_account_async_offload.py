@@ -33,6 +33,7 @@ from code_indexer.server.middleware.audit_request_context import (
     AuditRequestContextMiddleware,
 )
 from code_indexer.server.services.group_access_manager import GroupAccessManager
+from code_indexer.server.utils.route_table import iter_routes
 
 _ADMIN = "example-admin"
 _PASSWORD = "SecureP@ssw0rd!XyZ789"
@@ -107,7 +108,7 @@ def web(tmp_path: Path, store, monkeypatch, caplog):
     app = FastAPI()
     app.add_middleware(AuditRequestContextMiddleware)
     app.include_router(web_router, prefix="/admin")
-    for route in web_router.routes:
+    for route_path, route in iter_routes(web_router.routes):
         if isinstance(route, APIRoute):
             for dep in route.dependencies or []:
                 fn = getattr(dep, "dependency", None)
@@ -230,7 +231,7 @@ def test_web_git_credential_add_routes_build_their_manager_off_the_loop(
     app.include_router(web_routes.web_router, prefix="/admin")
     app.include_router(web_routes.user_router, prefix="/user")
     for router in (web_routes.web_router, web_routes.user_router):
-        for route in router.routes:
+        for route_path, route in iter_routes(router.routes):
             if isinstance(route, APIRoute):
                 for dep in route.dependencies or []:
                     fn = getattr(dep, "dependency", None)

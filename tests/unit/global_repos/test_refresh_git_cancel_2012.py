@@ -54,7 +54,10 @@ while i < len(argv):  # the subcommand follows -C <path> / -c <cfg> options
     else:
         sub = argv[i]
         break
-if sub == os.environ.get("FAKE_GIT_FAIL_ON"):
+once = os.environ.get("FAKE_GIT_FAIL_ONCE_MARKER")
+if sub == os.environ.get("FAKE_GIT_FAIL_ON") and not (once and os.path.exists(once)):
+    if once:
+        open(once, "w").close()
     sys.stderr.write(os.environ["FAKE_GIT_FAIL_STDERR"])
     sys.exit(128)
 if sub == os.environ.get("FAKE_GIT_HANG_ON"):
@@ -148,7 +151,11 @@ def install_fake_git(
     hang_on: str = "",
     fail_on: str = "",
     fail_stderr: str = "",
+    fail_once: bool = False,
 ) -> None:
+    """*fail_once*: only the FIRST *fail_on* git subcommand fails; later
+    ones run the real git (a read the git seam repeats later in the flow,
+    e.g. ``symbolic-ref``, fails only where the test aims it)."""
     bin_dir = tmp_path / "gitbin"
     bin_dir.mkdir(exist_ok=True)
     script = bin_dir / "fake_git.py"
@@ -162,6 +169,9 @@ def install_fake_git(
     monkeypatch.setenv("FAKE_GIT_HANG_ON", hang_on)
     monkeypatch.setenv("FAKE_GIT_FAIL_ON", fail_on)
     monkeypatch.setenv("FAKE_GIT_FAIL_STDERR", fail_stderr)
+    monkeypatch.setenv(
+        "FAKE_GIT_FAIL_ONCE_MARKER", str(bin_dir / "failed_once") if fail_once else ""
+    )
 
 
 def child_started(pid_file: Path) -> Callable[[], bool]:
@@ -185,7 +195,9 @@ def expect_cancelled(action: Callable[[], Any], pid_file: Path) -> None:
 @pytest.mark.parametrize(
     "hang_on,force_reset,new_remote_commit",
     [
-        ("branch", False, False),  # branch verification
+        # branch verification: the base clone's branch is read through the
+        # git seam, `git symbolic-ref --short HEAD` (head_branch)
+        ("symbolic-ref", False, False),
         ("fetch", False, False),  # change detection
         ("pull", False, True),  # update
         ("rev-parse", True, False),  # force-reset branch detection

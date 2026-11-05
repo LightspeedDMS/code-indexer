@@ -13,9 +13,9 @@ Covers:
 
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-from code_indexer.server.mcp.handlers._depmap_aliases import (
+from cidx_depmap.server.mcp._depmap_aliases import (
     assert_resolution_valid,
     assert_success_resolution_consistent,
 )
@@ -25,6 +25,7 @@ from tests.unit.server.mcp.test_dep_map_889_fixtures import (
     _make_hub_graph,
     _make_user,
 )
+from tests.unit.server._depmap_feature import depmap_service_reading, depmap_started
 
 
 class TestAC5InvalidByResolution:
@@ -87,22 +88,18 @@ class TestAC5ResolutionLiteralContract:
 
     def test_invalid_input_in_resolution_literal(self) -> None:
         import typing
-        from code_indexer.server.mcp.handlers._depmap_aliases import ResolutionLiteral
+        from cidx_depmap.server.mcp._depmap_aliases import ResolutionLiteral
 
         args = set(typing.get_args(ResolutionLiteral))
         assert "invalid_input" in args
 
     def test_missing_dep_map_path_returns_success_false(self, tmp_path: Path) -> None:
-        from code_indexer.server.mcp.handlers.depmap import (
+        from cidx_depmap.server.mcp.handlers import (
             depmap_get_hub_domains_handler,
         )
 
-        state = MagicMock()
-        state.dependency_map_service.cidx_meta_read_path = tmp_path / "no-such-dir"
-        with patch(
-            "code_indexer.server.mcp.handlers.depmap._utils.app_module.app.state",
-            state,
-        ):
+        service = depmap_service_reading(tmp_path / "no-such-dir")
+        with depmap_started(service, MagicMock()):
             result = depmap_get_hub_domains_handler({}, _make_user())
         data = json.loads(result["content"][0]["text"])
         assert data["success"] is False

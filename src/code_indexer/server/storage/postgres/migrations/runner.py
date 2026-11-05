@@ -17,7 +17,7 @@ import hashlib
 import logging
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 try:
     import psycopg
@@ -233,6 +233,77 @@ class MigrationRunner:
                 len(applied),
             )
             return count
+        finally:
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    "SELECT pg_advisory_unlock(%s)", (_MIGRATION_ADVISORY_LOCK_KEY,)
+                )
+
+    def run_feature_migrations(
+        self, plan: Sequence[Tuple[str, Sequence[Any]]]
+    ) -> Dict[str, int]:
+        """Apply feature add-on migrations, tracked per feature.
+
+        *plan* is ``[(feature name, migrations)]`` in dependency order; each
+        migration is a ``cidx_sdk.Migration`` (``version``, ``description``,
+        ``apply(connection)``), strictly increasing per feature. One version
+        row per feature lives in ``feature_schema_versions``.
+
+        Runs under the SAME session advisory lock as :meth:`run`, so workers
+        and nodes starting together apply each migration once. Each
+        migration and its version bump commit together; a failing migration
+        rolls back and raises (startup must stop). A version row AHEAD of the
+        feature's newest migration (the add-on was downgraded) is left as is
+        and nothing is applied: migrations are backward compatible, so the
+        older code runs on the newer schema.
+
+        Returns:
+            Feature name -> number of migrations applied in this run.
+        """
+        from code_indexer.server.features.migrations import (
+            CREATE_VERSIONS_TABLE_PG,
+            SELECT_VERSION_PG,
+            UPSERT_VERSION_PG,
+            pending_migrations,
+        )
+
+        applied: Dict[str, int] = {}
+        with self._conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_lock(%s)", (_MIGRATION_ADVISORY_LOCK_KEY,))
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute(CREATE_VERSIONS_TABLE_PG)
+            self._conn.commit()
+            for feature, migrations in plan:
+                with self._conn.cursor() as cur:
+                    cur.execute(SELECT_VERSION_PG, (feature,))
+                    row = cur.fetchone()
+                self._conn.commit()
+                current = int(row[0]) if row else 0
+                count = 0
+                for migration in pending_migrations(feature, migrations, current):
+                    try:
+                        migration.apply(self._conn)
+                        with self._conn.cursor() as cur:
+                            cur.execute(UPSERT_VERSION_PG, (feature, migration.version))
+                        self._conn.commit()
+                    except Exception:
+                        self._conn.rollback()
+                        logger.error(
+                            "Feature migration failed: %s %d",
+                            feature,
+                            migration.version,
+                        )
+                        raise
+                    logger.info(
+                        "Applied feature migration: %s %d (%s)",
+                        feature,
+                        migration.version,
+                        migration.description,
+                    )
+                    count += 1
+                applied[feature] = count
+            return applied
         finally:
             with self._conn.cursor() as cur:
                 cur.execute(

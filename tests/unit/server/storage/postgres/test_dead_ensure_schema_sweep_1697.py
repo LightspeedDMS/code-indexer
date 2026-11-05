@@ -81,7 +81,7 @@ class TestResearchSessionsPostgresBackendConstructorIsDbFree:
 
 class TestSCIPAuditPostgresBackendConstructorIsDbFree:
     def test_zero_conn_execute_calls_at_construction(self):
-        from code_indexer.server.storage.postgres.scip_audit_backend import (
+        from cidx_scip.server.audit_postgres import (
             SCIPAuditPostgresBackend,
         )
 

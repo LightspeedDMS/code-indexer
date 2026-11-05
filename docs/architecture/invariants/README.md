@@ -19,6 +19,7 @@ the architecture links in each file.
 | [Auto-updater and pace-maker](auto-update.md) | installer plus self-heal rule, launch settings, deployment lock, pace-maker guard |
 | [Dependency map, cidx-meta, description refresh](depmap-and-description-refresh.md) | resumable delta, sentinels, graph repair, backup mirror, description quarantine and refinement |
 | [Global alias fallback](global-alias-fallback.md) | bare alias promoted to `-global` on read paths only |
+| [Package dependency contracts and catalog guards](import-contracts.md) | import-linter contracts and their ratchet baseline, function-level and dynamic imports, catalog access guard presence |
 | [Fault injection and memory retrieval](fault-injection-and-memory-retrieval.md) | non-production harness guard, provider HTTP through the factory, memory pipeline confinement |
 
 Invariants documented with their subsystem instead of here:

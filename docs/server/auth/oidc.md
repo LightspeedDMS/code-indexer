@@ -4,7 +4,7 @@ How to connect a CIDX Server to an OpenID Connect (OIDC) identity provider so us
 sign-ins map to CIDX accounts and groups.
 
 Code: `src/code_indexer/server/auth/oidc/` (provider, manager, callback route), `/login/sso` in
-`src/code_indexer/server/web/routes.py`, group assignment in
+`src/code_indexer/server/web/pages/session.py`, group assignment in
 `src/code_indexer/server/services/sso_provisioning_hook.py`.
 
 ## Prerequisites

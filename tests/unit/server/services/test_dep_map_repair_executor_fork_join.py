@@ -33,8 +33,8 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
-from code_indexer.server.services.dep_map_health_detector import Anomaly
-from code_indexer.server.services.dep_map_repair_executor import RepairResult
+from cidx_depmap.server.dep_map_health_detector import Anomaly
+from cidx_depmap.server.dep_map_repair_executor import RepairResult
 
 from tests.unit.server.services._fork_join_fixtures import (
     EMPTY_LIFECYCLE,
@@ -55,7 +55,7 @@ from tests.unit.server.services._fork_join_fixtures import (
 # executor module for its fork/join branch B; patching at the symbol's
 # original source would leak the patch across unrelated consumers.
 _RUNNER_PATCH_TARGET: str = (
-    "code_indexer.server.services.dep_map_repair_executor.LifecycleBatchRunner"
+    "cidx_depmap.server.dep_map_repair_executor.LifecycleBatchRunner"
 )
 
 

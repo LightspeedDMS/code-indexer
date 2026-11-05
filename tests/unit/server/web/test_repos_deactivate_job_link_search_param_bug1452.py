@@ -26,6 +26,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.routing import APIRoute
 from jinja2 import Environment, FileSystemLoader
+from code_indexer.server.utils.route_table import iter_routes
 
 _ELEVATION_QUALNAME = "require_elevation.<locals>._check"
 
@@ -37,7 +38,7 @@ def _bypass_elevation(app, router):
     deactivate_repo route is gated by `Depends(dependencies.require_elevation())`,
     a separate auth boundary from `_require_admin_session`.
     """
-    for route in router.routes:
+    for route_path, route in iter_routes(router.routes):
         if not isinstance(route, APIRoute):
             continue
         for dep in route.dependencies or []:

@@ -194,12 +194,44 @@ def get_oauth_manager(request: Request) -> OAuthManager:
 
 
 def get_user_manager(request: Request) -> UserManager:
-    """The server's account store: OAuth sign-in authenticates live accounts."""
-    return request.app.state.user_manager  # type: ignore[no-any-return]
+    """The server's account store: OAuth sign-in authenticates live accounts.
+
+    Resolution order: the store wired onto ``app.state`` (upstream), then the
+    auth ``dependencies`` singleton ``app_wiring`` sets to the same instance.
+    EVO-66121: a bare ``UserManager()`` defaults to the per-node JSON-file store
+    (``~/.cidx-server/users.json``), which in a multipod / Postgres deployment
+    holds none of the real users, so it is only the last resort when nothing is
+    wired (CLI / solo / unit tests).
+    """
+    from code_indexer.server.auth import dependencies as _deps
+
+    state_manager: Optional[UserManager] = getattr(
+        request.app.state, "user_manager", None
+    )
+    if state_manager is not None:
+        return state_manager
+    wired: Optional[UserManager] = _deps.user_manager
+    if wired is not None:
+        return wired
+    return UserManager()
 
 
 def get_mcp_credential_manager(request: Request) -> MCPCredentialManager:
-    """MCPCredentialManager over the server's account store."""
+    """MCPCredentialManager over the server's account store (EVO-66121).
+
+    Prefer the singleton ``app_wiring`` built over the backend-aware
+    UserManager (on ``app.state`` or the ``dependencies`` module); otherwise
+    build one over :func:`get_user_manager` so credential verification still
+    hits the server's account store.
+    """
+    from code_indexer.server.auth import dependencies as _deps
+
+    for wired in (
+        getattr(request.app.state, "mcp_credential_manager", None),
+        _deps.mcp_credential_manager,
+    ):
+        if isinstance(wired, MCPCredentialManager):
+            return wired
     return MCPCredentialManager(user_manager=get_user_manager(request))
 
 

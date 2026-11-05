@@ -32,6 +32,7 @@ if TYPE_CHECKING:
         AuditLogBackend,
         BackgroundJobsBackend,
         CITokensBackend,
+        ControlPlaneMetadataBackend,
         DependencyMapTrackingBackend,
         DescriptionRefreshTrackingBackend,
         DiagnosticsBackend,
@@ -49,7 +50,6 @@ if TYPE_CHECKING:
         RefreshTokenBackend,
         RepoCategoryBackend,
         ResearchSessionsBackend,
-        SCIPAuditBackend,
         SelfMonitoringBackend,
         SessionsBackend,
         SSHKeysBackend,
@@ -93,7 +93,6 @@ class BackendRegistry:
     api_metrics: "ApiMetricsBackend"
     payload_cache: "PayloadCacheBackend"
     oauth: "OAuthBackend"
-    scip_audit: "SCIPAuditBackend"
     refresh_tokens: "RefreshTokenBackend"
     research_sessions: "ResearchSessionsBackend"
     wiki_cache: "WikiCacheBackend"
@@ -125,15 +124,14 @@ class BackendRegistry:
     # SAME db_path (SQLite) / general connection_pool (PostgreSQL) as the
     # sibling backends in this registry, never a second isolated connection.
     embedding_call_stats: Any = field(default=None)
-    # Story #1787 S2 amendment AC16 (dual-review defect H4/H6): X-Ray
-    # graph-build K-calibration store — SQLite (dedicated db file) in solo
-    # mode, PostgreSQL (shared general pool) in cluster mode, so all nodes
-    # learn the same per-language memory multiplier from real graph builds.
-    # Typed Any like every other dual-backend field in this dataclass: the
-    # concrete type is chosen at runtime by storage_mode, and both concrete
-    # backends already share the identical record_sample()/get_k() protocol
-    # (KStoreProtocol in k_calibration_store.py).
-    xray_k_calibration: Any = field(default=None)
+    # Content seam step 5a: golden-repo alias pointers and write-mode markers
+    # (control-plane metadata) -- SQLite in solo mode, PostgreSQL in cluster
+    # mode, replacing the per-pod golden-repos/aliases/ and .write_mode/ files.
+    # Optional only so registries built field-by-field in tests stay valid;
+    # both factory paths always set it.
+    control_plane_metadata: Optional["ControlPlaneMetadataBackend"] = field(
+        default=None
+    )
     # SIEM delivery store (services/siem_delivery/db.py SiemDb): SQLite on
     # groups.db (beside audit_logs, so capture joins the audit transaction)
     # in solo mode, the shared general pool in cluster mode.
@@ -196,6 +194,7 @@ class StorageFactory:
             ApiMetricsSqliteBackend,
             BackgroundJobsSqliteBackend,
             CITokensSqliteBackend,
+            ControlPlaneMetadataSqliteBackend,
             DependencyMapTrackingBackend as DependencyMapTrackingBackend_,
             DescriptionRefreshTrackingBackend as DescriptionRefreshTrackingBackend_,
             DiagnosticsSqliteBackend,
@@ -211,7 +210,6 @@ class StorageFactory:
             QueryEmbeddingCacheSqliteBackend,
             RefreshTokenSqliteBackend,
             ResearchSessionsSqliteBackend,
-            SCIPAuditSqliteBackend,
             SelfMonitoringSqliteBackend,
             SessionsSqliteBackend,
             SSHKeysSqliteBackend,
@@ -235,9 +233,6 @@ class StorageFactory:
         )
         from code_indexer.server.services.embedding_call_stats import (
             EmbeddingCallStatsSqliteBackend,
-        )
-        from code_indexer.server.services.xray_graph_governor.k_calibration_store import (
-            SqliteKCalibrationBackend,
         )
 
         # Main database: all backends except groups/audit share the same DB.
@@ -271,9 +266,6 @@ class StorageFactory:
                 db_path=str(Path(data_dir) / "payload_cache.db")
             ),
             oauth=OAuthSqliteBackend(db_path=str(Path(data_dir).parent / "oauth.db")),
-            scip_audit=SCIPAuditSqliteBackend(
-                db_path=str(Path(data_dir).parent / "scip_audit.db")
-            ),
             refresh_tokens=RefreshTokenSqliteBackend(
                 db_path=str(Path(data_dir).parent / "refresh_tokens.db")
             ),
@@ -289,9 +281,7 @@ class StorageFactory:
             query_analytics_exports=QueryAnalyticsExportSqliteBackend(db_path=db_path),
             search_embed_event=SearchEmbedEventSqliteBackend(db_path=db_path),
             embedding_call_stats=EmbeddingCallStatsSqliteBackend(db_path=db_path),
-            xray_k_calibration=SqliteKCalibrationBackend(
-                db_path=str(Path(data_dir) / "xray_k_calibration.db")
-            ),
+            control_plane_metadata=ControlPlaneMetadataSqliteBackend(db_path),
             siem_delivery=SiemDb.sqlite(str(groups_db_path)),
         )
 
@@ -377,9 +367,6 @@ class StorageFactory:
         from code_indexer.server.storage.postgres.oauth_backend import (
             OAuthPostgresBackend,
         )
-        from code_indexer.server.storage.postgres.scip_audit_backend import (
-            SCIPAuditPostgresBackend,
-        )
         from code_indexer.server.storage.postgres.refresh_token_backend import (
             RefreshTokenPostgresBackend,
         )
@@ -413,8 +400,8 @@ class StorageFactory:
         from code_indexer.server.services.embedding_call_stats import (
             EmbeddingCallStatsPostgresBackend,
         )
-        from code_indexer.server.storage.postgres.xray_graph_k_calibration_backend import (
-            XrayGraphKCalibrationPostgresBackend,
+        from code_indexer.server.storage.postgres.control_plane_metadata_backend import (
+            ControlPlaneMetadataPostgresBackend,
         )
 
         dsn = config["postgres_dsn"]
@@ -460,7 +447,6 @@ class StorageFactory:
             api_metrics=ApiMetricsPostgresBackend(pool),
             payload_cache=PayloadCachePostgresBackend(pool),
             oauth=OAuthPostgresBackend(pool),
-            scip_audit=SCIPAuditPostgresBackend(pool),
             refresh_tokens=RefreshTokenPostgresBackend(pool),
             research_sessions=ResearchSessionsPostgresBackend(pool),
             wiki_cache=WikiCachePostgresBackend(pool),
@@ -472,7 +458,7 @@ class StorageFactory:
             query_analytics_exports=QueryAnalyticsExportPostgresBackend(pool),
             search_embed_event=SearchEmbedEventPostgresBackend(pool),
             embedding_call_stats=EmbeddingCallStatsPostgresBackend(pool),
-            xray_k_calibration=XrayGraphKCalibrationPostgresBackend(pool),
+            control_plane_metadata=ControlPlaneMetadataPostgresBackend(pool),
             siem_delivery=SiemDb.postgres(pool),
             connection_pool=pool,
             critical_connection_pool=critical_pool,

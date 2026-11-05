@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from code_indexer.server.wiki.wiki_service import WikiService
+from cidx_wiki.server.wiki_service import WikiService
 
 
 @pytest.fixture

@@ -21,7 +21,7 @@ from code_indexer.server.services.config_service import (
 from code_indexer.server.auth.jwt_manager import JWTManager
 from code_indexer.server.utils.jwt_secret_manager import JWTSecretManager
 from code_indexer.server.auth.user_manager import UserManager, UserRole
-from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+from cidx_scip.server.multi_service import SCIPMultiService
 
 
 # Test constants
@@ -198,11 +198,14 @@ class TestBug83AppInitialization:
         assert hasattr(config.password_security, "min_length")
         assert hasattr(config.password_security, "required_char_classes")
 
-        # Bug #83-3: SCIP config
-        assert hasattr(config, "scip_config")
-        assert config.scip_config is not None
-        assert hasattr(config.scip_config, "scip_reference_limit")
-        assert hasattr(config.scip_config, "scip_dependency_depth")
+        # Bug #83-3: SCIP limits -- the cidx-scip feature's config section
+        # since modular phase 4d (feature_settings["scip"]).
+        from cidx_scip.config import SCIP_CONFIG_SECTION
+
+        assert hasattr(config, "feature_settings")
+        assert {"scip_reference_limit", "scip_dependency_depth"} <= (
+            SCIP_CONFIG_SECTION.runtime_keys
+        )
 
     def test_scip_multi_service_uses_config_limits(self, temp_server_dir):
         """

@@ -84,23 +84,23 @@ class TestXrayExploreHandlerOmni:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
+                "cidx_xray.server.mcp.xray._explore._resolve_repo_path",
                 side_effect=fake_resolve,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray._explore._get_background_job_manager",
+                "cidx_xray.server.mcp.xray._explore._get_background_job_manager",
                 return_value=mock_bjm,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray._explore._get_job_tracker",
+                "cidx_xray.server.mcp.xray._explore._get_job_tracker",
                 return_value=mock_jt,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray._explore._get_xray_executor",
+                "cidx_xray.server.mcp.xray._explore._get_xray_executor",
                 return_value=mock_exec,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray._explore.validate_rust_evaluator",
+                "cidx_xray.server.mcp.xray._explore.validate_rust_evaluator",
                 return_value=MagicMock(ok=True),
             ),
             patch("asyncio.get_running_loop", return_value=loop_instance),
@@ -197,7 +197,7 @@ class TestXrayExploreHandlerDefaultEvaluator:
             await _import_handler()(params, user)
             job_fn = mock_loop.run_in_executor.call_args[0][1]
             with patch(
-                "code_indexer.xray.search_engine.XRaySearchEngine.run",
+                "cidx_xray.search_engine.XRaySearchEngine.run",
                 side_effect=lambda **kw: captured.update(kw)
                 or {
                     "matches": [],
@@ -239,7 +239,7 @@ class TestXrayExploreHandlerDefaultEvaluator:
         self,
     ) -> None:
         """Default evaluator must pass validate_rust_evaluator() (Bug 2)."""
-        from code_indexer.xray.sandbox import validate_rust_evaluator
+        from cidx_xray.sandbox import validate_rust_evaluator
 
         params: Dict[str, Any] = {
             "repository_alias": "myrepo-global",
@@ -283,8 +283,8 @@ class TestXrayExploreHandlerDefaultEvaluator:
 
     async def test_default_evaluator_is_valid_rust_and_passes_validation(self) -> None:
         """_DEFAULT_EVALUATOR_CODE is valid Rust with fn evaluate_node signature (Bug 2)."""
-        from code_indexer.server.mcp.handlers.xray import _DEFAULT_EVALUATOR_CODE
-        from code_indexer.xray.sandbox import validate_rust_evaluator
+        from cidx_xray.server.mcp.xray import _DEFAULT_EVALUATOR_CODE
+        from cidx_xray.sandbox import validate_rust_evaluator
 
         assert _DEFAULT_EVALUATOR_CODE, (
             "Default evaluator must be non-empty (Bug 2 regression)"

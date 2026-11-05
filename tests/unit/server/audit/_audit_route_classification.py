@@ -15,6 +15,7 @@ WORKSPACE_GIT = (
     "git operation inside the caller's activated working copy; changes "
     "repository content, not accounts, credentials, access or configuration"
 )
+
 SCIP_SCRATCH_CLEANUP = (
     "deletes expired temporary SCIP self-healing workspaces (scratch copies "
     "only; no index, access or configuration change)"
@@ -94,6 +95,7 @@ ROUTE_EXEMPT: Dict[str, str] = {
         "sets how much commit history one golden repository indexes; changes "
         "index content, not who can read it"
     ),
+    # cidx-scip's door (modular phase 4d); inventoried with every feature.
     "POST /api/admin/scip-cleanup-workspaces": SCIP_SCRATCH_CLEANUP,
     "DELETE /api/admin/jobs/cleanup": (
         "deletes finished background-job records past their retention age "
@@ -110,6 +112,10 @@ ROUTE_EXEMPT: Dict[str, str] = {
     "POST /admin/provider-health/reset-state": _PROVIDER_HEALTH,
     "POST /api/admin/diagnostics/dedup-warnings/clear-all": (
         "clears the active storage-migration duplicate warnings"
+    ),
+    "POST /api/admin/metadata-outbox/abandon": (
+        "drops undrained rollback-window file replays of alias/write-mode "
+        "metadata (registry unchanged; each dropped key is logged by name)"
     ),
     "POST /api/admin/reaper/trigger": (
         "starts one cycle of the idle activated-repository reaper, which "

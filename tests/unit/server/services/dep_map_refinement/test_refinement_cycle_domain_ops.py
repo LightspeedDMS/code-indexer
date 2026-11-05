@@ -320,7 +320,7 @@ class TestIndexMdRegenerationAfterBatch:
             regenerate_calls.append(output_dir)
 
         with patch(
-            "code_indexer.server.services.dep_map_index_regenerator.IndexRegenerator.regenerate",
+            "cidx_depmap.server.dep_map_index_regenerator.IndexRegenerator.regenerate",
             side_effect=fake_regenerate,
         ):
             service.run_refinement_cycle()
@@ -359,7 +359,7 @@ class TestIndexMdRegenerationAfterBatch:
             regenerate_calls.append(output_dir)
 
         with patch(
-            "code_indexer.server.services.dep_map_index_regenerator.IndexRegenerator.regenerate",
+            "cidx_depmap.server.dep_map_index_regenerator.IndexRegenerator.regenerate",
             side_effect=fake_regenerate,
         ):
             service.run_refinement_cycle()

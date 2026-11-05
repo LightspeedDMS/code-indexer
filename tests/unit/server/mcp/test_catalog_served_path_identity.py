@@ -100,9 +100,12 @@ def test_untouched_granted_alias_keeps_its_history(server: SimpleNamespace) -> N
 def test_xray_through_a_pointer_to_the_catalog_is_refused(
     pointer_to_catalog: str,
 ) -> None:
+    from tests.unit.server._xray_feature import xray_tools_installed
+
     from .test_meta_history_surfaces_denied import _xray_args
 
-    data = _restricted("xray_search", _xray_args("xray_search", pointer_to_catalog))
+    with xray_tools_installed():
+        data = _restricted("xray_search", _xray_args("xray_search", pointer_to_catalog))
     assert CatalogSurface.XRAY.refusal in json.dumps(data), data
 
 

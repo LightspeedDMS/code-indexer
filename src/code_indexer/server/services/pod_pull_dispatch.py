@@ -10,6 +10,14 @@ children's embedding_call_stats rows (Story #2118).
 
 Built by ``build_index_dispatch`` (installed by startup/lifespan.py) so the
 cluster dispatch path is one real, testable function.
+
+IndexJobClaimLoop also injects the job id into the metadata (EVO-66105), so
+an executor that spreads the metadata into a call drops that key first
+(``_without_job_id``) -- spread alongside ``job_id=`` it would be passed twice.
+
+The internal pod-pull ops ride the same table: the scheduled golden-repo
+refresh (any pod claims distinct repos under the memory gate), the FTS
+backfill build (EVO-66445) and the semantic self-heal re-embed.
 """
 
 from __future__ import annotations
@@ -19,8 +27,28 @@ from typing import Any, Callable, Dict, Optional
 from code_indexer.server.services.index_job_claim_loop import DispatchTable
 
 
-def build_index_dispatch(golden_repo_manager: Any) -> DispatchTable:
-    """The executor for every POD_PULL_OPS op, bound to this pod's manager."""
+def _without_job_id(md: Dict[str, Any]) -> Dict[str, Any]:
+    """*md* without the claim loop's injected ``job_id`` (passed explicitly)."""
+    return {key: value for key, value in md.items() if key != "job_id"}
+
+
+def build_index_dispatch(
+    golden_repo_manager: Any, refresh_scheduler: Optional[Any] = None
+) -> DispatchTable:
+    """The executor for every POD_PULL_OPS op, bound to this pod's manager
+    and refresh scheduler (None: a claimed refresh fails loudly)."""
+    from code_indexer.global_repos.refresh_scheduler import (
+        GLOBAL_REPO_REFRESH_OP,
+        global_repo_refresh_executor,
+    )
+    from code_indexer.server.services.fts_backfill.policy import (
+        FTS_BACKFILL_BUILD_OP,
+        fts_backfill_build_executor,
+    )
+    from code_indexer.server.services.semantic_backfill.policy import (
+        SEMANTIC_BACKFILL_REINDEX_OP,
+        semantic_backfill_reindex_executor,
+    )
     from code_indexer.server.app_helpers import (
         _execute_repository_sync,
         build_sync_progress_webhook_callback,
@@ -34,7 +62,7 @@ def build_index_dispatch(golden_repo_manager: Any) -> DispatchTable:
         md: Dict[str, Any], progress_callback: Callable[..., Any], job_id: str
     ) -> Optional[Dict[str, Any]]:
         return golden_repo_manager.execute_add_golden_repo_work(  # type: ignore[no-any-return]
-            **md, progress_callback=progress_callback, job_id=job_id
+            **_without_job_id(md), progress_callback=progress_callback, job_id=job_id
         )
 
     def _pp_change_branch(
@@ -80,17 +108,46 @@ def build_index_dispatch(golden_repo_manager: Any) -> DispatchTable:
         md: Dict[str, Any], progress_callback: Callable[..., Any], job_id: str
     ) -> Optional[Dict[str, Any]]:
         return _provider_index_job(
-            **md, progress_callback=progress_callback, job_id=job_id
+            **_without_job_id(md), progress_callback=progress_callback, job_id=job_id
         )
 
     def _pp_provider_temporal(
         md: Dict[str, Any], progress_callback: Callable[..., Any], job_id: str
     ) -> Optional[Dict[str, Any]]:
         return _provider_temporal_index_job(
-            **md, progress_callback=progress_callback, job_id=job_id
+            **_without_job_id(md), progress_callback=progress_callback, job_id=job_id
+        )
+
+    def _pp_global_repo_refresh(
+        md: Dict[str, Any], progress_callback: Callable[..., Any], job_id: str
+    ) -> Optional[Dict[str, Any]]:
+        # The metadata carries job_id (claim loop injection), which the
+        # executor threads into the refresh's embedding rows.
+        if refresh_scheduler is None:
+            raise RuntimeError(
+                "global_repo_refresh claimed on a pod with no refresh scheduler wired"
+            )
+        result: Optional[Dict[str, Any]] = global_repo_refresh_executor(
+            refresh_scheduler, md, progress_callback
+        )
+        return result
+
+    def _pp_fts_backfill(
+        md: Dict[str, Any], progress_callback: Callable[..., Any], job_id: str
+    ) -> Optional[Dict[str, Any]]:
+        return fts_backfill_build_executor(md, progress_callback)
+
+    def _pp_semantic_backfill(
+        md: Dict[str, Any], progress_callback: Callable[..., Any], job_id: str
+    ) -> Optional[Dict[str, Any]]:
+        return semantic_backfill_reindex_executor(
+            golden_repo_manager, md, progress_callback
         )
 
     return {
+        GLOBAL_REPO_REFRESH_OP: _pp_global_repo_refresh,
+        FTS_BACKFILL_BUILD_OP: _pp_fts_backfill,
+        SEMANTIC_BACKFILL_REINDEX_OP: _pp_semantic_backfill,
         "add_golden_repo": _pp_add_golden_repo,
         "change_branch": _pp_change_branch,
         "sync_repository": _pp_sync_repository,

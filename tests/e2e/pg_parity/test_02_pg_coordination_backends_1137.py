@@ -84,6 +84,7 @@ import pytest
 
 from tests.e2e._stub_systemd_unit import write_stub_systemd_unit
 from tests.e2e.helpers import (
+    E2E_ENABLED_FEATURES,
     login,
     require_postgres,
     require_voyage_key,
@@ -426,7 +427,7 @@ def _sentinel():
     out-of-process server share this on-disk directory.
     """
     from code_indexer.server.services.shared_job_sentinel import SharedJobSentinel
-    from code_indexer.server.services.dependency_map_service import (
+    from cidx_depmap.server.dependency_map_service import (
         ANALYSIS_STALE_TIMEOUT_SECONDS,
     )
 
@@ -962,6 +963,7 @@ def _write_throwaway_config(data_dir: Path, port: int) -> None:
         "port": port,
         "storage_mode": "postgres",
         "postgres_dsn": _pg_dsn(),
+        "enabled_features": E2E_ENABLED_FEATURES,
     }
     (data_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
 

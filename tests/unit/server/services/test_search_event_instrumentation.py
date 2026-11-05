@@ -133,16 +133,13 @@ def wire_app_module(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def wire_config_service(monkeypatch):
-    """Minimal config: memory retrieval disabled, no reranking."""
-    import code_indexer.server.mcp.handlers.search as sh
-
+    """Minimal config: no reranking (no memory section: the memory feature is
+    not loaded in this process)."""
     cfg = MagicMock()
-    cfg.get_config.return_value.memory_retrieval_config.memory_retrieval_enabled = False
     cfg.get_config.return_value.rerank_config = None
     cfg.get_config.return_value.node_id = "test-node"
     # code_search resolves the node id through the shared
     # server/utils/runtime_node_id.py resolver (Story #2118).
-    monkeypatch.setattr(sh.repo_search, "get_config_service", lambda: cfg)
     return cfg
 
 
@@ -386,34 +383,6 @@ class TestEmbeddingMetadataInRecord:
         assert ctx.voyage_cache_hit is False
         assert ctx.voyage_cache_mode == "on"
         assert ctx.voyage_latency_ms == 45
-
-    def test_memory_query_vector_writes_ctx(self, writer, monkeypatch, wire_app_module):
-        """_compute_memory_query_vector also writes voyage metadata to ctx on success."""
-        import code_indexer.server.mcp.handlers.search as sh
-        from code_indexer.server.services.search_event_context import _search_event_ctx
-
-        hit_meta = EmbeddingCacheMetadata(
-            key_found=True, cache_mode="shadow", provider_latency_ms=12
-        )
-        fake_vec = [0.4, 0.5]
-
-        import code_indexer.server.services.governed_call as gc_mod
-
-        monkeypatch.setattr(
-            gc_mod,
-            "coalesced_query_embedding",
-            lambda *a, **kw: (fake_vec, hit_meta),
-        )
-
-        ctx, token = self._with_ctx()
-        try:
-            sh._compute_memory_query_vector("test query")
-        finally:
-            _search_event_ctx.reset(token)
-
-        assert ctx.voyage_cache_hit is True
-        assert ctx.voyage_cache_mode == "shadow"
-        assert ctx.voyage_latency_ms == 12
 
     def test_cohere_cache_hit_in_record(self, writer, monkeypatch, wire_app_module):
         """Spec B6: cache HIT -> metadata propagated to ctx (voyage fields, since VoyageAIClient is used)."""

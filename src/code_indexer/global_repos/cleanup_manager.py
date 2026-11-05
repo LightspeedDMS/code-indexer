@@ -147,6 +147,11 @@ class CleanupManager:
         # time.monotonic() -- the retention floor must survive a process
         # restart, and time.monotonic() has no meaning across processes.
         self._scheduled_at: Dict[str, float] = {}
+        # EVO-64616: queued paths known to have a durable pending-deletion
+        # row (persisted here, or hydrated from the backend). Every node
+        # queues the same row; once a PEER deletes the path and removes the
+        # row, this node's copy is stale -- see _deleted_by_peer.
+        self._durably_pending: Set[str] = set()
         self._running = False
         self._thread: Optional[threading.Thread] = None
         # Per-path failure tracking for backoff and circuit breaker
@@ -286,6 +291,7 @@ class CleanupManager:
             for entry in pending:
                 path = entry["index_path"]
                 self._cleanup_queue.add(path)
+                self._durably_pending.add(path)
                 self._scheduled_at.setdefault(path, float(entry["scheduled_at"]))
         if pending:
             logger.info(
@@ -316,6 +322,8 @@ class CleanupManager:
                 scheduled_at = float(
                     self._persistence_backend.schedule_cleanup_deletion(index_path, now)
                 )
+                with self._queue_lock:
+                    self._durably_pending.add(index_path)
             except Exception as exc:
                 logger.error(
                     f"CleanupManager: failed to durably persist scheduled "
@@ -577,6 +585,53 @@ class CleanupManager:
                 f"CleanupManager: failed to remove durable pending-deletion "
                 f"row for {index_path} (non-fatal): {exc}"
             )
+
+    def _deleted_by_peer(self, index_path: str) -> bool:
+        """EVO-64616: whether another node already deleted *index_path*.
+
+        Every node hydrates the same durable pending-deletion rows, and the
+        cluster claim only serialises them: once the claim holder deletes
+        the path and removes its row, the other nodes still have it queued
+        and used to delete it again (failing on ENOENT). A path this node
+        knows had a durable row, whose row is now gone, was finished by a
+        peer. A path never durably recorded here (its persist failed) is
+        never skipped this way, and a listing failure answers False (the
+        deletion is idempotent anyway)."""
+        with self._queue_lock:
+            known_durable = index_path in self._durably_pending
+        if not known_durable or self._persistence_backend is None:
+            return False
+        try:
+            pending = self._persistence_backend.list_cleanup_pending_deletions()
+        except Exception as exc:
+            logger.debug(
+                f"CleanupManager: could not re-read pending deletions before "
+                f"deleting {index_path} ({exc}); deleting (idempotent)"
+            )
+            return False
+        return all(entry["index_path"] != index_path for entry in pending)
+
+    def _drop_peer_deleted(
+        self, index_path: str, tracked_job_id: Optional[str]
+    ) -> None:
+        """Forget a path a peer already deleted, and release its claim with
+        a result that says so (never a failure)."""
+        with self._queue_lock:
+            self._cleanup_queue.discard(index_path)
+            self._scheduled_at.pop(index_path, None)
+            self._durably_pending.discard(index_path)
+        self._reset_failure_count(index_path)
+        logger.info(f"Cleanup of {index_path} already done by another node")
+        if tracked_job_id and self._job_tracker is not None:
+            try:
+                self._job_tracker.complete_job(
+                    tracked_job_id,
+                    result={"deleted": False, "already_deleted_by_peer": True},
+                )
+            except Exception as exc:
+                logger.debug(
+                    f"Failed to complete index_cleanup job {tracked_job_id}: {exc}"
+                )
 
     def _delete_index(self, index_path: str) -> None:
         """Delete an index path.
@@ -924,6 +979,9 @@ class CleanupManager:
             claimed, tracked_job_id = self._claim_path_for_deletion(path)
             if not claimed:
                 continue
+            if self._deleted_by_peer(path):
+                self._drop_peer_deleted(path, tracked_job_id)
+                continue
 
             deletion_attempts += 1
             try:
@@ -933,6 +991,7 @@ class CleanupManager:
                     # Story #1457 AC13: clear the age-tracking entry now
                     # that deletion actually happened.
                     self._scheduled_at.pop(path, None)
+                    self._durably_pending.discard(path)
                 self._remove_persisted(path)
                 self._reset_failure_count(path)
                 logger.info(f"Deleted old index: {path}")

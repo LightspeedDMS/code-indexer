@@ -1,0 +1,981 @@
+"""
+SCIP Self-Healing Service.
+
+Handles automatic resolution of SCIP indexing failures through Claude Code integration.
+Part of Story #645 - Core Self-Healing SCIP Loop.
+"""
+
+from cidx_scip.paths import scip_index_dir
+from cidx_scip.server._core import get_correlation_id
+
+import logging
+import json
+import asyncio
+from typing import Optional, Dict, Any, List
+from pathlib import Path
+from dataclasses import dataclass
+
+from cidx_sdk.seams.git import redact_url_credentials
+
+from cidx_scip.generator import GenerationResult
+from cidx_scip.server import _core
+from cidx_scip.server._core import format_error_log
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ClaudeResponse:
+    """Response from Claude Code invocation."""
+
+    status: str  # "progress" | "no_progress" | "unresolvable"
+    actions_taken: List[str]
+    reasoning: str
+
+
+class SCIPSelfHealingService:
+    """
+    Service for automatically resolving SCIP indexing failures.
+
+    Detects SCIP failures (partial or total), invokes Claude Code for resolution,
+    and retries SCIP indexing upon successful dependency installation.
+    """
+
+    # Claude Code invocation timeout (30 minutes)
+    CLAUDE_TIMEOUT_SECONDS = 1800
+
+    # Maximum resolution attempts per project
+    MAX_RESOLUTION_ATTEMPTS = 3
+
+    def __init__(
+        self,
+        job_manager: Any,
+        repo_root: Path,
+        resolution_queue: Optional[Any] = None,
+    ):
+        """
+        Initialize SCIP Self-Healing Service.
+
+        Args:
+            job_manager: Background job manager for tracking job state
+            repo_root: Repository root path for SCIP operations
+            resolution_queue: Optional queue for re-queuing projects (AC4)
+
+        Note (EVO-65021): this Claude-Code self-healing path is LOCAL-ONLY. Under
+        ``scip_backend='delegated-plugin'`` the golden-repo SCIP step is routed through
+        ``scip_lifecycle.funnel_scip_generation`` to the delegated sandbox build
+        BEFORE any local generation runs, and the delegated build *supersedes*
+        self-healing (the sandbox build IS the resolution; the toolchain-less
+        indexing pod has nothing for Claude Code to fix — EVO-65020). So no
+        ``workspace_id`` is threaded here: it would be handed to a local indexer
+        that ignores it, reading as delegated support that can never exist.
+        """
+        self.job_manager = job_manager
+        self.repo_root = repo_root
+        self.resolution_queue = resolution_queue
+
+    def handle_scip_failure(
+        self,
+        job_id: str,
+        generation_result: GenerationResult,
+        repo_alias: str,
+    ) -> None:
+        """
+        Handle SCIP indexing failure by extracting per-project details and initiating resolution.
+
+        Implements AC1: SCIP Failure Detection and Per-Project Log Capture.
+
+        Args:
+            job_id: Background job ID for tracking
+            generation_result: SCIP generation result with project details
+            repo_alias: Repository alias being processed
+        """
+        # AC1: Detect partial or total failure
+        if not (
+            generation_result.is_partial_success()
+            or generation_result.is_complete_failure()
+        ):
+            # No failures to handle
+            logger.info(
+                f"Job {job_id}: SCIP generation successful for all projects, "
+                "no self-healing needed",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return
+
+        logger.info(
+            f"Job {job_id}: Detected SCIP failures - "
+            f"{generation_result.failed_projects} failed, "
+            f"{generation_result.successful_projects} succeeded",
+            extra={"correlation_id": get_correlation_id()},
+        )
+
+        # AC1: Extract per-project details for failed projects
+        language_resolution_status: Dict[str, Dict[str, Any]] = {}
+
+        for project_result in generation_result.project_results:
+            # Only process failed projects
+            if project_result.indexer_result.is_failure():
+                project = project_result.project
+                indexer_result = project_result.indexer_result
+
+                # Extract per-project details
+                project_path = str(project.relative_path)
+                if not project_path.endswith("/"):
+                    project_path += "/"
+
+                language_resolution_status[project_path] = {
+                    "project_path": project_path,
+                    "language": project.language,
+                    "build_system": project.build_system,
+                    "status": "pending",  # Initial status
+                    "attempts": 0,  # No attempts yet
+                    "last_error": indexer_result.stderr,
+                    "resolution_actions": [],  # Will be populated by Claude Code
+                    "workspace_path": "",  # Will be set when workspace created
+                }
+
+                logger.info(
+                    f"Job {job_id}: Queued {project.language} project at "
+                    f"{project_path} for resolution (build system: {project.build_system})",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+
+        # AC1: Update job with language_resolution_status and transition to RESOLVING_PREREQUISITES
+        with self.job_manager._lock:
+            job = self.job_manager.jobs.get(job_id)
+            if job:
+                job.language_resolution_status = language_resolution_status
+                job.status = _core.job_status().RESOLVING_PREREQUISITES
+                self.job_manager._persist_jobs()
+
+                logger.info(
+                    f"Job {job_id}: Transitioned to RESOLVING_PREREQUISITES state, "
+                    f"tracking {len(language_resolution_status)} failed projects",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+
+    def build_project_prompt(
+        self,
+        repo_alias: str,
+        project_path: str,
+        language: str,
+        build_system: str,
+        stderr: str,
+    ) -> str:
+        """
+        Build language-specific prompt for Claude Code invocation.
+
+        Implements AC2: Structured prompt with project context, error logs,
+        whitelisted package managers, and expected response format.
+
+        Args:
+            repo_alias: Repository alias (e.g., "my-repo")
+            project_path: Relative path to project (e.g., "backend/")
+            language: Project language (e.g., "python", "typescript")
+            build_system: Build system (e.g., "poetry", "npm", "maven")
+            stderr: SCIP indexer error output for this specific project
+
+        Returns:
+            Structured prompt string for Claude Code
+        """
+        package_managers = [
+            "npm",
+            "pip",
+            "pip3",
+            "pipenv",
+            "poetry",
+            "maven",
+            "gradle",
+            "dotnet",
+            "nuget",
+            "apt-get",
+            "apt",
+            "yum",
+            "dnf",
+            "brew",
+            "cargo",
+            "go",
+            "composer",
+            "bundler",
+            "gem",
+        ]
+
+        prompt = f"""You are diagnosing a SCIP indexing failure for a specific project within repository: {repo_alias}
+
+Project Details:
+- Project Path: {project_path}
+- Language: {language}
+- Build System: {build_system}
+
+SCIP Indexer Error Output:
+{stderr}
+
+Repository Context:
+- Other projects in this repository may have succeeded
+- Focus ONLY on resolving dependencies for this {language} project
+- Project location: {project_path}
+
+Your task:
+1. Analyze the error to identify missing {language} dependencies
+2. Install required dependencies for {build_system} using ONLY these package managers:
+   {", ".join(package_managers)}
+3. If a package manager is not installed, you may install it first
+4. Focus on the specific project at {project_path}
+5. Passwordless sudo is available for system installations
+
+Respond with JSON:
+{{
+  "status": "progress" | "no_progress" | "unresolvable",
+  "actions_taken": ["list", "of", "commands", "executed"],
+  "reasoning": "explanation specific to {language} at {project_path}"
+}}
+
+Status values:
+- "progress": Dependencies installed successfully, retry SCIP indexing
+- "no_progress": Made changes but uncertain if resolved
+- "unresolvable": Cannot resolve (missing tools, incompatible versions, etc.)
+"""
+        return prompt
+
+    def _build_claude_command(self, prompt_text: str, attempt: int) -> List[str]:
+        """Build Claude Code CLI command with flags."""
+        cmd = [
+            "/usr/local/bin/claude",
+            "--dangerously-skip-permissions",
+            prompt_text,
+        ]
+        if attempt > 1:
+            cmd.insert(2, "--resume")
+        return cmd
+
+    async def _execute_claude_subprocess(
+        self, cmd: List[str], workspace: Path, job_id: str, project_path: str
+    ) -> tuple[bytes, bytes]:
+        """Execute Claude Code subprocess with timeout."""
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=str(workspace),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(), timeout=self.CLAUDE_TIMEOUT_SECONDS
+            )
+            return stdout, stderr
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            logger.error(
+                format_error_log(
+                    "MCP-GENERAL-147",
+                    f"Job {job_id}: Claude Code timed out after "
+                    f"{self.CLAUDE_TIMEOUT_SECONDS}s for {project_path}",
+                )
+            )
+            raise
+
+    def _parse_claude_response(
+        self, stdout: bytes, job_id: str, project_path: str
+    ) -> ClaudeResponse:
+        """Parse and validate Claude Code JSON response.
+
+        Routes raw Claude CLI stdout through ``extract_json_from_llm_response``
+        so the pace-maker telemetry preamble (a leading ``§ ...`` line injected
+        on every cluster node), ``Warning:`` prose lines, and markdown code
+        fences are stripped before JSON parsing. A genuinely empty/garbage
+        response is re-raised as ``json.JSONDecodeError`` to preserve the
+        caller's existing error contract -- a failed parse is still reported
+        loudly and surfaced as ``unresolvable`` (MESSI rule #13,
+        anti-silent-failure), never coerced into a false success.
+        """
+        stdout_text = stdout.decode("utf-8")
+        try:
+            response_data = _core.extract_json_from_llm_response(stdout_text)
+        except (ValueError, TypeError) as e:
+            # Preserve the caller's `except json.JSONDecodeError` contract: a
+            # failed extraction (empty/preamble-only/garbage) must surface as a
+            # JSON parse error, not silently succeed.
+            raise json.JSONDecodeError(str(e), stdout_text or " ", 0) from e
+
+        status = response_data.get("status")
+        if status not in ("progress", "no_progress", "unresolvable"):
+            logger.error(
+                format_error_log(
+                    "MCP-GENERAL-148",
+                    f"Job {job_id}: Invalid status '{status}' in Claude response "
+                    f"for {project_path}",
+                )
+            )
+            return ClaudeResponse(
+                status="unresolvable",
+                actions_taken=[],
+                reasoning=f"Invalid or missing status in response: {status}",
+            )
+
+        return ClaudeResponse(
+            status=status,
+            actions_taken=response_data.get("actions_taken", []),
+            reasoning=response_data.get("reasoning", ""),
+        )
+
+    async def invoke_claude_code(
+        self,
+        job_id: str,
+        project_path: str,
+        language: str,
+        build_system: str,
+        stderr: str,
+        workspace: Path,
+        repo_alias: Optional[str] = None,
+        attempt: int = 1,
+    ) -> ClaudeResponse:
+        """
+        Invoke Claude Code CLI to diagnose and resolve project dependencies.
+
+        Implements AC2: Subprocess invocation with 30-minute timeout, dangerous mode,
+        and JSON response parsing.
+        Implements AC5: Workspace management with workspace_path logging.
+
+        Args:
+            job_id: Background job ID for tracking
+            project_path: Relative path to project
+            language: Project language
+            build_system: Build system
+            stderr: SCIP indexer error output
+            workspace: Per-project workspace path
+            repo_alias: Repository alias (optional)
+            attempt: Attempt number (1-based, --resume flag added when > 1)
+
+        Returns:
+            ClaudeResponse with status, actions_taken, and reasoning
+        """
+        # AC5: Log workspace path in language_resolution_status for admin reference
+        with self.job_manager._lock:
+            job = self.job_manager.jobs.get(job_id)
+            if (
+                job
+                and job.language_resolution_status is not None
+                and project_path in job.language_resolution_status
+            ):
+                job.language_resolution_status[project_path]["workspace_path"] = str(
+                    workspace
+                )
+                self.job_manager._persist_jobs()
+
+        prompt_text = self.build_project_prompt(
+            repo_alias=repo_alias or "unknown-repo",
+            project_path=project_path,
+            language=language,
+            build_system=build_system,
+            stderr=stderr,
+        )
+
+        # Build command (includes --resume flag when attempt > 1 via _build_claude_command)
+        cmd = self._build_claude_command(prompt_text, attempt)
+
+        logger.info(
+            f"Job {job_id}: Invoking Claude Code for {language} project at "
+            f"{project_path} (attempt {attempt}, workspace: {workspace})",
+            extra={"correlation_id": get_correlation_id()},
+        )
+
+        try:
+            stdout, _ = await self._execute_claude_subprocess(
+                cmd, workspace, job_id, project_path
+            )
+            response = self._parse_claude_response(stdout, job_id, project_path)
+            logger.info(
+                f"Job {job_id}: Claude Code completed for {project_path}, "
+                f"status: {response.status}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return response
+
+        except asyncio.TimeoutError:
+            return ClaudeResponse(
+                status="unresolvable",
+                actions_taken=[],
+                reasoning=f"Claude Code timed out after {self.CLAUDE_TIMEOUT_SECONDS}s",
+            )
+        except json.JSONDecodeError as e:
+            logger.error(
+                format_error_log(
+                    "MCP-GENERAL-149",
+                    f"Job {job_id}: Failed to parse Claude response for {project_path}: {e}",
+                )
+            )
+            return ClaudeResponse(
+                status="unresolvable",
+                actions_taken=[],
+                reasoning=f"Failed to parse Claude response: {str(e)}",
+            )
+        except (OSError, IOError) as e:
+            logger.error(
+                format_error_log(
+                    "MCP-GENERAL-150",
+                    f"Job {job_id}: I/O error invoking Claude Code for {project_path}: {e}",
+                )
+            )
+            return ClaudeResponse(
+                status="unresolvable",
+                actions_taken=[],
+                reasoning=f"I/O error: {str(e)}",
+            )
+
+    async def handle_project_response(
+        self,
+        job_id: str,
+        project_path: str,
+        response: ClaudeResponse,
+    ) -> None:
+        """
+        Handle Claude Code response for a specific project.
+
+        Implements AC3: Structured Response Protocol Handling - Per-Project.
+        Dispatches to appropriate handler based on response status.
+
+        Args:
+            job_id: Background job ID
+            project_path: Project relative path (e.g., "backend/")
+            response: Claude Code response with status, actions_taken, reasoning
+        """
+        if not self._update_common_response_fields(job_id, project_path, response):
+            return
+
+        if response.status == "progress":
+            await self._handle_progress_response(job_id, project_path)
+        elif response.status == "no_progress":
+            self._handle_no_progress_response(job_id, project_path)
+        elif response.status == "unresolvable":
+            self._handle_unresolvable_response(job_id, project_path, response.reasoning)
+
+    def _update_common_response_fields(
+        self, job_id: str, project_path: str, response: ClaudeResponse
+    ) -> bool:
+        """Update common response fields in language_resolution_status."""
+        with self.job_manager._lock:
+            job = self.job_manager.jobs.get(job_id)
+            if (
+                not job
+                or job.language_resolution_status is None
+                or project_path not in job.language_resolution_status
+            ):
+                logger.error(
+                    format_error_log(
+                        "MCP-GENERAL-151",
+                        f"Job {job_id}: Cannot handle response for unknown project {project_path}",
+                    )
+                )
+                return False
+
+            project_status = job.language_resolution_status[project_path]
+            project_status["resolution_actions"] = response.actions_taken
+            project_status["reasoning"] = response.reasoning
+            self.job_manager._persist_jobs()
+            return True
+
+    async def _handle_progress_response(self, job_id: str, project_path: str) -> None:
+        """Handle 'progress' response: retry SCIP, mark resolved or re-queue."""
+        logger.info(
+            f"Job {job_id}: Progress reported for {project_path}, attempting SCIP retry",
+            extra={"correlation_id": get_correlation_id()},
+        )
+
+        scip_success = self._retry_scip_for_project(job_id, project_path)
+
+        with self.job_manager._lock:
+            job = self.job_manager.jobs.get(job_id)
+            if (
+                not job
+                or job.language_resolution_status is None
+                or project_path not in job.language_resolution_status
+            ):
+                return
+
+            if scip_success:
+                job.language_resolution_status[project_path]["status"] = "resolved"
+                logger.info(
+                    f"Job {job_id}: Project {project_path} resolved successfully",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            else:
+                job.language_resolution_status[project_path]["attempts"] += 1
+                job.language_resolution_status[project_path]["status"] = "resolving"
+                logger.warning(
+                    format_error_log(
+                        "MCP-GENERAL-152",
+                        f"Job {job_id}: SCIP retry failed for {project_path}, "
+                        f"attempt {job.language_resolution_status[project_path]['attempts']}",
+                    )
+                )
+            self.job_manager._persist_jobs()
+
+        if not scip_success:
+            await self._enqueue_project_for_retry(job_id, project_path)
+
+    def _handle_no_progress_response(self, job_id: str, project_path: str) -> None:
+        """Handle 'no_progress' response: increment attempts, resume or mark unresolvable."""
+        with self.job_manager._lock:
+            job = self.job_manager.jobs.get(job_id)
+            if (
+                not job
+                or job.language_resolution_status is None
+                or project_path not in job.language_resolution_status
+            ):
+                return
+
+            project_status = job.language_resolution_status[project_path]
+
+            # Check if already at max attempts BEFORE incrementing
+            if project_status["attempts"] >= self.MAX_RESOLUTION_ATTEMPTS:
+                project_status["status"] = "unresolvable"
+                logger.warning(
+                    format_error_log(
+                        "MCP-GENERAL-153",
+                        f"Job {job_id}: Project {project_path} marked unresolvable "
+                        f"after {project_status['attempts']} attempts",
+                    )
+                )
+            else:
+                project_status["attempts"] += 1
+                project_status["status"] = "resolving"
+                logger.info(
+                    f"Job {job_id}: No progress for {project_path}, "
+                    f"will resume (attempt {project_status['attempts']})",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            self.job_manager._persist_jobs()
+
+    def _handle_unresolvable_response(
+        self, job_id: str, project_path: str, reasoning: str
+    ) -> None:
+        """Handle 'unresolvable' response: mark project unresolvable immediately."""
+        with self.job_manager._lock:
+            job = self.job_manager.jobs.get(job_id)
+            if (
+                not job
+                or job.language_resolution_status is None
+                or project_path not in job.language_resolution_status
+            ):
+                return
+
+            job.language_resolution_status[project_path]["status"] = "unresolvable"
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-154",
+                    f"Job {job_id}: Project {project_path} marked unresolvable: {reasoning}",
+                )
+            )
+            self.job_manager._persist_jobs()
+
+    def _retry_scip_for_project(self, job_id: str, project_path: str) -> bool:
+        """
+        Retry SCIP indexing for a specific project only.
+
+        Args:
+            job_id: Background job ID
+            project_path: Project relative path
+
+        Returns:
+            True if SCIP indexing succeeded, False otherwise
+        """
+        # Get project details from job
+        with self.job_manager._lock:
+            job = self.job_manager.jobs.get(job_id)
+            if (
+                not job
+                or job.language_resolution_status is None
+                or project_path not in job.language_resolution_status
+            ):
+                logger.error(
+                    format_error_log(
+                        "MCP-GENERAL-155",
+                        f"Job {job_id}: Cannot retry SCIP for unknown project {project_path}",
+                    )
+                )
+                return False
+
+            project_status = job.language_resolution_status[project_path]
+            language = project_status["language"]
+            build_system = project_status["build_system"]
+
+        logger.info(
+            f"Job {job_id}: Retrying SCIP for {language} project at {project_path} "
+            f"(build system: {build_system})",
+            extra={"correlation_id": get_correlation_id()},
+        )
+
+        try:
+            # Import here to avoid circular dependencies
+            from cidx_scip.generator import SCIPGenerator
+
+            # LOCAL-ONLY (EVO-65021): self-healing runs the local subprocess
+            # indexer map. The delegated backend never reaches here — the funnel
+            # enqueues the delegated build and supersedes self-heal — so no
+            # workspace_id is threaded (a local indexer would only ignore it).
+            generator = SCIPGenerator(self.repo_root)
+
+            # Get project directory (remove trailing slash for Path operations)
+            project_dir = self.repo_root / project_path.rstrip("/")
+            if not project_dir.exists():
+                logger.error(
+                    format_error_log(
+                        "MCP-GENERAL-156",
+                        f"Job {job_id}: Project directory not found: {project_dir}",
+                    )
+                )
+                return False
+
+            # SCIP output directory
+            output_dir = scip_index_dir(self.repo_root)
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            # Get appropriate indexer for language
+            indexer = generator._indexers.get(language)
+            if not indexer:
+                logger.error(
+                    format_error_log(
+                        "MCP-GENERAL-157",
+                        f"Job {job_id}: No SCIP indexer available for {language}",
+                    )
+                )
+                return False
+
+            # Generate SCIP index for this specific project. Local-only path:
+            # ``language`` is passed for interface parity (local indexers ignore
+            # it); no workspace_id — the delegated backend never runs here.
+            indexer_result = indexer.generate(
+                project_dir,
+                output_dir,
+                build_system,
+                language=language,
+            )
+
+            if indexer_result.is_success():
+                logger.info(
+                    f"Job {job_id}: SCIP retry succeeded for {project_path}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+            else:
+                logger.warning(
+                    format_error_log(
+                        "MCP-GENERAL-158",
+                        f"Job {job_id}: SCIP retry failed for {project_path}: "
+                        f"{redact_url_credentials(indexer_result.stderr)}",
+                    )
+                )
+                return False
+
+        except Exception as e:
+            logger.error(
+                format_error_log(
+                    "MCP-GENERAL-159",
+                    f"Job {job_id}: Exception during SCIP retry for {project_path}: {e}",
+                ),
+                exc_info=True,
+            )
+            return False
+
+    async def _enqueue_project_for_retry(self, job_id: str, project_path: str) -> None:
+        """
+        Re-queue a project for another resolution attempt.
+
+        Args:
+            job_id: Background job ID
+            project_path: Project relative path
+        """
+        if not self.resolution_queue:
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-160",
+                    f"Job {job_id}: Resolution queue not available, cannot re-queue {project_path}",
+                )
+            )
+            return
+
+        # Get project details from job for re-queuing
+        with self.job_manager._lock:
+            job = self.job_manager.jobs.get(job_id)
+            if (
+                not job
+                or job.language_resolution_status is None
+                or project_path not in job.language_resolution_status
+            ):
+                logger.error(
+                    format_error_log(
+                        "MCP-GENERAL-161",
+                        f"Job {job_id}: Cannot re-queue unknown project {project_path}",
+                    )
+                )
+                return
+
+            project_status = job.language_resolution_status[project_path]
+            language = project_status["language"]
+            build_system = project_status["build_system"]
+            last_error = project_status["last_error"]
+
+        try:
+            await self.resolution_queue.enqueue_project(
+                job_id=job_id,
+                project_path=project_path,
+                language=language,
+                build_system=build_system,
+                stderr=last_error,
+            )
+            logger.info(
+                f"Job {job_id}: Re-queued {project_path} for another resolution attempt",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            logger.error(
+                format_error_log(
+                    "MCP-GENERAL-162",
+                    f"Job {job_id}: Failed to re-queue {project_path}: {e}",
+                ),
+                exc_info=True,
+            )
+
+    def _record_partial_success_details(
+        self, job, resolved: int, total_projects: int
+    ) -> None:
+        """
+        Record partial success details in job failure_reason and extended_error.
+
+        Args:
+            job: Job object to update
+            resolved: Number of resolved projects
+            total_projects: Total number of projects tracked
+        """
+        unresolvable = total_projects - resolved
+        resolved_projects = [
+            path
+            for path, status in job.language_resolution_status.items()
+            if status["status"] == "resolved"
+        ]
+        unresolvable_projects = [
+            path
+            for path, status in job.language_resolution_status.items()
+            if status["status"] == "unresolvable"
+        ]
+
+        job.failure_reason = (
+            f"{resolved}/{total_projects} projects resolved, "
+            f"{unresolvable} unresolvable"
+        )
+        job.extended_error = {
+            "resolved_projects": resolved_projects,
+            "unresolvable_projects": unresolvable_projects,
+        }
+
+    def determine_job_completion(self, job_id: str) -> Any:
+        """
+        Determine final job status based on per-project resolution results.
+
+        Implements AC7: Job Completion Logic with Partial Resolution Support.
+        Implements Story #659 Priority 4: PR Creation After Successful Resolution.
+
+        Args:
+            job_id: Background job ID
+
+        Returns:
+            JobStatus enum value (COMPLETED or FAILED)
+        """
+        with self.job_manager._lock:
+            job = self.job_manager.jobs.get(job_id)
+            if not job:
+                logger.error(
+                    format_error_log(
+                        "MCP-GENERAL-163",
+                        f"Job {job_id} not found for completion determination",
+                    )
+                )
+                return _core.job_status().FAILED
+
+            if not job.language_resolution_status:
+                logger.warning(
+                    format_error_log(
+                        "MCP-GENERAL-164",
+                        f"Job {job_id} has no language_resolution_status",
+                    )
+                )
+                return _core.job_status().FAILED
+
+            # Count outcomes
+            total_projects = len(job.language_resolution_status)
+            resolved = sum(
+                1
+                for project_status in job.language_resolution_status.values()
+                if project_status["status"] == "resolved"
+            )
+            unresolvable = sum(
+                1
+                for project_status in job.language_resolution_status.values()
+                if project_status["status"] == "unresolvable"
+            )
+            pending = total_projects - resolved - unresolvable
+
+            # Warn if projects still pending
+            if pending > 0:
+                logger.warning(
+                    format_error_log(
+                        "MCP-GENERAL-165",
+                        f"Job {job_id}: {pending} projects still in non-terminal state "
+                        "(should not happen at completion)",
+                    )
+                )
+
+            logger.info(
+                f"Job {job_id}: Resolution summary - "
+                f"{resolved}/{total_projects} resolved, {unresolvable} unresolvable, {pending} pending",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+            # Determine final status
+            final_status = None
+            if resolved == total_projects:
+                logger.info(
+                    f"Job {job_id}: All {total_projects} projects resolved",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                final_status = _core.job_status().COMPLETED
+
+            elif resolved > 0 and unresolvable > 0:
+                self._record_partial_success_details(job, resolved, total_projects)
+                logger.info(
+                    f"Job {job_id}: Partial success - {job.failure_reason}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                final_status = _core.job_status().COMPLETED
+
+            else:
+                job.failure_reason = "No projects could be resolved"
+                logger.warning(
+                    format_error_log(
+                        "MCP-GENERAL-166",
+                        f"Job {job_id}: {job.failure_reason}",
+                    )
+                )
+                final_status = _core.job_status().FAILED
+
+            # Story #659 Priority 4: Trigger PR creation on successful resolution
+            if final_status == _core.job_status().COMPLETED and resolved > 0:
+                self._trigger_pr_creation(job_id, job, resolved, total_projects)
+
+            return final_status
+
+    def _build_pr_description(
+        self, job: Any, resolved: int, total_projects: int
+    ) -> tuple[str, str]:
+        """
+        Build PR title and body from resolution details.
+
+        Args:
+            job: Job object with language_resolution_status
+            resolved: Number of resolved projects
+            total_projects: Total number of projects
+
+        Returns:
+            Tuple of (pr_title, pr_body)
+        """
+        # Build list of resolved projects
+        resolved_projects = [
+            f"{path} ({status['language']})"
+            for path, status in job.language_resolution_status.items()
+            if status["status"] == "resolved"
+        ]
+
+        # Build PR title
+        if resolved == total_projects:
+            pr_title = f"fix(scip): Auto-resolved {resolved} SCIP indexing failures"
+            pr_body = f"Automatically resolved all {total_projects} SCIP indexing failures:\n\n"
+        else:
+            pr_title = (
+                f"fix(scip): Auto-resolved {resolved}/{total_projects} SCIP failures"
+            )
+            pr_body = f"Partially resolved SCIP indexing failures ({resolved}/{total_projects} fixed):\n\n"
+
+        # Add resolved projects list
+        pr_body += "Resolved:\n"
+        for project in resolved_projects:
+            pr_body += f"- {project}\n"
+
+        # Add actions taken
+        pr_body += "\n\nActions taken by Claude Code:\n"
+        for path, status in job.language_resolution_status.items():
+            if status["status"] == "resolved" and status.get("resolution_actions"):
+                pr_body += f"\n{path}:\n"
+                for action in status["resolution_actions"]:
+                    pr_body += f"  - {action}\n"
+
+        return pr_title, pr_body
+
+    def _trigger_pr_creation(
+        self, job_id: str, job: Any, resolved: int, total_projects: int
+    ) -> None:
+        """
+        Trigger PR creation after successful SCIP resolution.
+
+        Story #659 Priority 4: Integration hook for automatic PR creation.
+
+        Known limitations:
+        - files_modified tracking not implemented (passes empty list)
+        - platform detection defaults to 'github' (should detect from repo URL)
+
+        Args:
+            job_id: Background job ID
+            job: Job object with resolution details
+            resolved: Number of resolved projects
+            total_projects: Total number of projects tracked
+        """
+        try:
+            # Get repo_alias from job
+            repo_alias = job.repo_alias
+            if not repo_alias:
+                logger.warning(
+                    format_error_log(
+                        "MCP-GENERAL-167",
+                        f"Job {job_id}: Cannot create PR - no repo_alias in job params",
+                    )
+                )
+                return
+
+            # Load server config and create GitStateManager
+            config = _core.get_config_service().get_config()
+            git_manager = _core.git_state_manager(config)
+
+            # Build PR description
+            pr_title, pr_body = self._build_pr_description(
+                job, resolved, total_projects
+            )
+
+            # Platform detection - defaults to github (limitation: should detect from repo URL)
+            platform = "github"
+
+            # Call PR creation (non-blocking - errors logged but not propagated)
+            git_manager.create_pr_after_fix(
+                repo_path=self.repo_root,
+                fix_description=pr_body,
+                files_modified=[],  # Limitation: file tracking not implemented
+                pr_description=pr_title,
+                platform=platform,
+                job_id=job_id,
+            )
+
+            logger.info(
+                f"Job {job_id}: PR creation triggered for {repo_alias} ({resolved}/{total_projects} resolved)",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+        except Exception as e:
+            # PR creation errors should NOT block job completion
+            logger.error(
+                format_error_log(
+                    "MCP-GENERAL-168",
+                    f"Job {job_id}: Failed to create PR (non-blocking): {e}",
+                ),
+                exc_info=True,
+            )

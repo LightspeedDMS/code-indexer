@@ -51,6 +51,54 @@ class UserRole(str, Enum):
     NORMAL_USER = "normal_user"  # Query + list repos only
 
 
+def role_has_permission(role: UserRole, permission: Optional[str]) -> bool:
+    """Whether *role* holds *permission* (see :meth:`User.has_permission`).
+
+    Permissions follow from the role alone, so a caller holding only a
+    session's role (the shell's navigation) needs no user-store read.
+    """
+    # Handle None permission (public tools) and "public" permission
+    if permission is None or permission == "public":
+        return True
+
+    # Define base permissions for each role (without inheritance)
+    base_permissions = {
+        UserRole.NORMAL_USER: {
+            "query_repos",
+            "repository:read",  # Can read repo status, list branches, etc.
+            "activate_repos",  # AC1 Story #981: Normal users can activate/deactivate/switch/sync their workspace
+        },
+        UserRole.POWER_USER: {
+            "activate_repos",
+            "repository:write",  # Can modify files, commit, push, etc.
+        },
+        UserRole.ADMIN: {
+            "manage_users",
+            "manage_golden_repos",
+            "repository:admin",  # Can perform destructive operations
+        },
+    }
+
+    # Build inherited permissions based on role hierarchy
+    if role == UserRole.ADMIN:
+        # ADMIN inherits from POWER_USER and NORMAL_USER
+        user_permissions = (
+            base_permissions[UserRole.NORMAL_USER]
+            | base_permissions[UserRole.POWER_USER]
+            | base_permissions[UserRole.ADMIN]
+        )
+    elif role == UserRole.POWER_USER:
+        # POWER_USER inherits from NORMAL_USER
+        user_permissions = (
+            base_permissions[UserRole.NORMAL_USER]
+            | base_permissions[UserRole.POWER_USER]
+        )
+    else:  # NORMAL_USER
+        user_permissions = base_permissions[UserRole.NORMAL_USER]
+
+    return permission in user_permissions
+
+
 class User(BaseModel):
     """User data model."""
 
@@ -90,46 +138,7 @@ class User(BaseModel):
         Returns:
             True if user has permission, False otherwise
         """
-        # Handle None permission (public tools) and "public" permission
-        if permission is None or permission == "public":
-            return True
-
-        # Define base permissions for each role (without inheritance)
-        base_permissions = {
-            UserRole.NORMAL_USER: {
-                "query_repos",
-                "repository:read",  # Can read repo status, list branches, etc.
-                "activate_repos",  # AC1 Story #981: Normal users can activate/deactivate/switch/sync their workspace
-            },
-            UserRole.POWER_USER: {
-                "activate_repos",
-                "repository:write",  # Can modify files, commit, push, etc.
-            },
-            UserRole.ADMIN: {
-                "manage_users",
-                "manage_golden_repos",
-                "repository:admin",  # Can perform destructive operations
-            },
-        }
-
-        # Build inherited permissions based on role hierarchy
-        if self.role == UserRole.ADMIN:
-            # ADMIN inherits from POWER_USER and NORMAL_USER
-            user_permissions = (
-                base_permissions[UserRole.NORMAL_USER]
-                | base_permissions[UserRole.POWER_USER]
-                | base_permissions[UserRole.ADMIN]
-            )
-        elif self.role == UserRole.POWER_USER:
-            # POWER_USER inherits from NORMAL_USER
-            user_permissions = (
-                base_permissions[UserRole.NORMAL_USER]
-                | base_permissions[UserRole.POWER_USER]
-            )
-        else:  # NORMAL_USER
-            user_permissions = base_permissions[UserRole.NORMAL_USER]
-
-        return permission in user_permissions
+        return role_has_permission(self.role, permission)
 
 
 class UserManager:

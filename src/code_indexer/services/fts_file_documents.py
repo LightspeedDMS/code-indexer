@@ -20,12 +20,23 @@ import logging
 import os
 import threading
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Iterable, Iterator, List, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Optional,
+    Tuple,
+)
 
+from ..indexing.file_texts import iter_file_bytes
 from ..indexing.fixed_size_chunker import FixedSizeChunker
 
 if TYPE_CHECKING:
     from ..config import Config
+    from ..indexing.repo_manifest import RepoManifest
     from .tantivy_index_manager import TantivyIndexManager
 
 logger = logging.getLogger(__name__)
@@ -150,21 +161,68 @@ class FileFtsDocuments:
     """Chunk-level FTS documents of whole files, built with the chunker
     normal indexing uses (`FixedSizeChunker(config)`, as DocumentProcessor
     builds it, called with `repo_root=codebase_dir` as FileChunkingManager
-    calls it). Reads and chunks files only: never embeds."""
+    calls it). Reads and chunks files only: never embeds.
 
-    def __init__(self, config: "Config") -> None:
+    Under a delegated content backend (`backend` plus the pass's `manifest`)
+    the repository is not on this machine: every file's bytes are fetched
+    from the backend in batches (`iter_file_bytes`), never read off the
+    local disk, and an absent file is the backend's "not found" answer, never
+    a local `exists()`."""
+
+    def __init__(
+        self,
+        config: "Config",
+        *,
+        backend: Optional[Any] = None,
+        manifest: Optional["RepoManifest"] = None,
+    ) -> None:
         self._codebase_dir = Path(config.codebase_dir)
         self._chunker = FixedSizeChunker(config)
+        self._backend = backend
+        self._manifest = manifest
 
-    def for_file(self, file_path: Path) -> List[Dict[str, Any]]:
+    def for_file(
+        self, file_path: Path, content: Optional[bytes] = None
+    ) -> List[Dict[str, Any]]:
         """`file_path`'s FTS documents; [] for a file with no chunk.
+        `content`: the file's bytes when the caller already has them (from a
+        content backend); None reads the file from disk.
 
         Raises:
             ValueError: the file cannot be read or chunked, or lies outside
                 the codebase (normal indexing fails such a file).
         """
-        chunks = self._chunker.chunk_file(file_path, repo_root=self._codebase_dir)
+        chunks = self._chunker.chunk_file(
+            file_path, repo_root=self._codebase_dir, content=content
+        )
         return chunk_fts_documents(chunks, file_path, self._codebase_dir)
+
+    def iter_documents(
+        self, files: Iterable[Path]
+    ) -> Iterator[Tuple[Path, Optional[List[Dict[str, Any]]], Optional[str]]]:
+        """Each file's `(path, documents, None)`, or `(path, None, error)`
+        when it cannot be read or chunked -- in order, one entry per file.
+        Under a backend the bytes are fetched a batch at a time."""
+        if self._backend is None:
+            for file_path in files:
+                try:
+                    yield file_path, self.for_file(file_path), None
+                except Exception as e:  # each caller records the file as failed
+                    yield file_path, None, str(e)
+            return
+        for record in iter_file_bytes(
+            list(files),
+            self._codebase_dir,
+            manifest=self._manifest,
+            backend=self._backend,
+        ):
+            if record.data is None:
+                yield record.path, None, record.error
+                continue
+            try:
+                yield record.path, self.for_file(record.path, record.data), None
+            except Exception as e:  # each caller records the file as failed
+                yield record.path, None, str(e)
 
     def replace_in_index(
         self, fts_manager: "TantivyIndexManager", file_path: Path
@@ -177,18 +235,30 @@ class FileFtsDocuments:
         """
         # The chunker's own return type: one dict per chunk.
         chunks: List[Dict[str, Any]] = []
-        if file_path.exists():
+        if self._backend is not None:
+            [record] = list(
+                iter_file_bytes(
+                    [file_path],
+                    self._codebase_dir,
+                    manifest=self._manifest,
+                    backend=self._backend,
+                )
+            )
+            if record.data is not None:
+                chunks = self._chunker.chunk_file(
+                    file_path, repo_root=self._codebase_dir, content=record.data
+                )
+            elif not record.missing:
+                raise ValueError(f"{file_path} could not be read: {record.error}")
+        elif file_path.exists():
             chunks = self._chunker.chunk_file(file_path, repo_root=self._codebase_dir)
         replace_file_fts_documents(fts_manager, file_path, self._codebase_dir, chunks)
 
     def files_with_documents(self, files: Iterable[Path]) -> Iterator[Path]:
         """Lazily yield the files that get at least one FTS document."""
-        for file_path in files:
-            try:
-                if self.for_file(file_path):
-                    yield file_path
-            except ValueError:
-                continue
+        for file_path, documents, _error in self.iter_documents(files):
+            if documents:
+                yield file_path
 
 
 def fts_content_version_is_current(index_dir: Path) -> bool:

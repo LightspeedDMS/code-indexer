@@ -17,14 +17,14 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from code_indexer.server.services.memory_file_lock_manager import MemoryFileLockManager
+from cidx_memory.server.memory_file_lock_manager import MemoryFileLockManager
 from code_indexer.server.services.memory_io import read_memory_file
-from code_indexer.server.services.memory_rate_limiter import (
+from cidx_memory.server.memory_rate_limiter import (
     MemoryRateLimiter,
     RateLimitConfig,
 )
-from code_indexer.server.services.memory_schema import MemorySchemaValidationError
-from code_indexer.server.services.memory_store_service import (
+from cidx_memory.server.memory_schema import MemorySchemaValidationError
+from cidx_memory.server.memory_store_service import (
     MemoryStoreConfig,
     MemoryStoreService,
     RateLimitError,
@@ -338,7 +338,7 @@ def _create_one(
 
 def test_create_memory_conflict_on_locked_id(memories_dir, lock_manager, rate_limiter):
     """Test 9: ConflictError raised when per-memory lock is already held externally."""
-    from code_indexer.server.services.memory_store_service import ConflictError
+    from cidx_memory.server.memory_store_service import ConflictError
 
     svc, _s, _d = _build_service(
         memories_dir, lock_manager, rate_limiter, id_factory=lambda: FIXED_UUID
@@ -411,7 +411,7 @@ def test_edit_memory_stale_hash_raises_stale_content_error(
     memories_dir, lock_manager, rate_limiter
 ):
     """Test 12: Wrong hash on edit raises StaleContentError carrying the real hash; disk unchanged."""
-    from code_indexer.server.services.memory_store_service import StaleContentError
+    from cidx_memory.server.memory_store_service import StaleContentError
 
     ids = _make_counter_id_factory()
     svc, _s, _d, memory_id, real_hash = _create_one(
@@ -430,7 +430,7 @@ def test_edit_memory_stale_hash_raises_stale_content_error(
 
 def test_edit_memory_not_found(memories_dir, lock_manager, rate_limiter):
     """Test 13: edit on a memory_id that was never created raises NotFoundError."""
-    from code_indexer.server.services.memory_store_service import NotFoundError
+    from cidx_memory.server.memory_store_service import NotFoundError
 
     svc, _s, _d = _build_service(memories_dir, lock_manager, rate_limiter)
 
@@ -523,7 +523,7 @@ def test_edit_memory_stale_does_not_trigger_refresh(
     memories_dir, lock_manager, rate_limiter
 ):
     """Test 17: StaleContentError on edit fires neither trigger_refresh_for_repo nor signal_dirty."""
-    from code_indexer.server.services.memory_store_service import StaleContentError
+    from cidx_memory.server.memory_store_service import StaleContentError
 
     ids = _make_counter_id_factory()
     svc, scheduler, debouncer, memory_id, _hash = _create_one(
@@ -561,7 +561,7 @@ def test_delete_memory_happy_path(memories_dir, lock_manager, rate_limiter):
 
 def test_delete_memory_stale_hash_raises(memories_dir, lock_manager, rate_limiter):
     """Test 19: delete with wrong hash raises StaleContentError; file remains on disk."""
-    from code_indexer.server.services.memory_store_service import StaleContentError
+    from cidx_memory.server.memory_store_service import StaleContentError
 
     ids = _make_counter_id_factory()
     svc, _s, _d, memory_id, _hash = _create_one(
@@ -577,7 +577,7 @@ def test_delete_memory_stale_hash_raises(memories_dir, lock_manager, rate_limite
 
 def test_delete_memory_not_found(memories_dir, lock_manager, rate_limiter):
     """Test 20: delete on a never-created memory_id raises NotFoundError."""
-    from code_indexer.server.services.memory_store_service import NotFoundError
+    from cidx_memory.server.memory_store_service import NotFoundError
 
     svc, _s, _d = _build_service(memories_dir, lock_manager, rate_limiter)
 

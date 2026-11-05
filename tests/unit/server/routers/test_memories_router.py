@@ -7,23 +7,24 @@ Endpoints under test:
   DELETE /api/v1/memories/{id}     — delete memory (If-Match required)
 """
 
+from typing import Iterator, Optional
 from unittest.mock import MagicMock
-from typing import Optional
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from code_indexer.server.auth.dependencies import get_current_user
-from code_indexer.server.routers.memories import router
-from code_indexer.server.services.memory_schema import MemorySchemaValidationError
-from code_indexer.server.services.memory_store_service import (
+from cidx_memory.server.routes import ROUTER_PREFIX, current_principal, router
+from cidx_sdk import Principal
+from cidx_memory.server.memory_schema import MemorySchemaValidationError
+from cidx_memory.server.memory_store_service import (
     ConflictError,
     MemoryStoreService,
     NotFoundError,
     RateLimitError,
     StaleContentError,
 )
+from tests.unit.server._memory_feature import memory_context_installed
 
 
 # ---------------------------------------------------------------------------
@@ -47,22 +48,23 @@ _WRITE_RESPONSE = {
 }
 
 
-def _build_test_app(service: Optional[object]) -> FastAPI:
-    """Factory: build a minimal FastAPI app with the memories router.
-
-    Mounts the router, sets app.state.memory_store_service to `service`
-    (may be None to simulate unavailable service), and overrides
-    get_current_user with a fixed alice stub.
-    """
+def _build_test_app() -> FastAPI:
+    """Factory: a minimal FastAPI app with the memories router mounted where
+    the core mounts it, the caller a fixed alice principal (the core's
+    authentication is not under test here)."""
     test_app = FastAPI()
-    test_app.include_router(router)
-    test_app.state.memory_store_service = service
-
-    mock_user = MagicMock()
-    mock_user.username = "alice"
-
-    test_app.dependency_overrides[get_current_user] = lambda: mock_user
+    test_app.include_router(router, prefix=ROUTER_PREFIX)
+    test_app.dependency_overrides[current_principal] = lambda: Principal(
+        username="alice", role="normal_user"
+    )
     return test_app
+
+
+def _client(service: Optional[object]) -> Iterator[TestClient]:
+    """A client of the app while the memory feature runs with *service* as
+    its store (None: the store is not running)."""
+    with memory_context_installed(store=service):
+        yield TestClient(_build_test_app(), raise_server_exceptions=False)
 
 
 # ---------------------------------------------------------------------------
@@ -78,12 +80,12 @@ def mock_service():
 
 @pytest.fixture()
 def client(mock_service):
-    return TestClient(_build_test_app(mock_service), raise_server_exceptions=False)
+    yield from _client(mock_service)
 
 
 @pytest.fixture()
 def client_no_service():
-    return TestClient(_build_test_app(None), raise_server_exceptions=False)
+    yield from _client(None)
 
 
 # ---------------------------------------------------------------------------

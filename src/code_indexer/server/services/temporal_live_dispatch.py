@@ -26,6 +26,7 @@ builds, not to this function's own return contract (which always includes
 job_id so the caller CAN build either shape).
 """
 
+from code_indexer.server.services.served_index_cache import reads_served_indexes
 import logging
 import time
 from datetime import datetime
@@ -58,6 +59,11 @@ from code_indexer.services.temporal.temporal_status import (
     list_temporal_shard_dirs_under_fixed_root,
 )
 from code_indexer.services.temporal.temporal_worker_input import TemporalWorkerInput
+from code_indexer.server.startup.search_backend_wiring import (
+    TEMPORAL_NOT_DELEGATED_ERROR_CODE,
+    TEMPORAL_NOT_DELEGATED_MESSAGE,
+    active_search_backend,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -281,6 +287,7 @@ def _parse_completed_at_epoch(completed_at_iso: Optional[str]) -> Optional[float
         return None
 
 
+@reads_served_indexes
 def execute_live_temporal_search(
     worker_input: TemporalWorkerInput,
     background_job_manager: BackgroundJobManager,
@@ -347,6 +354,16 @@ def execute_live_temporal_search(
         Nothing -- TemporalDedupCapacityExhaustedError is caught and
         surfaced as a "capacity_exhausted" status dict instead.
     """
+    # Fail loud under search delegation: no temporal query is submitted to a
+    # worker that would read local temporal indexes this pod does not have.
+    if active_search_backend() is not None:
+        logger.error(TEMPORAL_NOT_DELEGATED_MESSAGE)
+        return {
+            "status": "failed",
+            "job_id": None,
+            "error": TEMPORAL_NOT_DELEGATED_MESSAGE,
+            "error_code": TEMPORAL_NOT_DELEGATED_ERROR_CODE,
+        }
     if dedup_cache is None:
         dedup_cache = get_temporal_dedup_cache()
     if freshness_cache is None:

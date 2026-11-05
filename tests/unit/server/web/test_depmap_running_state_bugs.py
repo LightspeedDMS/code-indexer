@@ -29,6 +29,9 @@ from fastapi.testclient import TestClient
 def app():
     """Create FastAPI app with minimal startup."""
     from code_indexer.server.app import app as _app
+    from tests.unit.server._depmap_feature import ensure_depmap_routes
+
+    ensure_depmap_routes(_app)
 
     return _app
 
@@ -87,7 +90,7 @@ class TestJobStatusRunningBadgeNotOverriddenByContentHealth:
 
     def _make_unhealthy_report(self, status="needs_repair"):
         """Build a HealthReport that reports unhealthy content."""
-        from code_indexer.server.services.dep_map_health_detector import (
+        from cidx_depmap.server.dep_map_health_detector import (
             Anomaly,
             HealthReport,
         )
@@ -144,15 +147,15 @@ class TestJobStatusRunningBadgeNotOverriddenByContentHealth:
 
         with (
             patch(
-                "code_indexer.server.web.dependency_map_routes._get_dashboard_cache_backend",
+                "cidx_depmap.server.web.routes._get_dashboard_cache_backend",
                 return_value=cache,
             ),
             patch(
-                "code_indexer.server.web.dependency_map_routes._get_dep_map_output_dir",
+                "cidx_depmap.server.web.routes._get_dep_map_output_dir",
                 return_value=self._FAKE_OUTPUT_DIR,
             ),
             patch(
-                "code_indexer.server.services.dep_map_health_detector.DepMapHealthDetector"
+                "cidx_depmap.server.dep_map_health_detector.DepMapHealthDetector"
             ) as mock_detector_cls,
         ):
             mock_detector_cls.return_value.detect.return_value = health_report
@@ -239,8 +242,11 @@ class TestDepmapActivityEntriesDivHasLoadTrigger:
 
     TEMPLATE_PATH = (
         Path(__file__).parent.parent.parent.parent.parent
+        / "packages"
+        / "features"
+        / "cidx-depmap"
         / "src"
-        / "code_indexer"
+        / "cidx_depmap"
         / "server"
         / "web"
         / "templates"

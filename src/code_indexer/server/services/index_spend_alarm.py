@@ -73,7 +73,6 @@ def count_published_points(snapshot_path: Any) -> Optional[int]:
     CHUNKS_DB collection of its index, each ``chunks.db`` opened read-only.
     None when the snapshot holds no CHUNKS_DB collection (nothing countable
     without walking legacy shards). Any read error propagates."""
-    from pathlib import Path
 
     from code_indexer.storage.shared.chunk_layout import (
         ChunkLayout,
@@ -82,7 +81,9 @@ def count_published_points(snapshot_path: Any) -> Optional[int]:
     from code_indexer.storage.shared.collection_migration import CHUNKS_DB_FILENAME
     from code_indexer.storage.sqlite_chunk_store import ChunkStore
 
-    index_dir = Path(snapshot_path) / ".code-indexer" / "index"
+    from code_indexer.utils.index_store import index_root
+
+    index_dir = index_root(snapshot_path) / "index"
     total: Optional[int] = None
     for collection_dir in sorted(p for p in index_dir.iterdir() if p.is_dir()):
         if resolve_chunk_layout(collection_dir) is not ChunkLayout.CHUNKS_DB:

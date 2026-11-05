@@ -12,7 +12,7 @@ on, the current state is noted here and documented in the architecture pages, no
 ## Current implementation status
 
 - **ADR-001**: both modes are live. Mode detection is `compiler::detect_evaluator_mode`
-  (`rust/xray-core/src/compiler.rs`); `validate_rust_evaluator()` (`src/code_indexer/xray/sandbox.py`) rejects a source
+  (`rust/xray-core/src/compiler.rs`); `validate_rust_evaluator()` (`packages/features/cidx-xray/src/cidx_xray/sandbox.py`) rejects a source
   that satisfies neither mode.
 - **ADR-002**: implemented. `GraphHandle` is exported from `rust/xray-core/src/graph/csr/mod.rs`; the evaluator-side
   accessors are declared in `rust/xray-core/src/compiler/graph_preamble.rs`. The ABI number and the future-tense

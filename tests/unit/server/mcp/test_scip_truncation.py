@@ -9,9 +9,21 @@ large context fields in SCIP results (definition, references, dependencies, depe
 TDD: Tests written BEFORE implementation.
 """
 
+from contextlib import contextmanager
+from typing import Iterator
+
 import pytest
 from unittest.mock import Mock, patch
 from code_indexer.server.auth.user_manager import User, UserRole
+
+
+@contextmanager
+def _patched_app_state() -> Iterator[Mock]:
+    """The server app's state as the SCIP feature reads it (``_core.app_state``,
+    the cidx-scip feature since modular phase 4d), replaced for the block."""
+    state = Mock()
+    with patch("cidx_scip.server._core.app_state", return_value=state):
+        yield state
 
 
 @pytest.fixture
@@ -44,7 +56,7 @@ class TestApplyScipPayloadTruncation:
 
     def test_small_context_unchanged(self, mock_payload_cache):
         """Test that small context (<= 2000 chars) is not truncated."""
-        from code_indexer.server.mcp.handlers import _apply_scip_payload_truncation
+        from cidx_scip.server.mcp._common import _apply_scip_payload_truncation
 
         small_context = "x" * 100  # Small context (< preview_size_chars)
 
@@ -64,9 +76,7 @@ class TestApplyScipPayloadTruncation:
             }
         ]
 
-        with patch(
-            "code_indexer.server.mcp.handlers.app_module.app.state"
-        ) as mock_state:
+        with _patched_app_state() as mock_state:
             mock_state.payload_cache = mock_payload_cache
 
             result = _apply_scip_payload_truncation(results, owner="alice")  # Sync call
@@ -80,7 +90,7 @@ class TestApplyScipPayloadTruncation:
 
     def test_large_context_truncated_with_cache_handle(self, mock_payload_cache):
         """Test that large context (> 2000 chars) is truncated and cached."""
-        from code_indexer.server.mcp.handlers import _apply_scip_payload_truncation
+        from cidx_scip.server.mcp._common import _apply_scip_payload_truncation
 
         large_context = "x" * 5000  # Large context
         preview = large_context[:2000]  # First 2000 chars
@@ -101,9 +111,7 @@ class TestApplyScipPayloadTruncation:
             }
         ]
 
-        with patch(
-            "code_indexer.server.mcp.handlers.app_module.app.state"
-        ) as mock_state:
+        with _patched_app_state() as mock_state:
             mock_state.payload_cache = mock_payload_cache
 
             result = _apply_scip_payload_truncation(results, owner="alice")  # Sync call
@@ -119,7 +127,7 @@ class TestApplyScipPayloadTruncation:
 
     def test_multiple_results_mixed_sizes(self, mock_payload_cache):
         """Test truncation with mixed result sizes."""
-        from code_indexer.server.mcp.handlers import _apply_scip_payload_truncation
+        from cidx_scip.server.mcp._common import _apply_scip_payload_truncation
 
         small_context = "small" * 10  # 50 chars
         large_context = "x" * 4000  # 4000 chars
@@ -150,9 +158,7 @@ class TestApplyScipPayloadTruncation:
             },
         ]
 
-        with patch(
-            "code_indexer.server.mcp.handlers.app_module.app.state"
-        ) as mock_state:
+        with _patched_app_state() as mock_state:
             mock_state.payload_cache = mock_payload_cache
 
             result = _apply_scip_payload_truncation(results, owner="alice")  # Sync call
@@ -173,7 +179,7 @@ class TestApplyScipPayloadTruncation:
 
     def test_null_context_handled_gracefully(self, mock_payload_cache):
         """Test that null/None context is handled gracefully."""
-        from code_indexer.server.mcp.handlers import _apply_scip_payload_truncation
+        from cidx_scip.server.mcp._common import _apply_scip_payload_truncation
 
         results = [
             {
@@ -188,9 +194,7 @@ class TestApplyScipPayloadTruncation:
             }
         ]
 
-        with patch(
-            "code_indexer.server.mcp.handlers.app_module.app.state"
-        ) as mock_state:
+        with _patched_app_state() as mock_state:
             mock_state.payload_cache = mock_payload_cache
 
             result = _apply_scip_payload_truncation(results, owner="alice")  # Sync call
@@ -202,7 +206,7 @@ class TestApplyScipPayloadTruncation:
 
     def test_missing_context_handled_gracefully(self, mock_payload_cache):
         """Test that missing context field is handled gracefully."""
-        from code_indexer.server.mcp.handlers import _apply_scip_payload_truncation
+        from cidx_scip.server.mcp._common import _apply_scip_payload_truncation
 
         results = [
             {
@@ -217,9 +221,7 @@ class TestApplyScipPayloadTruncation:
             }
         ]
 
-        with patch(
-            "code_indexer.server.mcp.handlers.app_module.app.state"
-        ) as mock_state:
+        with _patched_app_state() as mock_state:
             mock_state.payload_cache = mock_payload_cache
 
             result = _apply_scip_payload_truncation(results, owner="alice")  # Sync call
@@ -230,7 +232,7 @@ class TestApplyScipPayloadTruncation:
 
     def test_cache_unavailable_returns_unchanged(self):
         """Test that results are unchanged when cache is unavailable."""
-        from code_indexer.server.mcp.handlers import _apply_scip_payload_truncation
+        from cidx_scip.server.mcp._common import _apply_scip_payload_truncation
 
         context = "x" * 5000  # Large context
 
@@ -247,9 +249,7 @@ class TestApplyScipPayloadTruncation:
             }
         ]
 
-        with patch(
-            "code_indexer.server.mcp.handlers.app_module.app.state"
-        ) as mock_state:
+        with _patched_app_state() as mock_state:
             mock_state.payload_cache = None  # Cache unavailable
 
             result = _apply_scip_payload_truncation(results, owner="alice")  # Sync call
@@ -262,7 +262,7 @@ class TestApplyScipPayloadTruncation:
 
     def test_cache_error_returns_unchanged_with_metadata(self, mock_payload_cache):
         """Test that cache errors leave context unchanged but add metadata."""
-        from code_indexer.server.mcp.handlers import _apply_scip_payload_truncation
+        from cidx_scip.server.mcp._common import _apply_scip_payload_truncation
 
         context = "x" * 5000  # Large context
 
@@ -282,9 +282,7 @@ class TestApplyScipPayloadTruncation:
             }
         ]
 
-        with patch(
-            "code_indexer.server.mcp.handlers.app_module.app.state"
-        ) as mock_state:
+        with _patched_app_state() as mock_state:
             mock_state.payload_cache = mock_payload_cache
 
             result = _apply_scip_payload_truncation(results, owner="alice")  # Sync call
@@ -296,11 +294,9 @@ class TestApplyScipPayloadTruncation:
 
     def test_empty_results_list(self, mock_payload_cache):
         """Test that empty results list is handled correctly."""
-        from code_indexer.server.mcp.handlers import _apply_scip_payload_truncation
+        from cidx_scip.server.mcp._common import _apply_scip_payload_truncation
 
-        with patch(
-            "code_indexer.server.mcp.handlers.app_module.app.state"
-        ) as mock_state:
+        with _patched_app_state() as mock_state:
             mock_state.payload_cache = mock_payload_cache
 
             result = _apply_scip_payload_truncation([])  # Sync call
@@ -318,7 +314,7 @@ class TestScipDefinitionPayloadTruncation:
 
     def test_scip_definition_applies_truncation(self, mock_user, mock_payload_cache):
         """Test that scip_definition applies payload truncation to results."""
-        from code_indexer.server.mcp.handlers import scip_definition
+        from cidx_scip.server.mcp.scip import scip_definition
 
         large_context = "x" * 5000
 
@@ -341,11 +337,9 @@ class TestScipDefinitionPayloadTruncation:
         mock_payload_cache.store = Mock(return_value="uuid-def-123")
 
         with (
+            _patched_app_state() as mock_state,
             patch(
-                "code_indexer.server.mcp.handlers.app_module.app.state"
-            ) as mock_state,
-            patch(
-                "code_indexer.server.mcp.handlers._get_scip_query_service",
+                "cidx_scip.server.mcp.scip._get_scip_query_service",
                 return_value=mock_service,
             ),
         ):
@@ -376,7 +370,7 @@ class TestScipReferencesPayloadTruncation:
 
     def test_scip_references_applies_truncation(self, mock_user, mock_payload_cache):
         """Test that scip_references applies payload truncation to results."""
-        from code_indexer.server.mcp.handlers import scip_references
+        from cidx_scip.server.mcp.scip import scip_references
 
         large_context = "x" * 5000
 
@@ -399,11 +393,9 @@ class TestScipReferencesPayloadTruncation:
         mock_payload_cache.store = Mock(return_value="uuid-ref-123")
 
         with (
+            _patched_app_state() as mock_state,
             patch(
-                "code_indexer.server.mcp.handlers.app_module.app.state"
-            ) as mock_state,
-            patch(
-                "code_indexer.server.mcp.handlers._get_scip_query_service",
+                "cidx_scip.server.mcp.scip._get_scip_query_service",
                 return_value=mock_service,
             ),
         ):
@@ -432,7 +424,7 @@ class TestScipDependenciesPayloadTruncation:
 
     def test_scip_dependencies_applies_truncation(self, mock_user, mock_payload_cache):
         """Test that scip_dependencies applies payload truncation to results."""
-        from code_indexer.server.mcp.handlers import scip_dependencies
+        from cidx_scip.server.mcp.scip import scip_dependencies
 
         large_context = "x" * 5000
 
@@ -455,11 +447,9 @@ class TestScipDependenciesPayloadTruncation:
         mock_payload_cache.store = Mock(return_value="uuid-dep-123")
 
         with (
+            _patched_app_state() as mock_state,
             patch(
-                "code_indexer.server.mcp.handlers.app_module.app.state"
-            ) as mock_state,
-            patch(
-                "code_indexer.server.mcp.handlers._get_scip_query_service",
+                "cidx_scip.server.mcp.scip._get_scip_query_service",
                 return_value=mock_service,
             ),
         ):
@@ -486,7 +476,7 @@ class TestScipDependentsPayloadTruncation:
 
     def test_scip_dependents_applies_truncation(self, mock_user, mock_payload_cache):
         """Test that scip_dependents applies payload truncation to results."""
-        from code_indexer.server.mcp.handlers import scip_dependents
+        from cidx_scip.server.mcp.scip import scip_dependents
 
         large_context = "x" * 5000
 
@@ -509,11 +499,9 @@ class TestScipDependentsPayloadTruncation:
         mock_payload_cache.store = Mock(return_value="uuid-dpt-123")
 
         with (
+            _patched_app_state() as mock_state,
             patch(
-                "code_indexer.server.mcp.handlers.app_module.app.state"
-            ) as mock_state,
-            patch(
-                "code_indexer.server.mcp.handlers._get_scip_query_service",
+                "cidx_scip.server.mcp.scip._get_scip_query_service",
                 return_value=mock_service,
             ),
         ):

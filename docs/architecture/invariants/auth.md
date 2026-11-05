@@ -24,7 +24,7 @@ because FastAPI wraps `HTTPException` detail.
 
 ## JWT logout revocation
 
-- Both logout routes in `src/code_indexer/server/web/routes.py`, `GET /admin/logout` (`web_router`, mounted at
+- Both logout routes in `src/code_indexer/server/web/pages/session.py`, `GET /admin/logout` (`web_router`, mounted at
   `/admin`) and `GET /user/logout` (`user_router`, mounted at `/user`; mounts in `routers/inline_routes.py`), add the
   token's `jti` to the blacklist with `get_token_blacklist().add(jti)`. `TokenBlacklist`
   (`src/code_indexer/server/app.py`) is database-backed, so a revoked `jti` is rejected by every worker and node.

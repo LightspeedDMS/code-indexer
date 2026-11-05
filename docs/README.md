@@ -94,6 +94,19 @@ Kept for reference only; they describe past states of the system.
 - [Query embedding cache empirical study](archive/query-embedding-cache-empirical-study.md): a point-in-time measurement study.
 - [HNSW temporal orphans investigation](archive/hnsw-temporal-orphans-1330.md): a point-in-time research note on HNSW orphans.
 
+## Internal fork (code-indexer-internal)
+
+Fork-only documents: the delegation seams that let a pod run without the repository mount (EVO-64616), and how
+upstream releases are taken.
+
+- [Upstream snapshot merge](upstream-snapshot-merge.md): the procedure for taking an upstream release, and the merge-base trap.
+- [Upstream merge corrections](upstream-merge-corrections.md): what earlier snapshot merges got wrong, and the rules that followed.
+- [Git seam guard](git-seam-guard.md): the CI guard that keeps every server git call on the seam.
+- [Content seam inventory](content-seam-inventory.md): every filesystem access the server can reach, classified.
+- [IndexStore cross-pod serving](index-store-cross-pod.md): publishing and serving built indexes across pods.
+- [Background work distribution](background-work-distribution.md): leader gating, per-process budgets and pod-pull work.
+- [X-Ray query-time toolchain](xray-query-time-toolchain.md): the compiler toolchain X-Ray needs in the image.
+
 ## Elsewhere in the repository
 
 - [CONTRIBUTING.md](../CONTRIBUTING.md): development setup, branches, test suites, releases.

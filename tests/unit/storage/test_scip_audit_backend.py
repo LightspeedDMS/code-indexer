@@ -1,4 +1,9 @@
-"""Tests for SCIPAuditBackend Protocol and SCIPAuditSqliteBackend (Story #516)."""
+"""Tests for SCIPAuditBackend Protocol and SCIPAuditSqliteBackend (Story #516).
+
+The SCIP feature (cidx-scip) owns both since modular phase 4d; the SQLite
+backend runs over a ``storage``-shaped object (the feature's ``storage``
+capability on a server, a single file here).
+"""
 
 import pytest
 from pathlib import Path
@@ -6,7 +11,7 @@ from pathlib import Path
 
 class TestSCIPAuditBackendProtocol:
     def test_protocol_is_runtime_checkable(self):
-        from code_indexer.server.storage.protocols import SCIPAuditBackend
+        from cidx_scip.server.audit_backend import SCIPAuditBackend
 
         class NotABackend:
             pass
@@ -17,7 +22,7 @@ class TestSCIPAuditBackendProtocol:
             pytest.fail("SCIPAuditBackend is not @runtime_checkable")
 
     def test_protocol_has_required_methods(self):
-        from code_indexer.server.storage.protocols import SCIPAuditBackend
+        from cidx_scip.server.audit_backend import SCIPAuditBackend
 
         required = ["create_audit_record", "query_audit_records", "close"]
         for m in required:
@@ -27,14 +32,17 @@ class TestSCIPAuditBackendProtocol:
 class TestSCIPAuditSqliteBackend:
     @pytest.fixture
     def backend(self, tmp_path):
-        from code_indexer.server.storage.sqlite_backends import SCIPAuditSqliteBackend
+        from cidx_scip.server.audit import SqliteFileStorage
+        from cidx_scip.server.audit_sqlite import SCIPAuditSqliteBackend
 
-        b = SCIPAuditSqliteBackend(str(tmp_path / "test_scip.db"))
+        b = SCIPAuditSqliteBackend(
+            SqliteFileStorage(tmp_path / "test_scip.db"), ensure_schema=True
+        )
         yield b
         b.close()
 
     def test_satisfies_protocol(self, backend):
-        from code_indexer.server.storage.protocols import SCIPAuditBackend
+        from cidx_scip.server.audit_backend import SCIPAuditBackend
 
         assert isinstance(backend, SCIPAuditBackend)
 
@@ -148,21 +156,23 @@ class TestSCIPAuditSqliteBackend:
 
 
 class TestBackendRegistrySCIPAudit:
-    def test_registry_has_scip_audit_field(self):
+    """The core's backend registry no longer builds the SCIP audit backend:
+    the cidx-scip feature builds it over its ``storage`` capability."""
+
+    def test_registry_has_no_scip_audit_field(self):
         from code_indexer.server.storage.factory import BackendRegistry
         import dataclasses
 
         fields = {f.name for f in dataclasses.fields(BackendRegistry)}
-        assert "scip_audit" in fields
+        assert "scip_audit" not in fields
 
-    def test_factory_sqlite_creates_scip_audit_backend(self, tmp_path):
+    def test_factory_sqlite_builds_no_scip_audit_file(self, tmp_path):
         from code_indexer.server.storage.factory import StorageFactory
-        from code_indexer.server.storage.protocols import SCIPAuditBackend
 
         data_dir = str(tmp_path / "data")
         Path(data_dir).mkdir(parents=True)
         # groups.db must exist at parent level
         (tmp_path / "groups.db").touch()
 
-        registry = StorageFactory._create_sqlite_backends(data_dir)
-        assert isinstance(registry.scip_audit, SCIPAuditBackend)
+        StorageFactory._create_sqlite_backends(data_dir)
+        assert not (tmp_path / "scip_audit.db").exists()

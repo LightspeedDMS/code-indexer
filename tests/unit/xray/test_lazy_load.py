@@ -14,8 +14,19 @@ from pathlib import Path
 
 import pytest
 
+from cidx_testkit.registry import in_tree_source_dirs
+
 SRC_ROOT = str(Path(__file__).parent.parent.parent.parent / "src")
 PROJECT_ROOT = str(Path(__file__).parent.parent.parent.parent)
+# The in-repo distributions the core imports (the SDK, the local backends, the
+# X-Ray feature), for a checkout where they are not installed; an installed
+# copy also works. Derived from what the root pyproject depends on by path, so
+# a new distribution cannot be missed here.
+_DISTRIBUTION_SRCS = [
+    str(path)
+    for path in in_tree_source_dirs(Path(PROJECT_ROOT))
+    if str(path) != SRC_ROOT
+]
 
 
 class TestLazyLoadInProcess:
@@ -119,10 +130,12 @@ class TestLazyLoadSubprocess:
         )
         assert result.returncode == 0, f"Subprocess failed: {result.stderr}"
         xray_modules = json.loads(result.stdout.strip())
-        # xray __init__.py may be imported (it has no heavy imports), but
-        # ast_engine must not be imported (it does the lazy tree_sitter import)
-        assert "code_indexer.xray.ast_engine" not in xray_modules, (
-            "ast_engine was eagerly imported at CLI startup - this would import tree_sitter"
+        # cidx_xray's __init__.py may be imported (it has no heavy imports),
+        # but ast_engine must not be imported (it does the lazy tree_sitter
+        # import).
+        assert "cidx_xray.ast_engine" not in xray_modules, (
+            "cidx_xray.ast_engine was eagerly imported at CLI startup - this "
+            "would import tree_sitter"
         )
 
 
@@ -140,7 +153,9 @@ class TestCidxHelpTiming:
             timeout=10,
             env={
                 **__import__("os").environ,
-                "PYTHONPATH": SRC_ROOT,
+                "PYTHONPATH": __import__("os").pathsep.join(
+                    [SRC_ROOT, *_DISTRIBUTION_SRCS]
+                ),
             },
         )
         elapsed = time.monotonic() - start

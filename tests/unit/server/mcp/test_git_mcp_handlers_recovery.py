@@ -43,11 +43,21 @@ def mock_git_service():
 
 
 @pytest.fixture
-def mock_repo_manager():
+def repo_path(tmp_path: Path) -> Path:
+    """A real activated working copy: the handlers refuse a path without
+    ``.git`` (``_resolve_git_repo_path``). A fixed /tmp path made these tests
+    pass only on a machine that happened to have /tmp/test-repo/.git."""
+    path = tmp_path / "test-repo"
+    (path / ".git").mkdir(parents=True)
+    return path
+
+
+@pytest.fixture
+def mock_repo_manager(repo_path: Path):
     """Create mock ActivatedRepoManager."""
     with patch("code_indexer.server.mcp.handlers.ActivatedRepoManager") as MockClass:
         mock_instance = MockClass.return_value
-        mock_instance.get_activated_repo_path.return_value = Path("/tmp/test-repo")
+        mock_instance.get_activated_repo_path.return_value = repo_path
         yield mock_instance
 
 
@@ -101,7 +111,7 @@ class TestGitResetHandler:
         assert data["success"] is True
         assert data["mode"] == "soft"
         mock_git_service.git_reset.assert_called_once_with(
-            Path("/tmp/test-repo"),
+            mock_repo_manager.get_activated_repo_path.return_value,
             mode="soft",
             commit_hash="HEAD~1",
             confirmation_token=None,
@@ -155,7 +165,7 @@ class TestGitResetHandler:
         assert data["success"] is True
         assert data["mode"] == "hard"
         mock_git_service.git_reset.assert_called_once_with(
-            Path("/tmp/test-repo"),
+            mock_repo_manager.get_activated_repo_path.return_value,
             mode="hard",
             commit_hash="HEAD",
             confirmation_token="ABC123",
@@ -190,7 +200,7 @@ class TestGitResetHandler:
 
         assert data["success"] is True
         mock_git_service.git_reset.assert_called_once_with(
-            Path("/tmp/test-repo"),
+            mock_repo_manager.get_activated_repo_path.return_value,
             mode="soft",
             commit_hash="abc1234",
             confirmation_token=None,
@@ -254,7 +264,7 @@ class TestGitCleanHandler:
         assert data["success"] is True
         assert len(data["removed_files"]) == 2
         mock_git_service.git_clean.assert_called_once_with(
-            Path("/tmp/test-repo"),
+            mock_repo_manager.get_activated_repo_path.return_value,
             confirmation_token="XYZ789",
             username="testadmin",
             repo_alias="test-repo",
@@ -292,7 +302,9 @@ class TestGitMergeAbortHandler:
 
         assert data["success"] is True
         assert "aborted" in data["message"].lower()
-        mock_git_service.git_merge_abort.assert_called_once_with(Path("/tmp/test-repo"))
+        mock_git_service.git_merge_abort.assert_called_once_with(
+            mock_repo_manager.get_activated_repo_path.return_value
+        )
 
     def test_git_merge_abort_no_merge_in_progress(
         self, mock_user, mock_git_service, mock_repo_manager
@@ -351,7 +363,7 @@ class TestGitCheckoutFileHandler:
         assert data["success"] is True
         assert data["restored_file"] == "src/main.py"
         mock_git_service.git_checkout_file.assert_called_once_with(
-            Path("/tmp/test-repo"), "src/main.py"
+            mock_repo_manager.get_activated_repo_path.return_value, "src/main.py"
         )
 
     def test_git_checkout_file_nonexistent(

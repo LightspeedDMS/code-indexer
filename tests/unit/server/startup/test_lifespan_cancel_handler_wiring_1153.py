@@ -37,7 +37,14 @@ from code_indexer.server.utils.config_manager import BackgroundJobsConfig
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 _LIFESPAN_PATH = (
-    _REPO_ROOT / "src" / "code_indexer" / "server" / "startup" / "lifespan.py"
+    _REPO_ROOT
+    / "packages"
+    / "features"
+    / "cidx-depmap"
+    / "src"
+    / "cidx_depmap"
+    / "server"
+    / "lifecycle.py"
 )
 _BG_JOBS_PATH = (
     _REPO_ROOT

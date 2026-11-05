@@ -20,12 +20,12 @@ from typing import Any
 from unittest import TestCase
 from unittest.mock import MagicMock, patch
 
-from code_indexer.global_repos.dependency_map_analyzer import (
+from cidx_depmap.server.dependency_map_analyzer import (
     DependencyMapAnalyzer,
     _VERIFICATION_SEMAPHORE_STATE,
 )
 
-_LOGGER = "code_indexer.global_repos.dependency_map_analyzer"
+_LOGGER = "cidx_depmap.server.dependency_map_analyzer"
 
 
 # ---------------------------------------------------------------------------

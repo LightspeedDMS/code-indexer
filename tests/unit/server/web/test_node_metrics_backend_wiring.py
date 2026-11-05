@@ -14,9 +14,10 @@ that cannot be exercised without the full app startup.
 from pathlib import Path
 
 
+# The dashboard routes live in web/pages/dashboard.py since web/routes.py was split.
 ROUTES_PATH = (
     Path(__file__).parent.parent.parent.parent.parent
-    / "src/code_indexer/server/web/routes.py"
+    / "src/code_indexer/server/web/pages/dashboard.py"
 )
 
 LIFESPAN_PATH = (

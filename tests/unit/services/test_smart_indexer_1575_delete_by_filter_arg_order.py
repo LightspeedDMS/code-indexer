@@ -7,7 +7,8 @@ The real ``FilesystemVectorStore.delete_by_filter`` signature is::
 
     def delete_by_filter(self, collection_name: str, filter_conditions: Dict[str, Any]) -> bool:
 
-Both ``_process_files_with_metadata`` and ``delete_file_branch_aware`` called
+Both ``_process_files_with_metadata`` (since deleted: it had no callers) and
+``delete_file_branch_aware`` called
 it as ``delete_by_filter(filter_dict, collection_name)`` -- the WRONG order.
 Reproduced against the real ``FilesystemVectorStore``: the swapped call
 raises ``TypeError: unhashable type: 'dict'`` deep inside ``scroll_points``

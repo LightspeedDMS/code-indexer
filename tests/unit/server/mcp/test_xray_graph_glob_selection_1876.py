@@ -7,7 +7,7 @@ glob policy.
 
 from pathlib import Path
 
-from code_indexer.server.mcp.handlers.xray_graph import _collect_graph_candidate_files
+from cidx_xray.server.mcp.xray_graph import _collect_graph_candidate_files
 
 
 def _build_java_tree(repo_root: Path) -> None:

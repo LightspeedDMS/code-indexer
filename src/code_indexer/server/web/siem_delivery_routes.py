@@ -31,7 +31,7 @@ from code_indexer.server.services.siem_delivery import admin, ops_documents
 from code_indexer.server.services.siem_delivery.stats import COUNT_CAP
 
 from . import siem_forms
-from .routes import templates
+from .pages._shared import templates
 
 siem_delivery_web_router = APIRouter(tags=["siem-delivery-web"])
 

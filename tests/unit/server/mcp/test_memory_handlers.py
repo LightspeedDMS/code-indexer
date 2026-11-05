@@ -7,16 +7,17 @@ translators — the service has its own 174 unit tests.
 
 import json
 from typing import Any, cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-from code_indexer.server.services.memory_store_service import (
+from cidx_memory.server.memory_store_service import (
     ConflictError,
     NotFoundError,
     RateLimitError,
     StaleContentError,
 )
-from code_indexer.server.services.memory_schema import MemorySchemaValidationError
+from cidx_memory.server.memory_schema import MemorySchemaValidationError
 from code_indexer.server.auth.user_manager import User
+from tests.unit.server._memory_feature import memory_context_installed
 
 
 def make_user(username: str = "alice") -> MagicMock:
@@ -27,13 +28,9 @@ def make_user(username: str = "alice") -> MagicMock:
 
 
 def make_context(service_mock: MagicMock):
-    """Return a context manager that patches _utils.app_module with service_mock."""
-    app_module_mock = MagicMock()
-    app_module_mock.app.state.memory_store_service = service_mock
-    return patch(
-        "code_indexer.server.mcp.handlers.memory._utils.app_module",
-        app_module_mock,
-    )
+    """Return a context manager under which the memory feature runs with
+    *service_mock* as its store (as after its on_startup)."""
+    return memory_context_installed(store=service_mock)
 
 
 def _parse_response(response: dict) -> dict[Any, Any]:
@@ -52,7 +49,7 @@ class TestHandleCreateMemory:
 
     def test_success_returns_id_content_hash_path(self):
         """Test 1: success path returns success=True with id, content_hash, path."""
-        from code_indexer.server.mcp.handlers.memory import handle_create_memory
+        from cidx_memory.server.mcp.handlers import handle_create_memory
 
         service = MagicMock()
         service.create_memory.return_value = {
@@ -78,7 +75,7 @@ class TestHandleCreateMemory:
 
     def test_passes_payload_to_service_create_memory(self):
         """Test 2: handler passes the raw params dict (as payload) to service.create_memory."""
-        from code_indexer.server.mcp.handlers.memory import handle_create_memory
+        from cidx_memory.server.mcp.handlers import handle_create_memory
 
         service = MagicMock()
         service.create_memory.return_value = {
@@ -102,16 +99,10 @@ class TestHandleCreateMemory:
 
     def test_service_unavailable_returns_error(self):
         """Test 3: when memory_store_service is None, returns service_unavailable error."""
-        from code_indexer.server.mcp.handlers.memory import handle_create_memory
-
-        app_module_mock = MagicMock()
-        app_module_mock.app.state.memory_store_service = None
+        from cidx_memory.server.mcp.handlers import handle_create_memory
 
         params = {"type": "gotcha", "scope": "global", "summary": "s", "evidence": []}
-        with patch(
-            "code_indexer.server.mcp.handlers.memory._utils.app_module",
-            app_module_mock,
-        ):
+        with memory_context_installed():
             result = handle_create_memory(params, make_user())
 
         data = _parse_response(result)
@@ -120,7 +111,7 @@ class TestHandleCreateMemory:
 
     def test_schema_validation_error_returns_validation_error(self):
         """Test 4: MemorySchemaValidationError -> error='validation_error'."""
-        from code_indexer.server.mcp.handlers.memory import handle_create_memory
+        from cidx_memory.server.mcp.handlers import handle_create_memory
 
         service = MagicMock()
         service.create_memory.side_effect = MemorySchemaValidationError(
@@ -143,7 +134,7 @@ class TestHandleCreateMemory:
 
     def test_rate_limit_error_returns_rate_limit_exceeded(self):
         """Test 5: RateLimitError -> error='rate_limit_exceeded'."""
-        from code_indexer.server.mcp.handlers.memory import handle_create_memory
+        from cidx_memory.server.mcp.handlers import handle_create_memory
 
         service = MagicMock()
         service.create_memory.side_effect = RateLimitError("Too many writes")
@@ -159,7 +150,7 @@ class TestHandleCreateMemory:
 
     def test_conflict_error_returns_conflict(self):
         """Test 6: ConflictError -> error='conflict'."""
-        from code_indexer.server.mcp.handlers.memory import handle_create_memory
+        from cidx_memory.server.mcp.handlers import handle_create_memory
 
         service = MagicMock()
         service.create_memory.side_effect = ConflictError("Lock held")
@@ -184,7 +175,7 @@ class TestHandleEditMemory:
 
     def test_success_returns_true_with_fields(self):
         """Test 7: edit success -> success=True with id, content_hash, path."""
-        from code_indexer.server.mcp.handlers.memory import handle_edit_memory
+        from cidx_memory.server.mcp.handlers import handle_edit_memory
 
         service = MagicMock()
         service.edit_memory.return_value = {
@@ -211,7 +202,7 @@ class TestHandleEditMemory:
 
     def test_passes_correct_args_to_service_edit_memory(self):
         """Test 8: edit calls service.edit_memory(memory_id, payload, expected_hash, username)."""
-        from code_indexer.server.mcp.handlers.memory import handle_edit_memory
+        from cidx_memory.server.mcp.handlers import handle_edit_memory
 
         service = MagicMock()
         service.edit_memory.return_value = {
@@ -248,7 +239,7 @@ class TestHandleEditMemory:
 
     def test_missing_memory_id_returns_missing_parameter(self):
         """Test 9: missing memory_id -> error='missing_parameter'."""
-        from code_indexer.server.mcp.handlers.memory import handle_edit_memory
+        from cidx_memory.server.mcp.handlers import handle_edit_memory
 
         service = MagicMock()
         params = {
@@ -268,7 +259,7 @@ class TestHandleEditMemory:
 
     def test_missing_expected_content_hash_returns_missing_parameter(self):
         """Test 10: missing expected_content_hash -> error='missing_parameter'."""
-        from code_indexer.server.mcp.handlers.memory import handle_edit_memory
+        from cidx_memory.server.mcp.handlers import handle_edit_memory
 
         service = MagicMock()
         params = {
@@ -288,7 +279,7 @@ class TestHandleEditMemory:
 
     def test_stale_content_error_returns_stale_content_hash(self):
         """Test 11: StaleContentError -> error='stale_content_hash' + current_content_hash."""
-        from code_indexer.server.mcp.handlers.memory import handle_edit_memory
+        from cidx_memory.server.mcp.handlers import handle_edit_memory
 
         service = MagicMock()
         service.edit_memory.side_effect = StaleContentError(
@@ -314,7 +305,7 @@ class TestHandleEditMemory:
 
     def test_not_found_error_returns_not_found(self):
         """Test 12: NotFoundError -> error='not_found'."""
-        from code_indexer.server.mcp.handlers.memory import handle_edit_memory
+        from cidx_memory.server.mcp.handlers import handle_edit_memory
 
         service = MagicMock()
         service.edit_memory.side_effect = NotFoundError("Memory m99 not found")
@@ -346,7 +337,7 @@ class TestHandleDeleteMemory:
 
     def test_success_returns_true_with_id_and_message(self):
         """Test 13: delete success -> success=True, id, and message."""
-        from code_indexer.server.mcp.handlers.memory import handle_delete_memory
+        from cidx_memory.server.mcp.handlers import handle_delete_memory
 
         service = MagicMock()
         service.delete_memory.return_value = None
@@ -362,7 +353,7 @@ class TestHandleDeleteMemory:
 
     def test_missing_expected_content_hash_returns_missing_parameter(self):
         """Test 14: delete missing expected_content_hash -> error='missing_parameter'."""
-        from code_indexer.server.mcp.handlers.memory import handle_delete_memory
+        from cidx_memory.server.mcp.handlers import handle_delete_memory
 
         service = MagicMock()
         params = {"memory_id": "del2"}
@@ -376,7 +367,7 @@ class TestHandleDeleteMemory:
 
     def test_stale_content_error_returns_stale_content_hash(self):
         """Test 15: delete StaleContentError -> error='stale_content_hash' + current_content_hash."""
-        from code_indexer.server.mcp.handlers.memory import handle_delete_memory
+        from cidx_memory.server.mcp.handlers import handle_delete_memory
 
         service = MagicMock()
         service.delete_memory.side_effect = StaleContentError(

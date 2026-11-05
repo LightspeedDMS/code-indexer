@@ -22,6 +22,7 @@ Test mapping:
   Scenario 15 -> test_missing_domain_file_triggers_synthetic_creation
 """
 
+from tests.unit.server._depmap_feature import depmap_claude_config
 import json
 import logging
 from pathlib import Path
@@ -29,7 +30,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from code_indexer.server.services.dep_map_delta_journal import (
+from cidx_depmap.server.dep_map_delta_journal import (
     all_new_repos_have_domain_assignments,
     compute_delta_fingerprint,
     parse_frontmatter,
@@ -368,10 +369,9 @@ def _make_service_for_delta(tmp_path: Path, invoke_result: str = "Updated body\n
     All external I/O is mocked except the real filesystem (tmp_path).
     invoke_delta_merge_file returns invoke_result by default.
     """
-    from code_indexer.server.services.dependency_map_service import DependencyMapService
-    from code_indexer.server.utils.config_manager import ClaudeIntegrationConfig
+    from cidx_depmap.server.dependency_map_service import DependencyMapService
 
-    config = ClaudeIntegrationConfig(
+    config = depmap_claude_config(
         dependency_map_enabled=True,
         dependency_map_interval_hours=24,
         dependency_map_pass_timeout_seconds=300,
@@ -778,12 +778,11 @@ class TestConcurrentLockRejection:
         This tests the non-blocking lock.acquire(blocking=False) guard at the
         top of run_delta_analysis, which is the primary same-process concurrency gate.
         """
-        from code_indexer.server.services.dependency_map_service import (
+        from cidx_depmap.server.dependency_map_service import (
             DependencyMapService,
         )
-        from code_indexer.server.utils.config_manager import ClaudeIntegrationConfig
 
-        config = ClaudeIntegrationConfig(
+        config = depmap_claude_config(
             dependency_map_enabled=True,
             dependency_map_interval_hours=24,
             dependency_map_pass_timeout_seconds=300,

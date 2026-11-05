@@ -47,7 +47,7 @@ import pytest
 import yaml
 
 if TYPE_CHECKING:
-    from code_indexer.xray.rust_backend import RustNativeBackend, XrayCacheBackend
+    from cidx_xray.rust_backend import RustNativeBackend, XrayCacheBackend
 
 
 _VALID_EVALUATOR = (
@@ -56,19 +56,21 @@ _VALID_EVALUATOR = (
 
 
 def _require_xray_cli_binary() -> None:
-    """Skip when the real xray-cli release binary is not built locally.
+    """Ensure the real xray-cli release binary is available, or skip loudly.
 
-    Mirrors test_rust_backend.py's _require_xray_cli_binary(): this is a
-    genuine, near-zero-mocking regression test that needs the real compiled
-    binary to prove the fix at the actual OS process-exec layer.
+    Delegates to the shared tests/unit/xray/conftest.py helper, which
+    resolves the path the SAME way production does
+    (``resolve_xray_cli_path()`` -- ``$CIDX_XRAY_CLI_PATH`` first, then the
+    source-tree build output). The previous gate read the import-time
+    ``_XRAY_CLI_DEFAULT`` snapshot, so on a packaged install that exports
+    ``CIDX_XRAY_CLI_PATH`` -- the whole reason that override exists -- this
+    test SKIPPED while the binary it needs was sitting right there. The
+    shared helper also builds on demand and fails loudly when a build is
+    attempted and fails, instead of skipping silently.
     """
-    from code_indexer.xray.rust_backend import _XRAY_CLI_DEFAULT
+    from cidx_xray.testing import require_xray_cli_binary
 
-    if not _XRAY_CLI_DEFAULT.exists():
-        pytest.skip(
-            f"xray-cli binary not built at {_XRAY_CLI_DEFAULT}; "
-            "run 'cargo build --release' inside rust/ to enable this test."
-        )
+    require_xray_cli_binary()
 
 
 class _FakeClusterCache:
@@ -139,7 +141,7 @@ def _spy_on_identity_subprocess():
     subprocess.run, is patched. Yields the list of rust_code arguments passed
     to each real call.
     """
-    from code_indexer.xray.rust_backend import RustNativeBackend
+    from cidx_xray.rust_backend import RustNativeBackend
 
     original = RustNativeBackend._run_cache_identity_subprocess
     calls: List[str] = []
@@ -170,7 +172,7 @@ def _run_batch(
 
     Returns (job_result, identity_subprocess_calls).
     """
-    from code_indexer.server.mcp.handlers.xray_batch import _run_xray_batch_job
+    from cidx_xray.server.mcp.xray_batch import _run_xray_batch_job
 
     # Sandbox the cache dir -- read by Python's own pre/post-fill logic AND
     # by the real xray-cli child subprocess (Popen with no env= override
@@ -182,7 +184,7 @@ def _run_batch(
 
     with (
         patch(
-            "code_indexer.xray.search_engine._get_cluster_cache",
+            "cidx_xray.search_engine._get_cluster_cache",
             return_value=cluster_cache,
         ),
         _spy_on_identity_subprocess() as identity_calls,
@@ -390,11 +392,11 @@ def test_repo_scoped_pattern_overrides_size_cache_to_distinct_sources_not_scan_c
     job_id = "batch-job-1784-sizing"
     bjm.jobs = {job_id: MagicMock(cancelled=False)}
 
-    from code_indexer.server.mcp.handlers.xray_batch import _run_xray_batch_job
+    from cidx_xray.server.mcp.xray_batch import _run_xray_batch_job
 
     with (
         patch(
-            "code_indexer.xray.search_engine._get_cluster_cache",
+            "cidx_xray.search_engine._get_cluster_cache",
             return_value=_FakeClusterCache(),
         ),
         _spy_on_identity_subprocess() as identity_calls,

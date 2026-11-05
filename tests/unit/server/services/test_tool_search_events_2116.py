@@ -106,7 +106,7 @@ class TestMcpScipSearches:
     def test_each_mcp_scip_search_records_one_scip_row(
         self, env, name, args, query_text, result_list
     ):
-        from code_indexer.server.mcp.handlers import scip
+        from cidx_scip.server.mcp import scip
 
         body = _body(
             getattr(scip, name)(
@@ -137,7 +137,7 @@ class TestMcpScipSearches:
         ],
     )
     def test_rejected_mcp_scip_search_records_no_row(self, env, name, args):
-        from code_indexer.server.mcp.handlers import scip
+        from cidx_scip.server.mcp import scip
 
         body = _body(getattr(scip, name)(args, make_user("alice")))
 
@@ -150,7 +150,7 @@ class TestMcpScipSearches:
     ):
         """Story #2117: a SCIP search that ran and failed is a failure row
         (its exception's class); argument rejections above write nothing."""
-        from code_indexer.server.mcp.handlers import scip
+        from cidx_scip.server.mcp import scip
 
         class _FailingService:
             def __getattr__(self, method: str) -> Any:
@@ -183,8 +183,8 @@ def _rest_scip(
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
-    from code_indexer.server.auth.dependencies import get_current_user
-    from code_indexer.server.routers.scip_queries import router
+    from cidx_scip.server.route_auth import current_caller as get_current_user
+    from cidx_scip.server.routes import router
 
     app = FastAPI()
     app.include_router(router)
@@ -243,7 +243,7 @@ class TestRestScipSearches:
     ):
         """Story #2117: a REST SCIP search that ran and failed is a failure
         row (its exception's class)."""
-        from code_indexer.server.routers import scip_queries
+        from cidx_scip.server import routes as scip_queries
 
         class _FailingService:
             def __getattr__(self, method: str) -> Any:
@@ -268,7 +268,7 @@ class TestRestScipSearches:
         assert (row["repo_alias"], row["query_text"]) == ("example-repo", query_text)
 
     def test_rest_callchain_timeout_records_a_failure_row(self, env):
-        from code_indexer.server.routers import scip_queries
+        from cidx_scip.server import routes as scip_queries
 
         class _TimingOutService:
             def trace_callchain(self, *_a: Any, **_k: Any) -> Any:
@@ -334,7 +334,7 @@ class TestScipWithoutAlias:
     def test_mcp_records_one_row_per_repository(
         self, env, handler, path, args, result_list
     ):
-        from code_indexer.server.mcp.handlers import scip
+        from cidx_scip.server.mcp import scip
 
         _second_scip_repo(env)
         body = _body(getattr(scip, handler)(dict(args), make_user("alice")))
@@ -357,7 +357,7 @@ class _ScipMultiService:
     results, second-repo was searched and found nothing, third-repo failed."""
 
     def _response(self, request: Any) -> Any:
-        from code_indexer.server.multi.scip_models import (
+        from cidx_scip.server.multi_models import (
             SCIPMultiMetadata,
             SCIPMultiResponse,
             SCIPResult,
@@ -405,8 +405,8 @@ def _rest_scip_multi(env: Env, path: str, body: Dict[str, Any]) -> Any:
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
-    from code_indexer.server.auth.dependencies import get_current_user
-    from code_indexer.server.routes import scip_multi_routes
+    from cidx_scip.server.route_auth import current_caller as get_current_user
+    from cidx_scip.server import multi_routes as scip_multi_routes
 
     app = FastAPI()
     app.include_router(scip_multi_routes.router)
@@ -700,7 +700,7 @@ class TestScipUnresolvedSearchesRecordNothing:
     nothing: no row. The answer is unchanged (an empty success)."""
 
     def test_mcp_unknown_alias(self, env):
-        from code_indexer.server.mcp.handlers import scip
+        from cidx_scip.server.mcp import scip
 
         body = _body(
             scip.scip_definition(
@@ -716,7 +716,7 @@ class TestScipUnresolvedSearchesRecordNothing:
     def test_every_mcp_scip_tool_with_an_unknown_alias(
         self, env, name, args, query_text, result_list
     ):
-        from code_indexer.server.mcp.handlers import scip
+        from cidx_scip.server.mcp import scip
 
         body = _body(
             getattr(scip, name)(
@@ -748,7 +748,7 @@ class TestScipUnresolvedSearchesRecordNothing:
         assert env.rec.rows() == []
 
     def test_alias_free_without_any_scip_index(self, env):
-        from code_indexer.server.mcp.handlers import scip
+        from cidx_scip.server.mcp import scip
 
         shutil.rmtree(env.golden_repos_dir / "example-repo" / ".code-indexer")
 

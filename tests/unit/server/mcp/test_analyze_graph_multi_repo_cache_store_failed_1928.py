@@ -26,7 +26,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from code_indexer.server.cache.payload_cache import PayloadCacheConfig
-from code_indexer.server.mcp.handlers.xray_graph import (
+from cidx_xray.server.mcp.xray_graph import (
     _run_multi_repo_analyze_graph,
 )
 
@@ -80,7 +80,7 @@ async def test_per_repo_cache_store_failure_routes_to_errors_not_results() -> No
 
     with (
         patch(
-            "code_indexer.server.mcp.handlers.xray_graph._run_analyze_graph_pipeline",
+            "cidx_xray.server.mcp.xray_graph._run_analyze_graph_pipeline",
             new=AsyncMock(side_effect=_fake_pipeline),
         ),
         patch(

@@ -914,7 +914,10 @@ class GroupAccessManager(RepoAccessBatchMixin):
             ValueError: If the group does not exist
         """
         if self._backend is not None:
-            return self._backend.grant_repo_access(repo_name, group_id, granted_by)  # type: ignore[no-any-return]
+            granted: bool = self._backend.grant_repo_access(
+                repo_name, group_id, granted_by
+            )
+            return granted
         # Validate group exists
         group = self.get_group(group_id)
         if group is None:

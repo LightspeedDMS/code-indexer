@@ -89,8 +89,10 @@ def _call(user: User, tool: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         ("remove_golden_repo", {"alias": EXAMPLE_ALIAS}),
         ("refresh_golden_repo", {"alias": EXAMPLE_ALIAS}),
         ("change_golden_repo_branch", {"alias": EXAMPLE_ALIAS, "branch": "dev"}),
+        ("rename_golden_repo", {"alias": EXAMPLE_ALIAS, "new_alias": "example-x"}),
+        ("sync_golden_catalog", {"dry_run": True}),
     ],
-    ids=["add", "remove", "refresh", "change_branch"],
+    ids=["add", "remove", "refresh", "change_branch", "rename", "catalog_sync"],
 )
 def test_granted_non_admin_is_refused_by_the_handler(env, tool, arguments) -> None:
     user = _grant(tool)

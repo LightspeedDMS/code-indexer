@@ -9,17 +9,21 @@ effective timeout (when the caller omits timeout_seconds) is either a
 caller-supplied param or the hardcoded module constant
 _DEFAULT_TIMEOUT_SECONDS = 120.
 
-Fix: when timeout_override is None, read the default from
-get_config_service().get_config().xray_config.xray_timeout_seconds instead
-of the hardcoded _DEFAULT_TIMEOUT_SECONDS constant (fail-soft: falls back to
-_DEFAULT_TIMEOUT_SECONDS on any config read failure, consistent with other
-live-read helpers in this codebase, e.g. memory_governor._read_live_config).
+Fix: when timeout_override is None, read the default from the configured
+xray_timeout_seconds instead of the hardcoded _DEFAULT_TIMEOUT_SECONDS
+constant (fail-soft: falls back to _DEFAULT_TIMEOUT_SECONDS on any config
+read failure, consistent with other live-read helpers in this codebase, e.g.
+memory_governor._read_live_config).
+
+Since modular plan phase 4c the setting is the cidx-xray feature's config
+section, read through the ``config`` capability
+(``cidx_xray.server.runtime.config_section``) -- the seam these tests patch.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict
-from unittest.mock import MagicMock, patch
+from typing import Any, Callable, Dict
+from unittest.mock import patch
 
 from .test_xray_search_handler import (
     VALID_PARAMS,
@@ -32,14 +36,25 @@ from .test_xray_search_handler import (
 _CONFIGURED_XRAY_TIMEOUT_SECONDS = 55
 
 
+_SECTION = "cidx_xray.server.runtime.config_section"
+
+
+def _configured_section() -> Dict[str, Any]:
+    return {"xray_timeout_seconds": _CONFIGURED_XRAY_TIMEOUT_SECONDS}
+
+
+def _broken_section() -> Dict[str, Any]:
+    raise RuntimeError("DB unavailable")
+
+
 async def _capture_engine_kwargs_with_config(
-    params: Dict[str, Any], config_service: Any
+    params: Dict[str, Any], config_section: Callable[[], Dict[str, Any]]
 ) -> Dict[str, Any]:
-    """Run the xray_search handler with an injected ConfigService, capturing
+    """Run the xray_search handler with an injected config section, capturing
     the kwargs passed to XRaySearchEngine.run() (mirrors the
     _capture_engine_kwargs helper in test_xray_search_handler_params.py, but
-    also patches get_config_service so the default-timeout resolution under
-    test can be observed)."""
+    also patches the config section read so the default-timeout resolution
+    under test can be observed)."""
     from code_indexer.server.auth.user_manager import UserRole
     from .test_xray_search_handler import _make_user
 
@@ -47,19 +62,16 @@ async def _capture_engine_kwargs_with_config(
     captured: Dict[str, Any] = {}
     with (
         patch(
-            "code_indexer.server.mcp.handlers.xray._search._resolve_repo_path",
+            "cidx_xray.server.mcp.xray._search._resolve_repo_path",
             return_value="/some/path",
         ),
-        patch(
-            "code_indexer.server.mcp.handlers.xray._infra.get_config_service",
-            return_value=config_service,
-        ),
+        patch(_SECTION, side_effect=config_section),
     ):
         with _xray_single_repo_env() as (_bjm, _jt, _exec, mock_loop):
             await _import_handler()(params, user)
             job_fn = mock_loop.run_in_executor.call_args[0][1]
             with patch(
-                "code_indexer.xray.search_engine.XRaySearchEngine.run",
+                "cidx_xray.search_engine.XRaySearchEngine.run",
                 side_effect=lambda **kw: captured.update(kw)
                 or {
                     "matches": [],
@@ -77,19 +89,14 @@ class TestXrayDefaultTimeoutReadsConfigService:
     async def test_omitted_timeout_uses_configured_xray_timeout_seconds(self):
         """
         Bug #1399: when the caller omits timeout_seconds, the effective
-        timeout passed to XRaySearchEngine.run() must come from
-        ConfigService's xray_config.xray_timeout_seconds, not the hardcoded
+        timeout passed to XRaySearchEngine.run() must come from the
+        configured xray_timeout_seconds, not the hardcoded
         _DEFAULT_TIMEOUT_SECONDS=120 module constant.
         """
-        mock_config_service = MagicMock()
-        mock_config_service.get_config.return_value.xray_config.xray_timeout_seconds = (
-            _CONFIGURED_XRAY_TIMEOUT_SECONDS
-        )
-
         params = {**VALID_PARAMS}
         assert "timeout_seconds" not in params
 
-        captured = await _capture_engine_kwargs_with_config(params, mock_config_service)
+        captured = await _capture_engine_kwargs_with_config(params, _configured_section)
 
         assert captured.get("timeout_seconds") == _CONFIGURED_XRAY_TIMEOUT_SECONDS, (
             "Bug #1399: xray_search must read the default timeout from "
@@ -100,31 +107,20 @@ class TestXrayDefaultTimeoutReadsConfigService:
     async def test_explicit_timeout_override_still_wins(self):
         """An explicit timeout_seconds param must still take priority over
         the configured default (no regression to the override contract)."""
-        mock_config_service = MagicMock()
-        mock_config_service.get_config.return_value.xray_config.xray_timeout_seconds = (
-            _CONFIGURED_XRAY_TIMEOUT_SECONDS
-        )
-
         explicit_override = 33
         params = {**VALID_PARAMS, "timeout_seconds": explicit_override}
 
-        captured = await _capture_engine_kwargs_with_config(params, mock_config_service)
+        captured = await _capture_engine_kwargs_with_config(params, _configured_section)
 
         assert captured.get("timeout_seconds") == explicit_override
 
     async def test_config_read_failure_falls_back_to_hardcoded_default(self):
         """A broken ConfigService must not crash the handler -- falls back to
         the module's _DEFAULT_TIMEOUT_SECONDS constant (fail-soft)."""
-        from code_indexer.server.mcp.handlers.xray import _DEFAULT_TIMEOUT_SECONDS
-
-        class _BrokenConfigService:
-            def get_config(self):
-                raise RuntimeError("DB unavailable")
+        from cidx_xray.server.mcp.xray import _DEFAULT_TIMEOUT_SECONDS
 
         params = {**VALID_PARAMS}
-        captured = await _capture_engine_kwargs_with_config(
-            params, _BrokenConfigService()
-        )
+        captured = await _capture_engine_kwargs_with_config(params, _broken_section)
 
         assert captured.get("timeout_seconds") == _DEFAULT_TIMEOUT_SECONDS
 
@@ -139,18 +135,10 @@ class TestConfigReadFailureObservability:
     _DEFAULT_TIMEOUT_SECONDS); it must ALSO record a counter."""
 
     def test_config_read_failure_records_otel_counter(self):
-        from code_indexer.server.mcp.handlers import xray as xray_handlers
-
-        class _BrokenConfigService:
-            def get_config(self):
-                raise RuntimeError("DB unavailable")
+        from cidx_xray.server.mcp import xray as xray_handlers
 
         with (
-            patch.object(
-                xray_handlers._infra,
-                "get_config_service",
-                return_value=_BrokenConfigService(),
-            ),
+            patch(_SECTION, side_effect=_broken_section),
             patch.object(
                 xray_handlers._infra,
                 "_record_xray_timeout_config_read_failure_metric",
@@ -160,13 +148,6 @@ class TestConfigReadFailureObservability:
 
         assert result == xray_handlers._DEFAULT_TIMEOUT_SECONDS
         mock_record.assert_called_once_with(reason="exception")
-
-
-class _BrokenConfigService:
-    """Test double whose get_config() always raises."""
-
-    def get_config(self) -> Any:  # Any: never returns (always raises)
-        raise RuntimeError("DB unavailable")
 
 
 async def _assert_configuration_degraded_surfaced(
@@ -203,17 +184,14 @@ async def _assert_configuration_degraded_surfaced(
 
     with (
         patch(
-            "code_indexer.server.mcp.handlers.xray._search._resolve_repo_path",
+            "cidx_xray.server.mcp.xray._search._resolve_repo_path",
             return_value="/some/path",
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
+            "cidx_xray.server.mcp.xray._explore._resolve_repo_path",
             return_value="/some/path",
         ),
-        patch(
-            "code_indexer.server.mcp.handlers.xray._infra.get_config_service",
-            return_value=_BrokenConfigService(),
-        ),
+        patch(_SECTION, side_effect=_broken_section),
     ):
         with env_ctx_factory() as (_bjm, _jt, _exec, _mock_loop):
             response = await import_handler()(params, user)

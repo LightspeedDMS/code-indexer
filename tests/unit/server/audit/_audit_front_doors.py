@@ -45,6 +45,7 @@ from tests.unit.server.self_service_elevation_harness import (
     build_stack,
     enforcement,
 )
+from tests.unit.server.app_state_patch import patch_app_state
 
 ACTING_ADMIN = "example-second-admin"
 _PASSWORD = "SecureP@ssw0rd!XyZ789"
@@ -218,7 +219,7 @@ def front_door_env(tmp_path: Path, monkeypatch: Any) -> Iterator[DoorsEnv]:
         ("background_job_manager", jobs),
         ("backend_registry", backend_registry),
     ):
-        monkeypatch.setattr(app_module.app.state, name, value, raising=False)
+        patch_app_state(monkeypatch, app_module.app.state, name, value)
     monkeypatch.setattr(app_module, "golden_repo_manager", manager, raising=False)
     monkeypatch.setattr(app_module, "background_job_manager", jobs, raising=False)
     monkeypatch.setattr(web_routes, "validate_login_csrf_token", lambda _r, _t: True)
@@ -241,7 +242,6 @@ def front_door_env(tmp_path: Path, monkeypatch: Any) -> Iterator[DoorsEnv]:
         user_manager=stack.user_manager,
         golden_repo_manager=manager,
         background_job_manager=jobs,
-        workspace_cleanup_service=None,
         config_service=config_svc,
         server_config=None,
         data_dir=str(tmp_path / "golden-data"),

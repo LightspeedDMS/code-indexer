@@ -48,7 +48,7 @@ def _repo_with_out_of_root_symlink(tmp_path: Path) -> Tuple[Path, Path]:
 
 
 def test_local_cli_xray_search_follows_out_of_root_symlink(tmp_path: Path) -> None:
-    from tests.unit.xray.conftest import require_xray_cli_binary
+    from cidx_xray.testing import require_xray_cli_binary
 
     require_xray_cli_binary()
     repo, _ = _repo_with_out_of_root_symlink(tmp_path)
@@ -83,8 +83,8 @@ def test_local_cli_xray_search_follows_out_of_root_symlink(tmp_path: Path) -> No
 
 
 def test_server_default_engine_excludes_out_of_root_symlink(tmp_path: Path) -> None:
-    from tests.unit.xray.conftest import require_xray_cli_binary
-    from code_indexer.xray.search_engine import XRaySearchEngine
+    from cidx_xray.testing import require_xray_cli_binary
+    from cidx_xray.search_engine import XRaySearchEngine
 
     require_xray_cli_binary()
     repo, _ = _repo_with_out_of_root_symlink(tmp_path)

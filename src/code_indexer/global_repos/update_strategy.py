@@ -53,3 +53,10 @@ class UpdateStrategy(ABC):
             Absolute path to source repository
         """
         pass
+
+    def is_empty_repository(self) -> bool:
+        """True when the repository has nothing to update or index yet (a git
+        repository with no commit, EVO-64616): refresh skips it. False by
+        default -- a strategy without git history is never "empty" this way.
+        """
+        return False

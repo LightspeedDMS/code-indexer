@@ -24,7 +24,7 @@ from code_indexer.server.services.cidx_meta_access import (
 from code_indexer.server.services.cidx_meta_access.depmap_source import (
     source_for_visibility,
 )
-from code_indexer.server.services.dep_map_mcp_parser import DepMapMCPParser
+from cidx_depmap.server.dep_map_mcp_parser import DepMapMCPParser
 from tests.shared.cidx_meta_visibility_fixture import (
     ALPHA,
     CidxMetaFixture,

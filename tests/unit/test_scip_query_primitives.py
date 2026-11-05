@@ -3,7 +3,7 @@
 import pytest
 from pathlib import Path
 
-from code_indexer.scip.query.primitives import SCIPQueryEngine, _matches_symbol
+from cidx_scip.query.primitives import SCIPQueryEngine, _matches_symbol
 
 
 @pytest.fixture
@@ -612,7 +612,7 @@ class TestGetDependents:
         target_symbol = "SCIPDatabaseBuilder"
 
         # Force legacy backend (call_graph only)
-        from code_indexer.scip.query.backends import DatabaseBackend
+        from cidx_scip.query.backends import DatabaseBackend
 
         scip_db_path = real_query_engine.backend.db_path
         project_root = real_query_engine.backend.project_root
@@ -791,7 +791,7 @@ class TestSymbolReferencesIntegrity:
         target_symbol_id = row[0]
 
         # Trace call chain using v2 (database version)
-        from code_indexer.scip.database.queries import trace_call_chain_v2
+        from cidx_scip.database.queries import trace_call_chain_v2
         import time
 
         start = time.perf_counter()

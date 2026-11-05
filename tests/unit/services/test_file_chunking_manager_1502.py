@@ -390,9 +390,13 @@ class TestBug1502MultimodalOnlyAllFailuresFailLoud:
     success -- each per-chunk exception was logged-and-skipped, and with
     zero regular chunks the embedding-count check trivially passed
     (0 == 0), so the file completed with chunks_processed=0 and
-    success=True despite NOTHING being persisted."""
+    success=True despite NOTHING being persisted.
 
-    def test_multimodal_only_file_all_embeddings_fail_reports_failure(
+    EVO-64616: every chunk's text now reaches the text index, so such a
+    file keeps its text and succeeds; the failed multimodal embedding is
+    counted on the result, never silent."""
+
+    def test_multimodal_only_file_all_embeddings_fail_keeps_text_and_counts(
         self, tmp_path: Path
     ) -> None:
         test_image_path = tmp_path / "diagram.png"
@@ -443,8 +447,142 @@ class TestBug1502MultimodalOnlyAllFailuresFailLoud:
             future = manager.submit_file_for_processing(test_md_path, metadata, None)
             result = future.result(timeout=10.0)
 
-        assert result.success is False, (
-            "a multimodal-only file whose sole chunk's embedding failed "
-            "must report failure, never silent success"
+        assert result.success is True, result.error
+        assert result.multimodal_chunks_failed == 1
+        assert [call["collection_name"] for call in client.upsert_calls] == ["col"]
+        stored = client.upsert_calls[0]["points"]
+        assert [p["payload"]["content"] for p in stored] == [
+            "# Architecture\n\n![Diagram](diagram.png)"
+        ]
+
+
+def _image_chunk(index: int, total: int) -> Dict[str, Any]:
+    """An .htm chunk whose text references an image, as FixedSizeChunker
+    shapes it when the image exists in the repository."""
+    return {
+        "text": f"<img src='collapse.png' /> section {index} of the page",
+        "chunk_index": index,
+        "total_chunks": total,
+        "file_extension": "htm",
+        "size": 50,
+        "line_start": index * 10 + 1,
+        "line_end": index * 10 + 10,
+        "file_path": None,
+        "images": [{"alt_text": "", "path": "collapse.png"}],
+    }
+
+
+def _process_without_multimodal_client(
+    tmp_path: Path, chunks: List[Dict[str, Any]]
+) -> Any:
+    return _process_with_multimodal_client(tmp_path, chunks, None)
+
+
+def _process_with_multimodal_client(
+    tmp_path: Path, chunks: List[Dict[str, Any]], multimodal_client: Any
+) -> Any:
+    (tmp_path / "collapse.png").write_bytes(b"placeholder-image-bytes")
+    page = tmp_path / "CC_General_Information_13.htm"
+    page.write_text("<html><img src='collapse.png' /></html>")
+    chunker = Mock()
+    chunker.chunk_file.return_value = chunks
+    vector_manager = _FakeVectorManager()
+    client = _UpsertTrackingFilesystemClient()
+    with FileChunkingManager(
+        vector_manager=vector_manager,
+        chunker=chunker,
+        vector_store_client=client,
+        thread_count=2,
+        slot_tracker=CleanSlotTracker(max_slots=4),
+        codebase_dir=tmp_path,
+        multimodal_client=multimodal_client,
+    ) as manager:
+        metadata = {
+            "project_id": "proj",
+            "file_hash": "sha256:abc123",
+            "collection_name": "col",
+            "git_available": False,
+        }
+        result = manager.submit_file_for_processing(page, metadata, None).result(
+            timeout=10.0
         )
-        assert client.upsert_calls == []
+    return result, vector_manager, client
+
+
+class TestImageChunksWithoutMultimodalIndex:
+    """EVO-64616: with multimodal indexing off (EVO-65484) no multimodal
+    client exists, and image-bearing chunks were still routed away from the
+    text path -- embedded nowhere. jplanner's 5605 .htm pages, every chunk
+    of which references an image, failed with "No batches created" on every
+    run, so the refresh owed them forever. With it on, an image chunk whose
+    multimodal embedding could not be produced lost its text the same way.
+    Every chunk's text now reaches the text index."""
+
+    def test_a_page_whose_every_chunk_has_an_image_is_embedded_as_text(
+        self, tmp_path: Path
+    ) -> None:
+        chunks = [_image_chunk(i, 2) for i in range(2)]
+
+        result, vector_manager, client = _process_without_multimodal_client(
+            tmp_path, chunks
+        )
+
+        assert result.success is True, result.error
+        assert result.chunks_processed == 2
+        assert [text for batch in vector_manager.batches for text in batch] == [
+            chunk["text"] for chunk in chunks
+        ]
+        assert [call["collection_name"] for call in client.upsert_calls] == ["col"]
+
+    def test_with_multimodal_on_an_unresolvable_image_keeps_the_text(
+        self, tmp_path: Path
+    ) -> None:
+        """The image is gone: no multimodal point, the text is embedded, and
+        the gap is counted on the result."""
+        multimodal = Mock()
+        multimodal.config = Mock()
+        multimodal.config.model = "voyage-multimodal-3"
+        chunks = [{**_image_chunk(0, 1), "images": ["missing.png"]}]
+
+        result, vector_manager, client = _process_with_multimodal_client(
+            tmp_path, chunks, multimodal
+        )
+
+        assert result.success is True, result.error
+        assert result.multimodal_chunks_failed == 1
+        multimodal.get_multimodal_embedding.assert_not_called()
+        assert vector_manager.batches == [[chunks[0]["text"]]]
+        assert [call["collection_name"] for call in client.upsert_calls] == ["col"]
+
+    def test_with_multimodal_on_an_embedded_image_chunk_is_in_both_indexes(
+        self, tmp_path: Path
+    ) -> None:
+        multimodal = Mock(spec=["get_multimodal_embedding", "config"])
+        multimodal.get_multimodal_embedding.return_value = [0.3] * 8
+        multimodal.config = Mock()
+        multimodal.config.model = "voyage-multimodal-3"
+        chunks = [_image_chunk(0, 1)]
+
+        result, vector_manager, client = _process_with_multimodal_client(
+            tmp_path, chunks, multimodal
+        )
+
+        assert result.success is True, result.error
+        assert result.multimodal_chunks_failed == 0
+        assert vector_manager.batches == [[chunks[0]["text"]]]
+        assert sorted(call["collection_name"] for call in client.upsert_calls) == [
+            "col",
+            "voyage-multimodal-3",
+        ]
+
+    def test_image_chunks_beside_plain_ones_keep_their_text(
+        self, tmp_path: Path
+    ) -> None:
+        plain = {**_image_chunk(1, 3), "text": "plain section", "images": []}
+        chunks = [_image_chunk(0, 3), plain, _image_chunk(2, 3)]
+
+        result, _, client = _process_without_multimodal_client(tmp_path, chunks)
+
+        assert result.success is True, result.error
+        stored = [p["payload"]["chunk_index"] for p in client.upsert_calls[0]["points"]]
+        assert sorted(stored) == [0, 1, 2]

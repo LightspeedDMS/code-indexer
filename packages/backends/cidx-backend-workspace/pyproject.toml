@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cidx-backend-workspace"
+version = "0.1.0"
+description = "Local implementations of the code-indexer workspace seams (content, content writer, ripgrep, index store, clone)"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10,<3.13"
+# A backend depends on the SDK only, never on the core (code_indexer).
+# requests: the ONTAP and CoW-daemon clone modes are REST clients.
+dependencies = [
+    "cidx-sdk @ {root:parent:parent:uri}/cidx-sdk",
+    "requests>=2.28.0",
+]
+
+# The entry NAME is the mode it implements: content_backend=local.
+[project.entry-points."code_indexer.content_backend"]
+local = "cidx_backend_workspace.content:make_content_backend"
+
+# clone_backend=local / ontap / cow-daemon. Each factory takes the SDK's
+# CloneBackendSettings. ONTAP and the CoW daemon stay in this distribution
+# until a deployment needs one without the other (the end state names
+# cidx-clone-ontap and cidx-clone-cow).
+[project.entry-points."code_indexer.clone_backend"]
+local = "cidx_backend_workspace.clone:make_local_clone_backend"
+ontap = "cidx_backend_workspace.clone:make_ontap_clone_backend"
+cow-daemon = "cidx_backend_workspace.clone:make_cow_daemon_clone_backend"
+
+[project.entry-points."code_indexer.content_writer"]
+local = "cidx_backend_workspace.content_writer:make_content_writer"
+
+# The factory takes the core's bounded process runner (SDK BoundedProcessRunner).
+[project.entry-points."code_indexer.ripgrep_backend"]
+local = "cidx_backend_workspace.ripgrep:make_ripgrep_backend"
+
+# ``local`` here is an IndexStore; a delegate on this group is the artifact
+# service's client, which the core wraps (cidx_sdk.seams.index_store).
+[project.entry-points."code_indexer.index_artifacts"]
+local = "cidx_backend_workspace.index_store:make_index_store"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cidx_backend_workspace"]

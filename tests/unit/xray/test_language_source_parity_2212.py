@@ -11,7 +11,7 @@ from typing import List, Set
 
 import pytest
 
-from code_indexer.xray.languages import EXTENSION_MAP
+from cidx_xray.languages import EXTENSION_MAP
 
 _LANGUAGES_RS = (
     Path(__file__).resolve().parents[3] / "rust" / "xray-core" / "src" / "languages.rs"

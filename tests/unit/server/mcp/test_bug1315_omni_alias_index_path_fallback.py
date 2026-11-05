@@ -41,6 +41,7 @@ from typing import Any, Dict
 from unittest.mock import Mock
 
 import pytest
+from tests.unit.server.app_state_patch import patch_app_state
 
 
 # ---------------------------------------------------------------------------
@@ -229,14 +230,14 @@ class TestMultiSearchServiceGetRepositoryPathIndexPathFallback:
         (golden_repos_dir / "aliases").mkdir(parents=True)
         # Deliberately do NOT create an alias pointer file for repo-b-global.
 
-        monkeypatch.setattr(
-            real_app.state, "golden_repos_dir", str(golden_repos_dir), raising=False
+        patch_app_state(
+            monkeypatch, real_app.state, "golden_repos_dir", str(golden_repos_dir)
         )
-        monkeypatch.setattr(
+        patch_app_state(
+            monkeypatch,
             real_app.state,
             "backend_registry",
             SimpleNamespace(global_repos=backend),
-            raising=False,
         )
 
         service = MultiSearchService(
@@ -264,14 +265,14 @@ class TestMultiSearchServiceGetRepositoryPathIndexPathFallback:
         golden_repos_dir = tmp_path / "golden-repos"
         (golden_repos_dir / "aliases").mkdir(parents=True)
 
-        monkeypatch.setattr(
-            real_app.state, "golden_repos_dir", str(golden_repos_dir), raising=False
+        patch_app_state(
+            monkeypatch, real_app.state, "golden_repos_dir", str(golden_repos_dir)
         )
-        monkeypatch.setattr(
+        patch_app_state(
+            monkeypatch,
             real_app.state,
             "backend_registry",
             SimpleNamespace(global_repos=backend),
-            raising=False,
         )
 
         service = MultiSearchService(
@@ -309,14 +310,14 @@ class TestMultiSearchServiceGetRepositoryPathIndexPathFallback:
             "repo-a-global", str(current_target)
         )
 
-        monkeypatch.setattr(
-            real_app.state, "golden_repos_dir", str(golden_repos_dir), raising=False
+        patch_app_state(
+            monkeypatch, real_app.state, "golden_repos_dir", str(golden_repos_dir)
         )
-        monkeypatch.setattr(
+        patch_app_state(
+            monkeypatch,
             real_app.state,
             "backend_registry",
             SimpleNamespace(global_repos=backend),
-            raising=False,
         )
 
         service = MultiSearchService(
@@ -353,14 +354,14 @@ class TestResolveGlobalRepoTargetIndexPathFallback:
         golden_repos_dir = tmp_path / "golden-repos"
         (golden_repos_dir / "aliases").mkdir(parents=True)
 
-        monkeypatch.setattr(
-            real_app.state, "golden_repos_dir", str(golden_repos_dir), raising=False
+        patch_app_state(
+            monkeypatch, real_app.state, "golden_repos_dir", str(golden_repos_dir)
         )
-        monkeypatch.setattr(
+        patch_app_state(
+            monkeypatch,
             real_app.state,
             "backend_registry",
             SimpleNamespace(global_repos=backend),
-            raising=False,
         )
 
         repo_entry, target_path, err = _resolve_global_repo_target(
@@ -386,14 +387,14 @@ class TestResolveGlobalRepoTargetIndexPathFallback:
         golden_repos_dir = tmp_path / "golden-repos"
         (golden_repos_dir / "aliases").mkdir(parents=True)
 
-        monkeypatch.setattr(
-            real_app.state, "golden_repos_dir", str(golden_repos_dir), raising=False
+        patch_app_state(
+            monkeypatch, real_app.state, "golden_repos_dir", str(golden_repos_dir)
         )
-        monkeypatch.setattr(
+        patch_app_state(
+            monkeypatch,
             real_app.state,
             "backend_registry",
             SimpleNamespace(global_repos=backend),
-            raising=False,
         )
 
         repo_entry, target_path, err = _resolve_global_repo_target(
@@ -453,14 +454,14 @@ class TestOmniSearchCodeAliasFallbackBug1315:
         AliasManager(str(aliases_dir)).create_alias("repo-a-global", str(idx_a))
         # repo-b-global and repo-c-global: no alias pointer created on purpose.
 
-        monkeypatch.setattr(
-            real_app.state, "golden_repos_dir", str(golden_repos_dir), raising=False
+        patch_app_state(
+            monkeypatch, real_app.state, "golden_repos_dir", str(golden_repos_dir)
         )
-        monkeypatch.setattr(
+        patch_app_state(
+            monkeypatch,
             real_app.state,
             "backend_registry",
             SimpleNamespace(global_repos=backend),
-            raising=False,
         )
         monkeypatch.setattr(
             _utils.app_module,

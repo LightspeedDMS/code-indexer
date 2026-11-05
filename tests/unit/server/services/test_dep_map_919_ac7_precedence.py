@@ -16,7 +16,7 @@ Tests (exhaustive list):
   test_invocation_true_with_per_type_dry_run_still_true
 """
 
-from code_indexer.server.services.dep_map_repair_executor import is_effective_dry_run
+from cidx_depmap.server.dep_map_repair_executor import is_effective_dry_run
 
 
 def test_invocation_true_overrides_per_type_enabled() -> None:

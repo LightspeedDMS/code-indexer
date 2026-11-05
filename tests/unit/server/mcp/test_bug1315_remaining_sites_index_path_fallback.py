@@ -22,6 +22,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from tests.unit.server.app_state_patch import patch_app_state
 
 
 # ---------------------------------------------------------------------------
@@ -44,14 +45,14 @@ def _build_registry(tmp_path):
 def _patch_app_state(monkeypatch, golden_repos_dir, backend):
     from code_indexer.server.app import app as real_app
 
-    monkeypatch.setattr(
-        real_app.state, "golden_repos_dir", str(golden_repos_dir), raising=False
+    patch_app_state(
+        monkeypatch, real_app.state, "golden_repos_dir", str(golden_repos_dir)
     )
-    monkeypatch.setattr(
+    patch_app_state(
+        monkeypatch,
         real_app.state,
         "backend_registry",
         SimpleNamespace(global_repos=backend),
-        raising=False,
     )
 
 
@@ -148,7 +149,7 @@ class TestSCIPMultiServiceGetRepositoryPathIndexPathFallback:
     def test_falls_back_to_index_path_when_alias_pointer_missing(
         self, tmp_path, monkeypatch
     ):
-        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+        from cidx_scip.server.multi_service import SCIPMultiService
 
         backend = _build_registry(tmp_path)
         index_dir = tmp_path / "index-b"
@@ -168,7 +169,7 @@ class TestSCIPMultiServiceGetRepositoryPathIndexPathFallback:
     def test_still_raises_when_neither_alias_nor_valid_index_path_resolve(
         self, tmp_path, monkeypatch
     ):
-        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+        from cidx_scip.server.multi_service import SCIPMultiService
 
         backend = _build_registry(tmp_path)
         missing_index_path = tmp_path / "does-not-exist-c"
@@ -189,7 +190,7 @@ class TestSCIPMultiServiceGetRepositoryPathIndexPathFallback:
     def test_alias_pointer_present_still_wins_over_index_path(
         self, tmp_path, monkeypatch
     ):
-        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+        from cidx_scip.server.multi_service import SCIPMultiService
         from code_indexer.global_repos.alias_manager import AliasManager
 
         backend = _build_registry(tmp_path)

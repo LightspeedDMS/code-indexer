@@ -14,6 +14,9 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from code_indexer.server.auth.dependencies import require_permission
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.services.git_operations_service import git_operations_service
+from code_indexer.server.services.activated_write_reindex import (
+    attach_reindex_outcome,
+)
 from code_indexer.server.services.git_argv_safety import (
     GitArgumentValidationError,
     validate_revision,
@@ -51,7 +54,19 @@ from code_indexer.server.routers.git_models import (
 )
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.routers import repo_access_http
+from code_indexer.global_repos.git_operations import (
+    delegated_golden_git_backend,
+    is_revision_miss,
+)
+from code_indexer.server.services.git_tools_seam import (
+    GitToolsUnavailableError,
+    golden_git_reader,
+)
 from code_indexer.utils.source_text_decoding import decode_source_bytes
+from code_indexer.utils.subprocess_diagnostics import (
+    format_called_process_error_diagnostic,
+    redact_url_credentials,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -634,6 +649,7 @@ def git_pull(
             remote=request.remote,
             branch=request.branch,
         )
+        attach_reindex_outcome(result, user.username, alias, None)
         return GitPullResponse(**result)
     except FileNotFoundError as e:
         logger.warning(
@@ -757,6 +773,7 @@ def git_reset(
             commit_hash=request.commit_hash,
             confirmation_token=request.confirmation_token,
         )
+        attach_reindex_outcome(result, user.username, alias, None)
         return GitResetResponse(**result)
     except PermissionError as e:
         logger.warning(
@@ -823,6 +840,7 @@ def git_clean(
             username=user.username,
             confirmation_token=request.confirmation_token,
         )
+        attach_reindex_outcome(result, user.username, alias, None)
         return GitCleanResponse(**result)
     except PermissionError as e:
         logger.warning(
@@ -874,6 +892,7 @@ def git_merge_abort(
     try:
         service = git_operations_service
         result = service.abort_merge(repo_alias=alias, username=user.username)
+        attach_reindex_outcome(result, user.username, alias, None)
         return GitMergeAbortResponse(**result)
     except FileNotFoundError as e:
         logger.warning(
@@ -921,6 +940,7 @@ def git_checkout_file(
         result = service.checkout_file(
             repo_alias=alias, file_path=request.file_path, username=user.username
         )
+        attach_reindex_outcome(result, user.username, alias, [request.file_path])
         return GitCheckoutFileResponse(**result)
     except FileNotFoundError as e:
         logger.warning(
@@ -1077,6 +1097,7 @@ def git_branch_switch(
         result = service.switch_branch(
             repo_alias=alias, branch_name=name, username=user.username
         )
+        attach_reindex_outcome(result, user.username, alias, None)
         return GitBranchSwitchResponse(**result)
     except FileNotFoundError as e:
         logger.warning(
@@ -1246,27 +1267,36 @@ def git_cat(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
     try:
-        rev_result = subprocess.run(
-            ["git", "rev-parse", rev],
-            cwd=repo_path,
-            capture_output=True,
-            check=True,
-        )
-        resolved_sha = rev_result.stdout.decode("utf-8", errors="replace").strip()
+        git_backend = delegated_golden_git_backend()
+        if git_backend is not None:
+            # The copy is not on this pod: the same two commands through the
+            # git seam (git-mcp), git's own bytes for the blob.
+            resolved_sha, blob = _cat_through_git_backend(
+                git_backend, str(repo_path), rev, path
+            )
+        else:
+            rev_result = subprocess.run(
+                ["git", "rev-parse", rev],
+                cwd=repo_path,
+                capture_output=True,
+                check=True,
+            )
+            resolved_sha = rev_result.stdout.decode("utf-8", errors="replace").strip()
 
-        show_result = subprocess.run(
-            ["git", "show", f"{rev}:{path}"],
-            cwd=repo_path,
-            capture_output=True,
-            check=True,
-        )
+            show_result = subprocess.run(
+                ["git", "show", f"{rev}:{path}"],
+                cwd=repo_path,
+                capture_output=True,
+                check=True,
+            )
+            blob = show_result.stdout
         # Bug #1991: decode like indexing does (Latin-1/CP1252 files return
         # their text, not U+FFFD); valid UTF-8 output is unchanged.
-        content = decode_source_bytes(show_result.stdout)
+        content = decode_source_bytes(blob)
         return {
             "content": content,
             "path": path,
-            "size": len(show_result.stdout),
+            "size": len(blob),
             "rev": resolved_sha,
         }
     except subprocess.CalledProcessError as exc:
@@ -1280,6 +1310,47 @@ def git_cat(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"File or revision not found: {path}@{rev}",
         )
+
+
+def _cat_through_git_backend(
+    git_backend: Any, repo_path: str, rev: str, path: str
+) -> "tuple[str, bytes]":
+    """``git rev-parse <rev>`` and ``git show <rev>:<path>`` of a copy this pod
+    does not hold, through the git seam: (resolved sha, blob bytes).
+
+    Only git saying the revision or file does not exist is a
+    ``CalledProcessError`` (the route's 404, as the local ``check=True`` runs
+    give); any other failure to reach git is ``GitToolsUnavailableError`` --
+    an error, never "not found"."""
+    try:
+        resolved_sha = str(git_backend.rev_parse(repo_path, rev)).strip()
+    except subprocess.CalledProcessError as exc:
+        if is_revision_miss(exc):
+            raise
+        raise GitToolsUnavailableError(
+            f"git-mcp could not run git rev-parse on {repo_path}: "
+            f"{format_called_process_error_diagnostic(exc)}"
+        ) from exc
+    try:
+        # git-mcp's git_show_objects takes object ids only (hex): show the
+        # commit rev-parse just resolved, never the caller's symbolic rev.
+        shown = git_backend.show_objects(repo_path, [(resolved_sha, path)])
+    except subprocess.CalledProcessError as exc:
+        raise GitToolsUnavailableError(
+            f"git-mcp could not run git show on {repo_path}: "
+            f"{format_called_process_error_diagnostic(exc)}"
+        ) from exc
+    if len(shown) != 1:
+        raise RuntimeError(
+            f"git backend returned {len(shown)} results for one show_objects spec"
+        )
+    if shown[0].returncode != 0:
+        raise subprocess.CalledProcessError(
+            shown[0].returncode,
+            ["git", "show", f"{rev}:{path}"],
+            stderr=redact_url_credentials(shown[0].stderr),
+        )
+    return resolved_sha, bytes(shown[0].stdout)
 
 
 # Length of a full Git SHA-1 hex string (40 lowercase hex characters)
@@ -1398,13 +1469,19 @@ def git_blame(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
     try:
-        result = subprocess.run(
-            ["git", "blame", "--porcelain", rev, "--", path],
-            cwd=repo_path,
-            capture_output=True,
-            check=True,
-        )
-        stdout = result.stdout.decode("utf-8", errors="replace")
+        blame_cmd = ["git", "blame", "--porcelain", rev, "--", path]
+        git_backend = delegated_golden_git_backend()
+        if git_backend is not None:
+            # The copy is not on this pod: read-only git through git-mcp.
+            stdout = golden_git_reader(git_backend).run(blame_cmd, repo_path).stdout
+        else:
+            result = subprocess.run(
+                blame_cmd,
+                cwd=repo_path,
+                capture_output=True,
+                check=True,
+            )
+            stdout = result.stdout.decode("utf-8", errors="replace")
         blame_lines = _parse_git_blame_porcelain(stdout)
         return {"lines": blame_lines}
     except subprocess.CalledProcessError as exc:
@@ -1541,12 +1618,18 @@ def git_file_history(
     cmd.extend(["--", path])
 
     try:
-        result = subprocess.run(
-            cmd,
-            cwd=repo_path,
-            capture_output=True,
-            check=True,
-        )
+        git_backend = delegated_golden_git_backend()
+        if git_backend is not None:
+            # The copy is not on this pod: read-only git through git-mcp.
+            stdout = golden_git_reader(git_backend).run(cmd, repo_path).stdout
+        else:
+            result = subprocess.run(
+                cmd,
+                cwd=repo_path,
+                capture_output=True,
+                check=True,
+            )
+            stdout = result.stdout.decode("utf-8", errors="replace")
     except subprocess.CalledProcessError as exc:
         logger.warning(
             format_error_log(
@@ -1559,5 +1642,4 @@ def git_file_history(
             detail=f"File or revision not found: {path}",
         )
 
-    stdout = result.stdout.decode("utf-8", errors="replace")
     return {"commits": _parse_unit_separated_commits(stdout)}

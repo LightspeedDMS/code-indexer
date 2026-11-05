@@ -23,7 +23,9 @@ inputSchema:
       maximum: 500
     follow_renames:
       type: boolean
-      description: 'Follow file history across renames. Default: true.'
+      description: 'Follow file history across renames. Default: true. The history is read without rename following first;
+        --follow runs only when the oldest commit found renamed the file into this path, within a fixed time budget (see
+        follow_mode in the result).'
       default: true
     rerank_query:
       type: string
@@ -51,6 +53,16 @@ outputSchema:
       type:
       - string
       - 'null'
+      description: The path the file was renamed from, when its oldest commit found renamed it; null otherwise.
+    follow_mode:
+      type: string
+      enum:
+      - plain
+      - follow
+      - plain_follow_timed_out
+      description: 'How the history was read. plain: no rename to follow (or follow_renames=false). follow: renames
+        followed with --follow. plain_follow_timed_out: a rename was found but --follow exceeded its time budget, so only
+        the history since the rename (under the current path) is returned.'
     query_metadata:
       type: object
       description: Reranking telemetry when rerank_query is provided

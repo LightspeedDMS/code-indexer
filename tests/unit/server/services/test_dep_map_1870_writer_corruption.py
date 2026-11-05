@@ -32,10 +32,11 @@ that the bug report quotes -- confirming this fixture is faithful, not just
 plausible.
 """
 
+from tests.unit.server._depmap_feature import depmap_claude_config
 from pathlib import Path
 from unittest.mock import Mock
 
-from code_indexer.server.services.dep_map_delta_journal import (
+from cidx_depmap.server.dep_map_delta_journal import (
     parse_frontmatter,
     render_md,
     validate_rendered_frontmatter,
@@ -43,7 +44,7 @@ from code_indexer.server.services.dep_map_delta_journal import (
     compute_delta_fingerprint,
 )
 from code_indexer.server.services.dep_map_parser_tables import parse_frontmatter_strict
-from code_indexer.server.services.dependency_map_service import _DomainUpdateResult
+from cidx_depmap.server.dependency_map_service import _DomainUpdateResult
 
 
 def _make_repo(alias: str) -> dict:
@@ -107,10 +108,9 @@ MALFORMED_UNRELATED_SHAPE = (
 
 def _make_service_for_delta(tmp_path: Path, invoke_result: str = "Updated body\n"):
     """Same harness as test_dep_map_1053_delta_journal.py::_make_service_for_delta."""
-    from code_indexer.server.services.dependency_map_service import DependencyMapService
-    from code_indexer.server.utils.config_manager import ClaudeIntegrationConfig
+    from cidx_depmap.server.dependency_map_service import DependencyMapService
 
-    config = ClaudeIntegrationConfig(
+    config = depmap_claude_config(
         dependency_map_enabled=True,
         dependency_map_interval_hours=24,
         dependency_map_pass_timeout_seconds=300,

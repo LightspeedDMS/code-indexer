@@ -86,13 +86,15 @@ class TestIndexingConfig:
 
 
 class TestScipWorkspaceRetentionDaysMove:
-    """Test suite for AC2: Move scip_workspace_retention_days to ScipConfig."""
+    """AC2 moved scip_workspace_retention_days into ScipConfig; since modular
+    phase 4d it is the cidx-scip feature's setting (feature_settings["scip"]),
+    and a stored value is carried there on load."""
 
-    def test_scip_config_has_workspace_retention_days(self):
-        """AC2: ScipConfig should have scip_workspace_retention_days field."""
+    def test_scip_config_no_longer_has_workspace_retention_days(self):
+        """ScipConfig keeps only the core's temporal staleness threshold."""
         config = ScipConfig()
-        assert hasattr(config, "scip_workspace_retention_days")
-        assert config.scip_workspace_retention_days == 7
+        assert not hasattr(config, "scip_workspace_retention_days")
+        assert config.temporal_stale_threshold_days == 7
 
     def test_server_config_no_longer_has_scip_workspace_retention_days(self):
         """AC2: ServerConfig should NOT have scip_workspace_retention_days as loose field."""
@@ -100,23 +102,38 @@ class TestScipWorkspaceRetentionDaysMove:
         # After refactoring, this should NOT be on ServerConfig root level
         assert not hasattr(config, "scip_workspace_retention_days")
 
-    def test_save_load_preserves_scip_workspace_retention_days_in_scip_config(self):
-        """Test scip_workspace_retention_days in ScipConfig is properly persisted."""
+    def test_stored_retention_in_scip_config_moves_to_the_feature_section(self):
+        """A stored scip_config.scip_workspace_retention_days is carried into
+        feature_settings["scip"] when the configuration loads."""
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = ServerConfigManager(tmpdir)
-            original_config = ServerConfig(
-                server_dir=tmpdir,
-                scip_config=ScipConfig(
-                    scip_workspace_retention_days=14,
-                ),
+            loaded = manager._dict_to_server_config(
+                {
+                    "server_dir": tmpdir,
+                    "scip_config": {
+                        "temporal_stale_threshold_days": 9,
+                        "scip_workspace_retention_days": 14,
+                    },
+                }
             )
 
-            manager.save_config(original_config)
-            loaded_config = manager.load_config()
+            assert loaded.scip_config is not None
+            assert loaded.scip_config.temporal_stale_threshold_days == 9
+            assert loaded.feature_settings["scip"] == {
+                "scip_workspace_retention_days": 14
+            }
 
-            assert loaded_config is not None
-            assert loaded_config.scip_config is not None
-            assert loaded_config.scip_config.scip_workspace_retention_days == 14
+    def test_legacy_top_level_retention_moves_to_the_feature_section(self):
+        """The pre-Story #15 top-level key lands in the same place."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = ServerConfigManager(tmpdir)
+            loaded = manager._dict_to_server_config(
+                {"server_dir": tmpdir, "scip_workspace_retention_days": 21}
+            )
+
+            assert loaded.feature_settings["scip"] == {
+                "scip_workspace_retention_days": 21
+            }
 
 
 class TestClaudeIntegrationConfig:

@@ -64,8 +64,8 @@ _STUB_MODULES = [
     # SCIP protobuf generated modules — these import google.protobuf symbols
     # that don't exist when google-protobuf is not installed; stub the whole
     # scip_pb2 module so the import chain doesn't try to execute the real file.
-    "code_indexer.scip.protobuf.scip_pb2",
-    "code_indexer.scip.protobuf",
+    "cidx_scip.protobuf.scip_pb2",
+    "cidx_scip.protobuf",
     # numpy, msgpack — not installed in unit-test environment; stubbed so that
     # code_indexer.storage.vector_quantizer and filesystem_vector_store can be
     # imported as MagicMocks (the deadlock test doesn't need the real implementations).

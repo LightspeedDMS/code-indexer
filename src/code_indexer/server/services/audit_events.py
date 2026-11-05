@@ -370,6 +370,18 @@ AUDIT_ACTION_CATALOG: Dict[str, ActionSpec] = {
     "golden_repo_branch_changed": _spec(
         "repo", {"new_branch": GIT_REF, "job_id": OPAQUE_ID}, job_based=True
     ),
+    "golden_repo_renamed": _spec(
+        "repo", {"new_alias": REPO_ALIAS, "job_id": OPAQUE_ID}, job_based=True
+    ),
+    "golden_catalog_sync_requested": _spec(
+        "repo",
+        {
+            "scope": _enum("catalog", "workspaces", "all"),
+            "dry_run": BOOL,
+            "job_id": OPAQUE_ID,
+        },
+        job_based=True,
+    ),
     "provider_index_added": _spec("provider_index", _PROVIDER_INDEX, job_based=True),
     "provider_index_recreated": _spec(
         "provider_index", _PROVIDER_INDEX, job_based=True

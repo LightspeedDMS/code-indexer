@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from code_indexer.server.services.scip_query_service import SCIPQueryService
+from cidx_scip.server.query_service import SCIPQueryService
 from tests.unit.server._scip_access import GRANT_ALL, TEST_USER
 
 
@@ -190,14 +190,14 @@ class TestScipHandlersErrorHandling:
 
     def test_scip_definition_returns_empty_when_no_indexes(self) -> None:
         """Verify scip_definition returns empty results when service finds no indexes."""
-        from code_indexer.server.mcp.handlers import scip_definition
+        from cidx_scip.server.mcp.scip import scip_definition
 
         mock_service = self._create_mock_service_returning_empty()
         mock_user = MagicMock()
         mock_user.username = "testuser"
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            "cidx_scip.server.mcp.scip._get_scip_query_service",
             return_value=mock_service,
         ):
             params = {"symbol": "some_function"}
@@ -213,14 +213,14 @@ class TestScipHandlersErrorHandling:
 
     def test_scip_definition_passes_repository_alias_to_service(self) -> None:
         """Verify scip_definition passes repository_alias parameter to service."""
-        from code_indexer.server.mcp.handlers import scip_definition
+        from cidx_scip.server.mcp.scip import scip_definition
 
         mock_service = self._create_mock_service_returning_empty()
         mock_user = MagicMock()
         mock_user.username = "testuser"
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            "cidx_scip.server.mcp.scip._get_scip_query_service",
             return_value=mock_service,
         ):
             params = {"symbol": "some_function", "repository_alias": "test-repo"}
@@ -236,14 +236,14 @@ class TestScipHandlersErrorHandling:
 
     def test_scip_references_returns_empty_when_no_indexes(self) -> None:
         """Verify scip_references returns empty results when service finds no indexes."""
-        from code_indexer.server.mcp.handlers import scip_references
+        from cidx_scip.server.mcp.scip import scip_references
 
         mock_service = self._create_mock_service_returning_empty()
         mock_user = MagicMock()
         mock_user.username = "testuser"
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            "cidx_scip.server.mcp.scip._get_scip_query_service",
             return_value=mock_service,
         ):
             params = {"symbol": "some_function"}
@@ -257,14 +257,14 @@ class TestScipHandlersErrorHandling:
 
     def test_scip_references_passes_repository_alias_to_service(self) -> None:
         """Verify scip_references passes repository_alias parameter to service."""
-        from code_indexer.server.mcp.handlers import scip_references
+        from cidx_scip.server.mcp.scip import scip_references
 
         mock_service = self._create_mock_service_returning_empty()
         mock_user = MagicMock()
         mock_user.username = "testuser"
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            "cidx_scip.server.mcp.scip._get_scip_query_service",
             return_value=mock_service,
         ):
             params = {"symbol": "some_function", "repository_alias": "test-repo"}
@@ -278,14 +278,14 @@ class TestScipHandlersErrorHandling:
 
     def test_scip_dependencies_returns_empty_when_no_indexes(self) -> None:
         """Verify scip_dependencies returns empty results when service finds no indexes."""
-        from code_indexer.server.mcp.handlers import scip_dependencies
+        from cidx_scip.server.mcp.scip import scip_dependencies
 
         mock_service = self._create_mock_service_returning_empty()
         mock_user = MagicMock()
         mock_user.username = "testuser"
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            "cidx_scip.server.mcp.scip._get_scip_query_service",
             return_value=mock_service,
         ):
             params = {"symbol": "some_function"}
@@ -299,14 +299,14 @@ class TestScipHandlersErrorHandling:
 
     def test_scip_dependencies_passes_repository_alias_to_service(self) -> None:
         """Verify scip_dependencies passes repository_alias parameter to service."""
-        from code_indexer.server.mcp.handlers import scip_dependencies
+        from cidx_scip.server.mcp.scip import scip_dependencies
 
         mock_service = self._create_mock_service_returning_empty()
         mock_user = MagicMock()
         mock_user.username = "testuser"
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            "cidx_scip.server.mcp.scip._get_scip_query_service",
             return_value=mock_service,
         ):
             params = {"symbol": "some_function", "repository_alias": "test-repo"}
@@ -320,14 +320,14 @@ class TestScipHandlersErrorHandling:
 
     def test_scip_dependents_returns_empty_when_no_indexes(self) -> None:
         """Verify scip_dependents returns empty results when service finds no indexes."""
-        from code_indexer.server.mcp.handlers import scip_dependents
+        from cidx_scip.server.mcp.scip import scip_dependents
 
         mock_service = self._create_mock_service_returning_empty()
         mock_user = MagicMock()
         mock_user.username = "testuser"
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            "cidx_scip.server.mcp.scip._get_scip_query_service",
             return_value=mock_service,
         ):
             params = {"symbol": "some_function"}
@@ -341,14 +341,14 @@ class TestScipHandlersErrorHandling:
 
     def test_scip_dependents_passes_repository_alias_to_service(self) -> None:
         """Verify scip_dependents passes repository_alias parameter to service."""
-        from code_indexer.server.mcp.handlers import scip_dependents
+        from cidx_scip.server.mcp.scip import scip_dependents
 
         mock_service = self._create_mock_service_returning_empty()
         mock_user = MagicMock()
         mock_user.username = "testuser"
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            "cidx_scip.server.mcp.scip._get_scip_query_service",
             return_value=mock_service,
         ):
             params = {"symbol": "some_function", "repository_alias": "test-repo"}
@@ -362,14 +362,14 @@ class TestScipHandlersErrorHandling:
 
     def test_scip_impact_returns_empty_when_no_indexes(self) -> None:
         """Verify scip_impact returns empty results when service finds no indexes."""
-        from code_indexer.server.mcp.handlers import scip_impact
+        from cidx_scip.server.mcp.scip import scip_impact
 
         mock_service = self._create_mock_service_returning_empty()
         mock_user = MagicMock()
         mock_user.username = "testuser"
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            "cidx_scip.server.mcp.scip._get_scip_query_service",
             return_value=mock_service,
         ):
             params = {"symbol": "some_function"}
@@ -383,14 +383,14 @@ class TestScipHandlersErrorHandling:
 
     def test_scip_callchain_returns_empty_when_no_indexes(self) -> None:
         """Verify scip_callchain returns empty results when service finds no indexes."""
-        from code_indexer.server.mcp.handlers import scip_callchain
+        from cidx_scip.server.mcp.scip import scip_callchain
 
         mock_service = self._create_mock_service_returning_empty()
         mock_user = MagicMock()
         mock_user.username = "testuser"
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            "cidx_scip.server.mcp.scip._get_scip_query_service",
             return_value=mock_service,
         ):
             params = {"from_symbol": "func1", "to_symbol": "func2"}
@@ -404,14 +404,14 @@ class TestScipHandlersErrorHandling:
 
     def test_scip_callchain_passes_repository_alias_to_service(self) -> None:
         """Verify scip_callchain passes repository_alias parameter to service."""
-        from code_indexer.server.mcp.handlers import scip_callchain
+        from cidx_scip.server.mcp.scip import scip_callchain
 
         mock_service = self._create_mock_service_returning_empty()
         mock_user = MagicMock()
         mock_user.username = "testuser"
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            "cidx_scip.server.mcp.scip._get_scip_query_service",
             return_value=mock_service,
         ):
             params = {
@@ -429,14 +429,14 @@ class TestScipHandlersErrorHandling:
 
     def test_scip_context_returns_empty_when_no_indexes(self) -> None:
         """Verify scip_context returns empty results when service finds no indexes."""
-        from code_indexer.server.mcp.handlers import scip_context
+        from cidx_scip.server.mcp.scip import scip_context
 
         mock_service = self._create_mock_service_returning_empty()
         mock_user = MagicMock()
         mock_user.username = "testuser"
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            "cidx_scip.server.mcp.scip._get_scip_query_service",
             return_value=mock_service,
         ):
             params = {"symbol": "some_function"}
@@ -458,7 +458,7 @@ class TestScipCompositeHandlersGoldenReposDirectory:
 
     def test_scip_impact_delegates_to_service(self) -> None:
         """Verify scip_impact delegates to SCIPQueryService.analyze_impact()."""
-        from code_indexer.server.mcp.handlers import scip_impact
+        from cidx_scip.server.mcp.scip import scip_impact
 
         # Create mock service with expected response
         mock_service = MagicMock()
@@ -475,7 +475,7 @@ class TestScipCompositeHandlersGoldenReposDirectory:
         mock_user.username = "testuser"
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            "cidx_scip.server.mcp.scip._get_scip_query_service",
             return_value=mock_service,
         ):
             result = scip_impact({"symbol": "test", "depth": 2}, mock_user)
@@ -498,7 +498,7 @@ class TestScipCompositeHandlersGoldenReposDirectory:
 
     def test_scip_callchain_delegates_to_service(self) -> None:
         """Verify scip_callchain delegates to SCIPQueryService.trace_callchain()."""
-        from code_indexer.server.mcp.handlers import scip_callchain
+        from cidx_scip.server.mcp.scip import scip_callchain
 
         # Create mock service with expected response
         mock_service = MagicMock()
@@ -517,7 +517,7 @@ class TestScipCompositeHandlersGoldenReposDirectory:
         mock_user.username = "testuser"
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            "cidx_scip.server.mcp.scip._get_scip_query_service",
             return_value=mock_service,
         ):
             result = scip_callchain(
@@ -549,7 +549,7 @@ class TestScipCompositeHandlersGoldenReposDirectory:
         trace_callchain for a rejected value. Replaces the old
         test_scip_callchain_clamps_max_depth_to_10 regression assertion.
         """
-        from code_indexer.server.mcp.handlers import scip_callchain
+        from cidx_scip.server.mcp.scip import scip_callchain
 
         mock_service = MagicMock()
         mock_service.trace_callchain.return_value = ([], [])
@@ -558,7 +558,7 @@ class TestScipCompositeHandlersGoldenReposDirectory:
         mock_user.username = "testuser"
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            "cidx_scip.server.mcp.scip._get_scip_query_service",
             return_value=mock_service,
         ):
             # Execute with max_depth=15 (exceeds the [1, 3] callchain-only limit)
@@ -577,7 +577,7 @@ class TestScipCompositeHandlersGoldenReposDirectory:
 
     def test_scip_context_delegates_to_service(self) -> None:
         """Verify scip_context delegates to SCIPQueryService.get_context()."""
-        from code_indexer.server.mcp.handlers import scip_context
+        from cidx_scip.server.mcp.scip import scip_context
 
         # Create mock service with expected response
         mock_service = MagicMock()
@@ -594,7 +594,7 @@ class TestScipCompositeHandlersGoldenReposDirectory:
         mock_user.username = "testuser"
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            "cidx_scip.server.mcp.scip._get_scip_query_service",
             return_value=mock_service,
         ):
             result = scip_context({"symbol": "test"}, mock_user)
@@ -619,7 +619,7 @@ class TestScipCallchainSymbolValidation:
 
     def test_scip_callchain_validates_empty_from_symbol(self) -> None:
         """Verify scip_callchain returns error when from_symbol is empty."""
-        from code_indexer.server.mcp.handlers import scip_callchain
+        from cidx_scip.server.mcp.scip import scip_callchain
 
         mock_user = MagicMock()
         params = {"from_symbol": "", "to_symbol": "valid_symbol"}
@@ -637,7 +637,7 @@ class TestScipCallchainSymbolValidation:
 
     def test_scip_callchain_validates_empty_to_symbol(self) -> None:
         """Verify scip_callchain returns error when to_symbol is empty."""
-        from code_indexer.server.mcp.handlers import scip_callchain
+        from cidx_scip.server.mcp.scip import scip_callchain
 
         mock_user = MagicMock()
         params = {"from_symbol": "valid_symbol", "to_symbol": ""}
@@ -655,7 +655,7 @@ class TestScipCallchainSymbolValidation:
 
     def test_scip_callchain_validates_whitespace_from_symbol(self) -> None:
         """Verify scip_callchain returns error when from_symbol is only whitespace."""
-        from code_indexer.server.mcp.handlers import scip_callchain
+        from cidx_scip.server.mcp.scip import scip_callchain
 
         mock_user = MagicMock()
         params = {"from_symbol": "   ", "to_symbol": "valid_symbol"}
@@ -673,7 +673,7 @@ class TestScipCallchainSymbolValidation:
 
     def test_scip_callchain_validates_whitespace_to_symbol(self) -> None:
         """Verify scip_callchain returns error when to_symbol is only whitespace."""
-        from code_indexer.server.mcp.handlers import scip_callchain
+        from cidx_scip.server.mcp.scip import scip_callchain
 
         mock_user = MagicMock()
         params = {"from_symbol": "valid_symbol", "to_symbol": "   "}
@@ -698,7 +698,7 @@ class TestScipCallchainEnhancedResponse:
 
     def test_scip_callchain_includes_diagnostic_when_no_chains_found(self) -> None:
         """Verify scip_callchain includes diagnostic message when 0 chains found."""
-        from code_indexer.server.mcp.handlers import scip_callchain
+        from cidx_scip.server.mcp.scip import scip_callchain
 
         # Create mock service that returns empty chains
         mock_service = MagicMock()
@@ -708,7 +708,7 @@ class TestScipCallchainEnhancedResponse:
         mock_user.username = "testuser"
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            "cidx_scip.server.mcp.scip._get_scip_query_service",
             return_value=mock_service,
         ):
             result = scip_callchain(
@@ -744,9 +744,9 @@ def _build_real_scip_db_with_call_chain(db_path: Path) -> None:
     letting SCIPQueryEngine.trace_call_chain discover a genuine, non-empty
     chain against real data (Bug #1613).
     """
-    from code_indexer.scip.database.builder import ROLE_DEFINITION
-    from code_indexer.scip.database.builder import SCIPDatabaseBuilder
-    from code_indexer.scip.protobuf import scip_pb2
+    from cidx_scip.database.builder import ROLE_DEFINITION
+    from cidx_scip.database.builder import SCIPDatabaseBuilder
+    from cidx_scip.protobuf import scip_pb2
 
     index = scip_pb2.Index()
     caller = "python test `caller`/Caller#run()."
@@ -795,7 +795,7 @@ class TestScipCallchainFilesSearchedRealCount:
         exact evidence from the bug report: 100 real chains found while
         scip_files_searched read 0.
         """
-        from code_indexer.server.mcp.handlers import scip_callchain
+        from cidx_scip.server.mcp.scip import scip_callchain
 
         golden_repos_dir = tmp_path / "golden-repos"
         scip_dir = golden_repos_dir / "repo1" / ".code-indexer" / "scip"
@@ -809,7 +809,7 @@ class TestScipCallchainFilesSearchedRealCount:
         mock_user.username = "testuser"
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            "cidx_scip.server.mcp.scip._get_scip_query_service",
             return_value=service,
         ):
             result = scip_callchain(
@@ -838,7 +838,7 @@ class TestScipCallchainFilesSearchedRealCount:
     ) -> None:
         """scip_files_searched must change meaningfully as the real number
         of .scip.db files searched changes -- not a fixed/fake value."""
-        from code_indexer.server.mcp.handlers import scip_callchain
+        from cidx_scip.server.mcp.scip import scip_callchain
 
         golden_repos_dir = tmp_path / "golden-repos"
         for repo_name in ("repo1", "repo2"):
@@ -853,7 +853,7 @@ class TestScipCallchainFilesSearchedRealCount:
         mock_user.username = "testuser"
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            "cidx_scip.server.mcp.scip._get_scip_query_service",
             return_value=service,
         ):
             result = scip_callchain(
@@ -871,12 +871,14 @@ class TestScipHandlerRegistration:
     """Tests for SCIP handler registration in HANDLER_REGISTRY."""
 
     def test_scip_handlers_registered_in_handler_registry(self) -> None:
-        """Verify all 7 SCIP handlers are registered in HANDLER_REGISTRY.
+        """Verify all 7 SCIP handlers are registered in HANDLER_REGISTRY
+        when the scip feature's tools are installed (as with "scip" enabled).
 
         This test prevents regression of the bug where SCIP handlers were defined
         but not registered, causing "Handler not implemented" errors.
         """
         from code_indexer.server.mcp.handlers import HANDLER_REGISTRY
+        from tests.unit.server._scip_feature import scip_tools_installed
 
         expected_handlers = [
             "scip_definition",
@@ -888,10 +890,11 @@ class TestScipHandlerRegistration:
             "scip_context",
         ]
 
-        for handler_name in expected_handlers:
-            assert handler_name in HANDLER_REGISTRY, (
-                f"Handler '{handler_name}' not registered in HANDLER_REGISTRY"
-            )
-            assert callable(HANDLER_REGISTRY[handler_name]), (
-                f"Handler '{handler_name}' is not callable"
-            )
+        with scip_tools_installed():
+            for handler_name in expected_handlers:
+                assert handler_name in HANDLER_REGISTRY, (
+                    f"Handler '{handler_name}' not registered in HANDLER_REGISTRY"
+                )
+                assert callable(HANDLER_REGISTRY[handler_name]), (
+                    f"Handler '{handler_name}' is not callable"
+                )

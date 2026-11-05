@@ -100,6 +100,10 @@ E2E_PREFLIGHT_PASSED=""
 : "${E2E_PG_DB_NAME:=cidx_e2e}"
 : "${E2E_PG_SERVER_READINESS_TIMEOUT:=60}"
 
+# Every feature this repository ships, enabled in each server's bootstrap
+# config.json (tests/e2e/helpers.py reads the same file for the in-process ones).
+E2E_ENABLED_FEATURES_JSON="$(tr -d '\n' < "$SCRIPT_DIR/tests/e2e/enabled_features.json")"
+
 # Phase 7 (SIEM delivery) defaults and helpers live in their own file.
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/tests/e2e/siem_delivery/phase7_helpers.sh"
@@ -739,6 +743,12 @@ handle_phase_result() {
 # ---------------------------------------------------------------------------
 start_phase4_server() {
     _yellow "  Starting uvicorn on ${E2E_SERVER_HOST}:${E2E_SERVER_PORT}..."
+    cat > "$E2E_SERVER_DATA_DIR/config.json" <<CONFIG_EOF
+{
+  "server_dir": "$E2E_SERVER_DATA_DIR",
+  "enabled_features": $E2E_ENABLED_FEATURES_JSON
+}
+CONFIG_EOF
     write_stub_systemd_unit "$E2E_SERVER_DATA_DIR/systemd-units" "$E2E_SERVER_PORT" \
         || exit 2
     PYTHONPATH="$SCRIPT_DIR/src" \
@@ -769,7 +779,8 @@ write_fault_bootstrap_config() {
   "host": "$E2E_FAULT_SERVER_HOST",
   "port": $E2E_FAULT_SERVER_PORT,
   "fault_injection_enabled": true,
-  "fault_injection_nonprod_ack": true
+  "fault_injection_nonprod_ack": true,
+  "enabled_features": $E2E_ENABLED_FEATURES_JSON
 }
 CONFIG_EOF
     _yellow "  Wrote fault bootstrap config.json to $E2E_FAULT_SERVER_DATA_DIR/config.json"
@@ -927,7 +938,8 @@ write_pg_bootstrap_config() {
   "host": "$E2E_PG_SERVER_HOST",
   "port": $E2E_PG_SERVER_PORT,
   "storage_mode": "postgres",
-  "postgres_dsn": "$pg_dsn"
+  "postgres_dsn": "$pg_dsn",
+  "enabled_features": $E2E_ENABLED_FEATURES_JSON
 }
 CONFIG_EOF
     _yellow "  Wrote PG bootstrap config.json to $E2E_PG_SERVER_DATA_DIR/config.json"

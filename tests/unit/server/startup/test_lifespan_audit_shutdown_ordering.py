@@ -136,24 +136,27 @@ def test_captures_during_emitter_shutdown_are_written_not_unresolvable(
     thread = threading.Thread(target=emitter, name="shutdown-phase-emitter")
     try:
         with TestClient(app):
+            # The emitters' shutdown phase: from the global repos lifecycle
+            # stop to the audit writer's stop, the last step before the
+            # unbind (the dependency map, a feature since modular phase 4g,
+            # stops before both and is not started here).
             lifecycle = app.state.global_lifecycle_manager
-            dep_map = app.state.dependency_map_service
-            assert lifecycle is not None and dep_map is not None
+            audit_service = app.state.audit_service
+            assert lifecycle is not None and audit_service is not None
             real_lifecycle_stop = lifecycle.stop
-            real_dep_map_stop = dep_map.stop_scheduler
+            real_audit_stop = audit_service.stop
 
             def lifecycle_stop(*args, **kwargs):
                 phase_started.set()
                 return real_lifecycle_stop(*args, **kwargs)
 
-            def dep_map_stop(*args, **kwargs):
-                result = real_dep_map_stop(*args, **kwargs)
+            def audit_stop(*args, **kwargs):
                 phase_ended.set()
                 thread.join(30)
-                return result
+                return real_audit_stop(*args, **kwargs)
 
             monkeypatch.setattr(lifecycle, "stop", lifecycle_stop)
-            monkeypatch.setattr(dep_map, "stop_scheduler", dep_map_stop)
+            monkeypatch.setattr(audit_service, "stop", audit_stop)
             thread.start()
         assert phase_started.is_set() and phase_ended.is_set()
         assert not thread.is_alive()

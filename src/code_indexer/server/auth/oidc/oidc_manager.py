@@ -2,11 +2,15 @@
 
 import functools
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import anyio
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log
+
+if TYPE_CHECKING:
+    from code_indexer.server.auth.oidc.oidc_provider import OIDCUserInfo
+    from code_indexer.server.auth.user_manager import User
 
 
 async def _off_loop(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
@@ -15,14 +19,20 @@ async def _off_loop(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
 
 
 class OIDCManager:
-    def __init__(self, config, user_manager, jwt_manager, oauth_backend=None):
+    def __init__(
+        self, config, user_manager, jwt_manager, oauth_backend=None, db_path=None
+    ):
         self.config = config
         self.user_manager = user_manager
         self.jwt_manager = jwt_manager
         self.provider = None
         self._oauth_backend = oauth_backend
-        # Use existing oauth.db instead of separate database
-        self.db_path = str(Path.home() / ".cidx-server" / "oauth.db")
+        # Identity-link store. Defaults to the shared oauth.db. EVO-66121: a caller
+        # trusting a SEPARATE issuer (e.g. the mcp-gateway) passes a distinct db_path so
+        # its oidc_identity_links table can never collide on `subject` with another trust
+        # domain's (the interactive-SSO IdP) -- the links table is subject-unique with no
+        # issuer column, so a shared table would merge two issuers' subjects into one user.
+        self.db_path = db_path or str(Path.home() / ".cidx-server" / "oauth.db")
 
     async def initialize(self):
         """Initialize database schema (no network calls)."""
@@ -244,7 +254,7 @@ class OIDCManager:
         )
         return None
 
-    async def match_or_create_user(self, user_info):
+    async def match_or_create_user(self, user_info: "OIDCUserInfo") -> "Optional[User]":
         """The local account for this SSO identity, or None. Never the
         analysis agents' reserved account: no SSO session is issued for it."""
         import logging
@@ -253,6 +263,7 @@ class OIDCManager:
             ANALYSIS_AGENT_USERNAME,
         )
 
+        user: "Optional[User]"
         try:
             user = await self._match_or_create_user(user_info)
         except ValueError:

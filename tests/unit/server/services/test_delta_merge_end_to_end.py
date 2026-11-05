@@ -26,14 +26,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from code_indexer.global_repos.dependency_map_analyzer import DependencyMapAnalyzer
-from code_indexer.server.services.dependency_map_service import DependencyMapService
+from cidx_depmap.server.dependency_map_analyzer import DependencyMapAnalyzer
+from cidx_depmap.server.dependency_map_service import DependencyMapService
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-_SUBPROCESS_PATH = "code_indexer.global_repos.dependency_map_analyzer.subprocess.run"
+_SUBPROCESS_PATH = "cidx_depmap.server.dependency_map_analyzer.subprocess.run"
 _MTIME_TICK_S = 0.02
 
 _EXISTING_FULL_CONTENT = (

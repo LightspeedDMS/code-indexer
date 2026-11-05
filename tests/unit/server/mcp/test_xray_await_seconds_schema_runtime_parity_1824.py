@@ -40,17 +40,14 @@ from typing import Any, Callable, Dict
 
 import pytest
 
+import cidx_xray
 from code_indexer.server.auth.user_manager import User, UserRole
-from code_indexer.server.mcp.handlers.xray import _AWAIT_SECONDS_MAX
-from code_indexer.server.mcp.handlers.xray_batch import _AWAIT_MAX as _BATCH_AWAIT_MAX
+from cidx_xray.server.mcp.xray import _AWAIT_SECONDS_MAX
+from cidx_xray.server.mcp.xray_batch import _AWAIT_MAX as _BATCH_AWAIT_MAX
 
-_SERVER_ROOT = (
-    Path(__file__).parent.parent.parent.parent.parent
-    / "src"
-    / "code_indexer"
-    / "server"
-)
-TOOL_DOCS_SEARCH_DIR = _SERVER_ROOT / "mcp" / "tool_docs" / "search"
+# Phase 4c: the handlers and their tool docs ship in the cidx-xray feature.
+_XRAY_SERVER_ROOT = Path(cidx_xray.__file__).resolve().parent / "server"
+TOOL_DOCS_SEARCH_DIR = _XRAY_SERVER_ROOT / "tool_docs"
 # Issue #1935 Part 2: handlers/xray.py was split into the handlers/xray/
 # package (per-tool submodules). The await_seconds source-comment history
 # this test pins now spans multiple files (top-of-file provenance comment
@@ -58,7 +55,7 @@ TOOL_DOCS_SEARCH_DIR = _SERVER_ROOT / "mcp" / "tool_docs" / "search"
 # by both handle_xray_search's _search.py and handle_xray_explore's
 # _explore.py) -- read and concatenate every .py file in the package
 # rather than one flat file.
-XRAY_HANDLER_PACKAGE_DIR = _SERVER_ROOT / "mcp" / "handlers" / "xray"
+XRAY_HANDLER_PACKAGE_DIR = _XRAY_SERVER_ROOT / "mcp" / "xray"
 
 XRAY_EXPLORE_MD = TOOL_DOCS_SEARCH_DIR / "xray_explore.md"
 XRAY_SEARCH_BATCH_MD = TOOL_DOCS_SEARCH_DIR / "xray_search_batch.md"
@@ -70,23 +67,31 @@ _ADJACENCY_WINDOW_CHARS = 400
 
 
 def _load_tool_registry() -> Dict[str, Any]:
-    """Import TOOL_REGISTRY exactly as the real MCP front door builds it.
+    """The X-Ray tools' TOOL_REGISTRY entries exactly as the real MCP front
+    door builds them.
 
-    TOOL_REGISTRY is assembled DYNAMICALLY from the on-disk tool_docs
-    (ToolDocLoader) -- reading it here, rather than re-parsing the YAML
-    frontmatter independently, means this test observes precisely what a
-    real MCP client receives. The loader emits benign chatter on stderr
-    during construction; suppress it without clobbering pytest's own
-    capture stream (save/restore the ACTUAL previous stream, never a
-    hardcoded sys.__stderr__).
+    Phase 4c: the feature contributes its tools (``tools()``) and the core
+    turns each doc into a TOOL_REGISTRY entry with its own tool-doc parser
+    (``server/features/tools.py``) -- built the same way here, rather than
+    re-parsing the YAML frontmatter independently, so this test observes
+    precisely what a real MCP client receives. The loader emits benign
+    chatter on stderr during construction; suppress it without clobbering
+    pytest's own capture stream (save/restore the ACTUAL previous stream,
+    never a hardcoded sys.__stderr__).
     """
+    from cidx_xray.feature import make_feature
+
+    from code_indexer.server.features.tools import _prepare
+
     previous_stderr = sys.stderr
     sys.stderr = io.StringIO()
     try:
-        from code_indexer.server.mcp.tools import TOOL_REGISTRY
+        return {
+            tool.name: _prepare("xray", tool, set())[1]
+            for tool in make_feature().tools()
+        }
     finally:
         sys.stderr = previous_stderr
-    return TOOL_REGISTRY
 
 
 def _inline_result() -> Dict[str, Any]:

@@ -257,7 +257,7 @@ def _in_thread(fn: Callable[[], Any]) -> Tuple[threading.Thread, List[Any]]:
     def run() -> None:
         try:
             box.append(fn())
-        except Exception as exc:  # noqa: BLE001 - the test inspects it
+        except Exception as exc:  # any failure: the test inspects it
             box.append(exc)
 
     thread = threading.Thread(target=run, daemon=True)

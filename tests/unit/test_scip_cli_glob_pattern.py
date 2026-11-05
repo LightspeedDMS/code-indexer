@@ -6,10 +6,13 @@ instead of .scip files after the protobuf-to-SQLite conversion.
 
 import pytest
 import subprocess
+import sys
 from pathlib import Path
 import shutil
 
 pytestmark = pytest.mark.slow
+
+_CIDX = [sys.executable, "-m", "code_indexer.cli"]
 
 
 @pytest.fixture
@@ -18,7 +21,9 @@ def scip_test_repo(tmp_path):
     import json
 
     # Initialize cidx first
-    subprocess.run(["cidx", "init"], cwd=str(tmp_path), capture_output=True)
+    subprocess.run(
+        [*_CIDX, "init"], cwd=str(tmp_path), capture_output=True
+    )
 
     # Create .code-indexer/scip structure
     code_indexer_dir = tmp_path / ".code-indexer"
@@ -70,7 +75,7 @@ class TestSCIPCLIGlobPattern:
         # This test should FAIL before the fix (no .scip files found)
         # and PASS after the fix (finds .scip.db files)
         result = subprocess.run(
-            ["cidx", "scip", "definition", "Calculator"],
+            [*_CIDX, "scip", "definition", "Calculator"],
             cwd=str(scip_test_repo),
             capture_output=True,
             text=True,
@@ -88,7 +93,7 @@ class TestSCIPCLIGlobPattern:
     def test_cli_references_finds_scip_db_files(self, scip_test_repo):
         """Test that references command globs for .scip.db files."""
         result = subprocess.run(
-            ["cidx", "scip", "references", "Calculator"],
+            [*_CIDX, "scip", "references", "Calculator"],
             cwd=str(scip_test_repo),
             capture_output=True,
             text=True,
@@ -103,7 +108,7 @@ class TestSCIPCLIGlobPattern:
     def test_cli_dependencies_finds_scip_db_files(self, scip_test_repo):
         """Test that dependencies command globs for .scip.db files."""
         result = subprocess.run(
-            ["cidx", "scip", "dependencies", "Calculator"],
+            [*_CIDX, "scip", "dependencies", "Calculator"],
             cwd=str(scip_test_repo),
             capture_output=True,
             text=True,
@@ -118,7 +123,7 @@ class TestSCIPCLIGlobPattern:
     def test_cli_dependents_finds_scip_db_files(self, scip_test_repo):
         """Test that dependents command globs for .scip.db files."""
         result = subprocess.run(
-            ["cidx", "scip", "dependents", "Calculator"],
+            [*_CIDX, "scip", "dependents", "Calculator"],
             cwd=str(scip_test_repo),
             capture_output=True,
             text=True,
@@ -133,7 +138,7 @@ class TestSCIPCLIGlobPattern:
     def test_cli_trace_call_chain_finds_scip_db_files(self, scip_test_repo):
         """Test that callchain command globs for .scip.db files."""
         result = subprocess.run(
-            ["cidx", "scip", "callchain", "Calculator", "Add"],
+            [*_CIDX, "scip", "callchain", "Calculator", "Add"],
             cwd=str(scip_test_repo),
             capture_output=True,
             text=True,

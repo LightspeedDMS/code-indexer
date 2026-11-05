@@ -24,11 +24,11 @@ from unittest.mock import patch
 
 def _make_executor():
     """Return a DepMapRepairExecutor with just-enough no-op injections."""
-    from code_indexer.server.services.dep_map_health_detector import (
+    from cidx_depmap.server.dep_map_health_detector import (
         DepMapHealthDetector,
     )
-    from code_indexer.server.services.dep_map_index_regenerator import IndexRegenerator
-    from code_indexer.server.services.dep_map_repair_executor import (
+    from cidx_depmap.server.dep_map_index_regenerator import IndexRegenerator
+    from cidx_depmap.server.dep_map_repair_executor import (
         DepMapRepairExecutor,
     )
 
@@ -87,7 +87,7 @@ class TestAuditBidirectionalMismatchAggregateUnwrap(unittest.TestCase):
         domains_json: List = []
 
         target = (
-            "code_indexer.server.services.dep_map_repair_executor"
+            "cidx_depmap.server.dep_map_repair_executor"
             ".audit_one_bidirectional_mismatch"
         )
         with patch(target) as mock_audit:
@@ -139,11 +139,10 @@ class TestRepairSelfLoopAggregateUnwrap(unittest.TestCase):
 
         # Patch the step functions that _repair_self_loop calls after reading anomaly.file
         resolve_target = (
-            "code_indexer.server.services.dep_map_repair_executor"
-            ".resolve_self_loop_md_path"
+            "cidx_depmap.server.dep_map_repair_executor.resolve_self_loop_md_path"
         )
         remove_target = (
-            "code_indexer.server.services.dep_map_repair_executor.remove_self_loop_rows"
+            "cidx_depmap.server.dep_map_repair_executor.remove_self_loop_rows"
         )
 
         with patch(resolve_target, return_value=None) as mock_resolve:
@@ -190,7 +189,7 @@ class TestRepairMalformedYamlAggregateUnwrap(unittest.TestCase):
         output_dir = Path("/tmp/bug1054_malformed_yaml_test")
 
         target = (
-            "code_indexer.server.services.dep_map_repair_executor"
+            "cidx_depmap.server.dep_map_repair_executor"
             ".repair_single_malformed_yaml_anomaly"
         )
 

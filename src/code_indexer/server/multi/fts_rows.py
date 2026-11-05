@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from ..query.filtered_search import fts_filter_kwargs
+from code_indexer.utils.index_store import index_root
 
 if TYPE_CHECKING:
     from ...services.tantivy_index_manager import TantivyIndexManager
@@ -25,7 +26,7 @@ def open_fts_index(repo_path: Path) -> "TantivyIndexManager":
     """
     from ...services.tantivy_index_manager import TantivyIndexManager
 
-    fts_index_dir = Path(repo_path) / ".code-indexer" / "tantivy_index"
+    fts_index_dir = index_root(repo_path) / "tantivy_index"
     if not fts_index_dir.exists():
         raise FileNotFoundError(f"FTS index not found at {fts_index_dir}")
     index = TantivyIndexManager(fts_index_dir)

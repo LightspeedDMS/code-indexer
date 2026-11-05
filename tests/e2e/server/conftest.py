@@ -36,7 +36,11 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from code_indexer.server.services.auto_watch_manager import auto_watch_manager
-from tests.e2e.helpers import _auth_headers, require_voyage_key
+from tests.e2e.helpers import (
+    E2E_ENABLED_FEATURES,
+    _auth_headers,
+    require_voyage_key,
+)
 from tests.e2e.server.shared_app_bindings import (
     _app_wiring_bindings,
     _assert_auth_stores_in_shared_data_dir,
@@ -68,7 +72,8 @@ def isolated_server_data_dir(
     config.json (lifespan.py:658), which only a ConfigService built for this
     dir would otherwise write -- the process-wide singleton may already
     exist for another dir, and then startup logs APP-GENERAL-008.  So
-    config.json is written first: *config*, or a minimal one.  The env var
+    config.json is written first: *config*, or a minimal one (with every
+    feature enabled).  The env var
     is unguarded by a lock: this suite runs single-threaded and sequential.
 
     The ConfigService singleton is bound to *data_dir* explicitly: the
@@ -83,7 +88,11 @@ def isolated_server_data_dir(
     previous_data_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
     previous_service = config_module._config_service
     data_dir.mkdir(parents=True, exist_ok=True)
-    bootstrap = config if config is not None else {"server_dir": str(data_dir)}
+    bootstrap = (
+        config
+        if config is not None
+        else {"server_dir": str(data_dir), "enabled_features": E2E_ENABLED_FEATURES}
+    )
     (data_dir / "config.json").write_text(json.dumps(bootstrap))
     os.environ["CIDX_SERVER_DATA_DIR"] = str(data_dir)
     try:
@@ -436,6 +445,10 @@ def test_client_data_dir(tmp_path_factory) -> Iterator[Path]:
     (or removes) the env var on teardown to avoid leaking mutable process state.
     """
     d = tmp_path_factory.mktemp("cidx_testclient_data")
+    # Every feature enabled, as on a deployed server (see E2E_ENABLED_FEATURES).
+    (d / "config.json").write_text(
+        json.dumps({"server_dir": str(d), "enabled_features": E2E_ENABLED_FEATURES})
+    )
     previous = os.environ.get("CIDX_SERVER_DATA_DIR")
     os.environ["CIDX_SERVER_DATA_DIR"] = str(d)
     # Phase 3 is a REST/MCP functional suite; watch-mode (Phase 2's concern) is

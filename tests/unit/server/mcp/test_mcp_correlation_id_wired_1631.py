@@ -39,7 +39,9 @@ _HANDLERS_DIR = _SRC_ROOT / "code_indexer" / "server" / "mcp" / "handlers"
 _WIRED_MODULE = "code_indexer.server.telemetry.correlation_bridge"
 _UNWIRED_MODULE = "code_indexer.server.middleware.correlation"
 
-# (relative path under handlers/, dotted __package__ of that file)
+# (relative path under handlers/, dotted __package__ of that file). The SCIP
+# handlers left this package for the cidx-scip feature (modular phase 4d);
+# their reader is covered by TestScipFeatureReadsWiredCorrelationId below.
 _AFFECTED_FILES = [
     ("cicd.py", "code_indexer.server.mcp.handlers"),
     ("files.py", "code_indexer.server.mcp.handlers"),
@@ -47,7 +49,6 @@ _AFFECTED_FILES = [
     ("git_write.py", "code_indexer.server.mcp.handlers"),
     ("guides.py", "code_indexer.server.mcp.handlers"),
     ("pull_requests.py", "code_indexer.server.mcp.handlers"),
-    ("scip.py", "code_indexer.server.mcp.handlers"),
     ("git_read.py", "code_indexer.server.mcp.handlers"),
     ("ssh_keys.py", "code_indexer.server.mcp.handlers"),
     ("admin/__init__.py", "code_indexer.server.mcp.handlers.admin"),
@@ -140,3 +141,20 @@ class TestAllDomainSubmodulesUseWiredCorrelationIdReader:
         assert offenders == [], (
             f"files still importing from the unwired {_UNWIRED_MODULE}: {offenders}"
         )
+
+
+class TestScipFeatureReadsWiredCorrelationId:
+    """The SCIP handlers (cidx-scip feature) take the correlation id from the
+    server platform (``cidx_scip.server._core.get_correlation_id``): it must
+    be the value the REGISTERED CorrelationBridgeMiddleware set."""
+
+    def test_scip_feature_sees_the_bridge_correlation_id(self) -> None:
+        # Importing the server package fills the platform slot _core reads.
+        from code_indexer.server.telemetry import correlation_bridge
+        from cidx_scip.server import _core
+
+        token = correlation_bridge._correlation_id_var.set("corr-1631-scip")
+        try:
+            assert _core.get_correlation_id() == "corr-1631-scip"
+        finally:
+            correlation_bridge._correlation_id_var.reset(token)

@@ -28,7 +28,7 @@ from tests.unit.server.services.test_dep_map_health_detector import make_index_m
 
 
 def _health_detector():
-    from code_indexer.server.services.dep_map_health_detector import (
+    from cidx_depmap.server.dep_map_health_detector import (
         DepMapHealthDetector,
     )
 
@@ -36,13 +36,13 @@ def _health_detector():
 
 
 def _index_regenerator():
-    from code_indexer.server.services.dep_map_index_regenerator import IndexRegenerator
+    from cidx_depmap.server.dep_map_index_regenerator import IndexRegenerator
 
     return IndexRegenerator()
 
 
 def _repair_executor(domain_analyzer=None):
-    from code_indexer.server.services.dep_map_repair_executor import (
+    from cidx_depmap.server.dep_map_repair_executor import (
         DepMapRepairExecutor,
     )
 
@@ -250,7 +250,7 @@ def test_A_healthy_metadata_not_flagged(tmp_path):
 
 def test_A_empty_json_metadata_not_in_repairable_types():
     """empty_json_metadata must NOT be in REPAIRABLE_ANOMALY_TYPES."""
-    from code_indexer.server.services.dep_map_health_detector import (
+    from cidx_depmap.server.dep_map_health_detector import (
         REPAIRABLE_ANOMALY_TYPES,
     )
 
@@ -269,7 +269,7 @@ def test_B_incremental_new_domain_not_silently_empty(tmp_path):
     into _apply_domain_assignments so the assignment logic is independently testable
     without requiring Claude CLI. We call that extracted method directly.
     """
-    from code_indexer.server.services.dependency_map_service import DependencyMapService
+    from cidx_depmap.server.dependency_map_service import DependencyMapService
 
     service = DependencyMapService.__new__(DependencyMapService)
     existing_domain_list = [
@@ -469,7 +469,7 @@ def test_G_pass2_frontmatter_builder_includes_description():
     Fix 1: DependencyMapAnalyzer._build_domain_frontmatter must include 'description'.
     We call the real production method directly on the real class instance.
     """
-    from code_indexer.global_repos.dependency_map_analyzer import DependencyMapAnalyzer
+    from cidx_depmap.server.dependency_map_analyzer import DependencyMapAnalyzer
     from code_indexer.server.services.dep_map_file_utils import parse_yaml_frontmatter
 
     analyzer = DependencyMapAnalyzer.__new__(DependencyMapAnalyzer)

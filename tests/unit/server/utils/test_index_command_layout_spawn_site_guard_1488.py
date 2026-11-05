@@ -262,6 +262,7 @@ _KNOWN_SERVER_SPAWN_MODULES: Dict[str, int] = {
     "server/mcp/handlers/_temporal_index_cmd.py": 1,
     "global_repos/refresh_scheduler.py": 3,
     "server/services/claude_cli_manager.py": 1,
+    "server/services/fts_index_builder.py": 1,
 }
 
 

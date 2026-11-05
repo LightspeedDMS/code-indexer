@@ -38,7 +38,17 @@ import sys
 import textwrap
 from functools import lru_cache
 from pathlib import Path
-from typing import Callable, Dict, FrozenSet, Iterable, List, Mapping, Set, Tuple
+from typing import (
+    Callable,
+    Dict,
+    FrozenSet,
+    Iterable,
+    Iterator,
+    List,
+    Mapping,
+    Set,
+    Tuple,
+)
 
 import pytest
 
@@ -51,6 +61,7 @@ from _audit_route_classification import (
     WORKSPACE_GIT,
 )
 from code_indexer.server.services.audit_events import AUDIT_ACTION_CATALOG
+from code_indexer.server.utils.route_table import iter_routes
 
 _PROBE = Path(__file__).with_name("_audit_route_table_probe.py")
 _SRC_ROOT = Path(code_indexer.__file__).resolve().parent.parent
@@ -123,6 +134,8 @@ _ENTRY_POINTS: Dict[str, FrozenSet[str]] = {
             "submit_provider_scoped_index_job",
         },
         "golden_repo_branch_changed": {"change_branch_async"},
+        "golden_repo_renamed": {"rename_golden_repo"},
+        "golden_catalog_sync_requested": {"request_golden_catalog_sync"},
         "provider_index_added": {"submit_provider_index_job"},
         "provider_index_recreated": {"submit_provider_index_job"},
         "provider_index_removed": {"remove_provider_index_audited"},
@@ -136,6 +149,8 @@ _ENTRY_POINTS: Dict[str, FrozenSet[str]] = {
             # SIEM trusted CA (one apply_audited_change each)
             "set_trusted_ca",
             "remove_trusted_ca",
+            # feature settings (features/config.py: one apply_audited_change)
+            "commit_runtime_update",
         },
         "git_settings_changed": {"apply_git_settings_change"},
         "provider_api_key_set": {"apply_audited_change"},
@@ -222,6 +237,8 @@ _MCP_MAPPED: Dict[str, Tuple[str, ...]] = {
     "refresh_golden_repo": ("golden_repo_refreshed",),
     "add_golden_repo_index": ("golden_repo_index_added",),
     "change_golden_repo_branch": ("golden_repo_branch_changed",),
+    "rename_golden_repo": ("golden_repo_renamed",),
+    "sync_golden_catalog": ("golden_catalog_sync_requested",),
     "manage_provider_indexes": (
         "provider_index_added",
         "provider_index_recreated",
@@ -374,6 +391,9 @@ _ROUTE_MAPPED: Dict[str, Tuple[str, ...]] = {
     "DELETE /api/admin/golden-repos/{alias}": ("golden_repo_removed",),
     "POST /api/admin/golden-repos/{alias}/refresh": ("golden_repo_refreshed",),
     "POST /api/admin/golden-repos/{alias}/indexes": ("golden_repo_index_added",),
+    "POST /api/admin/golden-repos/{alias}/rename": ("golden_repo_renamed",),
+    "POST /api/admin/golden-catalog/sync": ("golden_catalog_sync_requested",),
+    "POST /api/admin/index-store/backfill": ("golden_repo_refreshed",),
     "POST /admin/golden-repos/add": ("golden_repo_added",),
     "POST /admin/golden-repos/batch-create": ("golden_repo_added",),
     "POST /admin/golden-repos/{alias}/delete": ("golden_repo_removed",),
@@ -403,6 +423,9 @@ _ROUTE_MAPPED: Dict[str, Tuple[str, ...]] = {
     "POST /admin/config/siem_delivery/credential": ("siem_credential_changed",),
     "POST /admin/config/siem_delivery/credential/remove": ("siem_credential_changed",),
     "POST /admin/self-monitoring": _CONFIG,
+    # Feature add-on settings (server/features/web.py), mounted on every server.
+    "PUT /api/admin/features/{feature}/config": _CONFIG,
+    "POST /admin/features/config/{feature}": _CONFIG,
     "POST /admin/config/api-keys/{platform}": ("ci_token_set",),
     "DELETE /admin/config/api-keys/{platform}": ("ci_token_deleted",),
     # SIEM delivery admin actions
@@ -631,8 +654,12 @@ def route_entries(tmp_path_factory: pytest.TempPathFactory) -> List[RouteEntry]:
     env = dict(os.environ)
     env["CIDX_SERVER_DATA_DIR"] = str(base / "server")
     env["CIDX_DATA_DIR"] = str(base / "data")
+    # The repository root too: the probe loads every in-tree feature through
+    # tests/unit/server/_in_tree_features.py.
     env["PYTHONPATH"] = os.pathsep.join(
-        p for p in (str(_SRC_ROOT), env.get("PYTHONPATH", "")) if p
+        p
+        for p in (str(_SRC_ROOT), str(_SRC_ROOT.parent), env.get("PYTHONPATH", ""))
+        if p
     )
     result = subprocess.run(
         [sys.executable, str(_PROBE), str(out)],
@@ -648,11 +675,17 @@ def route_entries(tmp_path_factory: pytest.TempPathFactory) -> List[RouteEntry]:
 
 
 @pytest.fixture(scope="module")
-def mcp_registries() -> Tuple[Dict[str, Dict[str, object]], Dict[str, Callable]]:
+def mcp_registries() -> Iterator[
+    Tuple[Dict[str, Dict[str, object]], Dict[str, Callable]]
+]:
+    """The MCP registries with every in-tree feature's tools installed, as an
+    app with every feature enabled has them."""
     from code_indexer.server.mcp.handlers import HANDLER_REGISTRY
     from code_indexer.server.mcp.tools import TOOL_REGISTRY
+    from tests.unit.server._in_tree_features import in_tree_feature_tools_installed
 
-    return TOOL_REGISTRY, HANDLER_REGISTRY
+    with in_tree_feature_tools_installed():
+        yield TOOL_REGISTRY, HANDLER_REGISTRY
 
 
 def _route_reach(entries: List[RouteEntry]) -> Dict[str, Set[str]]:
@@ -700,8 +733,8 @@ def test_the_conditionally_mounted_fault_injection_router_is_inventoried(
     from code_indexer.server.fault_injection.router import router as fault_router
 
     expected = {
-        f"{method} {getattr(route, 'path', '')}"
-        for route in fault_router.routes
+        f"{method} {route_path}"
+        for route_path, route in iter_routes(fault_router.routes)
         for method in getattr(route, "methods", ())
         if method in _MUTATING
     }

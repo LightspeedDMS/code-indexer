@@ -37,13 +37,15 @@ from __future__ import annotations
 import hashlib
 import threading
 from collections import OrderedDict
-from pathlib import PurePosixPath
 from dataclasses import dataclass, field
 from time import monotonic
 from typing import Callable, Dict, Generic, Hashable, Optional, TypeVar
 
-from code_indexer.server.storage.shared.snapshot_paths import (
-    is_versioned_snapshot as _canonical_is_versioned_snapshot,
+# The predicate is a pure path rule, so it lives beside the canonical
+# snapshot predicate in the kernel's utils (Phase 2 of
+# plans/designs/modular-packaging-addons.md); re-exported here unchanged.
+from code_indexer.utils.snapshot_paths import (
+    is_immutable_versioned_snapshot as is_immutable_versioned_snapshot,
 )
 
 K = TypeVar("K", bound=Hashable)
@@ -314,60 +316,6 @@ class TTLCache(Generic[K, V]):
     def counters(self) -> Dict[str, int]:
         with self._lock:
             return dict(self._counters)
-
-
-# ---------------------------------------------------------------------------
-# Immutable-path predicate (the ONLY gate for NO-TTL caching)
-# ---------------------------------------------------------------------------
-
-
-def is_immutable_versioned_snapshot(path: str) -> bool:
-    """Return True ONLY for a path at or inside an immutable canonical snapshot.
-
-    Bug #1084 B4: the ``.versioned`` decision is delegated to the SINGLE canonical
-    predicate (``snapshot_paths.is_versioned_snapshot``), CANONICAL clause only
-    (``mount_point`` omitted). The immutable golden-repo snapshot layout (project
-    CLAUDE.md "Golden Repo Versioned Path") is ``.../.versioned/{alias}/v_{ts}/``;
-    a refresh produces a NEW ``v_*`` directory (a new key / cache miss), never an
-    in-place mutation, so its config can be cached with NO TTL. Canonical
-    cow-daemon snapshots (``{mount}/.versioned/{ns}/v_*``) now legitimately gain
-    NO-TTL caching.
-
-    LEGACY cow shapes (``{mount}/{ns}/v_*``) and flat ONTAP (``{mount}/v_*``) are
-    deliberately NOT recognized here (the mount point is intentionally withheld):
-    those predate retention and could be deleted, so the NO-TTL immutability
-    promise must not extend to them -- they stay on the SHORT-TTL cache, the safe
-    (self-healing) direction. The MUTABLE base clone and activated CoW clones are
-    likewise rejected and MUST use the default SHORT-TTL cache.
-
-    The canonical predicate matches the snapshot LEAF (``v_<ts>``); a query path
-    is frequently DEEPER (e.g. ``.../v_42/.code-indexer/config.json``) and is
-    equally immutable. So we also test the path's ancestors: True iff the path
-    itself OR any ancestor is a canonical snapshot. Purely structural (no
-    filesystem access, NFS-safe); traversal tokens are rejected by the canonical
-    predicate's normalization.
-    """
-    if not path:
-        return False
-
-    if "/../" in path or path.endswith("/..") or path.startswith("../") or path == "..":
-        # Reject traversal tokens up front (Story #1082 contract). The canonical
-        # predicate would also reject the resulting shape, but be explicit.
-        return False
-
-    if _canonical_is_versioned_snapshot(path):
-        return True
-
-    # Walk ancestors: a subpath inside a canonical snapshot is still immutable.
-    pure = PurePosixPath(path)
-    for ancestor in pure.parents:
-        ancestor_str = str(ancestor)
-        if ancestor_str in ("", "/", "."):
-            break
-        if _canonical_is_versioned_snapshot(ancestor_str):
-            return True
-
-    return False
 
 
 # ---------------------------------------------------------------------------

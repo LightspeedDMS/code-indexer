@@ -1,0 +1,937 @@
+"""xray_search_batch MCP handler (Story #1055).
+
+Cross-repo, multi-expression X-Ray sweep in ONE background job.
+
+Algorithm:
+  1. Auth: require query_repos permission.
+  2. Parse + validate (hard-fail on structural/static errors BEFORE any job).
+  3. Resolve repos (graceful-partial) with global-alias fallback.
+  4. Submit ONE job (repo_alias=None, no per-repo dedup).
+
+Worker executes the repos × scans matrix:
+  - Between-cell cancellation via bjm.jobs[job_id].cancelled.
+  - Wall-clock timeout via deadline.
+  - Per-cell: resolve_batch_evaluator → XRaySearchEngine.run.
+  - Progress once per repo processed (integer percent).
+  - Oversized result → _truncate_xray_batch_result.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import time
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Tuple, cast
+
+from code_indexer.server.mcp.handlers._utils import _get_app_refresh_scheduler
+from code_indexer.server.services.api_metrics_service import api_metrics_service
+from cidx_xray._platform import server_platform
+from cidx_xray.rust_backend import SharedIdentityCache
+from cidx_xray.sandbox import validate_rust_evaluator
+from cidx_xray.search_engine import XRaySearchEngine
+from cidx_xray.server import runtime
+
+from ._common import (
+    SearchOrigin,
+    _app_payload_cache,
+    _lazy_app_attr,
+    _lazy_singleton_app_or_none,
+    _mcp_response,
+    _parse_json_string_array,
+    check_query_admission,
+    memory_pressure_mcp_payload,
+    run_recorded_xray,
+    truncate_paged_result,
+    xray_recorder,
+)
+from .xray import _resolve_evaluator_code
+
+logger = logging.getLogger(__name__)
+
+# Fan-out bounds (mirror omni caps).
+_MAX_REPOS = 50
+_MAX_SCANS = 50
+
+# Timeout range for the whole matrix (wider than single-repo [10,600]).
+_TIMEOUT_MIN = 10
+_TIMEOUT_MAX = 7200
+_DEFAULT_TIMEOUT_SECONDS = 600
+
+# await_seconds range (capped low — a multi-cell batch rarely completes inline).
+_AWAIT_MIN: float = 0.0
+_AWAIT_MAX: float = 30.0
+_AWAIT_WARN_THRESHOLD: float = 10.0
+_AWAIT_POLL_INTERVAL = 0.05
+
+# Default evaluator: accept-all (one finding per Phase-1 hit at root node).
+_DEFAULT_EVALUATOR_CODE = (
+    "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n"
+    "    vec![EvalFinding {\n"
+    '        pattern: "match".to_string(),\n'
+    "        line: node.start_line,\n"
+    "        snippet: String::new(),\n"
+    "    }]\n"
+    "}"
+)
+
+
+# ---------------------------------------------------------------------------
+# Pure helper: resolve evaluator code without accessing live app state
+# ---------------------------------------------------------------------------
+
+
+def resolve_batch_evaluator(
+    scan: Dict[str, Any],
+    repo_alias: str,
+    cidx_meta_path: Path,
+    refresh_scheduler: Optional[object] = None,
+) -> Tuple[str, Optional[Dict[str, Any]]]:
+    """Resolve evaluator code for one scan bundle without live app state.
+
+    Resolution order:
+      1. Inline ``evaluator_code`` in the scan dict → return as-is.
+      2. ``pattern_name`` → load from cidx_meta_path/xray-patterns/{repo}/{name}.yaml
+         then fall back to __any__/{name}.yaml.
+      3. Neither → return _DEFAULT_EVALUATOR_CODE.
+
+    Returns:
+        (evaluator_code, None) on success.
+        ("", structured_error_dict) on failure (pattern_not_found etc.).
+    """
+    raw_code: str = (scan.get("evaluator_code") or "").strip()
+    pattern_name: Optional[str] = scan.get("pattern_name") or None
+
+    # Keep batch pattern resolution on the same resolver as xray_search and
+    # xray_explore. The explicit cidx_meta_path preserves this helper's
+    # captured-worker-path contract while the shared resolver owns the
+    # ADR-001 legacy-mode check and all pattern lookup/error mapping.
+    params = {
+        "evaluator_code": raw_code or None,
+        "pattern_name": pattern_name,
+        "pattern_params": scan.get("pattern_params") or None,
+    }
+    try:
+        evaluator_code, error_response = _resolve_evaluator_code(
+            params,
+            repo_alias,
+            allow_default_evaluator=True,
+            expected_execution_mode="legacy",
+            cidx_meta_path=cidx_meta_path,
+            refresh_scheduler=refresh_scheduler,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return (
+            "",
+            {"error": "pattern_load_error", "message": str(exc)},
+        )
+    if error_response is None:
+        return (evaluator_code, None)
+    try:
+        error_payload = json.loads(error_response["content"][0]["text"])
+    except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+        return (
+            "",
+            {"error": "pattern_load_error", "message": str(exc)},
+        )
+    return ("", cast(Dict[str, Any], error_payload))
+
+
+# ---------------------------------------------------------------------------
+# Truncation helper
+# ---------------------------------------------------------------------------
+
+
+def _truncate_xray_batch_result(
+    result: Dict[str, Any],
+    payload_cache: Any,
+    *,
+    owner: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Apply PayloadCache truncation to matches[]/errors[]/
+    evaluation_errors[] -- see _common.truncate_paged_result()
+    for the shared mechanics (Bug #1928: whole, unmodified entries per
+    cache page; each page its own PayloadCache row; inline budget =
+    payload_max_fetch_size_chars; no more fixed-3-entry cap or duplicate
+    preview field). Called from `_job_fn`, which already runs inside the
+    BackgroundJobManager worker thread pool -- off the event loop -- so
+    no additional offload is needed here (unlike xray_graph.py's `async
+    def` handlers). `owner` is the username of the requesting user; only
+    that user can fetch the cached pages.
+
+    When payload_cache is None, the core's truncation
+    own guard (Bug #1928 P3) returns a bounded, cache_unavailable=True
+    result rather than the full unbounded arrays.
+
+    Bug #1928 round 3 (P1): a page-set write failure (whole-entry pages
+    + the pages-v1 manifest, one atomic batch) raises PageSetStoreError
+    -- caught here and surfaced as an explicit error, never a
+    cache_handle pointing at data that was not durably written.
+    """
+    return truncate_paged_result(
+        result,
+        ["matches", "errors", "evaluation_errors"],
+        owner=owner,
+        label="xray_search_batch",
+        payload_cache=payload_cache,
+        logger=logger,
+    )
+
+
+# ---------------------------------------------------------------------------
+# App-state accessors (extracted for easy mocking in tests)
+# ---------------------------------------------------------------------------
+
+
+def _get_background_job_manager() -> Any:
+    # Bug #1709: a read of the already-built value (the server platform's
+    # app_attr), never a construction of the process-wide app singleton
+    # (byte-identical fix to xray.py's _get_background_job_manager()).
+    return _lazy_app_attr("background_job_manager")
+
+
+def _get_cidx_meta_path() -> Path:
+    """Return the mutable cidx-meta base path.
+
+    Bug #1709: safe lazy probe -- avoids PEP-562 construction side effect.
+    """
+    grm = _lazy_app_attr("golden_repo_manager")
+    if grm is None:
+        raise RuntimeError(
+            "cidx-meta path not available: golden_repo_manager not configured"
+        )
+    return Path(grm.golden_repos_dir) / "cidx-meta"
+
+
+def _get_arm_and_grm() -> Tuple[Any, Any]:
+    """Return (activated_repo_manager, golden_repo_manager) or (None, None).
+
+    Bug #1709: safe lazy probes -- avoid PEP-562 construction side effect.
+    """
+    arm = _lazy_app_attr("activated_repo_manager")
+    grm = _lazy_app_attr("golden_repo_manager")
+    return arm, grm
+
+
+def _get_access_filtering_service() -> Any:
+    """Return app.state.access_filtering_service, or None if not wired.
+
+    Probes via `_lazy_singleton_app_or_none()` (the
+    same side-effect-free helper Bug #1678/#1693/#1709 introduced for
+    every other app-state accessor in this file) instead of a bare
+    attribute read of the app module, which would otherwise
+    permanently construct the process-wide app singleton as a side
+    effect of merely reading it.
+    """
+    app = _lazy_singleton_app_or_none()
+    if app is None:
+        return None
+    return getattr(getattr(app, "state", None), "access_filtering_service", None)
+
+
+def _resolve_repo_path(alias: str) -> Optional[str]:
+    """Resolve alias → on-disk path via the shared registry-backed resolver
+    (Bug #1315 index_path fallback), matching search_code/regex_search and the
+    single-repo xray handler. The prior pointer-only resolution returned None —
+    and raised repository_not_found — for global repos whose alias pointer was
+    never created (e.g. example-global). Returns None if unresolvable."""
+    return server_platform().resolve_repo_path(alias)
+
+
+def _get_xray_cell_limiter() -> Any:
+    """Return the xray cell concurrency limiter, or None if not wired.
+
+    The feature's own runtime (``on_startup`` builds it); None in a process
+    where the feature has not started (CLI, tests).
+    """
+    return runtime.cell_limiter()
+
+
+def _await_job_result(
+    bjm: Any, job_id: str, username: str, await_seconds: float
+) -> Optional[Dict[str, Any]]:
+    jobs = runtime.background_jobs()
+    deadline = time.monotonic() + await_seconds
+    while time.monotonic() < deadline:
+        # The ``background_jobs`` capability once the feature has started;
+        # the job manager itself (the same call) before that.
+        job_status = (
+            jobs.status(job_id, username=username)
+            if jobs is not None
+            else bjm.get_job_status(job_id, username)
+        )
+        if job_status is not None and job_status.get("status") in (
+            "completed",
+            "completed_partial",
+        ):
+            return cast(Optional[Dict[str, Any]], job_status.get("result"))
+        time.sleep(_AWAIT_POLL_INTERVAL)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Batch worker
+# ---------------------------------------------------------------------------
+
+
+def _resolve_batch_evaluators(
+    resolved_repos: List[Dict[str, Any]],
+    scans: List[Dict[str, Any]],
+    cidx_meta_path: Path,
+    refresh_scheduler: Optional[object] = None,
+) -> Dict[Tuple[str, int], Tuple[str, Optional[Dict[str, Any]]]]:
+    """Pre-resolve resolve_batch_evaluator() for every (repo, scan) cell.
+
+    Bug #1784 review blocker (sizing-dimension mismatch): SharedIdentityCache
+    is keyed on resolved evaluator SOURCE TEXT, but resolve_batch_evaluator()
+    checks {repo-alias}/{name}.yaml BEFORE __any__/{name}.yaml — a
+    repo-scoped pattern override means one scan can resolve to a DIFFERENT
+    source per repo. Distinct sources can therefore reach
+    len(resolved_repos) x len(scans), not len(scans) alone. Resolving every
+    cell up front (cheap: a YAML file read, never a subprocess) lets the
+    caller (_run_xray_batch_job) size the identity cache to the ACTUAL
+    distinct-source count, and means the main execution loop never
+    re-resolves a cell it already resolved here.
+
+    Returns:
+        Dict keyed by (repository_alias, scan_index) -> (evaluator_code, err),
+        same (code, err) semantics as resolve_batch_evaluator().
+    """
+    resolved: Dict[Tuple[str, int], Tuple[str, Optional[Dict[str, Any]]]] = {}
+    for repo in resolved_repos:
+        for scan_index, scan in enumerate(scans):
+            resolved[(repo["alias"], scan_index)] = resolve_batch_evaluator(
+                scan, repo["alias"], cidx_meta_path, refresh_scheduler
+            )
+    return resolved
+
+
+def _run_xray_batch_job(
+    resolved_repos: List[Dict[str, Any]],
+    scans: List[Dict[str, Any]],
+    repo_errors: List[Dict[str, Any]],
+    cidx_meta_path: Path,
+    max_results: Optional[int],
+    timeout_seconds: int,
+    job_id: str,
+    bjm: Any,
+    progress_callback: Any,
+    refresh_scheduler: Optional[object] = None,
+    on_cell_started: Optional[Callable[[str, int, str], None]] = None,
+) -> Dict[str, Any]:
+    """Execute the repos × scans matrix.
+
+    Args:
+        resolved_repos: List of {"alias": str, "path": Path}.
+        scans: List of normalized scan dicts.
+        repo_errors: Pre-flight repo resolution errors (already tagged).
+        cidx_meta_path: Captured cidx-meta path (no live app state access).
+        max_results: Optional per-cell max_files cap.
+        timeout_seconds: Wall-clock cap for the entire matrix.
+        job_id: Job ID for cancellation checks.
+        bjm: BackgroundJobManager instance for cancellation checks.
+        progress_callback: Injected by BackgroundJobManager.
+        refresh_scheduler: Captured app refresh scheduler, so seed pattern
+            writes take the catalog lock.
+
+    Returns:
+        Unified result dict with matches, errors, evaluation_errors, counters,
+        and partial/timeout/cancelled flags.
+    """
+    matches: List[Dict[str, Any]] = []
+    errors: List[Dict[str, Any]] = list(repo_errors)
+    evaluation_errors: List[Dict[str, Any]] = []
+    warnings: List[Dict[str, Any]] = []
+    phase1_truncated_cells: List[Dict[str, Any]] = []
+
+    total = len(resolved_repos)
+    repos_completed = 0
+    partial: bool = bool(repo_errors)
+    timed_out = False
+    cancelled = False
+    deadline = time.monotonic() + timeout_seconds
+
+    # Bug #1784 review blocker: share ONE identity cache across the WHOLE
+    # batch operation instead of a fresh, empty cache per cell. Each cell
+    # constructs its own XRaySearchEngine/RustNativeBackend below, but the
+    # evaluator source is constant across every repo for a given scan
+    # (structural fact of the repos x scans matrix), so a batch-scoped
+    # shared cache collapses up to _MAX_REPOS x _MAX_SCANS identity
+    # subprocess calls down to the number of DISTINCT evaluator sources.
+    #
+    # Sizing-dimension-mismatch fix (final review round): "one entry per
+    # scan" is FALSE when repo-scoped pattern overrides exist --
+    # resolve_batch_evaluator() checks {repo-alias}/{name}.yaml BEFORE
+    # __any__/{name}.yaml, so a single scan can resolve to a DIFFERENT
+    # source per repo. Distinct sources can therefore reach
+    # len(resolved_repos) x len(scans), not len(scans) alone. Pre-resolving
+    # every cell up front and sizing to the ACTUAL distinct-source count
+    # (rather than guessing from scan count) guarantees no eviction can
+    # occur before every cell has been processed, regardless of how many
+    # repos carry their own pattern override.
+    resolved_evaluators = _resolve_batch_evaluators(
+        resolved_repos, scans, cidx_meta_path, refresh_scheduler
+    )
+    distinct_sources = {
+        code for code, cell_err in resolved_evaluators.values() if cell_err is None
+    }
+    identity_cache = SharedIdentityCache(max_entries=max(1, len(distinct_sources)))
+
+    outer_break = False
+    for repo in resolved_repos:
+        # Between-repo cancellation check.
+        job_obj = bjm.jobs.get(job_id)
+        if job_obj is not None and job_obj.cancelled:
+            cancelled = True
+            partial = True
+            outer_break = True
+            break
+
+        for scan_index, scan in enumerate(scans):
+            # Between-cell cancellation check.
+            job_obj = bjm.jobs.get(job_id)
+            if job_obj is not None and job_obj.cancelled:
+                cancelled = True
+                partial = True
+                outer_break = True
+                break
+
+            # Timeout check.
+            if time.monotonic() >= deadline:
+                timed_out = True
+                partial = True
+                outer_break = True
+                break
+
+            # Evaluator already resolved up front by _resolve_batch_evaluators()
+            # (pure, repo-scoped) -- looked up here, never re-resolved.
+            eval_code, err = resolved_evaluators[(repo["alias"], scan_index)]
+            if err is not None:
+                errors.append(
+                    {
+                        "error_level": "cell",
+                        "repository_alias": repo["alias"],
+                        "scan_index": scan_index,
+                        **err,
+                    }
+                )
+                partial = True
+                continue
+
+            # Acquire global xray cell limiter slot before executing.
+            _limiter = _get_xray_cell_limiter()
+            _slot = False
+            if _limiter is not None:
+                remaining = deadline - time.monotonic()
+                _slot = _limiter.acquire(timeout=max(0.0, remaining))
+                if not _slot:
+                    timed_out = True
+                    partial = True
+                    outer_break = True
+                    break
+
+            # Execute cell — limiter slot held (if wired); release in finally.
+            _cell_exec_error = False
+            try:
+                # Wire on_process_spawned so any Rust child process is
+                # tracked in bjm — mirrors the xray.py single-repo pattern.
+                # Mid-cell kill reliability is NOT promised (same as xray.py),
+                # but registration must exist for parity with the MCP path.
+                def _on_spawned(proc, _jid=job_id):  # type: ignore[no-untyped-def]
+                    if _jid:
+                        bjm.register_child_process(_jid, proc)
+
+                engine = XRaySearchEngine(identity_cache=identity_cache)
+                # ^ order on_cell_started after construction, before run; a cell that never runs names no evaluator
+                if on_cell_started is not None:
+                    on_cell_started(repo["alias"], scan_index, eval_code)
+                cell = engine.run(
+                    repo_path=repo["path"],
+                    driver_regex=scan["driver_regex"],
+                    evaluator_code=eval_code,
+                    search_target=scan.get("search_target", "content"),
+                    case_sensitive=scan.get("case_sensitive", True),
+                    multiline=scan.get("multiline", False),
+                    pcre2=scan.get("pcre2", False),
+                    max_files=max_results,
+                    on_process_spawned=_on_spawned,
+                )
+                if job_id:
+                    bjm.unregister_child_processes(job_id)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(
+                    {
+                        "error_level": "cell",
+                        "repository_alias": repo["alias"],
+                        "scan_index": scan_index,
+                        "error": "cell_execution_error",
+                        "message": str(exc),
+                    }
+                )
+                partial = True
+                _cell_exec_error = True
+            finally:
+                if _slot and _limiter is not None:
+                    _limiter.release()
+            if _cell_exec_error:
+                continue
+
+            # Capture phase1_failed.
+            if cell.get("phase1_failed"):
+                errors.append(
+                    {
+                        "error_level": "cell",
+                        "repository_alias": repo["alias"],
+                        "scan_index": scan_index,
+                        "error": "phase1_failed",
+                        "message": cell.get("phase1_error") or "",
+                    }
+                )
+                partial = True
+
+            # Tag and collect matches.
+            pattern_name_val = scan.get("pattern_name") or None
+            for m in cell.get("matches", []):
+                m_copy = dict(m)
+                m_copy["repository_alias"] = repo["alias"]
+                m_copy["scan_index"] = scan_index
+                m_copy["pattern_name"] = pattern_name_val
+                matches.append(m_copy)
+
+            # Tag and collect per-file evaluation errors.
+            for ee in cell.get("evaluation_errors", []):
+                ee_copy = dict(ee)
+                ee_copy["repository_alias"] = repo["alias"]
+                ee_copy["scan_index"] = scan_index
+                evaluation_errors.append(ee_copy)
+                partial = True
+
+            for w in cell.get("warnings", []):
+                warnings.append(
+                    {**w, "repository_alias": repo["alias"], "scan_index": scan_index}
+                )
+                # ^ why partial only for unparsed_files, not every warning; advisory warnings != incomplete scan
+                if w.get("type") == "unparsed_files":
+                    partial = True
+
+            if cell.get("partial"):
+                partial = True
+            if cell.get("phase1_truncated"):
+                phase1_truncated_cells.append(
+                    {
+                        "repository_alias": repo["alias"],
+                        "scan_index": scan_index,
+                        "reason": cell.get("phase1_truncation_reason"),
+                    }
+                )
+
+        if outer_break:
+            break
+
+        repos_completed += 1
+        progress_callback(
+            int(repos_completed / total * 100),
+            "processing",
+            f"{repos_completed}/{total} repos",
+        )
+
+    result: Dict[str, Any] = {
+        "matches": matches,
+        "errors": errors,
+        "evaluation_errors": evaluation_errors,
+        "total_repos": total,
+        "total_scans": len(scans),
+        "total_cells": total * len(scans),
+        "repos_completed": repos_completed,
+        "partial": partial,
+        "timeout": timed_out,
+        "cancelled": cancelled,
+    }
+    if warnings:
+        result["warnings"] = warnings
+    if phase1_truncated_cells:
+        result["phase1_truncated"] = True
+        result["phase1_truncated_cells"] = phase1_truncated_cells
+    return result
+
+
+# ---------------------------------------------------------------------------
+# MCP handler
+# ---------------------------------------------------------------------------
+
+
+def handle_xray_search_batch(
+    params: Dict[str, Any],
+    user: Optional[Any],
+    origin: Optional[SearchOrigin] = None,
+) -> Dict[str, Any]:
+    """MCP handler for the xray_search_batch tool.
+
+    1. Auth: query_repos permission required.
+    2. Parse + validate inputs (hard-fail on structural/static errors).
+    2b. Repo-level access check — see below.
+    3. Resolve repos (graceful-partial) with global-alias fallback.
+    4. Submit ONE background job.
+
+    Error codes:
+        auth_required                  — unauthenticated or missing query_repos.
+        alias_required                 — repository_alias missing or empty.
+        scans_required                 — scans missing, not a list, or empty.
+        access_denied                  — caller lacks access to a requested repo.
+        access_control_unavailable     — access_filtering_service missing.
+        too_many_repositories          — len(aliases) > 50.
+        too_many_scans                 — len(scans) > 50.
+        timeout_out_of_range           — timeout_seconds outside [10, 7200].
+        await_seconds_out_of_range     — await_seconds outside [0, 30].
+        driver_regex_required          — scan.driver_regex missing or empty.
+        mutually_exclusive_params      — both evaluator_code and pattern_name set.
+        xray_evaluator_validation_failed — evaluator code fails Rust whitelist.
+        no_repositories_resolved       — all aliases unresolvable.
+
+    The REST route POST /api/xray/search/batch
+    (routes/xray_routes.py) calls this handler function DIRECTLY,
+    bypassing mcp/protocol.py's handle_tools_call() dispatch layer
+    entirely -- which is where _check_repository_access() normally runs
+    for the genuine MCP xray_search_batch tool call. This handler is
+    therefore the ONLY place that can enforce repo-level access for the
+    REST front door; the check below is redundant-but-harmless for the
+    real MCP tool call (the dispatcher already denies first, so a
+    genuinely unauthorized MCP call never reaches here at all).
+    """
+    _admission = check_query_admission()
+    if not _admission.allowed:
+        return _mcp_response(memory_pressure_mcp_payload(_admission))
+
+    # ------------------------------------------------------------------
+    # 1. Auth
+    # ------------------------------------------------------------------
+    if user is None or not user.has_permission("query_repos"):
+        return _mcp_response({"error": "auth_required"})
+
+    # ------------------------------------------------------------------
+    # 2. Parse + validate
+    # ------------------------------------------------------------------
+    raw_alias = params.get("repository_alias", "")
+    raw_scans = params.get("scans")
+    timeout_raw = params.get("timeout_seconds", _DEFAULT_TIMEOUT_SECONDS)
+    await_raw = params.get("await_seconds", 0)
+    max_results: Optional[int] = params.get("max_results")
+
+    # Parse repository_alias: str | list | JSON-encoded array.
+    if raw_alias is None or raw_alias == "" or raw_alias == []:
+        return _mcp_response(
+            {"error": "alias_required", "message": "repository_alias is required"}
+        )
+    aliases_parsed = _parse_json_string_array(raw_alias)
+    if isinstance(aliases_parsed, list):
+        if not aliases_parsed:
+            return _mcp_response(
+                {
+                    "error": "alias_required",
+                    "message": "repository_alias must not be empty",
+                }
+            )
+        # De-duplicate, preserve order.
+        seen: set = set()
+        aliases: List[str] = []
+        for a in aliases_parsed:
+            if a not in seen:
+                seen.add(a)
+                aliases.append(a)
+    elif isinstance(aliases_parsed, str):
+        if not aliases_parsed:
+            return _mcp_response(
+                {
+                    "error": "alias_required",
+                    "message": "repository_alias must not be empty",
+                }
+            )
+        aliases = [aliases_parsed]
+    else:
+        return _mcp_response(
+            {"error": "alias_required", "message": "repository_alias is required"}
+        )
+
+    # ------------------------------------------------------------------
+    # 2b. Repo-level access check — UNCONDITIONAL,
+    #     BEFORE scan validation, repo resolution, or job submission. The
+    #     REST route calls this handler directly (bypassing the MCP
+    #     dispatcher's own _check_repository_access()), so this is the
+    #     ONLY enforcement point for that front door. Never skipped:
+    #     access_filtering_service missing fails closed, it does not
+    #     bypass the check.
+    # ------------------------------------------------------------------
+    access_refusal = server_platform().require_repo_access(
+        _get_access_filtering_service(), user.username, aliases
+    )
+    if access_refusal is not None:
+        error_code, message = access_refusal
+        return _mcp_response({"error": error_code, "message": message})
+
+    # Validate scans.
+    if raw_scans is None or not isinstance(raw_scans, list) or len(raw_scans) == 0:
+        return _mcp_response(
+            {"error": "scans_required", "message": "scans must be a non-empty list"}
+        )
+
+    # Fan-out bounds.
+    if len(aliases) > _MAX_REPOS:
+        return _mcp_response(
+            {
+                "error": "too_many_repositories",
+                "message": f"repository_alias must have at most {_MAX_REPOS} entries, got {len(aliases)}",
+            }
+        )
+    if len(raw_scans) > _MAX_SCANS:
+        return _mcp_response(
+            {
+                "error": "too_many_scans",
+                "message": f"scans must have at most {_MAX_SCANS} entries, got {len(raw_scans)}",
+            }
+        )
+
+    # Timeout validation.
+    try:
+        timeout_seconds = int(timeout_raw)
+    except (TypeError, ValueError):
+        timeout_seconds = _DEFAULT_TIMEOUT_SECONDS
+    if not (_TIMEOUT_MIN <= timeout_seconds <= _TIMEOUT_MAX):
+        return _mcp_response(
+            {
+                "error": "timeout_out_of_range",
+                "message": (
+                    f"timeout_seconds must be in [{_TIMEOUT_MIN}, {_TIMEOUT_MAX}], "
+                    f"got {timeout_seconds}"
+                ),
+            }
+        )
+
+    # await_seconds validation.
+    try:
+        await_seconds = float(await_raw)
+    except (TypeError, ValueError):
+        await_seconds = 0.0
+    if not (_AWAIT_MIN <= await_seconds <= _AWAIT_MAX):
+        return _mcp_response(
+            {
+                "error": "await_seconds_out_of_range",
+                "message": (
+                    f"await_seconds must be in [{_AWAIT_MIN}, {_AWAIT_MAX}], "
+                    f"got {await_seconds}"
+                ),
+            }
+        )
+    if await_seconds > _AWAIT_WARN_THRESHOLD:
+        logger.warning(
+            "xray_search_batch: await_seconds=%s may saturate threadpool under load",
+            await_seconds,
+        )
+
+    # Per-scan validation.
+    scans: List[Dict[str, Any]] = []
+    for i, scan in enumerate(raw_scans):
+        driver_regex: str = (scan.get("driver_regex") or "").strip()
+        if not driver_regex:
+            return _mcp_response(
+                {
+                    "error": "driver_regex_required",
+                    "message": f"scan[{i}].driver_regex is required and must not be empty",
+                    "scan_index": i,
+                }
+            )
+
+        raw_eval: str = (scan.get("evaluator_code") or "").strip()
+        pname: Optional[str] = scan.get("pattern_name") or None
+
+        if raw_eval and pname:
+            return _mcp_response(
+                {
+                    "error": "mutually_exclusive_params",
+                    "message": (
+                        "evaluator_code and pattern_name are mutually exclusive — "
+                        "provide one or the other, not both"
+                    ),
+                    "scan_index": i,
+                }
+            )
+
+        if raw_eval:
+            validation = validate_rust_evaluator(raw_eval)
+            if not validation.ok:
+                return _mcp_response(
+                    {
+                        "error": "xray_evaluator_validation_failed",
+                        "scan_index": i,
+                        "error_code": validation.error_code,
+                        "offending_construct": validation.offending_construct,
+                        "offending_line": validation.offending_line,
+                        "message": validation.reason,
+                    }
+                )
+
+        # Normalize per-bundle defaults.
+        scans.append(
+            {
+                "driver_regex": driver_regex,
+                "evaluator_code": raw_eval or None,
+                "pattern_name": pname,
+                "pattern_params": scan.get("pattern_params") or None,
+                "search_target": scan.get("search_target") or "content",
+                "case_sensitive": bool(scan.get("case_sensitive", True)),
+                "multiline": bool(scan.get("multiline", False)),
+                "pcre2": bool(scan.get("pcre2", False)),
+            }
+        )
+
+    # ------------------------------------------------------------------
+    # 3. Resolve repos (graceful-partial) with global-alias fallback
+    # ------------------------------------------------------------------
+    arm, grm = _get_arm_and_grm()
+    repo_errors: List[Dict[str, Any]] = []
+    resolved_repos: List[Dict[str, Any]] = []
+
+    from .xray._catalog_guard import catalog_xray_refusal
+
+    access_service = _get_access_filtering_service()
+    for alias in aliases:
+        catalog_refusal = catalog_xray_refusal(alias, user.username, access_service)
+        if catalog_refusal is not None:
+            repo_errors.append({"error_level": "repo", **catalog_refusal})
+            continue
+        # Try direct resolution.
+        path_str = _resolve_repo_path(alias)
+
+        # Global-alias fallback: bare alias → '<alias>-global'.
+        if path_str is None and arm is not None and grm is not None:
+            if not alias.endswith("-global"):
+                if not arm.user_has_activated_repo(user.username, alias):
+                    promoted = server_platform().try_global_fallback(alias, grm)
+                    if promoted is not None:
+                        logger.info(
+                            "batch bare-alias fallback: %r -> %r for user %r",
+                            alias,
+                            promoted,
+                            user.username,
+                        )
+                        alias = promoted
+                        path_str = _resolve_repo_path(alias)
+
+        if path_str is not None:
+            resolved_repos.append({"alias": alias, "path": Path(path_str)})
+        else:
+            repo_errors.append(
+                {
+                    "error_level": "repo",
+                    "repository_alias": alias,
+                    "error": "repository_not_found",
+                    "message": f"Repository alias {alias!r} not found",
+                }
+            )
+
+    if not resolved_repos:
+        return _mcp_response(
+            {
+                "error": "no_repositories_resolved",
+                "message": "None of the specified repository aliases could be resolved",
+                "errors": repo_errors,
+            }
+        )
+
+    # ^ coupled with src/code_indexer/server/routes/xray_routes.py:xray_search_batch; that route must not count again
+    for _ in resolved_repos:
+        api_metrics_service.increment_xray_search(username=user.username)
+
+    # ------------------------------------------------------------------
+    # 4. Submit ONE background job
+    # ------------------------------------------------------------------
+    bjm = _get_background_job_manager()
+    cidx_meta = _get_cidx_meta_path()
+
+    # Capture all needed values now (worker must not access request-time state).
+    captured_repos = list(resolved_repos)
+    captured_scans = list(scans)
+    captured_repo_errors = list(repo_errors)
+    captured_max_results = max_results
+    captured_timeout = timeout_seconds
+    captured_cidx_meta = cidx_meta
+    # Seed pattern writes in the worker take the catalog lock through it.
+    captured_scheduler = _get_app_refresh_scheduler()
+
+    # Story #2107 / Bug #2111: the job records the batch when its result is
+    # known -- one row per repository it resolved (an alias it could not
+    # resolve was rejected and gets no row).
+    event_origin = origin or SearchOrigin(tool="xray_search_batch", door="mcp")
+    record_event = xray_recorder(
+        tool=event_origin.tool,
+        door=event_origin.door,
+        username=user.username,
+        repo_alias=None,
+        pattern=" | ".join(scan["driver_regex"] for scan in captured_scans),
+        batch_repositories=[repo["alias"] for repo in captured_repos],
+    )
+
+    # cancel_check: injected by BackgroundJobManager (declared parameter); a
+    # batch cancelled after its last between-cell check records no event.
+    def _job_fn(progress_callback, cancel_check=None) -> Dict[str, Any]:  # type: ignore[no-untyped-def]
+        raw_result = run_recorded_xray(
+            record_event,
+            lambda: _run_xray_batch_job(
+                resolved_repos=captured_repos,
+                scans=captured_scans,
+                repo_errors=captured_repo_errors,
+                cidx_meta_path=captured_cidx_meta,
+                max_results=captured_max_results,
+                timeout_seconds=captured_timeout,
+                job_id=_jid[0] if _jid else "",
+                bjm=bjm,
+                progress_callback=progress_callback,
+                refresh_scheduler=captured_scheduler,
+            ),
+            cancel_check,
+        )
+        # Bug #1709: a read of the already-built app singleton, never a
+        # construction of it as a side effect of merely reading it.
+        return _truncate_xray_batch_result(
+            raw_result, _app_payload_cache(), owner=user.username
+        )
+
+    # Deferred job_id capture: submit_job requires `func` before it returns the
+    # job_id, but the worker (_job_fn) needs the job_id for between-cell
+    # cancellation checks (bjm.jobs[job_id].cancelled).  The mutable list
+    # _jid[] breaks the circular dependency: _job_fn reads _jid[0] at call
+    # time (after submit_job has returned and appended the id below).
+    _jid: List[str] = []
+    job_id: str = bjm.submit_job(
+        operation_type="xray_search_batch",
+        func=_job_fn,
+        submitter_username=user.username,
+        repo_alias=None,  # no per-repo dedup; concurrent batches allowed
+    )
+    _jid.append(job_id)
+
+    if await_seconds > 0:
+        inline = _await_job_result(bjm, job_id, user.username, await_seconds)
+        if inline is not None:
+            return _mcp_response(inline)
+
+    return _mcp_response({"job_id": job_id})
+
+
+# ---------------------------------------------------------------------------
+# REST batch route helper (used by xray_routes.py)
+# ---------------------------------------------------------------------------
+
+
+def get_batch_handler() -> Any:
+    """Return handle_xray_search_batch for wiring into the REST router."""
+    return handle_xray_search_batch
+
+
+# ---------------------------------------------------------------------------
+# Handler registry
+# ---------------------------------------------------------------------------
+
+
+def _register(registry: Dict[str, Any]) -> None:
+    """Register xray_search_batch handler."""
+    registry["xray_search_batch"] = handle_xray_search_batch

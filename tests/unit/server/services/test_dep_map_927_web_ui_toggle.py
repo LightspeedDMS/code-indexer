@@ -1,47 +1,37 @@
 """Story #927 Phase 3 AC10: Web UI toggle for dep_map_auto_repair_enabled.
 
-Structural content tests of the HTML template source.
-
-AC10: config_section.html must contain:
-  - An exact <select fragment for dep_map_auto_repair_enabled
-  - Label text "Auto-repair after scheduled jobs"
-  - Exact distinctive help text from the story spec
+The toggle is the cidx-depmap feature's setting: the config screen renders it
+in the generic Feature Settings block from the feature's config section
+(label and help text from its ``ConfigKey``), never in the core's Claude CLI
+section.
 """
 
 from pathlib import Path
 
-
-def _template_text() -> str:
-    template_path = (
-        Path(__file__).parent.parent.parent.parent.parent
-        / "src"
-        / "code_indexer"
-        / "server"
-        / "web"
-        / "templates"
-        / "partials"
-        / "config_section.html"
-    )
-    return template_path.read_text()
+from tests.unit.server._depmap_feature import render_depmap_feature_settings
 
 
 class TestAC10WebUIToggle:
-    """AC10: dep_map_auto_repair_enabled toggle present in claude-integration config section."""
+    """AC10: the dep_map_auto_repair_enabled toggle on the config screen."""
 
-    def test_select_element_present(self):
-        """Direct substring confirms <select with name='dep_map_auto_repair_enabled' is present."""
+    def test_checkbox_present(self):
         assert (
-            '<select id="dep-map-auto-repair-enabled" name="dep_map_auto_repair_enabled"'
-            in _template_text()
+            '<input type="checkbox" name="setting__dep_map_auto_repair_enabled"'
+            in render_depmap_feature_settings()
         )
 
     def test_label_text_present(self):
-        """config_section.html contains 'Auto-repair after scheduled jobs' label text."""
-        assert "Auto-repair after scheduled jobs" in _template_text()
+        assert "Auto-repair after scheduled jobs" in render_depmap_feature_settings()
 
     def test_help_text_present(self):
-        """config_section.html contains the exact help text for the auto-repair toggle."""
         assert (
-            "When enabled, scheduled delta and refinement jobs automatically run a repair"
-            " pass once if anomalies are detected." in _template_text()
+            "Repair once after a scheduled delta or refinement job that left "
+            "anomalies" in render_depmap_feature_settings()
         )
+
+    def test_not_in_the_core_claude_cli_section(self):
+        template = (
+            Path(__file__).parents[4]
+            / "src/code_indexer/server/web/templates/partials/config_section.html"
+        ).read_text()
+        assert "dep_map_auto_repair_enabled" not in template

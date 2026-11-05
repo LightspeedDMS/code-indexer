@@ -1,0 +1,49 @@
+{# Feature add-on config sections (server/features/web.py): the only place a
+   feature's settings are shown and edited. Runtime keys are edited here;
+   bootstrap keys live in config.json and are shown read-only. #}
+{% if request is defined and request.app.state.feature_config_view is defined %}
+{% set feature_view = request.app.state.feature_config_view(request) %}
+{% if feature_view.sections %}
+<section id="feature-settings">
+    <h2>Feature Settings</h2>
+    {% for section in feature_view.sections %}
+    <article class="feature-config-section" id="feature-settings-{{ section.feature }}" data-feature="{{ section.feature }}">
+        <header><strong>{{ section.title }}</strong> <small>({{ section.feature }})</small></header>
+        {% if section.description %}
+        <p class="section-description">{{ section.description }}</p>
+        {% endif %}
+        <form method="post" action="/admin/features/config/{{ section.feature }}">
+            <input type="hidden" name="csrf_token" value="{{ feature_view.csrf_token }}">
+            <table>
+                <thead><tr><th>Setting</th><th>Value</th><th>Kind</th><th>Description</th></tr></thead>
+                <tbody>
+                {% for key in section['keys'] %}
+                <tr>
+                    <td>{{ key.label }}{% if key.label != key.name %}<br><code>{{ key.name }}</code>{% endif %}</td>
+                    <td>
+                        {% if key.kind == 'bootstrap' %}
+                        <code>{{ key.value }}</code>
+                        {% elif key.type == 'bool' %}
+                        <input type="checkbox" name="setting__{{ key.name }}" {% if key.value %}checked{% endif %}>
+                        {% elif key.type in ('int', 'float') %}
+                        <input type="number" name="setting__{{ key.name }}" value="{{ key.value }}"{% if key.minimum is not none %} min="{{ key.minimum }}"{% endif %}{% if key.maximum is not none %} max="{{ key.maximum }}"{% endif %} step="{{ 'any' if key.type == 'float' else '1' }}">
+                        {% else %}
+                        <input type="text" name="setting__{{ key.name }}" value="{{ key.value }}">
+                        {% endif %}
+                    </td>
+                    <td>{% if key.kind == 'bootstrap' %}bootstrap (config.json){% else %}runtime{% endif %}</td>
+                    <td>
+                        {% if key.restart_required %}<small class="restart-note">Requires server restart</small><br>{% endif %}
+                        {{ key.description }}
+                    </td>
+                </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+            <button type="submit">Save {{ section.title }}</button>
+        </form>
+    </article>
+    {% endfor %}
+</section>
+{% endif %}
+{% endif %}

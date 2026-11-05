@@ -7,7 +7,7 @@ Story #216 AC7:
 - invoke_delta_merge_file passes allowed_tools and dangerously_skip_permissions
 """
 
-_SUBPROCESS_PATH = "code_indexer.global_repos.dependency_map_analyzer.subprocess.run"
+_SUBPROCESS_PATH = "cidx_depmap.server.dependency_map_analyzer.subprocess.run"
 _MTIME_TICK_S = 0.05
 
 
@@ -37,7 +37,7 @@ def _make_edit_side_effect(temp_glob: str, new_content: str, tmp_path):
 
 
 def _make_analyzer(tmp_path):
-    from code_indexer.global_repos.dependency_map_analyzer import DependencyMapAnalyzer
+    from cidx_depmap.server.dependency_map_analyzer import DependencyMapAnalyzer
 
     return DependencyMapAnalyzer(
         golden_repos_root=tmp_path,
@@ -133,7 +133,7 @@ class TestInvokeDeltaMergeFileAllowedTools:
         """AC7 (Bug #936): invoke_delta_merge_file dispatches with flow='dependency_map_delta_merge'."""
         from unittest.mock import MagicMock
 
-        from code_indexer.global_repos.dependency_map_analyzer import (
+        from cidx_depmap.server.dependency_map_analyzer import (
             DependencyMapAnalyzer,
         )
 

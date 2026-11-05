@@ -22,6 +22,8 @@ from unittest.mock import patch
 
 import pytest
 
+from cidx_xray.server.mcp.xray import set_xray_cell_limiter, set_xray_executor
+
 from tests.unit.server.services.search_event_real_stores import (
     PG_AVAILABLE,
     PG_SKIP_REASON,
@@ -46,10 +48,10 @@ _KINDS = [
 ]
 
 _XRAY_MODULES = (
-    "code_indexer.server.mcp.handlers.xray._search",
-    "code_indexer.server.mcp.handlers.xray._explore",
-    "code_indexer.server.mcp.handlers.xray_batch",
-    "code_indexer.server.routes.xray_routes",
+    "cidx_xray.server.mcp.xray._search",
+    "cidx_xray.server.mcp.xray._explore",
+    "cidx_xray.server.mcp.xray_batch",
+    "cidx_xray.server.routes",
 )
 
 
@@ -70,8 +72,6 @@ def env(request, tmp_path) -> Iterator[XRayEnv]:
     with recorder(request.param, tmp_path) as rec:
         state = SimpleNamespace(
             search_event_log_writer=rec.writer,
-            xray_executor=executor,
-            xray_cell_limiter=None,
             payload_cache=None,
             access_filtering_service=SimpleNamespace(is_admin_user=lambda u: True),
         )
@@ -90,9 +90,13 @@ def env(request, tmp_path) -> Iterator[XRayEnv]:
         ]
         for p in patches:
             p.start()
+        # The xray feature's on_startup installs its executor (phase 4c).
+        set_xray_executor(executor)
         try:
             yield XRayEnv(rec=rec, repo=repo, bjm=bjm, tracker=tracker, state=state)
         finally:
+            set_xray_executor(None)
+            set_xray_cell_limiter(None)
             for p in reversed(patches):
                 p.stop()
             executor.shutdown(wait=True)
@@ -114,7 +118,7 @@ def _mcp_body(response: Dict[str, Any]) -> Dict[str, Any]:
 
 class TestMcpXraySearch:
     def test_mcp_xray_search_records_one_xray_row(self, env):
-        from code_indexer.server.mcp.handlers.xray import handle_xray_search
+        from cidx_xray.server.mcp.xray import handle_xray_search
 
         body = _mcp_body(
             _run_async(
@@ -141,7 +145,7 @@ class TestMcpXraySearch:
         assert row["cohere_cache_hit"] is None
 
     def test_mcp_multi_repo_xray_search_records_one_row_per_alias(self, env):
-        from code_indexer.server.mcp.handlers.xray import handle_xray_search
+        from cidx_xray.server.mcp.xray import handle_xray_search
 
         async def _search_and_wait() -> Dict[str, Any]:
             response = await handle_xray_search(
@@ -173,7 +177,7 @@ class TestMcpXraySearch:
 
 class TestMcpXrayExplore:
     def test_mcp_xray_explore_records_one_xray_row(self, env):
-        from code_indexer.server.mcp.handlers.xray import handle_xray_explore
+        from cidx_xray.server.mcp.xray import handle_xray_explore
 
         body = _mcp_body(
             _run_async(
@@ -200,7 +204,7 @@ class TestMcpXrayExplore:
         assert row["query_text"] == r"def example_"
 
     def test_mcp_multi_repo_xray_explore_records_one_row_per_alias(self, env):
-        from code_indexer.server.mcp.handlers.xray import handle_xray_explore
+        from cidx_xray.server.mcp.xray import handle_xray_explore
 
         async def _explore_and_wait() -> Dict[str, Any]:
             body = _mcp_body(
@@ -234,10 +238,9 @@ def _rest_client(env: XRayEnv, username: str) -> Any:
     from fastapi.testclient import TestClient
 
     from code_indexer.server.auth.dependencies import get_current_user
-    from code_indexer.server.routes.xray_routes import router
+    from tests.unit.server._xray_feature import mount_xray_routes
 
-    app = FastAPI()
-    app.include_router(router)
+    app = mount_xray_routes(FastAPI())
     app.state.search_event_log_writer = env.state.search_event_log_writer
     app.state.access_filtering_service = env.state.access_filtering_service
     app.dependency_overrides[get_current_user] = lambda: make_user(username)
@@ -249,7 +252,7 @@ class TestXRayJobThatRaises:
     failure row (its exception's class). The engine is the stand-in."""
 
     def test_rest_xray_job_that_raises_records_a_failure_row(self, env):
-        from code_indexer.xray.search_engine import XRaySearchEngine
+        from cidx_xray.search_engine import XRaySearchEngine
 
         def _boom(self: Any, **_: Any) -> Any:
             raise RuntimeError("engine crashed")
@@ -275,7 +278,7 @@ class TestXRayJobThatRaises:
         )
 
     def test_batch_job_that_raises_records_a_failure_row(self, env):
-        from code_indexer.server.mcp.handlers import xray_batch
+        from cidx_xray.server.mcp import xray_batch
 
         def _boom(**_: Any) -> Any:
             raise RuntimeError("batch crashed")
@@ -298,8 +301,8 @@ class TestXRayJobThatRaises:
         """MCP xray_search runs its job on the X-Ray executor and awaits it
         inside the handler (no BackgroundJobManager); the job's exception
         propagates out of the handler to the MCP dispatcher."""
-        from code_indexer.server.mcp.handlers.xray import handle_xray_search
-        from code_indexer.xray.search_engine import XRaySearchEngine
+        from cidx_xray.server.mcp.xray import handle_xray_search
+        from cidx_xray.search_engine import XRaySearchEngine
 
         def _boom(self: Any, **_: Any) -> Any:
             raise RuntimeError("engine crashed")
@@ -356,7 +359,7 @@ _BATCH_SCANS = [
 
 class TestXrayBatch:
     def test_mcp_batch_records_one_row_per_call(self, env):
-        from code_indexer.server.mcp.handlers.xray_batch import (
+        from cidx_xray.server.mcp.xray_batch import (
             handle_xray_search_batch,
         )
 
@@ -404,7 +407,7 @@ class TestXrayBatchPerRepository:
     repository, with that repository's own match count and outcome."""
 
     def test_two_repository_batch_writes_one_row_per_repository(self, env):
-        from code_indexer.server.mcp.handlers.xray_batch import (
+        from cidx_xray.server.mcp.xray_batch import (
             handle_xray_search_batch,
         )
 
@@ -422,7 +425,7 @@ class TestXrayBatchPerRepository:
         assert len({r["correlation_id"] for r in rows}) == 1
 
     def test_two_repository_batch_that_raises_writes_a_failure_row_each(self, env):
-        from code_indexer.server.mcp.handlers import xray_batch
+        from cidx_xray.server.mcp import xray_batch
 
         def _boom(**_: Any) -> Any:
             raise RuntimeError("batch crashed")
@@ -459,7 +462,7 @@ class TestExportFilter:
 
         import openpyxl
 
-        from code_indexer.server.mcp.handlers.xray import handle_xray_search
+        from cidx_xray.server.mcp.xray import handle_xray_search
         from code_indexer.server.services.query_analytics_export_service import (
             QueryAnalyticsExportService,
         )
@@ -508,7 +511,7 @@ class TestFailedSearchesRecordAFailureRow:
     ran and failed is a failure row with its error class."""
 
     def test_mcp_xray_search_whose_driver_failed_records_a_failure_row(self, env):
-        from code_indexer.server.mcp.handlers.xray import handle_xray_search
+        from cidx_xray.server.mcp.xray import handle_xray_search
 
         body = _mcp_body(
             _run_async(
@@ -526,7 +529,7 @@ class TestFailedSearchesRecordAFailureRow:
         )
 
     def test_mcp_xray_explore_whose_driver_failed_records_a_failure_row(self, env):
-        from code_indexer.server.mcp.handlers.xray import handle_xray_explore
+        from cidx_xray.server.mcp.xray import handle_xray_explore
 
         body = _mcp_body(
             _run_async(
@@ -566,7 +569,7 @@ class TestFailedSearchesRecordAFailureRow:
         )
 
     def test_batch_whose_every_cell_failed_records_a_failure_row(self, env):
-        from code_indexer.server.mcp.handlers.xray_batch import (
+        from cidx_xray.server.mcp.xray_batch import (
             handle_xray_search_batch,
         )
 
@@ -587,7 +590,7 @@ class TestFailedSearchesRecordAFailureRow:
         )
 
     def test_batch_with_one_failed_cell_records_the_cells_that_ran(self, env):
-        from code_indexer.server.mcp.handlers.xray_batch import (
+        from cidx_xray.server.mcp.xray_batch import (
             handle_xray_search_batch,
         )
 
@@ -726,7 +729,7 @@ class TestEvaluatorThatFailsRecordsAFailureRow:
     def test_mcp_xray_search_whose_evaluator_failed_to_compile_records_a_failure(
         self, env
     ):
-        from code_indexer.server.mcp.handlers.xray import handle_xray_search
+        from cidx_xray.server.mcp.xray import handle_xray_search
 
         body = _mcp_body(
             _run_async(
@@ -748,7 +751,7 @@ class TestEvaluatorThatFailsRecordsAFailureRow:
         )
 
     def test_batch_whose_every_cell_failed_to_compile_records_a_failure(self, env):
-        from code_indexer.server.mcp.handlers.xray_batch import (
+        from cidx_xray.server.mcp.xray_batch import (
             handle_xray_search_batch,
         )
 
@@ -781,7 +784,7 @@ class TestCancelledMcpJobsRecordNothing:
         "handler_name", ["handle_xray_search", "handle_xray_explore"]
     )
     def test_job_cancelled_while_running_records_no_row(self, env, handler_name):
-        from code_indexer.server.mcp.handlers import xray
+        from cidx_xray.server.mcp import xray
 
         env.tracker.start_error = "cancelled"
 
@@ -794,7 +797,7 @@ class TestCancelledMcpJobsRecordNothing:
         """Only a cancellation (BackgroundJobManager.cancel_job fails the job
         with "cancelled") suppresses the row; a job the tracker failed for
         any other reason is not a cancellation."""
-        from code_indexer.server.mcp.handlers import xray
+        from cidx_xray.server.mcp import xray
 
         env.tracker.start_error = "Orphaned by server restart"
 
@@ -804,7 +807,7 @@ class TestCancelledMcpJobsRecordNothing:
         assert (row["outcome"], row["result_count"]) == ("success", 3)
 
     def test_status_update_that_raises_before_the_search_records_nothing(self, env):
-        from code_indexer.server.mcp.handlers import xray
+        from cidx_xray.server.mcp import xray
 
         def _unwritable(job_id: str, status: str, **_: Any) -> None:
             raise RuntimeError("job store unwritable")
@@ -838,7 +841,7 @@ class TestCancelledBackgroundJobsRecordNothing:
         assert env.rec.rows(search_type="xray") == []
 
     def test_batch_cancelled_while_running_records_no_row(self, env):
-        from code_indexer.server.mcp.handlers.xray_batch import (
+        from cidx_xray.server.mcp.xray_batch import (
             handle_xray_search_batch,
         )
 
@@ -856,10 +859,10 @@ class TestCancelledBackgroundJobsRecordNothing:
 
 class TestRecordingNeverChangesTheSearch:
     def test_job_without_worker_slot_records_no_row(self, env):
-        from code_indexer.server.mcp.handlers.xray import handle_xray_search
+        from cidx_xray.server.mcp.xray import handle_xray_search
 
-        env.state.xray_cell_limiter = SimpleNamespace(
-            acquire=lambda timeout: False, release=lambda: None
+        set_xray_cell_limiter(
+            SimpleNamespace(acquire=lambda timeout: False, release=lambda: None)
         )
 
         body = _mcp_body(
@@ -870,7 +873,7 @@ class TestRecordingNeverChangesTheSearch:
         assert env.rec.rows(search_type="xray") == []
 
     def test_recording_failure_never_fails_the_search(self, env):
-        from code_indexer.server.mcp.handlers.xray import handle_xray_search
+        from cidx_xray.server.mcp.xray import handle_xray_search
 
         def _broken_enqueue(record: Any) -> None:
             raise RuntimeError("writer unavailable")

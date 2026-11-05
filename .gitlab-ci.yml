@@ -1,0 +1,720 @@
+# CI for code-indexer-internal (the cidx multi-pod / cluster-mode fork).
+#
+# Stages
+#   test   smoke tests (mirrors the upstream GitHub CI) + advisory ruff lint.
+#   build  Docker build + push of the cluster-mode server image to the shared
+#          `gitlab-runner` ECR in the legacy tools account (601706661779) -- the
+#          ECR home every tools-* image shares. The ArgoCD overlay
+#          (cloud-engineering/k8s/tools/dev-platform/claude-code-indexer) pins a
+#          `gitlab-runner:cidx-<version>-<sha>` tag produced here.
+#
+# Image push runs under the default runner's NATIVE 601 identity (no assume-role)
+# -- the same path sandbox-mcp's "Deploy Docker" job uses. The `gitlab-runner`
+# repo enforces IMMUTABLE tags, so the moving `cidx-tools-latest` tag is
+# re-pointed via batch-get-image -> batch-delete-image -> put-image (a fresh
+# create, which immutability allows), never a plain `docker push`.
+#
+# Submodules are skipped (GIT_SUBMODULE_STRATEGY: none): the image pulls its
+# custom hnswlib from the git+https dependency declared in pyproject (the vendored
+# third_party/hnswlib submodule is not COPYed into the image), and one fixture
+# submodule uses an SSH URL that CI cannot fetch.
+
+stages:
+  - test
+  - build
+
+variables:
+  GIT_SUBMODULE_STRATEGY: none
+  ECR_REGION: "us-west-2"
+  ECR_ACCOUNT_ID: "601706661779"
+  ECR_REPOSITORY_NAME: "gitlab-runner"
+  IMAGE_PREFIX: "cidx"
+  LATEST_TAG: "cidx-tools-latest"
+  # Tag prefix for the BuildKit multi-stage layer cache (see build:image).
+  # Cache tags are unique per build -- the repo is IMMUTABLE, so a fixed cache
+  # tag could never be re-exported -- and pruned to the newest one at the end
+  # of each successful build.
+  CACHE_TAG_PREFIX: "cidx-buildcache"
+
+# One pipeline per change: merge-request pipelines, master branch pipelines, and
+# manual web-triggered pipelines (to build a pre-merge branch image on demand) --
+# never a duplicate branch pipeline while an MR is open.
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "master"
+    - if: $CI_PIPELINE_SOURCE == "web"
+
+# -- test ----------------------------------------------------------------------
+smoke:
+  stage: test
+  tags: [default]
+  image: python:3.11-slim-bookworm
+  # A real PostgreSQL, because ~46 tests across four files are gated on
+  # TEST_POSTGRES_DSN and have skipped on every pipeline since they were
+  # written. They are the only coverage of the cluster-mode storage backends --
+  # the code path production actually runs. Measured locally: without the DSN
+  # 85 passed / 46 skipped; with it 131 passed / 0 skipped. The gate was hiding
+  # working tests, not flaky ones.
+  services:
+    - name: public.ecr.aws/docker/library/postgres:16-alpine
+      alias: postgres
+      variables:
+        POSTGRES_PASSWORD: ci
+        POSTGRES_DB: cidx
+  variables:
+    PIP_NO_CACHE_DIR: "1"
+    # psycopg arrives via the `cluster` extra already installed below.
+    TEST_POSTGRES_DSN: "postgresql://postgres:ci@postgres:5432/cidx"
+  before_script:
+    # hnswlib + psycopg build from source; the git+https hnswlib dep needs git.
+    # ripgrep: the ripgrep seam's conformance suite runs the real rg (local)
+    # and behind the fake workspace-mcp, which also shells out to rg.
+    - apt-get update && apt-get install -y --no-install-recommends build-essential cmake git pkg-config ripgrep
+    - python -m pip install --upgrade pip
+    - pip install ".[dev,cluster,cohere]"
+  script:
+    # Same smoke subset the upstream GitHub CI runs (no live Postgres required),
+    # plus the fork's own invariant guards.
+    #
+    # The git-seam guard is here because it only earns its keep in CI. It exists
+    # to catch raw git calls that an upstream snapshot merge reintroduces --
+    # precisely the moment nobody is running a local script -- and it was
+    # previously referenced by no CI job, no pre-commit hook and no automation
+    # script, while fast-automation.sh passes --ignore=tests/unit/server/. It
+    # runs in seconds and build:image is already gated on this stage.
+    #
+    # MCP response serialization is in this list for the same reason as the
+    # fleet-concurrency files: the datetime fix (#1642) is correct and has
+    # three test files, none of which any CI job collected. A canary
+    # comparison caught the pre-fix image failing query_audit_logs with
+    # "Object of type datetime is not JSON serializable"; nothing would have
+    # caught it coming back.
+    #
+    # BOTH CI jobs are curated allowlists: this one names files, and
+    # build:image's in-image step runs tests/unit/xray/ and the cidx-xray
+    # distribution's tests (packages/features/cidx-xray/tests/) plus six MCP files.
+    # Anything not explicitly named is never COLLECTED -- so unlike a gated test
+    # it does not even show up as a skip, and there is no number anywhere that
+    # goes down when coverage is lost. The background-work audit's five changes
+    # (leader gating, per-process budgets, pod-pull refresh, catch-up
+    # single-flight, HNSW sweep gating) all merged green with none of their tests
+    # ever collected. The block below closes that, and
+    # tests/unit/ci/test_smoke_covers_fleet_invariants.py keeps it closed: it
+    # derives the required set from what the tests IMPORT, so a new one is not
+    # silently left out of this list.
+    - >
+      python -m pytest
+      tests/unit/server/storage/test_factory.py
+      tests/unit/server/mcp/test_protocol.py
+      tests/unit/services/test_database_health_cluster.py
+      tests/unit/server/storage/shared/test_git_backend_run_bytes_redaction.py
+      tests/unit/utils/test_git_invoker.py
+      tests/unit/utils/test_subprocess_diagnostics_1832.py
+      packages/features/cidx-xray/tests/test_python_validator_nested_std_paths.py
+      tests/unit/server/storage/postgres/test_xray_cache_backend.py
+      tests/unit/server/storage/test_search_event_log_backends.py
+      tests/unit/server/storage/test_windowed_cache_metrics_backends_1294.py
+      tests/unit/server/mcp/test_query_audit_logs_shared_read.py
+      tests/unit/server/auth/test_token_bucket_pg_atomic_concurrency_1334.py
+      tests/unit/server/startup/test_leader_gate.py
+      tests/unit/server/services/hnsw_orphan_sweep/test_scheduler_leader_gate.py
+      tests/unit/server/services/test_file_service_index_serve_evo66189.py
+      tests/unit/server/mcp/test_browse_directory_absolute_pattern_and_leading_slash_1886_r1_r2.py
+      tests/unit/server/services/hnsw_orphan_sweep/test_repair_executor_1360.py
+      tests/unit/server/services/hnsw_orphan_sweep/test_scheduler_1360.py
+      tests/unit/global_repos/test_refresh_scheduler_hnsw_orphan_forwarding_1388.py
+      tests/unit/server/wiki/test_wiki_routes.py
+      tests/unit/server/wiki/test_wiki_test_helpers.py
+      tests/unit/server/services/test_scheduled_catchup_single_flight.py
+      tests/unit/server/repositories/test_golden_repo_add_during_removal.py
+      tests/unit/server/services/test_distributed_job_worker_partial_2125.py
+      tests/unit/server/services/test_pod_pull_dispatch_stats_attribution_2118.py
+      tests/unit/global_repos/test_refresh_registered_branch_2148.py
+      tests/unit/global_repos/test_refresh_runtime_credentials.py
+      tests/unit/global_repos/test_refresh_pod_pull_migration.py
+      tests/unit/server/services/test_metadata_reader_failed_files_2125.py
+      tests/unit/server/repositories/test_background_jobs_worker_budget.py
+      tests/unit/server/repositories/test_background_jobs_pod_pull_submit.py
+      tests/unit/server/repositories/test_background_jobs_concurrency.py
+      tests/unit/global_repos/test_refresh_budget_worker_share.py
+      tests/unit/global_repos/test_refresh_scheduler_yields_under_pressure.py
+      tests/unit/global_repos/test_refresh_scheduler_background_jobs.py
+      tests/unit/utils/test_worker_budget.py
+      tests/unit/ci/test_smoke_covers_fleet_invariants.py
+      tests/unit/global_repos/test_cleanup_manager_cluster_dedup_1844.py
+      tests/unit/global_repos/test_cleanup_manager_live_reader_cross_node_1845.py
+      tests/unit/global_repos/test_refresh_scheduler_activation_coordination_1393.py
+      tests/unit/server/mcp/test_xray_multi_repo_bug1074.py
+      tests/unit/server/repositories/test_background_job_manager_tracker.py
+      tests/unit/server/repositories/test_background_jobs_pod_pull_status_readthrough_bug1424.py
+      tests/unit/server/repositories/test_background_jobs_temporal_query_no_warning_1535.py
+      tests/unit/server/repositories/test_background_jobs_pg_startup_cleanup_evo70528.py
+      tests/unit/server/utils/test_config_orphan_key_strip_1226.py
+      packages/features/cidx-xray/tests/test_xray_cli_path_override.py
+      tests/unit/server/repositories/test_golden_repo_manager_lifecycle_hook.py
+      tests/unit/server/repositories/test_golden_repo_add_duplicate_authoritative_evo64616.py
+      tests/unit/server/repositories/test_golden_repo_registry_reconcile_evo65484.py
+      tests/unit/server/services/test_global_activation_repair_evo64616.py
+      tests/unit/server/repositories/test_submit_job_atomic_dedup.py
+      tests/unit/server/services/dep_map_tracking/test_conflict.py
+      tests/unit/server/services/fleet_migration/test_scheduler_1458.py
+      tests/unit/server/services/fleet_migration/test_scheduler_canary_gate_1461.py
+      tests/unit/server/services/semantic_backfill/test_policy.py
+      tests/unit/server/services/test_golden_index_backfill.py
+      tests/unit/server/services/test_bug1235_pg_duplicate_claim_race.py
+      tests/unit/server/services/test_cross_worker_dedup_1184.py
+      tests/unit/server/services/test_dep_map_927_manual_no_auto_repair.py
+      tests/unit/server/services/test_dep_map_927_scheduler_helpers.py
+      tests/unit/server/services/test_dependency_map_lifecycle_gate.py
+      tests/unit/server/services/test_dependency_map_service_cancel.py
+      tests/unit/server/services/test_description_refresh_circuit_breaker_1096.py
+      tests/unit/server/services/test_description_refresh_integration_1094.py
+      tests/unit/server/services/test_description_refresh_scheduler_bug1089.py
+      tests/unit/server/services/test_description_refresh_scheduler_lifecycle_backfill.py
+      tests/unit/server/services/test_distributed_job_claimer.py
+      tests/unit/server/services/test_distributed_job_claimer_concurrency.py
+      tests/unit/server/services/test_distributed_job_claimer_memory_gate.py
+      tests/unit/server/services/test_distributed_job_claimer_metadata.py
+      tests/unit/server/services/test_distributed_job_claimer_progress.py
+      tests/unit/server/services/test_distributed_job_worker.py
+      tests/unit/server/services/test_distributed_job_worker_claimed_refresh_1839.py
+      tests/unit/server/services/test_golden_repo_reconciler_bug1317.py
+      tests/unit/server/services/test_index_dispatch_coverage_bug1424.py
+      tests/unit/server/services/test_index_job_claim_loop.py
+      tests/unit/server/services/test_job_tracker_atomic_register.py
+      tests/unit/server/services/test_job_tracker_blocking_lookup_1220.py
+      tests/unit/server/services/test_job_tracker_node_scoped_orphan_cleanup_1400.py
+      tests/unit/server/services/test_job_tracker_terminal_revert_1348.py
+      tests/unit/server/services/test_job_tracker_update_dedup_1256.py
+      tests/unit/server/services/test_pod_pull_executing_node_bug1430.py
+      tests/unit/server/services/test_pod_pull_work_stealing_roundtrip_bug1424.py
+      tests/unit/server/services/test_versioned_snapshot_reconciler_1567.py
+      tests/unit/server/startup/test_lifespan_cancel_handler_wiring_1153.py
+      tests/unit/server/storage/postgres/test_background_jobs_backend_duplicate_log_level_1565.py
+      tests/unit/server/storage/postgres/test_background_jobs_postgres.py
+      tests/unit/server/storage/postgres/test_null_executing_node_orphan_1512.py
+      tests/unit/server/storage/test_background_jobs_active_unique_index.py
+      tests/unit/server/utils/test_cluster_node_id_resolver.py
+      packages/features/cidx-xray/tests/test_rust_backend_compile_budget_worker_aware.py
+      tests/unit/server/mcp/test_query_audit_logs_datetime_serialization_1642.py
+      tests/unit/server/mcp/test_datetime_serialization.py
+      tests/unit/server/mcp/test_json_default_fallback_1645.py
+      tests/unit/server/services/test_backend_plugin_loader.py
+      tests/unit/server/services/test_empty_repo_source_and_scip_evo64616.py
+      tests/unit/server/services/test_content_backend_plugin.py
+      tests/unit/server/services/test_description_invoker_seam_evo64616.py
+      tests/unit/server/startup/test_content_backend_wiring.py
+      tests/unit/server/startup/test_content_backend_parked_on_app_state.py
+      tests/unit/server/services/test_control_plane_metadata_seam_evo64616.py
+      tests/unit/server/services/test_file_tools_content_seam.py
+      tests/unit/server/services/test_large_repo_seam_reads_evo64616.py
+      packages/features/cidx-xray/tests/test_xray_delegation_api.py
+      tests/unit/global_repos/test_refresh_scheduler_error_logging.py
+      tests/unit/services/test_unborn_head_is_empty_evo64616.py
+      tests/unit/indexing/test_fetch_planner.py
+      tests/unit/indexing/test_manifest_pass_lifetime.py
+      tests/unit/indexing/test_delegated_pod_has_no_local_repo.py
+      tests/unit/server/repositories/test_golden_repo_delegated_content.py
+      tests/unit/server/routers/test_activated_repos_routes_content_seam.py
+      tests/unit/server/repositories/test_activated_repos_content_seam.py
+      tests/unit/server/services/test_activated_write_reindex.py
+      tests/unit/server/auto_update/test_operator_tooling_content_seam.py
+      tests/unit/server/test_activated_rest_surfaces_content_seam.py
+      tests/unit/server/test_activated_branch_health_fail_loud.py
+      tests/unit/services/test_index_git_seam.py
+      tests/unit/services/test_reconcile_git_seam_mountless.py
+      tests/unit/services/test_delegated_max_file_size.py
+      tests/unit/services/test_project_id_git_seam.py
+      tests/unit/services/test_smart_indexer_pass_existence.py
+      tests/unit/storage/test_fvs_chunk_content_seam.py
+      tests/unit/services/temporal/test_temporal_query_history_elsewhere.py
+      tests/unit/server/storage/shared/test_git_backend.py
+      tests/unit/server/services/test_git_tools_content_seam.py
+      tests/unit/services/test_git_push_with_pat.py
+      tests/unit/server/git/test_shared_git_push.py
+      tests/unit/services/test_git_push_error_masks_url_authority.py
+      tests/unit/server/services/test_golden_git_history_git_exec.py
+      tests/unit/global_repos/test_file_history_follow_budget_evo64616.py
+      tests/unit/server/services/test_orchestrator_golden_repo_source.py
+      tests/unit/global_repos/test_refresh_git_seam_mountless.py
+      tests/unit/global_repos/test_refresh_scheduler_indexing_types.py
+      tests/unit/global_repos/test_reclone_mountless.py
+      tests/unit/global_repos/test_trigram_mountless.py
+      tests/unit/global_repos/test_trigram_delegated_build.py
+      tests/unit/global_repos/test_regex_search_narrowing_and_early_stop.py
+      tests/unit/xray/test_xray_content_probe_only_unmatched.py
+      tests/unit/server/routers/test_metadata_outbox_admin.py
+      tests/unit/global_repos/test_index_store_snapshot.py
+      tests/unit/server/startup/test_index_store_wiring.py
+      tests/unit/server/services/test_index_materializer_cross_pod.py
+      tests/unit/server/services/test_index_materializer_leftovers_evo64616.py
+      tests/unit/global_repos/test_refresh_repaired_repo_refreshable_evo64616.py
+      tests/unit/global_repos/test_refresh_heals_repointed_origin_evo64616.py
+      tests/unit/server/services/test_golden_repo_rename_evo64616.py
+      tests/unit/server/services/test_golden_repo_rename_satellites_evo64616.py
+      tests/unit/server/services/test_golden_catalog_sync_evo64616.py
+      tests/unit/server/services/test_workspace_registration_sync_evo64616.py
+      tests/unit/server/services/test_memory_governor_working_set_evo64616.py
+      tests/unit/server/services/test_base_clone_never_a_checkout_evo64616.py
+      tests/unit/server/repositories/test_golden_add_publishes_index.py
+      tests/unit/server/repositories/test_add_index_swap_records_published_index.py
+      tests/unit/server/mcp/test_swap_sites_record_published_index.py
+      tests/unit/server/services/test_unpublished_swaps_fail_loud.py
+      tests/unit/server/repositories/test_activated_index_store_cross_pod.py
+      tests/unit/server/test_golden_mount_removal.py
+      tests/unit/server/startup/test_golden_mount_guard.py
+      tests/unit/server/test_activated_git_wiki_status_seam.py
+      tests/unit/server/mcp/test_global_alias_handler_fallbacks.py
+      tests/unit/server/services/test_temporal_not_served_here.py
+      tests/unit/services/test_composite_query_backends.py
+      tests/unit/server/services/test_activated_index_store_readers.py
+      tests/unit/server/routers/test_repository_health_golden_served.py
+      tests/unit/server/services/test_checkout_sweep.py
+      tests/unit/server/services/test_served_index_cache.py
+      tests/unit/global_repos/test_refresh_base_seeded_after_eviction.py
+      tests/unit/server/services/test_served_index_read_paths.py
+      tests/unit/server/services/test_deep_fidelity_audit_bounded_capacity_1822.py
+      tests/unit/server/services/hnsw_orphan_sweep/test_golden_repair_publishes.py
+      tests/unit/server/services/test_index_store_backfill.py
+      tests/unit/server/services/test_activated_history_git_seam.py
+      tests/unit/server/startup/test_content_writer_wiring.py
+      tests/unit/server/services/test_activated_file_tools_content_seam.py
+      tests/unit/server/mcp/test_files_meta_visibility.py
+      tests/unit/server/routers/test_repo_files_meta_visibility_delegated.py
+      tests/unit/server/startup/test_ripgrep_backend_wiring.py
+      tests/unit/server/startup/test_ripgrep_backend_parked_on_app_state.py
+      tests/unit/indexing/test_content_prefetcher.py
+      tests/unit/indexing/test_manifest_mtime.py
+      tests/unit/indexing/test_manifest_prune_dirs.py
+      tests/unit/indexing/test_manifest_discovery.py
+      tests/unit/test_content_backend_seam.py
+      tests/unit/test_content_backend_invariants.py
+      tests/unit/test_manifest_backed_blob_hash.py
+      tests/unit/test_single_read_equivalence.py
+      tests/unit/services/test_progressive_metadata_lifecycle_1865.py
+      tests/unit/server/test_kernel_wiring.py
+      tests/unit/kernel/test_capabilities.py
+      tests/unit/kernel/test_xray_scip_import_boundary.py
+      tests/unit/xray/test_xray_reads_through_content_seam.py
+      tests/unit/xray/test_xray_line_content_emitted.py
+      tests/unit/utils/test_sandbox_mcp_client.py
+      tests/unit/xray/test_xray_execution_seam.py
+      tests/unit/server/startup/test_xray_backend_wiring.py
+      tests/unit/scip/test_plugin_scip_indexer.py
+      tests/unit/server/startup/test_scip_backend_plugin_wiring.py
+      tests/unit/server/services/test_scip_repo_reads_mountless.py
+      tests/unit/scip/test_scip_context_content_seam.py
+      tests/unit/server/services/test_scip_query_access_scoping.py
+      tests/unit/test_scip_cli_verification_stderr.py
+      tests/unit/global_repos/test_cleanup_already_deleted_evo64616.py
+      tests/unit/server/repositories/test_change_branch_off_deleted_branch.py
+      tests/unit/global_repos/test_stale_index_signal_trigram.py
+      tests/unit/global_repos/test_refresh_trigram_backfill.py
+      tests/unit/global_repos/test_workspace_mcp_content_rg_contract.py
+      tests/unit/global_repos/test_refresh_scip_present_nested_layout.py
+      tests/unit/server/services/test_scip_query_skips_dependency_dbs.py
+      tests/unit/services/test_chunk_coverage.py
+      tests/unit/services/test_chunk_coverage_heal.py
+      tests/unit/services/test_file_chunking_manager_1502.py
+      tests/unit/global_repos/test_control_plane_metadata.py
+      tests/unit/xray/test_xray_phase2_content_root.py
+      tests/unit/server/repositories/test_activated_index_state_not_tracked.py
+      tests/unit/test_scip_discovery.py
+      tests/unit/server/services/test_cidx_meta_content.py
+      tests/unit/server/services/test_cidx_meta_dep_map_reads.py
+      tests/unit/server/services/test_cidx_meta_dep_map_writes.py
+      tests/unit/server/utils/test_index_command_layout_1488.py
+      tests/unit/server/services/test_fts_index_builder.py
+      tests/unit/global_repos/test_git_pull_updater_delegated_worktree.py
+      tests/unit/global_repos/test_lifecycle_description_delegated_refusal.py
+      tests/unit/global_repos/test_refresh_scheduler_delegated_repo_probes.py
+      tests/unit/global_repos/test_regex_search_delegated_paths_are_lexical.py
+      tests/unit/global_repos/test_delegation_skip_fs_check.py
+      tests/unit/indexing/test_delegated_override_file.py
+      tests/unit/indexing/test_repo_manifest_backend_is_local.py
+      tests/unit/indexing/test_unreached_repo_reads_stay_unreached.py
+      tests/unit/server/mcp/test_all_repositories_status_delegated_failure.py
+      tests/unit/server/mcp/test_auto_watch_skipped_when_delegated.py
+      tests/unit/server/repositories/test_golden_repo_lifecycle_delegated.py
+      tests/unit/server/repositories/test_golden_repo_remove_index_versions.py
+      tests/unit/server/repositories/test_repository_listing_statistics_content_seam.py
+      tests/unit/server/routers/test_branches_v2_current_branch_git_seam.py
+      tests/unit/server/services/semantic_backfill/test_empty_probe_delegated.py
+      tests/unit/server/services/test_delegated_refusal.py
+      tests/unit/server/services/test_description_scheduler_delegated.py
+      tests/unit/server/services/test_file_service_pod_local_repos_skip_seam.py
+      tests/unit/server/services/test_content_seam_source_always.py
+      tests/unit/server/services/test_activated_copy_present.py
+      tests/unit/server/services/test_golden_branch_listing_for_each_ref.py
+      tests/unit/server/services/test_golden_lifecycle_sweeps_delegated.py
+      tests/unit/server/services/test_index_freshness_head_cache.py
+      tests/unit/server/test_git_tools_delegated_seam.py
+      tests/unit/server/test_infra_content_seam_guards.py
+      tests/unit/server/utils/test_fix_config_spawn_backend_args.py
+      tests/unit/server/wiki/test_wiki_golden_content_seam.py
+      tests/unit/services/test_delegated_index_pass_local_reads.py
+      tests/unit/services/test_file_identifier_backend_skips_local_probe.py
+      tests/unit/services/test_fix_config_delegated_backends.py
+      tests/unit/services/test_reconcile_working_dir_content_id.py
+      tests/unit/services/test_smart_indexer_hook_install_delegated.py
+      tests/unit/xray/test_xray_pod_local_execution.py
+      tests/unit/xray/test_xray_pod_local_inline.py
+      tests/unit/server/routers/test_refresh_golden_repo_status_evo64616.py
+      tests/unit/server/services/metadata_outbox/test_metadata_outbox.py
+      tests/unit/server/services/test_search_backend_plugin.py
+      tests/unit/server/startup/test_search_backend_wiring.py
+      tests/unit/scip/test_scip_backend_factory.py
+      tests/unit/server/services/test_delegated_scip_build_queue.py
+      tests/unit/server/services/test_scip_build_single_flight_evo70527.py
+      tests/unit/server/startup/test_scip_backend_wiring.py
+      tests/unit/server/mcp/test_scip_truncation.py
+      tests/unit/server/mcp/test_scip_local_access.py
+      tests/unit/server/query/test_search_delegation_temporal.py
+      tests/unit/test_scip_generator.py
+      tests/unit/ci/test_import_contracts.py
+      tests/unit/ci/test_catalog_guard_presence.py
+      tests/unit/global_repos/test_refresh_scheduler_double_registration.py
+      tests/unit/global_repos/test_refresh_volume_alarm_claimed_2118.py
+      tests/unit/server/services/test_refresh_fence_postgres_329.py
+      tests/unit/server/services/test_add_index_scip_delegated_evo64616.py
+      tests/unit/global_repos/test_integrity_baseline_cross_pod.py
+      tests/unit/indexing/test_fts_text_source.py
+      tests/unit/server/managers/test_composite_file_listing.py
+      tests/unit/server/repositories/test_activated_composite_content_seam.py
+      tests/unit/server/repositories/test_activated_composite_index_store.py
+      tests/unit/server/services/test_cidx_meta_shared_writers.py
+      tests/unit/server/services/test_golden_repo_writes_through_content_writer.py
+      tests/unit/server/services/test_temporal_shards_cross_pod.py
+      tests/unit/server/test_content_seam_inventory.py
+      tests/unit/server/wiki/test_wiki_meta_visibility_delegated.py
+      tests/unit/services/test_multimodal_content_seam.py
+      tests/unit/utils/test_index_store.py
+      -v --tb=short
+      --deselect tests/unit/server/storage/test_factory.py::TestSQLiteProtocolSatisfaction::test_dependency_map_tracking_satisfies_protocol
+    # The plugins ship their own suites and NO job collected either of them.
+    # Not something a test count could have revealed: pytest's testpaths is
+    # ["tests"], so a bare run never descends into plugins/ at all -- 52 tests
+    # that reported nothing, passing or failing. These are the delegated seams
+    # (git, and the orchestrator invoker), where a regression is cidx reaching
+    # past a boundary it is supposed to go through.
+    #
+    # PYTHONPATH per plugin because each is its own distribution, deliberately
+    # not installed into the image. Separate invocations rather than one: the
+    # two would shadow each other's top-level package directory.
+    #
+    # tests/unit/ci/test_ci_runs_plugin_suites.py derives this requirement from
+    # what is on disk, so a NEW plugin cannot land uncollected the way these did.
+    - PYTHONPATH=plugins/cidx_orchestrator_invoker python -m pytest -q plugins/cidx_orchestrator_invoker
+    - PYTHONPATH=plugins/cidx_git_backend python -m pytest -q plugins/cidx_git_backend
+    # The add-on SDK (packages/cidx-sdk, installed above as a path dependency
+    # of the core), the local content backend (packages/backends, also a path
+    # dependency), the dev test kit (on pytest's pythonpath, never installed),
+    # the core's feature loader, the seams as the core resolves them, and the
+    # X-Ray and SCIP features (packages/features/cidx-xray and cidx-scip, also
+    # path dependencies) as the loader and the core see them.
+    # Files named one by one: the smoke-coverage guard only counts file tokens.
+    - >
+      python -m pytest -q
+      packages/cidx-sdk/tests
+      packages/cidx-testkit/tests
+      packages/backends/cidx-backend-workspace/tests
+      packages/backends/cidx-backend-git/tests
+      tests/unit/seams/test_content_seam_resolution.py
+      tests/unit/seams/test_git_invoker_resolution.py
+      tests/unit/seams/test_cli_invoker_resolution.py
+      tests/unit/seams/test_scip_seam_resolution.py
+      tests/unit/seams/test_xray_seam_resolution.py
+      tests/unit/seams/test_clone_seam_resolution.py
+      tests/unit/seams/test_workspace_seams_resolution.py
+      tests/unit/seams/test_git_seam_resolution.py
+      tests/unit/server/features/test_feature_loader.py
+      tests/unit/server/features/test_feature_runtime.py
+      tests/unit/server/features/test_feature_config_and_seams.py
+      packages/features/cidx-xray/tests/test_xray_feature.py
+      packages/features/cidx-xray/tests/test_package_lazy_load.py
+      tests/unit/xray/test_xray_feature_wiring.py
+      packages/features/cidx-wiki/tests/test_wiki_feature.py
+      packages/features/cidx-memory/tests/test_memory_feature.py
+      packages/features/cidx-depmap/tests/test_depmap_feature.py
+      packages/features/cidx-scip/tests/test_scip_feature.py
+      tests/unit/server/features/test_scip_removability.py
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "master"
+
+# Real gate: ruff must be PINNED to the version the repo standardizes on
+# (.pre-commit-config.yaml → v0.14.1). Unpinned `pip install ruff` drifts to
+# whatever is latest, whose much broader default ruleset floods this vendored
+# upstream snapshot with ~18k style/modernization nits (UP/FA/BLE/LOG…) — none of
+# them in the repo's actual lint standard, and hand-fixing them would gratuitously
+# diverge the fork from upstream. Against the pinned ruff the tree is clean, so
+# (per the former TODO) this is now blocking rather than advisory.
+lint:
+  stage: test
+  tags: [default]
+  image: python:3.11-slim-bookworm
+  before_script:
+    # import-linter: exact pin, same as pyproject's dev extra and
+    # .pre-commit-config.yaml (tests/unit/ci/test_import_contracts.py checks).
+    - pip install ruff==0.14.1 import-linter==2.15
+  script:
+    # packages/features/cidx-xray / cidx-scip / cidx-wiki / cidx-memory /
+    # cidx-depmap: the X-Ray (phase 4b), SCIP (phase 4d), wiki (phase 4e),
+    # memory (phase 4f) and dependency map (phase 4g) feature distributions.
+    - ruff check src tests packages/features/cidx-xray packages/features/cidx-scip packages/features/cidx-wiki packages/features/cidx-memory packages/features/cidx-depmap
+    # Package dependency contracts (.importlinter) against their ratchet
+    # baseline: fails on a new forbidden import and on a stale baseline entry.
+    # See docs/architecture/invariants/import-contracts.md.
+    - python scripts/check_import_contracts.py
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "master"
+
+# -- build ---------------------------------------------------------------------
+# Gated on `smoke` (later stage runs only if the test stage passed). Auto on
+# master; manual on a web-triggered branch pipeline so we can cut an image from a
+# feature branch (e.g. to point the ArgoCD test overlay at a pre-merge build).
+build:image:
+  stage: build
+  tags: [default]
+  image: public.ecr.aws/docker/library/docker:24
+  services:
+    - name: public.ecr.aws/docker/library/docker:24-dind
+      alias: docker
+  variables:
+    DOCKER_HOST: tcp://docker:2376
+    DOCKER_TLS_CERTDIR: "/certs"
+    DOCKER_TLS_VERIFY: "1"
+    DOCKER_CERT_PATH: "/certs/client"
+    DOCKER_BUILDKIT: "1"
+  resource_group: docker-build/cidx
+  timeout: 90m
+  before_script:
+    # --upgrade bumps expat to match python3.12's pyexpat: without it the alpine
+    # aws-cli package fails with "XML_SetAllocTrackerActivationThreshold: symbol
+    # not found" and get-login-password emits nothing (docker login then falls
+    # back to an interactive prompt and errors). Matches sandbox-mcp's job.
+    - apk add --no-cache --upgrade aws-cli jq
+    - aws --version
+    - until docker info >/dev/null 2>&1; do sleep 2; done
+    # A buildx builder on the docker-container driver, NOT the default `docker`
+    # driver. This is not a style preference: `--cache-to type=registry` is
+    # rejected outright by the docker driver ("cache export is not supported"),
+    # and registry cache is the only mechanism that carries the `builder` and
+    # `xray-builder` stages (see the cache note in `script:`). buildx ships in
+    # this image (verified: docker:24 -> buildx v0.16.2).
+    #
+    # The driver pulls moby/buildkit:buildx-stable-1 from Docker Hub into the
+    # dind daemon. If that ever starts flaking on Hub's anonymous pull limits,
+    # mirror that image into this same ECR and add
+    # `--driver-opt image=<ecr>/<repo>:<buildkit-tag>` here.
+    # The docker-container driver cannot read DOCKER_TLS_VERIFY/DOCKER_CERT_PATH
+    # from the environment -- it fails with "could not create a builder instance
+    # with TLS data loaded from environment" and tells you to make a context.
+    # dind here is TLS-only (tcp://docker:2376 + /certs/client), so the context
+    # is not optional. Built from the same variables the job already sets, so
+    # there is no second copy of the endpoint to drift.
+    - >
+      docker context create cidx-dind
+      --docker "host=${DOCKER_HOST},ca=${DOCKER_CERT_PATH}/ca.pem,cert=${DOCKER_CERT_PATH}/cert.pem,key=${DOCKER_CERT_PATH}/key.pem"
+    - docker buildx create --name cidx-builder --driver docker-container --use cidx-dind
+    - docker buildx inspect --bootstrap
+  script:
+    - |
+      ECR_REPOSITORY="${ECR_ACCOUNT_ID}.dkr.ecr.${ECR_REGION}.amazonaws.com/${ECR_REPOSITORY_NAME}"
+      aws ecr get-login-password --region "$ECR_REGION" \
+        | docker login --username AWS --password-stdin "${ECR_ACCOUNT_ID}.dkr.ecr.${ECR_REGION}.amazonaws.com"
+
+      VERSION=$(TZ=America/Denver date +"%Y.%m.%d.%H%M")
+      SHORT_SHA=$(echo "$CI_COMMIT_SHORT_SHA" | cut -c1-7)
+      if [ "$CI_COMMIT_BRANCH" = "master" ]; then
+        # Matches the existing overlay convention: cidx-<YYYY.MM.DD.HHMM>-<sha>.
+        IMAGE_TAG="${IMAGE_PREFIX}-${VERSION}-${SHORT_SHA}"
+      else
+        BRANCH_SAFE=$(echo "$CI_COMMIT_REF_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g' | cut -c1-40)
+        IMAGE_TAG="${IMAGE_PREFIX}-${BRANCH_SAFE}-${VERSION}-${SHORT_SHA}"
+      fi
+      FULL="${ECR_REPOSITORY}:${IMAGE_TAG}"
+
+      # -- layer cache -------------------------------------------------------
+      # The previous `--build-arg BUILDKIT_INLINE_CACHE=1 --cache-from <latest>`
+      # cached NOTHING in the two stages that cost real time. Inline cache is
+      # embedded in the pushed image's config, so it can only describe the
+      # layers of the FINAL stage; the `builder` and `xray-builder` stages leave
+      # no record. And because the final stage COPYs from `builder` before it
+      # COPYs from `xray-builder`, any src/ commit misses on the first COPY,
+      # which misses every later step in that stage, which forces xray-builder
+      # to be materialized for real -- i.e. `cargo build --release -p xray-cli`
+      # plus the ~20 tree-sitter grammar crates compiled from scratch on every
+      # single build, inside a job already at timeout: 90m behind a
+      # resource_group that serializes it.
+      #
+      # Measured on a reduced two-builder-stage reproduction of this exact
+      # topology, both runs on a provably empty local BuildKit cache, one
+      # single-file src change between seed and run:
+      #   inline cache  : 0 cached steps, full rebuild of xray-builder (28s)
+      #   registry max  : xray-builder fully CACHED, never executed (8s)
+      # The stamps baked into the two images confirmed the xray steps were
+      # restored rather than re-run.
+      #
+      # `mode=max` is the point: it exports every layer of every stage, not
+      # just the final one. `image-manifest=true,oci-mediatypes=true` makes the
+      # cache a single OCI image manifest, which is the shape ECR accepts (the
+      # older multi-manifest cache format is not an ECR-supported artifact).
+      #
+      # Tagging: this ECR repo is IMMUTABLE, so the cache CANNOT be re-exported
+      # to a fixed tag, and the delete-then-put-image trick used for
+      # ${LATEST_TAG} below is not available either -- cache-from reads at the
+      # start of the build and cache-to writes at the end, so there is no point
+      # at which the tag could be freed. Instead every build writes a FRESH,
+      # unique cache tag (always a create, which immutability allows), reads
+      # the newest cache tag left by the previous build, and prunes the rest at
+      # the end. Storage is therefore bounded at one cache manifest. Its layers
+      # are content-addressed in the same repo, so layers it shares with the
+      # pushed image are stored once; the extra is the intermediate-stage
+      # layers (python builder site-packages, the cargo target dir), order of a
+      # few GB -> low single-digit dollars/month at ECR's per-GB rate. If a
+      # MUTABLE repo is ever available for build caches, this whole
+      # discover/prune dance collapses to one fixed `--cache-to` tag.
+      NEW_CACHE_TAG="${CACHE_TAG_PREFIX}-${VERSION}-${SHORT_SHA}"
+      PREV_CACHE_TAG=$(aws ecr describe-images --repository-name "$ECR_REPOSITORY_NAME" \
+        --region "$ECR_REGION" \
+        --query 'sort_by(imageDetails[?imageTags], &imagePushedAt)[*].imageTags[]' \
+        --output text 2>/dev/null | tr '\t' '\n' | grep "^${CACHE_TAG_PREFIX}-" | tail -1 || true)
+
+      CACHE_FROM="--cache-from type=registry,ref=${ECR_REPOSITORY}:${LATEST_TAG}"
+      if [ -n "$PREV_CACHE_TAG" ]; then
+        CACHE_FROM="--cache-from type=registry,ref=${ECR_REPOSITORY}:${PREV_CACHE_TAG} ${CACHE_FROM}"
+        echo "Reusing build cache ${ECR_REPOSITORY}:${PREV_CACHE_TAG}"
+      else
+        echo "No ${CACHE_TAG_PREFIX}-* cache tag yet; this build seeds one."
+      fi
+
+      # Pre-delete covers a same-minute rerun of the same commit (immutable repo
+      # accepts a fresh tag, not an overwrite). Must happen BEFORE the build now
+      # that buildx pushes the image itself.
+      aws ecr batch-delete-image --repository-name "$ECR_REPOSITORY_NAME" \
+        --image-ids imageTag="$IMAGE_TAG" --region "$ECR_REGION" || true
+      aws ecr batch-delete-image --repository-name "$ECR_REPOSITORY_NAME" \
+        --image-ids imageTag="$NEW_CACHE_TAG" --region "$ECR_REGION" || true
+
+      # --provenance=false --sbom=false: buildx attaches a provenance
+      # attestation on --push by default, which turns the pushed artifact into
+      # an OCI index instead of the plain single-platform image manifest that
+      # `docker push` produced before. The ${LATEST_TAG} re-point below copies
+      # that manifest verbatim via put-image, and the ArgoCD overlay consumes
+      # it, so keep the artifact shape byte-for-byte what it has always been.
+      # The content-backend plugin is installed from the evo-sandbox private PyPI
+      # registry. Its index URL goes in as a BuildKit secret (never a build-arg,
+      # which would land in the image history). Reading another project
+      # registry with CI_JOB_TOKEN needs the evo-sandbox job-token allowlist to
+      # include this project.
+      export PLUGIN_INDEX_URL="https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.com/api/v4/projects/85492596/packages/pypi/simple"
+      docker buildx build \
+        --builder cidx-builder \
+        --provenance=false --sbom=false \
+        $CACHE_FROM \
+        --cache-to "type=registry,ref=${ECR_REPOSITORY}:${NEW_CACHE_TAG},mode=max,image-manifest=true,oci-mediatypes=true" \
+        --secret id=plugin_index,env=PLUGIN_INDEX_URL \
+        -t "$FULL" --push .
+      echo "Pushed $FULL"
+
+      # -- run the tests that can ONLY run inside this image -----------------
+      # Both test jobs above use python:3.11-slim-bookworm, which has no cargo
+      # and no xray-cli, so every test gated on the real binary SKIPS in CI --
+      # roughly 30 of them, on every pipeline, since the gate was written. A
+      # suite that always skips is not coverage; it is a green tick with
+      # nothing behind it, and it skipped silently right through the release
+      # that shipped xray with no binary at all.
+      #
+      # This image is the first artifact that can run them: it carries xray-cli
+      # AND the pinned toolchain, and sets CIDX_XRAY_CLI_PATH, so the gates
+      # resolve to a real binary and the tests execute against the EXACT
+      # artifact being shipped -- including the glibc it will run on in the pod.
+      #
+      # --user 0:0 because the image runs as `cidx` and pip needs to write;
+      # the repo is mounted read-write only so pytest can place its cache.
+      # CIDX_REQUIRE_XRAY_EXTRAS turns a missing optional dependency into a
+      # failure here rather than another silent skip.
+      # Fed over stdin as a QUOTED heredoc, not `sh -c '...'`. The quoted
+      # form looks tidier and is a trap: an apostrophe anywhere in the body --
+      # including inside a comment, e.g. "the image's own ENV" -- closes the
+      # string, and everything after it then runs on the RUNNER instead of in
+      # the container. That is exactly how this step failed twice, reporting
+      # "/usr/bin/python: No module named pip" from the Alpine runner and
+      # looking convincingly like an interpreter-resolution problem.
+      # <<'EOF' quoting also stops the runner expanding anything inside.
+      docker run --rm --user 0:0 -i \
+        -v "$CI_PROJECT_DIR:/w" -w /w \
+        -e CIDX_REQUIRE_XRAY_EXTRAS=1 \
+        "$FULL" sh -s <<'IN_IMAGE_VERIFY'
+      set -e
+      # No PYTHONPATH=/w/src: the repo is mounted for the TEST files, but
+      # code_indexer must resolve from site-packages so this exercises the code
+      # that actually ships. Pointing at the mount tested the working tree, and
+      # the bind mount import overhead also pushed `cidx --help` from ~1.0s to
+      # ~1.7s, intermittently tripping the 2s startup assertion.
+      # The shipped image must carry the workspace-backend packages (local path
+      # deps since v12.103.0), or content_backend=local fails at runtime.
+      # cidx-backend-workspace registers entry points in the four shared groups
+      # (content_backend, ripgrep_backend, index_artifacts, content_writer);
+      # cidx-xray and cidx-scip register as features. All use ``in`` because
+      # other distributions may add to the same group.
+      python -c "from importlib.metadata import entry_points; eps = [e.value for e in entry_points(group='code_indexer.content_backend')]; assert 'cidx_backend_workspace.content:make_content_backend' in eps, eps; print('content backend:', eps)"
+      python -c "from importlib.metadata import entry_points; eps = [e.value for e in entry_points(group='code_indexer.ripgrep_backend')]; assert 'cidx_backend_workspace.ripgrep:make_ripgrep_backend' in eps, eps; print('ripgrep backend:', eps)"
+      python -c "from importlib.metadata import entry_points; eps = [e.value for e in entry_points(group='code_indexer.index_artifacts')]; assert 'cidx_backend_workspace.index_store:make_index_store' in eps, eps; print('index artifacts:', eps)"
+      python -c "from importlib.metadata import entry_points; eps = [e.value for e in entry_points(group='code_indexer.content_writer')]; assert 'cidx_backend_workspace.content_writer:make_content_writer' in eps, eps; print('content writer:', eps)"
+      python -c "from importlib.metadata import entry_points; eps = [e.value for e in entry_points(group='code_indexer.features')]; assert 'cidx_xray.feature:make_feature' in eps, eps; print('xray feature:', eps)"
+      python -c "from importlib.metadata import entry_points; eps = [e.value for e in entry_points(group='code_indexer.features')]; assert 'cidx_scip.feature:make_feature' in eps, eps; print('scip feature:', eps)"
+      python -m pip install --quiet --no-input pytest pytest-asyncio pytest-timeout
+      python -m pytest \
+        tests/unit/xray/ \
+        packages/features/cidx-xray/tests/ \
+        tests/unit/server/mcp/test_analyze_graph_handler.py \
+        tests/unit/server/mcp/test_analyze_graph_multi_repo_1902.py \
+        tests/unit/server/mcp/test_analyze_graph_refine_1909.py \
+        tests/unit/server/mcp/test_xray_graph_pattern_modes_1859_1860.py \
+        tests/unit/server/mcp/test_xray_graph_excluded_extractor_honesty_1907.py \
+        tests/unit/server/mcp/test_xray_missing_binary_honesty.py \
+        -q -p no:randomly --timeout=600
+      IN_IMAGE_VERIFY
+      echo "In-image xray verification passed for $FULL"
+
+      # Keep exactly the cache tag this build just wrote.
+      for STALE in $(aws ecr describe-images --repository-name "$ECR_REPOSITORY_NAME" \
+            --region "$ECR_REGION" --query 'imageDetails[?imageTags].imageTags[]' \
+            --output text 2>/dev/null | tr '\t' '\n' \
+            | grep "^${CACHE_TAG_PREFIX}-" | grep -v "^${NEW_CACHE_TAG}$"); do
+        aws ecr batch-delete-image --repository-name "$ECR_REPOSITORY_NAME" \
+          --image-ids imageTag="$STALE" --region "$ECR_REGION" || true
+        echo "Pruned stale build cache tag $STALE"
+      done
+
+      # Re-point the moving latest by manifest copy (immutable tag -> put-image),
+      # master builds only.
+      if [ "$CI_COMMIT_BRANCH" = "master" ]; then
+        MANIFEST=$(aws ecr batch-get-image --repository-name "$ECR_REPOSITORY_NAME" \
+          --image-ids imageTag="$IMAGE_TAG" --region "$ECR_REGION" \
+          --query 'images[0].imageManifest' --output text)
+        aws ecr batch-delete-image --repository-name "$ECR_REPOSITORY_NAME" \
+          --image-ids imageTag="$LATEST_TAG" --region "$ECR_REGION" || true
+        aws ecr put-image --repository-name "$ECR_REPOSITORY_NAME" \
+          --image-tag "$LATEST_TAG" --image-manifest "$MANIFEST" --region "$ECR_REGION"
+        echo "Re-pointed ${ECR_REPOSITORY}:${LATEST_TAG} -> $IMAGE_TAG"
+      fi
+
+      # Publish the tag so it is visible in the job log and consumable by a
+      # downstream ArgoCD-overlay bump (dotenv artifact).
+      echo "IMAGE_TAG=$IMAGE_TAG" > image.env
+      echo "Overlay image ref: ${ECR_REPOSITORY}:${IMAGE_TAG}"
+  artifacts:
+    reports:
+      dotenv: image.env
+    paths:
+      - image.env
+    expire_in: 30 days
+  rules:
+    - if: $CI_COMMIT_BRANCH == "master"
+    - if: $CI_PIPELINE_SOURCE == "web"
+      when: manual

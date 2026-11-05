@@ -16,7 +16,7 @@ TDD: tests are written BEFORE the implementation.
 
 External dependency mocked:
   - MemoryCandidateRetriever.retrieve — patched at the class boundary
-    via `code_indexer.server.services.memory_candidate_retriever.MemoryCandidateRetriever.retrieve`
+    via `cidx_memory.server.memory_candidate_retriever.MemoryCandidateRetriever.retrieve`
     (HNSW I/O boundary; the only patched dependency in this file)
 """
 
@@ -28,7 +28,11 @@ import pytest
 
 from code_indexer.server.services.access_filtering_service import AccessFilteringService
 from code_indexer.server.services.group_access_manager import GroupAccessManager
-from code_indexer.server.services.memory_candidate_retriever import MemoryCandidate
+from cidx_memory.server.memory_candidate_retriever import MemoryCandidate
+from tests.unit.server._memory_feature import (
+    memory_context_installed,
+    memory_search_section_installed,
+)
 
 # ---------------------------------------------------------------------------
 # Shared test constants
@@ -37,15 +41,14 @@ from code_indexer.server.services.memory_candidate_retriever import MemoryCandid
 _FAKE_STORE_PATH = "/fake/cidx-meta"
 _FAKE_MEMORY_PATH_PREFIX = "/fake/cidx-meta/memories"
 _RETRIEVER_PATCH_PATH = (
-    "code_indexer.server.services.memory_candidate_retriever"
-    ".MemoryCandidateRetriever.retrieve"
+    "cidx_memory.server.memory_candidate_retriever.MemoryCandidateRetriever.retrieve"
 )
 # FilesystemVectorStore is patched at the class boundary so MemoryCandidateRetriever
 # can be instantiated without touching /fake on disk.  The MemoryRetrievalPipeline
 # tests exercise only filter/floor/truncate logic; real disk I/O is the retriever's
 # responsibility and is separately mocked via _RETRIEVER_PATCH_PATH.
 _VECTOR_STORE_PATCH_PATH = (
-    "code_indexer.server.services.memory_candidate_retriever.FilesystemVectorStore"
+    "cidx_memory.server.memory_candidate_retriever.FilesystemVectorStore"
 )
 
 
@@ -74,7 +77,7 @@ def _make_pipeline(
     max_body_chars: int = 2000,
 ):
     """Construct a MemoryRetrievalPipeline with injected config values."""
-    from code_indexer.server.mcp.memory_retrieval_pipeline import (
+    from cidx_memory.server.memory_retrieval_pipeline import (
         MemoryRetrievalPipeline,
         MemoryRetrievalPipelineConfig,
     )
@@ -278,19 +281,10 @@ class TestBodyTruncation:
 #     with filtered — proving exact inter-stage data handoff.
 #   - Scenarios B/C assert the class was never instantiated.
 
-_PIPELINE_CLS_PATCH = (
-    "code_indexer.server.mcp.handlers.search.memory_retrieval.MemoryRetrievalPipeline"
-)
-_CONFIG_SVC_PATCH = (
-    "code_indexer.server.mcp.handlers.search.repo_search.get_config_service"
-)
-# _get_golden_repos_dir is imported directly into memory_retrieval.py's namespace
-# via `from .._utils import ..., _get_golden_repos_dir, ...` (Issue #1935 split),
-# so patching the _utils module attribute would not affect the already-bound
-# name in memory_retrieval.py. We must patch the name as bound there instead.
-_GOLDEN_DIR_PATCH = (
-    "code_indexer.server.mcp.handlers.search.memory_retrieval._get_golden_repos_dir"
-)
+# The memory section is the cidx-memory feature's search augmenter (modular
+# phase 4f): search_code hands the finished search to it.
+_PIPELINE_CLS_PATCH = "cidx_memory.server.retrieval.MemoryRetrievalPipeline"
+_GOLDEN_DIR_PATCH = "cidx_memory.server.retrieval._golden_repos_dir"
 _APP_MODULE_PATCH = "code_indexer.server.mcp.handlers._utils.app_module"
 
 _FAKE_GOLDEN_DIR = "/fake/golden-repos"
@@ -315,16 +309,9 @@ def _make_mock_user():
     return user
 
 
-def _make_mock_config_service(enabled: bool = True):
-    """Return a mock config service with a MemoryRetrievalConfig."""
-    from code_indexer.server.utils.config_manager import MemoryRetrievalConfig
-
-    mem_cfg = MemoryRetrievalConfig(memory_retrieval_enabled=enabled)
-    config = MagicMock()
-    config.memory_retrieval_config = mem_cfg
-    svc = MagicMock()
-    svc.get_config.return_value = config
-    return svc
+def _make_mock_config_service(enabled: bool = True) -> dict:
+    """The memory feature's config section with the kill-switch at *enabled*."""
+    return {"memory_retrieval_enabled": enabled}
 
 
 def _make_activated_repo_result():
@@ -355,7 +342,7 @@ def _extract_query_metadata(result: dict) -> dict:
 
 def _invoke_search_code_with_mocks(
     search_mode: str,
-    config_service_mock: MagicMock,
+    config_service_mock: dict,
     pipeline_cls_mock: MagicMock,
     pipeline_instance: MagicMock,
     access_filtering_service: Optional[AccessFilteringService] = None,
@@ -378,9 +365,10 @@ def _invoke_search_code_with_mocks(
 
     with (
         patch(_APP_MODULE_PATCH) as mock_app,
-        patch(_CONFIG_SVC_PATCH, return_value=config_service_mock),
         patch(_GOLDEN_DIR_PATCH, return_value=_FAKE_GOLDEN_DIR),
         patch(_PIPELINE_CLS_PATCH, pipeline_cls_mock),
+        memory_search_section_installed(),
+        memory_context_installed(mock_app.app, settings=config_service_mock),
     ):
         # Never a truthy MagicMock: filter_query_results() would return a
         # MagicMock that fails JSON serialization.
@@ -435,10 +423,10 @@ class TestHandlerMemoryRetrieval:
         5. relevant_memories attached to query_metadata
         """
         from unittest.mock import ANY
-        from code_indexer.server.mcp.memory_retrieval_pipeline import (
+        from cidx_memory.server.memory_retrieval_pipeline import (
             MemoryRetrievalPipelineConfig,
         )
-        from code_indexer.server.utils.config_manager import MemoryRetrievalConfig
+        from cidx_memory.config import MemoryRetrievalConfig
 
         # Build the exact MemoryRetrievalPipelineConfig the handler will construct
         _defaults = MemoryRetrievalConfig()
@@ -505,7 +493,7 @@ class TestHandlerMemoryRetrieval:
         pipeline_instance.build_relevant_memories.assert_called_once_with(
             memory_candidates=filtered_candidates,
             query=_EXPECTED_QUERY,
-            config_service=cfg_svc,
+            config_service=None,
             reranker_status=_EXPECTED_RERANKER_STATUS,
         )
 
@@ -717,7 +705,7 @@ class TestBodyHydration:
         """
         from unittest.mock import patch
 
-        from code_indexer.server.mcp.memory_retrieval_pipeline import (
+        from cidx_memory.server.memory_retrieval_pipeline import (
             _hydrate_memory_bodies,
         )
 
@@ -728,7 +716,7 @@ class TestBodyHydration:
             return ({"title": "Real Memory"}, expected_body, "deadbeef")
 
         with patch(
-            "code_indexer.server.mcp.memory_retrieval_pipeline.read_memory_file",
+            "cidx_memory.server.memory_retrieval_pipeline.read_memory_file",
             side_effect=_fake_read,
         ):
             result = _hydrate_memory_bodies(
@@ -746,7 +734,7 @@ class TestBodyHydration:
         """Scenario I: when read_memory_file raises, candidate is skipped and WARNING logged."""
         from unittest.mock import patch
 
-        from code_indexer.server.mcp.memory_retrieval_pipeline import (
+        from cidx_memory.server.memory_retrieval_pipeline import (
             _hydrate_memory_bodies,
         )
 
@@ -759,11 +747,11 @@ class TestBodyHydration:
             return ({"title": "Good Memory"}, "good body text", "abc123")
 
         with patch(
-            "code_indexer.server.mcp.memory_retrieval_pipeline.read_memory_file",
+            "cidx_memory.server.memory_retrieval_pipeline.read_memory_file",
             side_effect=_fake_read,
         ):
             with patch(
-                "code_indexer.server.mcp.memory_retrieval_pipeline.logger"
+                "cidx_memory.server.memory_retrieval_pipeline.logger"
             ) as mock_logger:
                 result = _hydrate_memory_bodies(
                     candidates=[good_candidate, bad_candidate],

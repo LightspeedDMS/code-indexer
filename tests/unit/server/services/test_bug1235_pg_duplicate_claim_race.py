@@ -335,55 +335,109 @@ class TestRealPgConcurrencyBarrier:
 
     def test_concurrent_claims_deterministic_across_iterations(self):
         """Across 20 barrier iterations: exactly one success, one DuplicateJobError, zero RuntimeErrors."""
+        import psycopg
+        from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
         from code_indexer.server.storage.postgres.background_jobs_backend import (
             BackgroundJobsPostgresBackend,
         )
+        from code_indexer.server.storage.postgres.connection_pool import (
+            ConnectionPool,
+        )
+        from code_indexer.server.storage.postgres.migrations.runner import (
+            MigrationRunner,
+        )
 
-        dsn = os.environ["TEST_POSTGRES_DSN"]
-        backend = BackgroundJobsPostgresBackend(dsn)
-        results: List[Any] = []
-        errors: List[Exception] = []
-        barrier = threading.Barrier(2)
+        # Two things were broken here, both because this test had never run
+        # anywhere: the class is skipped without TEST_POSTGRES_DSN (so never
+        # locally) and the file was in no CI job's allowlist (so never there).
+        #
+        # 1. BackgroundJobsPostgresBackend takes a ConnectionPool, not a DSN.
+        #    Passing the raw string made self._pool a str, and the cleanup below
+        #    died with "'str' object has no attribute 'connection'".
+        # 2. Nothing created the schema. The barrier threads swallow their
+        #    exceptions into `errors`, which is asserted only AFTER the cleanup
+        #    DELETE -- so the missing `background_jobs` table surfaced as that
+        #    AttributeError rather than as the UndefinedTable it really was.
+        #
+        # Own migrated database, following tests/unit/server/_audit_read_support.py:
+        # the shared DSN's database is not guaranteed to be migrated, and this
+        # test writes real rows.
+        admin_dsn = os.environ["TEST_POSTGRES_DSN"]
+        params = conninfo_to_dict(admin_dsn)
+        db_name = f"bug1235_{uuid.uuid4().hex[:12]}"
+        with psycopg.connect(admin_dsn, autocommit=True) as admin:
+            admin.execute(f'CREATE DATABASE "{db_name}"')
+        params["dbname"] = db_name
+        dsn = make_conninfo(**params)
+        with MigrationRunner(dsn) as runner:
+            runner.run()
 
-        def claim(worker_id: str) -> None:
-            try:
-                job_id = f"race-{worker_id}-{uuid.uuid4().hex[:8]}"
-                tracker = _make_backend_tracker(
-                    _FakeBackend(inject_violation=False, blocking_job_id=None)
-                )
-                tracker._backend = backend
-                job = _make_job(job_id)
-                barrier.wait()
-                tracker._atomic_insert_or_raise(job)
-                results.append(("success", job_id))
-            except DuplicateJobError as e:
-                results.append(("duplicate", e))
-            except Exception as e:
-                errors.append(e)
+        # Everything after CREATE DATABASE runs in try/finally. The first
+        # version placed teardown at the end of the body and called it
+        # best-effort -- but as placed it ran ONLY on the passing path,
+        # which is the one case where leaking costs nothing. Any assertion
+        # below (the failures this test exists to catch) exits the function
+        # first, stranding bug1235_<hex> and an open pool with live worker
+        # threads on the SHARED CI server -- and repeated red smoke runs are
+        # exactly the situation this MR is trying to get out of.
+        try:
+            pool = ConnectionPool(dsn, min_size=1, max_size=4, name="bug1235-test")
+            backend = BackgroundJobsPostgresBackend(pool)
+            results: List[Any] = []
+            errors: List[Exception] = []
+            barrier = threading.Barrier(2)
 
-        ITERATIONS = 20
-        for _ in range(ITERATIONS):
-            results.clear()
-            errors.clear()
-
-            threads = [
-                threading.Thread(target=claim, args=(f"w{i}",)) for i in range(2)
-            ]
-            for t in threads:
-                t.start()
-            for t in threads:
-                t.join(timeout=10)
-
-            with backend._pool.connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "DELETE FROM background_jobs WHERE operation_type = %s AND repo_alias = %s",
-                        ("data_retention_cleanup", "server"),
+            def claim(worker_id: str) -> None:
+                try:
+                    job_id = f"race-{worker_id}-{uuid.uuid4().hex[:8]}"
+                    tracker = _make_backend_tracker(
+                        _FakeBackend(inject_violation=False, blocking_job_id=None)
                     )
+                    tracker._backend = backend
+                    job = _make_job(job_id)
+                    barrier.wait()
+                    tracker._atomic_insert_or_raise(job)
+                    results.append(("success", job_id))
+                except DuplicateJobError as e:
+                    results.append(("duplicate", e))
+                except Exception as e:
+                    errors.append(e)
 
-            assert not errors, f"Unexpected exceptions in iteration: {errors}"
-            assert len([r for r in results if r[0] == "success"]) == 1
-            assert len([r for r in results if r[0] == "duplicate"]) == 1
+            ITERATIONS = 20
+            for _ in range(ITERATIONS):
+                results.clear()
+                errors.clear()
+
+                threads = [
+                    threading.Thread(target=claim, args=(f"w{i}",)) for i in range(2)
+                ]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join(timeout=10)
+
+                with backend._pool.connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "DELETE FROM background_jobs WHERE operation_type = %s AND repo_alias = %s",
+                            ("data_retention_cleanup", "server"),
+                        )
+
+                assert not errors, f"Unexpected exceptions in iteration: {errors}"
+                assert len([r for r in results if r[0] == "success"]) == 1
+                assert len([r for r in results if r[0] == "duplicate"]) == 1
+        finally:
+            # Inner try/except stay: teardown must never mask a real failure.
+            try:
+                pool.close()
+            except Exception:  # noqa: BLE001 -- teardown must not fail the test
+                pass
+            try:
+                with psycopg.connect(admin_dsn, autocommit=True) as admin:
+                    admin.execute(f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)')
+            except Exception:  # noqa: BLE001 -- see above
+                pass
 
 
 # ---------------------------------------------------------------------------

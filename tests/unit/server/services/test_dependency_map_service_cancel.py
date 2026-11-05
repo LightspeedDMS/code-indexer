@@ -19,6 +19,7 @@ Tests:
 import json
 import threading
 from unittest.mock import Mock
+from tests.unit.server._depmap_feature import depmap_service_installed
 
 
 class TestCancelEventLifecycle:
@@ -26,7 +27,7 @@ class TestCancelEventLifecycle:
 
     def _make_service(self):
         """Create a minimal DependencyMapService with mock dependencies."""
-        from code_indexer.server.services.dependency_map_service import (
+        from cidx_depmap.server.dependency_map_service import (
             DependencyMapService,
         )
 
@@ -70,7 +71,7 @@ class TestCancelRunningAnalysis:
     """Tests for cancel_running_analysis() method."""
 
     def _make_service(self):
-        from code_indexer.server.services.dependency_map_service import (
+        from cidx_depmap.server.dependency_map_service import (
             DependencyMapService,
         )
 
@@ -123,7 +124,7 @@ class TestCancelEventClearedOnNewRun:
     """Tests that stale cancel flag is cleared at the start of each analysis run."""
 
     def _make_service(self):
-        from code_indexer.server.services.dependency_map_service import (
+        from cidx_depmap.server.dependency_map_service import (
             DependencyMapService,
         )
 
@@ -199,7 +200,7 @@ class TestDomainLoopCancellation:
 
     def test_update_affected_domains_breaks_on_cancellation(self, tmp_path):
         """_update_affected_domains exits early when _cancel_event is pre-set."""
-        from code_indexer.server.services.dependency_map_service import (
+        from cidx_depmap.server.dependency_map_service import (
             DependencyMapService,
         )
 
@@ -228,7 +229,7 @@ class TestDomainLoopCancellation:
 
         def patched_update_domain_file(domain_name, **kwargs):
             processed.append(domain_name)
-            from code_indexer.server.services.dependency_map_service import (
+            from cidx_depmap.server.dependency_map_service import (
                 _DomainUpdateResult,
             )
 
@@ -256,7 +257,7 @@ class TestDomainLoopCancellation:
 
     def test_refinement_cycle_domain_loop_breaks_on_cancellation(self, tmp_path):
         """run_refinement_cycle domain loop breaks when _cancel_event is pre-set."""
-        from code_indexer.server.services.dependency_map_service import (
+        from cidx_depmap.server.dependency_map_service import (
             DependencyMapService,
         )
 
@@ -317,7 +318,7 @@ class TestCancelGracefulCleanup:
 
     def _make_service_with_mock_tracker(self):
         """Create a DependencyMapService with a mock job tracker."""
-        from code_indexer.server.services.dependency_map_service import (
+        from cidx_depmap.server.dependency_map_service import (
             DependencyMapService,
         )
 
@@ -393,7 +394,7 @@ class TestCancelRestEndpoint:
 
     def test_cancel_endpoint_function_exists_in_routes(self):
         """cancel_dependency_map_analysis function must exist in dependency_map_routes."""
-        from code_indexer.server.web import dependency_map_routes
+        from cidx_depmap.server.web import routes as dependency_map_routes
 
         assert hasattr(dependency_map_routes, "cancel_dependency_map_analysis"), (
             "cancel_dependency_map_analysis function must exist in dependency_map_routes"
@@ -404,7 +405,7 @@ class TestCancelRestEndpoint:
 
     def test_cancel_endpoint_route_registered(self):
         """POST /dependency-map/cancel must be registered on dependency_map_router."""
-        from code_indexer.server.web.dependency_map_routes import dependency_map_router
+        from cidx_depmap.server.web.routes import dependency_map_router
 
         routes = dependency_map_router.routes
         cancel_routes = [
@@ -422,7 +423,7 @@ class TestCancelRestEndpoint:
     def test_cancel_endpoint_returns_success_when_lock_held(self):
         """cancel_dependency_map_analysis returns 200 with success when analysis running."""
         from unittest.mock import MagicMock, patch
-        from code_indexer.server.web.dependency_map_routes import (
+        from cidx_depmap.server.web.routes import (
             cancel_dependency_map_analysis,
         )
 
@@ -437,13 +438,10 @@ class TestCancelRestEndpoint:
 
         with (
             patch(
-                "code_indexer.server.web.dependency_map_routes._require_admin_session",
+                "cidx_depmap.server.web.routes._require_admin_session",
                 return_value={"username": "admin"},
             ),
-            patch(
-                "code_indexer.server.web.dependency_map_routes._get_dep_map_service_from_state",
-                return_value=mock_service,
-            ),
+            depmap_service_installed(mock_service),
         ):
             response = cancel_dependency_map_analysis(mock_request)
 
@@ -456,7 +454,7 @@ class TestCancelRestEndpoint:
     def test_cancel_endpoint_returns_no_active_job_when_idle(self):
         """cancel_dependency_map_analysis returns 200 with no_active_job when idle."""
         from unittest.mock import MagicMock, patch
-        from code_indexer.server.web.dependency_map_routes import (
+        from cidx_depmap.server.web.routes import (
             cancel_dependency_map_analysis,
         )
 
@@ -470,13 +468,10 @@ class TestCancelRestEndpoint:
 
         with (
             patch(
-                "code_indexer.server.web.dependency_map_routes._require_admin_session",
+                "cidx_depmap.server.web.routes._require_admin_session",
                 return_value={"username": "admin"},
             ),
-            patch(
-                "code_indexer.server.web.dependency_map_routes._get_dep_map_service_from_state",
-                return_value=mock_service,
-            ),
+            depmap_service_installed(mock_service),
         ):
             response = cancel_dependency_map_analysis(mock_request)
 
@@ -489,14 +484,14 @@ class TestCancelRestEndpoint:
     def test_cancel_endpoint_returns_401_without_admin_session(self):
         """cancel_dependency_map_analysis returns 401 when not authenticated as admin."""
         from unittest.mock import MagicMock, patch
-        from code_indexer.server.web.dependency_map_routes import (
+        from cidx_depmap.server.web.routes import (
             cancel_dependency_map_analysis,
         )
 
         mock_request = MagicMock()
 
         with patch(
-            "code_indexer.server.web.dependency_map_routes._require_admin_session",
+            "cidx_depmap.server.web.routes._require_admin_session",
             return_value=None,
         ):
             response = cancel_dependency_map_analysis(mock_request)
@@ -506,7 +501,7 @@ class TestCancelRestEndpoint:
     def test_cancel_endpoint_returns_503_when_service_unavailable(self):
         """cancel_dependency_map_analysis returns 503 when dep map service is None."""
         from unittest.mock import MagicMock, patch
-        from code_indexer.server.web.dependency_map_routes import (
+        from cidx_depmap.server.web.routes import (
             cancel_dependency_map_analysis,
         )
 
@@ -514,13 +509,10 @@ class TestCancelRestEndpoint:
 
         with (
             patch(
-                "code_indexer.server.web.dependency_map_routes._require_admin_session",
+                "cidx_depmap.server.web.routes._require_admin_session",
                 return_value={"username": "admin"},
             ),
-            patch(
-                "code_indexer.server.web.dependency_map_routes._get_dep_map_service_from_state",
-                return_value=None,
-            ),
+            depmap_service_installed(None),
         ):
             response = cancel_dependency_map_analysis(mock_request)
 
@@ -532,7 +524,7 @@ class TestCancelledJobMarkedAsFailed:
 
     def _make_service_with_mock_tracker(self, tmp_path):
         """Create a DependencyMapService with controllable mocks."""
-        from code_indexer.server.services.dependency_map_service import (
+        from cidx_depmap.server.dependency_map_service import (
             DependencyMapService,
         )
 
@@ -671,7 +663,7 @@ class TestCancellationMethodExists:
 
     def test_cancel_running_analysis_method_exists_and_callable(self):
         """cancel_running_analysis method exists on DependencyMapService."""
-        from code_indexer.server.services.dependency_map_service import (
+        from cidx_depmap.server.dependency_map_service import (
             DependencyMapService,
         )
 

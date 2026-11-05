@@ -25,7 +25,7 @@ runs.
 from pathlib import Path
 from typing import Any, Dict, List
 
-from code_indexer.global_repos.dependency_map_analyzer import DependencyMapAnalyzer
+from cidx_depmap.server.dependency_map_analyzer import DependencyMapAnalyzer
 
 # ---------------------------------------------------------------------------
 # Shared helpers

@@ -24,7 +24,6 @@ if TYPE_CHECKING:
     from code_indexer.services.hnsw_health_service import HNSWHealthService
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server import app as app_module
-from code_indexer.server.repositories.scip_audit import SCIPAuditRepository
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.constants import is_internal_meta_repo
@@ -182,26 +181,6 @@ def cap_breach_http_exception(breach: CapBreach) -> None:
     )
 
 
-# Fallback SCIP Audit Repository for standalone/SQLite mode (no backend)
-_scip_audit_repository_fallback: Optional[SCIPAuditRepository] = None
-
-
-def _get_scip_audit_repository() -> SCIPAuditRepository:
-    """Get the SCIPAuditRepository instance.
-
-    Returns the backend-aware instance from app.state when available
-    (set during startup in app_wiring.py), otherwise falls back to a
-    module-level SQLite singleton for backward compatibility.
-    """
-    global _scip_audit_repository_fallback
-    repo = getattr(app_module.app.state, "scip_audit_repository", None)
-    if repo is not None:
-        return repo
-    if _scip_audit_repository_fallback is None:
-        _scip_audit_repository_fallback = SCIPAuditRepository()
-    return _scip_audit_repository_fallback
-
-
 # Module-level singleton for HNSWHealthService (Story #59 - fix caching bug)
 _hnsw_health_service: Optional["HNSWHealthService"] = None
 
@@ -261,24 +240,8 @@ def _parse_and_collapse_repo_alias(value: Any) -> Any:
     return parsed
 
 
-def _coerce_int(value: Any, default: int) -> int:
-    """Coerce MCP parameter to int, returning default on failure."""
-    if value is None:
-        return default
-    try:
-        return int(value)
-    except (ValueError, TypeError):
-        return default
-
-
-def _coerce_float(value: Any, default: float) -> float:
-    """Coerce MCP parameter to float, returning default on failure."""
-    if value is None:
-        return default
-    try:
-        return float(value)
-    except (ValueError, TypeError):
-        return default
+#: The feature that serves ``/wiki`` (cidx-wiki); see _get_wiki_enabled_repos.
+WIKI_FEATURE_NAME = "wiki"
 
 
 def _get_wiki_enabled_repos() -> set:
@@ -287,8 +250,17 @@ def _get_wiki_enabled_repos() -> set:
     Called once per MCP request to avoid per-result DB queries.
     Returns set of alias strings without -global suffix (e.g. {"example-wiki", "docs-repo"}).
     Degrades gracefully: returns empty set on any error.
+
+    Empty while the server runs without the wiki feature (cidx-wiki not
+    enabled): there is no ``/wiki`` page to link to, whatever the stored
+    flags say. TODO(modular): a search-result enricher contributed by the
+    feature, so the core stops naming it.
     """
     try:
+        from code_indexer.server.features.registry import feature_offered
+
+        if not feature_offered(WIKI_FEATURE_NAME):
+            return set()
         grm = getattr(app_module, "golden_repo_manager", None)
         if grm is None:
             return set()
@@ -468,6 +440,53 @@ def _get_global_repo(alias_name: str):
     return app_module.app.state.backend_registry.global_repos.get_repo(alias_name)
 
 
+def _resolve_global_repo_path_or_index(alias_name: str) -> Optional[str]:
+    """Resolve a global repo alias to an on-disk path WITH the registry
+    ``index_path`` fallback (Bug #1315) — the canonical read-only resolution
+    used by search_code/regex_search.
+
+    ``resolve_alias_or_index_path`` reads the AliasManager pointer file first,
+    then falls back to the registry row's ``index_path`` when the pointer was
+    never created (a bulk/seeder provisioning gap). Handlers that resolved via
+    the pointer-only path (``repos._resolve_golden_repo_path``) returned None —
+    and therefore raised ``repository_not_found`` — on global repos with a
+    missing alias pointer even though the repo is registered and searchable
+    (e.g. ``evolution-global``, which search_code/regex_search resolve fine).
+    This shared helper keeps the xray handlers consistent with the other
+    read-only search paths and is deliberately NOT wired into
+    ``_resolve_golden_repo_path`` (which the WRITE-path base-clone derivation
+    depends on decomposing a ``.versioned`` snapshot path).
+
+    Returns None only when the alias is unknown to the registry AND no valid
+    on-disk ``index_path`` fallback resolves.
+    """
+    from pathlib import Path
+
+    from code_indexer.global_repos.alias_manager import (
+        AliasManager,
+        resolve_alias_or_index_path,
+    )
+
+    # Look the entry up the same way ``search._resolve_global_repo_target`` does
+    # (``_list_global_repos()`` + match on ``alias_name``) so the two paths stay
+    # behaviourally identical (Messi Rule #4 anti-duplication).
+    repo_entry = next(
+        (r for r in _list_global_repos() if r.get("alias_name") == alias_name),
+        None,
+    )
+    from code_indexer.server.startup.content_backend_wiring import (
+        is_content_seam_delegated,
+    )
+
+    alias_manager = AliasManager(str(Path(_get_golden_repos_dir()) / "aliases"))
+    return resolve_alias_or_index_path(
+        alias_manager,
+        alias_name=alias_name,
+        repo_entry=repo_entry,
+        skip_fs_check=is_content_seam_delegated(),
+    )
+
+
 def _get_query_tracker():
     """Get QueryTracker from app.state.
 
@@ -633,30 +652,6 @@ def _get_access_filtering_service():
         AccessFilteringService instance if configured in app.state, None otherwise.
     """
     return getattr(app_module.app.state, "access_filtering_service", None)
-
-
-def _get_scip_query_service():
-    """Get SCIPQueryService instance for SCIP handlers.
-
-    Creates a SCIPQueryService configured with:
-    - golden_repos_dir: From app.state (server configuration)
-    - access_filtering_service: From app.state (for user-based repository filtering)
-
-    Returns:
-        SCIPQueryService instance ready for use by SCIP handlers
-
-    Raises:
-        RuntimeError: If golden_repos_dir is not configured
-    """
-    from code_indexer.server.services.scip_query_service import SCIPQueryService
-
-    golden_repos_dir = _get_golden_repos_dir()
-    access_filtering_service = _get_access_filtering_service()
-
-    return SCIPQueryService(
-        golden_repos_dir=golden_repos_dir,
-        access_filtering_service=access_filtering_service,
-    )
 
 
 def _apply_payload_truncation(
@@ -1054,76 +1049,6 @@ def _apply_temporal_payload_truncation(
     return results
 
 
-def _apply_scip_payload_truncation(
-    results: List[Dict[str, Any]],
-    *,
-    owner: Optional[str] = None,
-) -> List[Dict[str, Any]]:
-    """Apply payload truncation to SCIP query results (Story #685).
-
-    Story #50: Converted from async to sync for FastAPI thread pool execution.
-
-    For SCIP results with large context fields (> preview_size_chars), replaces
-    context with context_preview + context_cache_handle. This reduces response
-    size while allowing clients to fetch full context on demand.
-
-    Args:
-        results: List of SCIP result dicts with optional 'context' field
-        owner: Username of the caller whose request created the entries; only
-            that user can fetch the returned handles.
-
-    Returns:
-        Modified results list with truncation applied to context fields
-    """
-    payload_cache = getattr(app_module.app.state, "payload_cache", None)
-    if payload_cache is None:
-        # Cache not available, return results unchanged
-        return results
-
-    preview_size = payload_cache.config.preview_size_chars
-
-    for result_dict in results:
-        context = result_dict.get("context")
-
-        # Handle missing context field
-        if "context" not in result_dict:
-            result_dict["context_cache_handle"] = None
-            result_dict["context_has_more"] = False
-            continue
-
-        # Handle None context
-        if context is None:
-            result_dict["context_cache_handle"] = None
-            result_dict["context_has_more"] = False
-            continue
-
-        try:
-            if len(context) > preview_size:
-                # Large context: store full content and replace with preview (sync call)
-                cache_handle = payload_cache.store(context, owner=owner)
-                result_dict["context_preview"] = context[:preview_size]
-                result_dict["context_cache_handle"] = cache_handle
-                result_dict["context_has_more"] = True
-                result_dict["context_total_size"] = len(context)
-                del result_dict["context"]
-            else:
-                # Small context: keep as-is, add metadata
-                result_dict["context_cache_handle"] = None
-                result_dict["context_has_more"] = False
-        except Exception as e:
-            logger.warning(
-                format_error_log(
-                    "MCP-GENERAL-028",
-                    f"Failed to truncate SCIP context: {e}",
-                )
-            )
-            # Keep original context on error, add metadata
-            result_dict["context_cache_handle"] = None
-            result_dict["context_has_more"] = False
-
-    return results
-
-
 def _error_with_suggestions(
     error_msg: str,
     attempted_value: str,
@@ -1178,7 +1103,13 @@ def _get_available_repos(user: "User") -> List[str]:
             )
             return filtered
         return all_repos
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "_get_available_repos: swallowed %s: %s",
+            type(exc).__name__,
+            exc,
+            exc_info=True,
+        )
         return []
 
 
@@ -1279,7 +1210,13 @@ def _get_temporal_status(repo_aliases: List[str]) -> Dict[str, Any]:
             )
 
         return status
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "_get_temporal_status: swallowed %s: %s",
+            type(exc).__name__,
+            exc,
+            exc_info=True,
+        )
         return {}
 
 
@@ -1289,22 +1226,6 @@ WILDCARD_CHARS = {"*", "?", "["}
 def _has_wildcard(pattern: str) -> bool:
     """Check if pattern contains wildcard characters."""
     return any(c in pattern for c in WILDCARD_CHARS)
-
-
-def _validate_symbol_format(symbol: Optional[str], param_name: str) -> Optional[str]:
-    """Validate symbol format for call chain queries.
-
-    Args:
-        symbol: The symbol string to validate (can be None)
-        param_name: Parameter name for error messages (e.g., "from_symbol", "to_symbol")
-
-    Returns:
-        None if valid, error message string if invalid
-    """
-    if not symbol or not symbol.strip():
-        return f"{param_name} cannot be empty"
-
-    return None
 
 
 def _enforce_wildcard_cap(

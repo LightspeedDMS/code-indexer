@@ -18,7 +18,7 @@ _DEFAULT_SUFFIX = f".cidx-server/{_JOURNAL_FILENAME}"
 
 def _make_journal_default():
     """Instantiate RepairJournal with no path argument (uses env var / default)."""
-    from code_indexer.server.services.dep_map_repair_executor import RepairJournal
+    from cidx_depmap.server.dep_map_repair_executor import RepairJournal
 
     return RepairJournal()
 
@@ -42,7 +42,7 @@ def test_cidx_data_dir_unset_defaults_to_home_cidx_server(tmp_path, monkeypatch)
     load), so point it at a temp home -- the journal creates its directory,
     which must never be the developer's real server home.
     """
-    from code_indexer.server.services import dep_map_repair_phase37
+    from cidx_depmap.server import dep_map_repair_phase37
 
     monkeypatch.setattr(
         dep_map_repair_phase37,

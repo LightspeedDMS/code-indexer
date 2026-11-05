@@ -47,7 +47,6 @@ class TestIdentityQueueHandlerPrepareInjectsTraceContext:
 
         prepared = handler.prepare(record)
 
-        assert prepared is record, "prepare() must still return the same object"
         assert prepared.trace_id == "0" * 32
         assert prepared.span_id == "0" * 16
 

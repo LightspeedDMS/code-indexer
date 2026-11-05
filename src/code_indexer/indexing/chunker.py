@@ -7,7 +7,7 @@ from pathlib import Path
 from ..config import IndexingConfig
 from .image_extractor import ImageExtractorFactory, extract_valid_image_paths
 from ..logging import AdaptiveLogger
-from ..utils.source_text_decoding import read_source_text
+from ..utils.source_text_decoding import decode_source_text
 
 
 class TextChunker:
@@ -929,13 +929,18 @@ class TextChunker:
         return False
 
     def chunk_file(
-        self, file_path: Path, repo_root: Optional[Path] = None
+        self,
+        file_path: Path,
+        repo_root: Optional[Path] = None,
+        content: Optional[bytes] = None,
     ) -> List[Dict[str, Any]]:
         """Read and chunk a file.
 
         Args:
             file_path: Path to the file to chunk
             repo_root: Repository root directory (for image extraction in markdown files)
+            content: the file's bytes if the caller already has them, so the file
+                is not opened a second time. None reads from disk, unchanged.
 
         Returns:
             List of chunk dictionaries with metadata including images[] field
@@ -953,8 +958,18 @@ class TextChunker:
             f.flush()
 
         try:
-            # Shared with query-time retrieval (Bug #1991).
-            text = read_source_text(file_path)
+            # Bytes first, then decode. `content` lets a caller that has ALREADY
+            # read this file hand the bytes over, instead of the file being
+            # opened again: one indexing pass opens a file up to three times
+            # today (text probe, blob hash, chunking). None keeps the read
+            # here, so every existing caller is unchanged. Reading bytes is what
+            # a content backend returns, so this is the single place the byte
+            # source changes when the read moves off the local filesystem. The
+            # decode is the one query-time retrieval shares (Bug #1991), since
+            # chunk text feeds each chunk's point UUID and its line ranges.
+            text = decode_source_text(
+                file_path.read_bytes() if content is None else content
+            )
 
             with open(debug_file, "a") as f:
                 f.write(

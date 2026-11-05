@@ -36,7 +36,7 @@ _OUTER_TIMEOUT_SECONDS: int = 330
 # Config-service patch targets that must all receive the same fake config service.
 _CONFIG_SVC_TARGETS = (
     "code_indexer.server.services.config_service.get_config_service",
-    "code_indexer.server.web.dependency_map_routes.get_config_service",
+    "cidx_depmap.server.web.routes.get_config_service",
     "code_indexer.server.services.dep_map_dispatcher_factory.get_config_service",
 )
 
@@ -106,7 +106,7 @@ def _make_codex_config(codex_enabled: bool, codex_weight: float):
 
 def _make_real_service(root: Path):
     """Build a real DependencyMapService with minimal concrete collaborators."""
-    from code_indexer.server.services.dependency_map_service import (
+    from cidx_depmap.server.dependency_map_service import (
         DependencyMapService,
     )
 
@@ -151,7 +151,7 @@ def _drive_service_and_capture_invoke_fn(
 
     Returns the captured callable, or None if construction was not reached.
     """
-    from code_indexer.server.services.dep_map_repair_executor import (
+    from cidx_depmap.server.dep_map_repair_executor import (
         DepMapRepairExecutor,
     )
 
@@ -175,7 +175,7 @@ def _drive_service_and_capture_invoke_fn(
         patch(_CONFIG_SVC_TARGETS[1], return_value=mock_config_svc, create=True),
         patch(_CONFIG_SVC_TARGETS[2], return_value=mock_config_svc, create=True),
         patch(
-            "code_indexer.server.services.dep_map_repair_executor.DepMapRepairExecutor",
+            "cidx_depmap.server.dep_map_repair_executor.DepMapRepairExecutor",
             _SpyExecutor,
         ),
         patch.dict("os.environ", env_overrides, clear=True),

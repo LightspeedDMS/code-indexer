@@ -30,7 +30,7 @@ from code_indexer.server.services.cidx_meta_access.catalog_articles import (
 from code_indexer.server.services.cidx_meta_access.depmap_source import (
     source_for_visibility,
 )
-from code_indexer.server.services.dependency_map_domain_service import (
+from cidx_depmap.server.dependency_map_domain_service import (
     DependencyMapDomainService,
 )
 from tests.shared.cidx_meta_visibility_fixture import (

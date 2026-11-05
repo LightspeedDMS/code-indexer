@@ -40,15 +40,13 @@ class TestGetScipQueryServiceHelper:
 
     def test_creates_service_with_golden_repos_dir_from_app_state(self):
         """Verify helper gets golden_repos_dir from request.app.state."""
-        from code_indexer.server.routers.scip_queries import _get_scip_query_service
+        from cidx_scip.server.routes import _get_scip_query_service
 
         mock_request = MagicMock()
         mock_request.app.state.golden_repos_dir = "/path/to/golden-repos"
         mock_request.app.state.access_filtering_service = None
 
-        with patch(
-            "code_indexer.server.routers.scip_queries.SCIPQueryService"
-        ) as MockService:
+        with patch("cidx_scip.server.routes.SCIPQueryService") as MockService:
             _get_scip_query_service(mock_request)
 
             MockService.assert_called_once_with(
@@ -58,16 +56,14 @@ class TestGetScipQueryServiceHelper:
 
     def test_creates_service_with_access_filtering_service(self):
         """Verify helper passes access_filtering_service to SCIPQueryService."""
-        from code_indexer.server.routers.scip_queries import _get_scip_query_service
+        from cidx_scip.server.routes import _get_scip_query_service
 
         mock_request = MagicMock()
         mock_request.app.state.golden_repos_dir = "/path/to/golden-repos"
         mock_access_service = MagicMock()
         mock_request.app.state.access_filtering_service = mock_access_service
 
-        with patch(
-            "code_indexer.server.routers.scip_queries.SCIPQueryService"
-        ) as MockService:
+        with patch("cidx_scip.server.routes.SCIPQueryService") as MockService:
             _get_scip_query_service(mock_request)
 
             MockService.assert_called_once_with(
@@ -87,7 +83,7 @@ class TestDefinitionRouteDelegation:
     ):
         """AC: /scip/definition route delegates to SCIPQueryService.find_definition()."""
         from fastapi import Request
-        from code_indexer.server.routers.scip_queries import get_definition
+        from cidx_scip.server.routes import get_definition
 
         mock_scip_service.find_definition.return_value = [
             {
@@ -105,11 +101,11 @@ class TestDefinitionRouteDelegation:
         mock_request = MagicMock(spec=Request)
 
         with patch(
-            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            "cidx_scip.server.routes._get_scip_query_service",
             return_value=mock_scip_service,
         ):
             with patch(
-                "code_indexer.server.routers.scip_queries._apply_scip_payload_truncation",
+                "cidx_scip.server.routes._apply_scip_payload_truncation",
             ) as mock_truncate:
                 mock_truncate.return_value = (
                     mock_scip_service.find_definition.return_value
@@ -142,17 +138,17 @@ class TestDefinitionRouteDelegation:
     ):
         """Verify project parameter is passed as repository_alias to service."""
         from fastapi import Request
-        from code_indexer.server.routers.scip_queries import get_definition
+        from cidx_scip.server.routes import get_definition
 
         mock_scip_service.find_definition.return_value = []
         mock_request = MagicMock(spec=Request)
 
         with patch(
-            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            "cidx_scip.server.routes._get_scip_query_service",
             return_value=mock_scip_service,
         ):
             with patch(
-                "code_indexer.server.routers.scip_queries._apply_scip_payload_truncation",
+                "cidx_scip.server.routes._apply_scip_payload_truncation",
             ) as mock_truncate:
                 mock_truncate.return_value = []
                 # Sync call - no await needed
@@ -183,7 +179,7 @@ class TestReferencesRouteDelegation:
     ):
         """AC: /scip/references route delegates to SCIPQueryService.find_references()."""
         from fastapi import Request
-        from code_indexer.server.routers.scip_queries import get_references
+        from cidx_scip.server.routes import get_references
 
         mock_scip_service.find_references.return_value = [
             {
@@ -201,11 +197,11 @@ class TestReferencesRouteDelegation:
         mock_request = MagicMock(spec=Request)
 
         with patch(
-            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            "cidx_scip.server.routes._get_scip_query_service",
             return_value=mock_scip_service,
         ):
             with patch(
-                "code_indexer.server.routers.scip_queries._apply_scip_payload_truncation",
+                "cidx_scip.server.routes._apply_scip_payload_truncation",
             ) as mock_truncate:
                 mock_truncate.return_value = (
                     mock_scip_service.find_references.return_value
@@ -244,7 +240,7 @@ class TestDependenciesRouteDelegation:
     ):
         """AC: /scip/dependencies route delegates to get_dependencies()."""
         from fastapi import Request
-        from code_indexer.server.routers.scip_queries import get_dependencies
+        from cidx_scip.server.routes import get_dependencies
 
         mock_scip_service.get_dependencies.return_value = [
             {
@@ -262,11 +258,11 @@ class TestDependenciesRouteDelegation:
         mock_request = MagicMock(spec=Request)
 
         with patch(
-            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            "cidx_scip.server.routes._get_scip_query_service",
             return_value=mock_scip_service,
         ):
             with patch(
-                "code_indexer.server.routers.scip_queries._apply_scip_payload_truncation",
+                "cidx_scip.server.routes._apply_scip_payload_truncation",
             ) as mock_truncate:
                 mock_truncate.return_value = (
                     mock_scip_service.get_dependencies.return_value
@@ -304,7 +300,7 @@ class TestDependentsRouteDelegation:
     ):
         """AC: /scip/dependents route delegates to SCIPQueryService.get_dependents()."""
         from fastapi import Request
-        from code_indexer.server.routers.scip_queries import get_dependents
+        from cidx_scip.server.routes import get_dependents
 
         mock_scip_service.get_dependents.return_value = [
             {
@@ -322,11 +318,11 @@ class TestDependentsRouteDelegation:
         mock_request = MagicMock(spec=Request)
 
         with patch(
-            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            "cidx_scip.server.routes._get_scip_query_service",
             return_value=mock_scip_service,
         ):
             with patch(
-                "code_indexer.server.routers.scip_queries._apply_scip_payload_truncation",
+                "cidx_scip.server.routes._apply_scip_payload_truncation",
             ) as mock_truncate:
                 mock_truncate.return_value = (
                     mock_scip_service.get_dependents.return_value

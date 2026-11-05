@@ -30,14 +30,14 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from code_indexer.server.auth.dependencies import get_current_user
+from cidx_scip.server.route_auth import current_caller as get_current_user
 from code_indexer.server.auth.user_manager import User, UserRole
-from code_indexer.server.multi.scip_models import SCIPMultiMetadata, SCIPMultiResponse
+from cidx_scip.server.multi_models import SCIPMultiMetadata, SCIPMultiResponse
 from code_indexer.server.services.access_filtering_service import (
     AccessFilteringService,
 )
 from code_indexer.server.services.group_access_manager import GroupAccessManager
-from code_indexer.server.routes import scip_multi_routes
+from cidx_scip.server import multi_routes as scip_multi_routes
 
 
 def _make_user(username: str, role: UserRole = UserRole.NORMAL_USER) -> User:

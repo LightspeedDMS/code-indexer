@@ -37,6 +37,7 @@ from code_indexer.server.services.activated_repo_index_manager import (
     ActivatedRepoIndexManager,
 )
 from code_indexer.server.utils.config_manager import ServerConfig
+from tests.unit.server._scip_feature import scip_pipeline_installed
 
 _RELATIVE_PYTHONPATH = "./src"
 
@@ -201,9 +202,15 @@ class TestActivatedRepoIndexManagerSanitizesPythonPath:
         expected_abs = os.path.abspath(_RELATIVE_PYTHONPATH)
         run_fn, captured_calls = capturing_subprocess_run
 
-        with patch(
-            "code_indexer.server.services.activated_repo_index_manager.subprocess.run",
-            side_effect=run_fn,
+        # The SCIP step runs only while the scip feature's index builder is
+        # installed (modular phase 4d); under the local backend it answers
+        # with the command the core runs here.
+        with (
+            scip_pipeline_installed(),
+            patch(
+                "code_indexer.server.services.activated_repo_index_manager.subprocess.run",
+                side_effect=run_fn,
+            ),
         ):
             index_manager._execute_scip_indexing(str(tmp_path), clear=False)
 

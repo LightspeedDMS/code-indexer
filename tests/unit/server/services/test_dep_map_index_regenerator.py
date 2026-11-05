@@ -25,7 +25,7 @@ from tests.unit.server.services.test_dep_map_health_detector import (
 
 def _get_regenerator():
     """Import IndexRegenerator -- fails if not yet implemented."""
-    from code_indexer.server.services.dep_map_index_regenerator import (
+    from cidx_depmap.server.dep_map_index_regenerator import (
         IndexRegenerator,
     )
 

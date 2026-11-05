@@ -43,12 +43,32 @@ if TYPE_CHECKING:
     from code_indexer.server.services.audit_outcome import AuditActor
 
 from pydantic import BaseModel
-from code_indexer.server.logging_utils import format_error_log, mask_url_credentials
+from code_indexer.server.logging_utils import (
+    format_error_log,
+    mask_url_credentials,
+    strip_url_credentials,
+)
+from code_indexer.server.storage.shared.git_backend import (
+    GitBackend,
+    LocalGitBackend,
+    local_git_backend,
+)
+from code_indexer.server.storage.shared.content_backend import (
+    ContentBackend,
+    ContentBackendFactory,
+    LocalContentBackend,
+)
 from code_indexer.server.git.git_subprocess_env import (
     build_non_interactive_git_env,
     ensure_remote_url_without_credentials,
     remote_url_without_credentials,
 )
+from code_indexer.server.utils.index_command_layout import (
+    is_pod_local_repo,
+    repo_layout_kwargs,
+    server_backend_args,
+)
+from code_indexer.utils.git_runner import run_git_command
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 
 # Story #876 D4 — cluster-atomic lifecycle registration hook.
@@ -67,6 +87,7 @@ from code_indexer.storage.sqlite_chunk_store import chunk_store_has_real_data
 # create_span() no-ops (yields a _NoOpSpan) when OTEL tracing is
 # unavailable/uninitialized.
 from code_indexer.server.telemetry.spans import create_span
+from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -272,14 +293,81 @@ def _make_hnsw_orphan_event_logger(alias: str):
     return _log_event
 
 
+class DelegatedRepositoryRemoval:
+    """What a removal did to a golden clone held by workspace-mcp.
+
+    Under ``content_backend='delegated'`` the clone lives at workspace-mcp, at
+    the same absolute path as this pod's index-state directory. *outcome* is
+    ``deleted`` (workspace-mcp removed it), ``already_absent`` (nothing was
+    there -- a re-run, say) or ``retained`` (cidx does not own it; *reason*
+    says why). Only ``deleted`` ever claims a deletion.
+    """
+
+    DELETED = "deleted"
+    ALREADY_ABSENT = "already_absent"
+    RETAINED = "retained"
+
+    def __init__(
+        self, clone_path: str, outcome: str, reason: Optional[str] = None
+    ) -> None:
+        self.clone_path = clone_path
+        self.outcome = outcome
+        self.reason = reason
+
+    def note(self) -> str:
+        """The clause the removal's result message carries."""
+        if self.outcome == self.DELETED:
+            return f" (deleted the repository at {self.clone_path} on workspace-mcp)"
+        if self.outcome == self.ALREADY_ABSENT:
+            return (
+                f" (the repository at {self.clone_path} was already absent on "
+                "workspace-mcp)"
+            )
+        return f" (the repository at {self.clone_path} was NOT deleted: {self.reason})"
+
+    def record(self, cascade_results: Dict[str, Any]) -> None:
+        """Name the path in the job result under what happened to it."""
+        cascade_results[f"repository_{self.outcome}_at"] = self.clone_path
+
+
+#: The index-artifact client's error code for an alias it cannot delete now:
+#: a publish of it is running or a checkout lease on it is live (transient).
+_INDEX_ARTIFACT_ALIAS_BUSY = "ECONFLICT"
+
+
 class GoldenRepoError(Exception):
     """Base exception for golden repository operations."""
 
     pass
 
 
+class GoldenRepoAlreadyExistsError(GoldenRepoError):
+    """The alias is already registered in the shared golden-repo registry.
+
+    A typed duplicate so the REST layer can answer 409 Conflict -- a caller
+    re-registering an existing alias (an idempotent seeder) made no server
+    error -- without matching on message text.
+    """
+
+    pass
+
+
 class GitOperationError(GoldenRepoError):
     """Exception raised when git operations fail."""
+
+    pass
+
+
+class WorkspaceIdNotRetainedError(GoldenRepoError):
+    """Raised when a golden repo's workspace-mcp ``workspace_id`` cannot be resolved.
+
+    EVO-65021: the delegated SCIP indexer must hand sandbox-mcp the
+    workspace-mcp ``workspace_id`` (``sb-{workspace_id}``) of the golden repo's
+    workspace. This is raised by :meth:`GoldenRepoManager.resolve_workspace_id`
+    when the alias is unknown, or when the repo predates workspace_id retention
+    and has not been backfilled — the "missing-handle" path the delegated
+    backend fail-softs on (skips SCIP for that repo).
+    """
 
     pass
 
@@ -346,6 +434,10 @@ class GoldenRepo(BaseModel):
     temporal_options: Optional[Dict] = None
     category_id: Optional[int] = None
     category_auto_assigned: bool = False
+    # EVO-65021: workspace-mcp workspace id (``ws-<hex>``) this golden repo was
+    # provisioned into. Consumed by the delegated SCIP indexer to address
+    # sandbox-mcp (``sb-{workspace_id}``). None when not (yet) retained.
+    workspace_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert golden repository to dictionary.
@@ -364,6 +456,7 @@ class GoldenRepo(BaseModel):
             "temporal_options": self.temporal_options,
             "category_id": self.category_id,
             "category_auto_assigned": self.category_auto_assigned,
+            "workspace_id": self.workspace_id,
         }
 
 
@@ -396,6 +489,12 @@ class GoldenRepoManager:
         None  # RefreshScheduler (existing, re-declared for clarity)
     )
     _snapshot_manager: Optional[Any] = None  # VersionedSnapshotManager (Story #1034)
+    # Content seam. A class-level default as well as the __init__ parameter: an
+    # instance built without __init__ (object.__new__, as many tests do) must
+    # still mean "the repository is on this pod" -- today's behaviour -- rather
+    # than an AttributeError. LocalContentBackend is stateless, so sharing it
+    # is safe.
+    _content_backend: ContentBackend = LocalContentBackend()
 
     def __init__(
         self,
@@ -403,6 +502,8 @@ class GoldenRepoManager:
         resource_config: Optional["ServerResourceConfig"] = None,
         db_path: Optional[str] = None,
         storage_backend: Optional[Any] = None,
+        git_backend: Optional[GitBackend] = None,
+        content_backend: Optional[ContentBackend] = None,
     ):
         """
         Initialize golden repository manager.
@@ -411,12 +512,32 @@ class GoldenRepoManager:
             data_dir: Data directory path (REQUIRED - no default)
             resource_config: Resource configuration (timeouts, limits)
             db_path: Path to SQLite database file (optional, auto-computed from data_dir if not provided)
+            git_backend: EVO-64678 git seam. Defaults to the local git backend (git run
+                in-process), i.e. exactly today's behavior; the server injects the
+                configured backend via build_git_backend() at startup.
+            content_backend: the content seam. Defaults to the local mode's module
+                (the repository is on this pod's disk). A delegated backend means
+                the clone lives with the service that owns the files, and only
+                the repository's index state lives here -- see
+                _clone_for_delegated_content.
 
         Raises:
             ValueError: If data_dir is None or empty
         """
         if not data_dir or not data_dir.strip():
             raise ValueError("data_dir is required and cannot be None or empty")
+
+        # EVO-64678: all git runs through this seam. Default local => no behavior change.
+        self._git_backend: GitBackend = (
+            git_backend if git_backend is not None else local_git_backend()
+        )
+        # Unset: the module installed for the content seam's local mode, via
+        # the seam resolver (never a direct construction).
+        self._content_backend: ContentBackend = (
+            content_backend
+            if content_backend is not None
+            else ContentBackendFactory.create("local")
+        )
 
         self.data_dir = data_dir
         self.golden_repos_dir = os.path.join(self.data_dir, "golden-repos")
@@ -629,6 +750,26 @@ class GoldenRepoManager:
         self.golden_repos[alias] = repo
         return repo
 
+    def _strip_credentials_if_delegated(self, repo_url: str) -> str:
+        """EVO-64616: return *repo_url* with any embedded credential REMOVED when
+        the git backend supplies its own (delegated → git-mcp), so the PAT lives
+        ONLY in git-mcp and never in cidx's stored golden state (metadata row +
+        background-job metadata + ``.git/config``). Local mode returns it unchanged
+        — in-process git needs the token in the URL.
+
+        The scheme match is case-INSENSITIVE (RFC 3986 §3.1: schemes are
+        case-insensitive, and git/libcurl accept ``HTTPS://``) so an odd-cased URL
+        cannot smuggle the credential past the guard. The http/https allow-list is
+        kept: ``ssh://git@host`` must retain its ``git`` user (not a secret).
+        """
+        if self._git_backend.owns_credentials and repo_url.lower().startswith(
+            ("http://", "https://")
+        ):
+            # strip_url_credentials is typed Any->Any (non-str passthrough); a str
+            # in always yields a str out.
+            return cast(str, strip_url_credentials(repo_url))
+        return repo_url
+
     def add_golden_repo(
         self,
         repo_url: str,
@@ -640,6 +781,7 @@ class GoldenRepoManager:
         *,
         submitter_username: str,
         skip_pre_flight_git_validation: bool = False,
+        workspace_id: Optional[str] = None,
     ) -> str:
         """
         Add a golden repository.
@@ -660,6 +802,10 @@ class GoldenRepoManager:
             temporal_options: Temporal indexing configuration options
             submitter_username: The authenticated caller, recorded on the job
                 and as the audit actor.
+            workspace_id: Optional workspace-mcp workspace id (EVO-65021) to
+                retain on the golden repo so the delegated SCIP indexer can
+                address sandbox-mcp (``sb-{workspace_id}``). None when the
+                caller does not (yet) know it.
 
         Returns:
             Job ID for tracking add operation progress
@@ -685,6 +831,7 @@ class GoldenRepoManager:
                 temporal_options=temporal_options,
                 submitter_username=submitter_username,
                 skip_pre_flight_git_validation=skip_pre_flight_git_validation,
+                workspace_id=workspace_id,
             )
         except Exception:
             record_repo_outcome(
@@ -717,6 +864,7 @@ class GoldenRepoManager:
         temporal_options: Optional[Dict],
         submitter_username: str,
         skip_pre_flight_git_validation: bool,
+        workspace_id: Optional[str] = None,
     ) -> str:
         """Validate the request and submit the background add job."""
         # Check maintenance mode first (Story #734)
@@ -751,11 +899,68 @@ class GoldenRepoManager:
                 "and cannot be used as part of an alias name"
             )
 
-        # Validate BEFORE submitting job (Bug #1314: resolve via shared
-        # backend so a duplicate-alias registered by ANOTHER worker/node is
-        # still detected, not just aliases known to this worker's cache)
-        if self._resolve_golden_repo(alias) is not None:
-            raise GoldenRepoError(f"Golden repository alias '{alias}' already exists")
+        # Validate BEFORE submitting job. Read the SHARED backend, never this
+        # worker's cache: Bug #1314 is the cache missing an alias another node
+        # registered; EVO-64616 is the converse -- a cache HIT for an alias
+        # another node has since removed (a failed add rolls its row back on
+        # the node that ran it), which nothing evicts here. The cache-first
+        # resolver then refused that alias as "already exists" on every pod
+        # that had cached it, while the registry listing did not contain it.
+        if self._resolve_golden_repo_authoritative(alias) is not None:
+            raise GoldenRepoAlreadyExistsError(
+                f"Golden repository alias '{alias}' already exists"
+            )
+
+        # GAP-5: Also check the global registry -- a prior removal that failed
+        # mid-way could have left a global registry entry (and alias pointer)
+        # even though the golden_repos row is gone. Re-adding without cleaning
+        # these ghosts produces a wedged state (the AICC incident).
+        try:
+            from code_indexer.global_repos.global_activation import GlobalActivator
+
+            activator = GlobalActivator(self.golden_repos_dir)
+            if activator.registry.get_global_repo(f"{alias}-global") is not None:
+                raise GoldenRepoError(
+                    f"Golden repository alias '{alias}' has a stale global registry "
+                    f"entry ('{alias}-global'). Remove it first or use the admin UI "
+                    f"to clean up the orphaned registration."
+                )
+        except GoldenRepoError:
+            raise
+        except Exception as registry_check_err:
+            # Non-fatal: if the global registry is unavailable, proceed with
+            # the add and let activation fail later (existing behavior).
+            logging.warning(
+                "GAP-5: global registry pre-check for '%s' failed: %s",
+                alias,
+                registry_check_err,
+            )
+
+        # GAP-5: Check for an orphaned on-disk clone directory. A prior removal
+        # that crashed after deleting the DB row but before cleaning the
+        # filesystem would leave a directory that blocks _clone_repository with
+        # "destination path already exists". _remove_orphan_clone_for_retry
+        # handles this inside the background worker, but surfacing it here
+        # gives the caller a clear early error instead of a delayed job failure.
+        clone_dir = os.path.join(self.golden_repos_dir, alias)
+        if os.path.exists(clone_dir) and not repo_url.startswith("local://"):
+            logging.warning(
+                "GAP-5: on-disk clone directory '%s' exists without a golden_repos "
+                "row -- an orphaned clone from a prior incomplete removal. The "
+                "background worker will attempt cleanup via "
+                "_remove_orphan_clone_for_retry.",
+                clone_dir,
+            )
+
+        # EVO-64616: strip any embedded credential up front (when git-mcp owns
+        # auth) so the pre-flight probe AND the background-job metadata carry a
+        # clean URL; the persistence point strips again as defense-in-depth.
+        repo_url = self._strip_credentials_if_delegated(repo_url)
+
+        if not repo_url.startswith("local://"):  # local:// lives on this pod
+            self._refuse_local_git_under_delegated_content()
+        if enable_temporal:
+            self._refuse_temporal_under_delegated_content()
 
         # The removal job deletes the registry row FIRST (Bug #1317) and the
         # clone directory LAST, so the alias looks free while its removal is
@@ -785,12 +990,15 @@ class GoldenRepoManager:
                     f"{mask_url_credentials(repo_url)}"
                 )
 
-        # Pod-pull: the real clone+index+register+activate work now
+        # EVO-64545 (pod-pull): the real clone+index+register+activate work now
         # lives in execute_add_golden_repo_work() so any pod's IndexJobClaimLoop
         # can run it from the job row's metadata. This thin wrapper preserves the
         # exact solo/local-pool path.
-        # Story #2118: declaring job_id makes BackgroundJobManager inject this
-        # job's id, recorded on the embedding_call_stats rows of its children.
+        # EVO-66113 / Story #2118: BackgroundJobManager._execute_job injects the
+        # assigned job_id into any worker whose signature declares a `job_id`
+        # param, straight from the dequeued (job_id, func, args, kwargs) tuple
+        # -- race-free, so no post-submit mutable holder is needed. It is
+        # recorded on the embedding_call_stats rows of its children.
         def background_worker(progress_callback=None, job_id=None) -> Dict[str, Any]:
             return self.execute_add_golden_repo_work(
                 repo_url=repo_url,
@@ -799,11 +1007,12 @@ class GoldenRepoManager:
                 enable_temporal=enable_temporal,
                 temporal_options=temporal_options,
                 submitter_username=submitter_username,
+                workspace_id=workspace_id,
                 progress_callback=progress_callback,
                 job_id=job_id,
             )
 
-        # Submit to BackgroundJobManager. Pod-pull: pass reconstruction params
+        # Submit to BackgroundJobManager. EVO-64545: pass reconstruction params
         # as metadata so in cluster mode the row is left PENDING and claimable +
         # runnable on any pod (pod-pull); solo mode runs background_worker locally.
         job_id = self.background_job_manager.submit_job(
@@ -819,6 +1028,7 @@ class GoldenRepoManager:
                 "enable_temporal": enable_temporal,
                 "temporal_options": temporal_options,
                 "submitter_username": submitter_username,
+                "workspace_id": workspace_id,
             },
         )
         return cast(str, job_id)
@@ -832,15 +1042,21 @@ class GoldenRepoManager:
         enable_temporal: bool = False,
         temporal_options: Optional[Dict] = None,
         submitter_username: str,
+        workspace_id: Optional[str] = None,
         progress_callback: Optional[Callable[..., Any]] = None,
         job_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """reusable clone + index + register + global-activate body for
+        """EVO-64545: reusable clone + index + register + global-activate body for
         add_golden_repo, extracted verbatim from the former background_worker
         closure so a pod-pull IndexJobClaimLoop can execute it on any pod from the
         job row's metadata. Retry-safe: a partial clone is cleaned up on failure
         and a duplicate alias is rejected up front by the caller.
         """
+        # EVO-64616 defense-in-depth: this is the persistence boundary (clone +
+        # _sqlite_backend.add_repo + GoldenRepo record) and is reachable directly
+        # from a pod-pull job's metadata, so strip here too — a credential must
+        # never reach the stored record even if a caller passed an unstripped URL.
+        repo_url = self._strip_credentials_if_delegated(repo_url)
 
         def _cleanup_failed_clone(clone_path: Optional[str]) -> None:
             """Remove a partially-cloned directory so retries don't fail with
@@ -848,6 +1064,44 @@ class GoldenRepoManager:
             Silently no-ops if clone_path is None or does not exist.
             """
             if not clone_path:
+                return
+            if self.repositories_are_delegated() and not repo_url.startswith(
+                "local://"
+            ):
+                # The clone is with git-mcp/workspace-mcp; its index state is
+                # here. Remove both, and only while no registry row names the
+                # alias: a row means a registered repository (a reclaimed
+                # re-run of an add whose first executor committed it), whose
+                # index state and clone are live, not this failure's debris.
+                try:
+                    registered = self.get_golden_repo(alias) is not None
+                except Exception as lookup_exc:
+                    logging.error(
+                        "Bug #1218: registration of '%s' failed and its registry "
+                        "row could not be read (%s); its index state and clone "
+                        "at %s are kept",
+                        alias,
+                        lookup_exc,
+                        clone_path,
+                    )
+                    return
+                if registered:
+                    logging.warning(
+                        "Bug #1218: registration of '%s' failed; its index state "
+                        "and clone at %s are kept: a registry row still names it",
+                        alias,
+                        clone_path,
+                    )
+                    return
+                try:
+                    self._remove_pod_index_state(clone_path)
+                except OSError as cleanup_exc:
+                    logging.warning(
+                        "Bug #1218: failed to remove index state at '%s': %s",
+                        clone_path,
+                        cleanup_exc,
+                    )
+                self._discard_failed_delegated_clone(alias, repo_url, clone_path)
                 return
             try:
                 if os.path.islink(clone_path):
@@ -893,6 +1147,14 @@ class GoldenRepoManager:
                 # Remove such an orphan up front (guards inside the helper never
                 # touch in-place content or a committed registration).
                 self._remove_orphan_clone_for_retry(repo_url, alias)
+                if self.repositories_are_delegated() and not self._is_local_path(
+                    repo_url
+                ):
+                    # git-mcp can fail a clone partway (or the visibility wait
+                    # can time out) and leave a partial clone there. The step
+                    # above proved nothing was there and no row names it, so
+                    # the path is this job's to clean if it fails from here.
+                    _clone_path_for_cleanup = os.path.join(self.golden_repos_dir, alias)
                 # Clone repository
                 clone_path = self._clone_repository(repo_url, alias, default_branch)
                 # In index-in-place mode clone_path IS
@@ -924,7 +1186,9 @@ class GoldenRepoManager:
                     temporal_options=temporal_options,
                     progress_callback=progress_callback,
                     orphan_event_callback=_make_hnsw_orphan_event_logger(alias),
+                    golden_repo_alias=alias,
                     job_id=job_id,
+                    local_content=is_pod_local_repo(repo_url, alias),
                 )
 
                 # Create golden repository record
@@ -937,6 +1201,7 @@ class GoldenRepoManager:
                     created_at=created_at,
                     enable_temporal=enable_temporal,
                     temporal_options=temporal_options,
+                    workspace_id=workspace_id,
                 )
 
                 # Store and persist
@@ -949,6 +1214,7 @@ class GoldenRepoManager:
                     created_at=created_at,
                     enable_temporal=enable_temporal,
                     temporal_options=temporal_options,
+                    workspace_id=workspace_id,
                 )
 
                 # Auto-assign category (Story #181 AC1, Story #622 URL matching)
@@ -985,17 +1251,13 @@ class GoldenRepoManager:
                 # outer except clause below cleans up the orphaned clone
                 # directory for -- registration is all-or-nothing.
                 try:
-                    from code_indexer.global_repos.global_activation import (
-                        GlobalActivator,
-                    )
-
-                    global_activator = GlobalActivator(self.golden_repos_dir)
-                    global_activator.activate_golden_repo(
-                        repo_name=alias,
+                    self._activate_globally(
+                        alias=alias,
                         repo_url=repo_url,
                         clone_path=clone_path,
                         enable_temporal=enable_temporal,
                         temporal_options=temporal_options,
+                        published=self._publish_added_index(clone_path),
                     )
                     logging.info(
                         f"Golden repository '{alias}' automatically activated globally as '{alias}-global'"
@@ -1036,24 +1298,7 @@ class GoldenRepoManager:
                     ) from activation_error
 
                 # Lifecycle hook: Create .md file in cidx-meta (Story #538)
-                try:
-                    from code_indexer.global_repos.meta_description_hook import (
-                        on_repo_added,
-                    )
-
-                    on_repo_added(
-                        repo_name=alias,
-                        repo_url=repo_url,
-                        clone_path=clone_path,
-                        golden_repos_dir=self.golden_repos_dir,
-                        mcp_registration_service=self._mcp_registration_service,
-                    )
-                except Exception as hook_error:
-                    # Log error but don't fail the golden repo registration
-                    logging.error(
-                        f"Meta description hook failed for '{alias}': {hook_error}. "
-                        f"Golden repository added but meta description not created."
-                    )
+                self._run_meta_description_hook(alias, repo_url, clone_path)
 
                 # Lifecycle hook: Auto-assign to admins/powerusers groups (Story #706)
                 try:
@@ -1079,16 +1324,11 @@ class GoldenRepoManager:
                 # exceptions), but we wrap the call in a belt-and-suspenders
                 # try/except for consistency with the other hooks and to
                 # guard against any unexpected error in the wiring itself.
-                try:
-                    self._register_lifecycle_after_registration(
-                        alias, submitter_username
-                    )
-                except Exception as hook_error:
-                    logging.error(
-                        f"Lifecycle registration hook failed for '{alias}': "
-                        f"{hook_error}. Golden repository added but lifecycle "
-                        f"detection rebuild was not scheduled."
-                    )
+                # EVO-65484: gate + run the synchronous description/lifecycle
+                # generation (extracted so the gate is unit-testable).
+                self._maybe_register_lifecycle_after_registration(
+                    alias, submitter_username
+                )
 
                 return {
                     "success": True,
@@ -1099,7 +1339,7 @@ class GoldenRepoManager:
             except subprocess.CalledProcessError as e:
                 _cleanup_failed_clone(_clone_path_for_cleanup)
                 raise GitOperationError(
-                    f"Failed to clone repository: Git process failed with exit code {e.returncode}: {e.stderr}"
+                    f"Failed to clone repository: Git process failed with exit code {e.returncode}: {redact_url_credentials(e.stderr)}"
                 )
             except subprocess.TimeoutExpired as e:
                 _cleanup_failed_clone(_clone_path_for_cleanup)
@@ -1140,6 +1380,8 @@ class GoldenRepoManager:
         Returns True iff an orphan clone was removed.
         """
         clone_path = os.path.join(self.golden_repos_dir, alias)
+        if self.repositories_are_delegated() and not repo_url.startswith("local://"):
+            return self._remove_delegated_orphan_for_retry(repo_url, alias, clone_path)
         if not os.path.exists(clone_path):
             return False
         if self._is_in_place_registration(repo_url, clone_path):
@@ -1170,6 +1412,129 @@ class GoldenRepoManager:
                 "directory still exists after removal"
             )
         return True
+
+    def _remove_delegated_orphan_for_retry(
+        self, repo_url: str, alias: str, clone_path: str
+    ) -> bool:
+        """The delegated half of :meth:`_remove_orphan_clone_for_retry`.
+
+        The interrupted attempt left its index state HERE and its partial
+        clone at workspace-mcp (git-mcp cloned it there), where the next clone
+        would fail with "destination exists". With no committed registry row
+        for *alias*, both are removed: the index state on this pod, the clone
+        through workspace-mcp's ``/clone-path/delete`` (idempotent: nothing
+        there is a no-op). Never an in-place registration's directory -- that
+        content is its provisioner's (EVO-64228).
+
+        Another pod's add of the same alias cannot be mid-clone here: an add
+        runs only as an ``add_golden_repo`` job row, and the
+        ``idx_active_job_per_repo`` partial unique index on
+        ``(operation_type, repo_alias)`` admits ONE pending/running such row
+        cluster-wide (``register_job_if_no_conflict`` at submit); a pod-pull
+        reclaim re-runs that same row only after its executor was declared
+        dead. So with no registry row, whatever is at the path is an orphan.
+
+        Returns True iff anything was removed. A workspace-mcp failure raises:
+        the clone must not proceed into a destination that may still exist.
+        """
+        if self.get_golden_repo(alias) is not None:
+            return False
+        removed = False
+        if os.path.lexists(clone_path):
+            try:
+                self._remove_pod_index_state(clone_path)
+            except OSError as cleanup_error:
+                raise GitOperationError(
+                    f"Failed orphan index-state cleanup for '{alias}' at "
+                    f"{clone_path}: {cleanup_error}"
+                ) from cleanup_error
+            removed = True
+        reason = self._delegated_clone_retain_reason(alias, repo_url, clone_path)
+        if reason is not None:
+            logging.info(
+                "add_golden_repo retry for '%s': %s left at workspace-mcp: %s",
+                alias,
+                clone_path,
+                reason,
+            )
+            return removed
+        copies = self._delegated_working_copies_if_wired()
+        if copies is None:
+            logging.warning(
+                "add_golden_repo for '%s': no workspace-mcp clone backend "
+                "(clone_backend='delegated') is wired, so a partial clone an "
+                "interrupted add may have left at %s cannot be removed; if one "
+                "is there, the clone fails with 'destination exists'",
+                alias,
+                clone_path,
+            )
+            return removed
+        try:
+            deleted = copies.remove(clone_path)
+        except GitOperationError:
+            raise
+        except Exception as exc:  # workspace-mcp transport / HTTP error
+            raise GitOperationError(
+                f"Failed orphan cleanup for '{alias}': the partial clone at "
+                f"{clone_path} could not be deleted on workspace-mcp ({exc}); "
+                "cloning into it would fail with 'destination exists'"
+            ) from exc
+        if deleted:
+            logging.warning(
+                "add_golden_repo retry: deleted orphan partial clone for '%s' at "
+                "%s on workspace-mcp (no committed registry row)",
+                alias,
+                clone_path,
+            )
+        return removed or deleted
+
+    def _golden_description_generation_enabled(self) -> bool:
+        """EVO-65484: whether to run description/lifecycle generation on golden add.
+
+        Reads ``indexing.golden_description_generation_enabled`` (default True).
+        Fail-open: any error resolving the config returns True so the (historical)
+        generation still runs -- the flag is an opt-OUT knob, never a silent skip.
+        """
+        try:
+            from ..services.config_service import get_config_service
+            from ..utils.config_manager import golden_description_generation_enabled
+
+            return golden_description_generation_enabled(
+                get_config_service().get_config()
+            )
+        except Exception as exc:  # config read must never block add
+            logging.warning(
+                "EVO-65484: could not read golden_description_generation_enabled "
+                f"({exc}); defaulting to enabled."
+            )
+            return True
+
+    def _maybe_register_lifecycle_after_registration(
+        self, alias: str, submitter_username: str
+    ) -> None:
+        """EVO-65484: run description/lifecycle generation unless gated off.
+
+        Extracted from ``execute_add_golden_repo_work`` so the gate is unit-testable.
+        When ``golden_description_generation_enabled`` is False (config), skip the
+        synchronous orchestrator -> Claude seam (a failing seam otherwise adds
+        per-add latency + spam). Skipping only omits the generated description --
+        never the repo's search/index data. The generation call is itself sidecar-
+        disciplined; the belt-and-suspenders try/except keeps the add worker alive.
+        """
+        if not self._golden_description_generation_enabled():
+            logging.info(
+                "EVO-65484: golden_description_generation_enabled=false; "
+                f"skipping description/lifecycle generation for '{alias}'."
+            )
+            return
+        try:
+            self._register_lifecycle_after_registration(alias, submitter_username)
+        except Exception as hook_error:
+            logging.error(
+                f"Lifecycle registration hook failed for '{alias}': "
+                f"{hook_error}. Golden repository added but lifecycle "
+                f"detection rebuild was not scheduled."
+            )
 
     def _register_lifecycle_after_registration(
         self, alias: str, submitter_username: str
@@ -1292,6 +1657,454 @@ class GoldenRepoManager:
         """
         return self._sqlite_backend.list_repos()  # type: ignore[no-any-return]
 
+    def _reconstruct_repo_identity(self, repo_dir: "Path") -> tuple[str, str]:
+        """Reconstruct (repo_url, default_branch) for a registry backfill from the
+        on-disk git clone. Falls back to a ``file://`` URL and ``main`` when git
+        metadata is unavailable (non-git / detached HEAD).
+
+        Delegated: asked of the git seam -- see
+        :meth:`_reconstruct_repo_identity_delegated`."""
+        if self.repositories_are_delegated():
+            return self._reconstruct_repo_identity_delegated(repo_dir)
+        repo_url = f"file://{repo_dir}"
+        default_branch = "main"
+        try:
+            url = subprocess.run(
+                ["git", "-C", str(repo_dir), "config", "--get", "remote.origin.url"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if url.returncode == 0 and url.stdout.strip():
+                repo_url = url.stdout.strip()
+            branch = subprocess.run(
+                ["git", "-C", str(repo_dir), "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            resolved = branch.stdout.strip()
+            if branch.returncode == 0 and resolved and resolved != "HEAD":
+                default_branch = resolved
+        except (subprocess.SubprocessError, OSError):
+            pass
+        return repo_url, default_branch
+
+    _IDENTITY_GIT_TIMEOUT_SECONDS = 15
+
+    def _reconstruct_repo_identity_delegated(self, repo_dir: "Path") -> tuple[str, str]:
+        """(repo_url, default_branch) from git-mcp, for a pod without the clone.
+
+        The local method's ``file://`` / ``main`` fallbacks describe what a
+        directory holding no repository looks like, so they would register an
+        identity nothing can fetch from. Here an unreadable origin raises
+        GitOperationError (the reconcile counts it and skips the backfill);
+        only a detached HEAD falls back to ``main``, as locally.
+        """
+        backend = self.delegated_git_backend("registry backfill")
+        timeout = self._IDENTITY_GIT_TIMEOUT_SECONDS
+        try:
+            repo_url = backend.remote_get_url(str(repo_dir), "origin", timeout=timeout)
+            branch = backend.rev_parse(
+                str(repo_dir), "--abbrev-ref", "HEAD", timeout=timeout
+            )
+        except subprocess.CalledProcessError as e:
+            raise GitOperationError(
+                f"Reading the identity of {repo_dir} through the git backend "
+                f"failed: {redact_url_credentials(e.stderr or str(e))}"
+            ) from e
+        if not repo_url:
+            raise GitOperationError(
+                f"The git backend reports no origin URL for {repo_dir}"
+            )
+        return repo_url, branch if branch and branch != "HEAD" else "main"
+
+    def reconcile_registry_from_filesystem(self) -> Dict[str, int]:
+        """EVO-65484: make the golden-repo registry a faithful, self-healing
+        projection of on-disk state — BIDIRECTIONALLY.
+
+        A filesystem index-build and a DB registry-row insert cannot be atomic
+        across a process crash, so the registry can drift from disk in two ways;
+        this reconcile heals BOTH (and is meant to run periodically, not just at
+        startup — see the lifespan wiring):
+
+        1. Index-orphan (index on disk, no registry row). Registration persists the
+           index (``_execute_post_clone_workflow``) BEFORE the row (``add_repo``), so
+           a crash / pod eviction between the two orphans the index; the workspace-mcp
+           seeder then re-provisions it (EVO-65481). Heal: reconstruct identity from
+           the on-disk clone and add the row. NEVER re-indexes (index already exists).
+
+        2. Row-orphan (registry row, but its on-disk clone directory is entirely
+           gone — e.g. a removeOnDisk that didn't deregister). The row is
+           unqueryable and misleads callers. Heal: prune the row. Under
+           ``content_backend='delegated'`` "gone" is workspace-mcp's answer for
+           the clone path (``/clone-path/stat``), never this pod's index-state
+           directory; a failed answer skips the row.
+
+        Both passes are idempotent and tolerate sibling pods racing (IntegrityError
+        on insert / already-gone on delete are benign). The prune is deliberately
+        CONSERVATIVE — it only removes a row whose clone dir is an IN-TREE
+        ``<golden_repos_dir>/<alias>`` that is verifiably absent from the SAME
+        cache-fresh directory listing used above (so an NFS negative-dentry blip
+        can't trigger it), and it SKIPS repos that are globally active (whose
+        ``-global`` pointer would need separate teardown) OR that still have per-user
+        activated repos derived from them (which ``remove_golden_repo`` cascades but
+        this background prune must not silently orphan) — those are logged for
+        manual attention.
+
+        3. Activation-orphan (registry row, no ``<alias>-global`` entry): the row
+           is registered but not queryable. Every row pass 1 backfills is born
+           this way. Heal: activate it from the index it already has
+           (``services/global_activation_repair.py``; EVO-64616). Pass 1 skips
+           an alias whose add or removal is in flight: an add builds its index
+           BEFORE it inserts its row, so a backfill there made the add fail on
+           the duplicate key before activating.
+
+        Pass 1 also skips a clone a removal left behind (its ``-global``
+        pointer was deleted and never re-created): re-registering it would
+        undo the removal.
+
+        Returns counts: scanned / indexed / backfilled / skipped_registered /
+        skipped_in_flight / skipped_removed / pruned_orphan_rows / orphan_rows_skipped_global /
+        orphan_rows_skipped_activated / errors, plus the activation repair's
+        counts (``ActivationRepairResult.counts``).
+        """
+        from code_indexer.server.routers.repository_health import detect_semantic_index
+
+        counts = {
+            "scanned": 0,
+            "indexed": 0,
+            "backfilled": 0,
+            "skipped_registered": 0,
+            "pruned_orphan_rows": 0,
+            "orphan_rows_skipped_global": 0,
+            "orphan_rows_skipped_activated": 0,
+            "skipped_in_flight": 0,
+            "skipped_removed": 0,
+            "errors": 0,
+        }
+        root = Path(self.golden_repos_dir)
+        if not root.is_dir():
+            return counts
+        registered_rows = self.list_golden_repos()
+        registered = {r["alias"] for r in registered_rows}
+        # A cache-fresh snapshot of the on-disk golden dirs (one iterdir busts the
+        # NFS negative-dentry cache), reused by BOTH the backfill and prune passes.
+        present_dirs = set()
+        for entry in sorted(root.iterdir(), key=lambda p: p.name):
+            if entry.name.startswith(".") or not entry.is_dir():
+                continue
+            present_dirs.add(entry.name)
+            counts["scanned"] += 1
+            if not detect_semantic_index(entry / ".code-indexer" / "index"):
+                continue
+            counts["indexed"] += 1
+            alias = entry.name
+            if alias in registered:
+                counts["skipped_registered"] += 1
+                continue
+            # EVO-64616: an add builds the index BEFORE it inserts the row, so
+            # "indexed, no row" is also every add still in flight. Backfilling
+            # one made the add fail on the duplicate key before its global
+            # activation, stranding a row with no -global entry. A removal in
+            # flight is skipped likewise.
+            if self._registry_lifecycle_job_in_flight(alias, counts):
+                continue
+            if self._clone_left_by_removal(alias, counts):
+                continue
+            if self._directory_in_rename(alias, counts):
+                continue
+            try:
+                repo_url, default_branch = self._reconstruct_repo_identity(entry)
+                created_at = datetime.now(timezone.utc).isoformat()
+                self._sqlite_backend.add_repo(
+                    alias=alias,
+                    repo_url=repo_url,
+                    default_branch=default_branch,
+                    clone_path=str(entry),
+                    created_at=created_at,
+                )
+                self.golden_repos[alias] = GoldenRepo(
+                    alias=alias,
+                    repo_url=repo_url,
+                    default_branch=default_branch,
+                    clone_path=str(entry),
+                    created_at=created_at,
+                )
+                counts["backfilled"] += 1
+                logging.info(
+                    "EVO-65484: backfilled registry entry for indexed-but-unregistered "
+                    "golden repo '%s' (repo_url=%s branch=%s)",
+                    alias,
+                    mask_url_credentials(repo_url),
+                    default_branch,
+                )
+            except Exception as exc:
+                # IntegrityError => a sibling pod backfilled it first (benign);
+                # any other error is logged and skipped so one bad repo can't abort
+                # the whole reconcile.
+                counts["errors"] += 1
+                logging.warning(
+                    "EVO-65484: could not backfill registry entry for '%s': %s",
+                    entry.name,
+                    exc,
+                )
+
+        # Pass 2 — prune row-orphans whose in-tree clone dir has vanished.
+        # When delegated, the dirs listed above are this pod's index state, so
+        # a missing one means "not indexed here", not "repository gone" --
+        # pruning on it would deregister live repositories (every one of them,
+        # on a pod with a fresh volume). There the clone's presence is asked of
+        # workspace-mcp, which holds it at the same path; a failed answer skips
+        # the row (never a prune on an error). local:// rows are skipped: a
+        # pod-local repository is on ONE pod, so another pod's disk proves
+        # nothing about it, and cidx-meta's content is not a clone.
+        prune_rows = registered_rows
+        working_copies = None
+        if self.repositories_are_delegated():
+            prune_rows = [
+                r
+                for r in registered_rows
+                if not is_pod_local_repo(r.get("repo_url"), r.get("alias"))
+            ]
+            try:
+                if prune_rows:
+                    working_copies = self._delegated_working_copies(
+                        "registry reconcile"
+                    )
+            except GitOperationError as exc:
+                prune_rows = []
+                counts["errors"] += 1
+                logging.warning(
+                    "EVO-65484: row-orphan prune skipped -- workspace-mcp, which "
+                    "holds the clones, cannot be asked: %s",
+                    exc,
+                )
+        root_str = str(root)
+        for row in prune_rows:
+            alias = row.get("alias")
+            clone_path = row.get("clone_path")
+            if not alias or not clone_path:
+                continue
+            # Only in-tree clones (<golden_repos_dir>/<name>) are prunable: their
+            # presence is exactly what `present_dirs` (cache-fresh) records. Skip
+            # external / symlinked clone paths — we can't vouch for those mounts.
+            parent = os.path.dirname(os.path.normpath(clone_path))
+            if parent != root_str:
+                continue
+            if working_copies is None:
+                if os.path.basename(os.path.normpath(clone_path)) in present_dirs:
+                    continue  # dir still present — not an orphan
+            else:
+                try:
+                    if working_copies.exists(clone_path):
+                        continue  # workspace-mcp holds the clone — not an orphan
+                except Exception as exc:  # never prune on an error
+                    counts["errors"] += 1
+                    logging.warning(
+                        "EVO-65484: could not ask workspace-mcp whether the "
+                        "clone of '%s' at %s exists; row left: %s",
+                        alias,
+                        clone_path,
+                        exc,
+                    )
+                    continue
+            try:
+                if self.is_globally_active(alias):
+                    counts["orphan_rows_skipped_global"] += 1
+                    logging.warning(
+                        "EVO-65484: registry row '%s' has no on-disk clone but is "
+                        "globally active — leaving it for manual teardown",
+                        alias,
+                    )
+                    continue
+                # Don't prune a golden whose row still has per-user activated repos
+                # derived from it: remove_golden_repo cascades those (deactivate),
+                # but this conservative background prune must not silently orphan a
+                # live user activation. Skip + log for manual teardown, mirroring the
+                # globally-active guard above.
+                derived = self.activated_repo_manager.find_repos_by_golden_alias(alias)
+                if derived:
+                    counts["orphan_rows_skipped_activated"] += 1
+                    logging.warning(
+                        "EVO-65484: registry row '%s' has no on-disk clone but %d "
+                        "activated repo(s) derive from it — leaving it for manual "
+                        "teardown",
+                        alias,
+                        len(derived),
+                    )
+                    continue
+                self._sqlite_backend.remove_repo(alias)
+                self.golden_repos.pop(alias, None)
+                counts["pruned_orphan_rows"] += 1
+                logging.info(
+                    "EVO-65484: pruned registry row '%s' — its on-disk clone %s is gone",
+                    alias,
+                    clone_path,
+                )
+            except Exception as exc:  # one bad row never aborts the prune
+                counts["errors"] += 1
+                logging.warning(
+                    "EVO-65484: could not prune orphan registry row '%s': %s",
+                    alias,
+                    exc,
+                )
+
+        # Pass 3 -- EVO-64616: a row with no `<alias>-global` registry entry is
+        # registered but not queryable. Rows backfilled above are born that way;
+        # so are rows stranded by an add that failed after its row insert.
+        # Activate them from the index they already have (never re-indexed).
+        self._repair_global_activation(counts)
+
+        # Pass 4 -- EVO-64616: a base clone is never a checkout (see
+        # ``_publish_index``); clear the marker an earlier in-place publish left.
+        self._clear_base_clone_markers(counts)
+
+        logging.info(
+            "EVO-65484: registry reconcile from filesystem complete: %s", counts
+        )
+        return counts
+
+    def _clear_base_clone_markers(self, counts: Dict[str, int]) -> None:
+        """Remove ``CHECKED_OUT_MARKER`` from every registered golden base
+        clone (``<golden_repos_dir>/<alias>``), counted as
+        ``base_clone_markers_cleared``. Idempotent: a clone without one is
+        left as it is. The marker made the served-index cache treat the base
+        clone as an evictable checkout; a failure is counted and logged, the
+        rest go on."""
+        from code_indexer.server.services.index_materializer import (
+            clear_checked_out_marker,
+            is_base_clone,
+        )
+
+        counts.setdefault("base_clone_markers_cleared", 0)
+        for row in self.list_golden_repos():
+            clone_path = row.get("clone_path")
+            if not clone_path or not is_base_clone(clone_path, self.golden_repos_dir):
+                continue
+            try:
+                cleared = clear_checked_out_marker(clone_path)
+            except OSError as exc:
+                counts["errors"] += 1
+                logging.warning(
+                    "EVO-64616: could not clear the checkout marker of base "
+                    "clone %s: %s",
+                    clone_path,
+                    exc,
+                )
+                continue
+            if cleared:
+                counts["base_clone_markers_cleared"] += 1
+        if counts["base_clone_markers_cleared"]:
+            logging.warning(
+                "EVO-64616: cleared the checkout marker of %d golden base "
+                "clone(s); a base clone is never a served-index cache entry",
+                counts["base_clone_markers_cleared"],
+            )
+
+    def _registry_lifecycle_job_in_flight(
+        self, alias: str, counts: Dict[str, int]
+    ) -> bool:
+        """True when an add or removal of *alias* is pending or running
+        anywhere in the cluster -- or when that cannot be asked (counted as an
+        error): the reconcile then leaves the alias alone this cycle."""
+        from code_indexer.server.services.global_activation_repair import (
+            lifecycle_job_in_flight,
+        )
+
+        try:
+            in_flight = lifecycle_job_in_flight(self.job_tracker, alias)
+        except Exception as exc:
+            counts["errors"] += 1
+            logging.error(
+                "EVO-64616: could not ask whether an add/removal of '%s' is in "
+                "flight; not backfilling it this cycle: %s",
+                alias,
+                exc,
+            )
+            return True
+        if in_flight:
+            counts["skipped_in_flight"] += 1
+        return in_flight
+
+    def _directory_in_rename(self, alias: str, counts: Dict[str, int]) -> bool:
+        """EVO-64616: True when *alias* is either end of an unfinished rename
+        (a crashed one included): the new directory is being copied, the
+        old one is about to go. Registering either would split the
+        repository in two. Unanswerable: counted as an error and skipped."""
+        from code_indexer.global_repos.alias_manager import AliasManager
+        from code_indexer.server.services.golden_repo_rename import names_in_rename
+
+        try:
+            in_rename = alias in names_in_rename(
+                AliasManager(os.path.join(self.golden_repos_dir, "aliases"))
+            )
+        except Exception as exc:
+            counts["errors"] += 1
+            logging.error(
+                "EVO-64616: could not ask whether '%s' is being renamed; not "
+                "backfilling it this cycle: %s",
+                alias,
+                exc,
+            )
+            return True
+        if in_rename:
+            counts["skipped_in_flight"] += 1
+        return in_rename
+
+    def _clone_left_by_removal(self, alias: str, counts: Dict[str, int]) -> bool:
+        """True when *alias* was removed on purpose and this is the clone the
+        removal left: its ``-global`` pointer was deleted (the removal's
+        deactivation records a tombstone, which nothing clears) and no add has
+        written it since. Re-registering that clone would undo the removal, so
+        the backfill leaves it until the clone is gone or an add of the alias
+        activates it again. A failed add does not lift it: the add's own
+        cleanup owns that clone. Unanswerable: counted as an error and skipped.
+        """
+        from code_indexer.global_repos.alias_manager import AliasManager
+
+        global_alias = f"{alias}-global"
+        try:
+            aliases = AliasManager(os.path.join(self.golden_repos_dir, "aliases"))
+            left = aliases.deleted_at(global_alias) is not None and not (
+                aliases.alias_exists(global_alias)
+            )
+        except Exception as exc:
+            counts["errors"] += 1
+            logging.error(
+                "EVO-64616: could not ask whether '%s' was removed; not "
+                "backfilling it this cycle: %s",
+                alias,
+                exc,
+            )
+            return True
+        if left:
+            counts["skipped_removed"] += 1
+            logging.info(
+                "EVO-64616: not re-registering '%s': it was removed and this is "
+                "the clone the removal left",
+                alias,
+            )
+        return left
+
+    def _repair_global_activation(self, counts: Dict[str, int]) -> None:
+        """Run the activation repair over the CURRENT rows (pass 1 may have
+        just added some) and merge its counts. A failure to read the registry
+        is counted and logged at ERROR, never treated as "nothing to repair"."""
+        from code_indexer.server.services.global_activation_repair import (
+            repair_global_activation,
+        )
+
+        try:
+            result = repair_global_activation(self, self.list_golden_repos())
+        except Exception as exc:
+            counts["errors"] += 1
+            logging.error(
+                "EVO-64616: global activation repair failed: %s", exc, exc_info=True
+            )
+            return
+        counts.update(result.counts())
+
     def is_globally_active(self, alias: str) -> bool:
         """Return True if *alias* is registered and globally activated (Story #1039).
 
@@ -1348,10 +2161,11 @@ class GoldenRepoManager:
             )
 
         with self._operation_lock:
-            # Idempotency: return False if already registered (Bug #1314:
-            # resolve via shared backend so a repo registered by ANOTHER
-            # worker/node is recognized here too)
-            if self._resolve_golden_repo(alias) is not None:
+            # Idempotency: return False if already registered. Authoritative
+            # read for the same reason as _submit_add_job's guard (Bug #1314
+            # and EVO-64616): a stale cache hit for an alias another node
+            # removed must not report it as registered.
+            if self._resolve_golden_repo_authoritative(alias) is not None:
                 return False
 
             # Create golden repository record
@@ -1443,6 +2257,7 @@ class GoldenRepoManager:
                     f"Initialized CIDX index structure for local repo '{alias}'"
                 )
 
+
         # Lifecycle hooks (controlled by fire_lifecycle_hooks parameter)
         if fire_lifecycle_hooks:
             try:
@@ -1498,6 +2313,12 @@ class GoldenRepoManager:
         ``golden_repo_removed`` row naming *submitter_username* (the
         authenticated caller; there is no default).
 
+        Pre-flight cleanup: cancels any active background jobs (add, refresh,
+        global_repo_refresh) for this alias before submitting the removal job,
+        preventing race conditions where a concurrent refresh interferes with
+        removal. This logic lives here (not in the REST/MCP handlers) so every
+        API surface gets the same pre-flight cleanup automatically (GAP-5 fix).
+
         Args:
             alias: Alias of the repository to remove
             submitter_username: The authenticated caller, recorded on the job
@@ -1513,6 +2334,53 @@ class GoldenRepoManager:
         return self._submit_removal(
             alias, submitter_username=submitter_username, actor=submitter_username
         )
+
+    def rename_golden_repo(
+        self,
+        alias: str,
+        new_alias: str,
+        *,
+        submitter_username: str,
+        repo_url: Optional[str] = None,
+        branch: Optional[str] = None,
+    ) -> str:
+        """EVO-64616: rename *alias* to *new_alias* without re-cloning or
+        re-embedding (``services/golden_repo_rename.py``), optionally
+        correcting a mis-registered URL/branch to what the clone holds.
+        Checked here, run as a background job; returns its id. Raises a
+        ``RenameError`` subclass (its ``status`` is the HTTP status).
+        Records one ``golden_repo_renamed`` row naming the caller."""
+        from code_indexer.server.services.golden_repo_audited_ops import (
+            record_repo_outcome,
+        )
+        from code_indexer.server.services.golden_repo_rename import submit_rename
+
+        try:
+            job_id = submit_rename(
+                self,
+                alias,
+                new_alias,
+                repo_url=repo_url,
+                branch=branch,
+                submitter_username=submitter_username,
+            )
+        except Exception:
+            record_repo_outcome(
+                submitter_username,
+                "golden_repo_renamed",
+                self._verified_alias_or_none(alias),
+                "failure",
+            )
+            raise
+        record_repo_outcome(
+            submitter_username,
+            "golden_repo_renamed",
+            alias,
+            "success",
+            new_alias=new_alias,
+            job_id=job_id,
+        )
+        return job_id
 
     def remove_orphaned_golden_repo(
         self, alias: str, *, submitter_username: str
@@ -1571,6 +2439,46 @@ class GoldenRepoManager:
 
     def _submit_removal_job(self, alias: str, submitter_username: str) -> str:
         """Submit the background removal job for a verified *alias*."""
+
+        # GAP-5: Cancel any active background jobs for this repository BEFORE
+        # submitting the removal job. A concurrent refresh or add that is still
+        # running can interfere with removal, leaving stale entries. This was
+        # previously only done in the REST handler (inline_admin_ops.py) but
+        # not in the MCP handler -- moving it here makes both surfaces safe.
+        try:
+            active_jobs = self.background_job_manager.get_jobs_by_operation_and_params(
+                operation_types=[
+                    "add_golden_repo",
+                    "refresh_golden_repo",
+                    "global_repo_refresh",
+                ],
+                params_filter={"alias": alias},
+            )
+            for job in active_jobs:
+                if job.get("status") in ["pending", "running"]:
+                    cancel_result = self.background_job_manager.cancel_job(
+                        job["job_id"], submitter_username, is_admin=True
+                    )
+                    if cancel_result["success"]:
+                        logging.info(
+                            "GAP-5: cancelled background job %s for repository %s",
+                            job["job_id"],
+                            alias,
+                        )
+                    else:
+                        logging.warning(
+                            "GAP-5: failed to cancel job %s for repository %s: %s",
+                            job["job_id"],
+                            alias,
+                            cancel_result.get("message", "unknown"),
+                        )
+        except Exception as job_cancel_error:
+            # Job cancellation failure should not prevent deletion, but log it
+            logging.warning(
+                "GAP-5: job cancellation failed during removal of '%s': %s",
+                alias,
+                job_cancel_error,
+            )
 
         # Create no-args wrapper for background execution
         def background_worker() -> Dict[str, Any]:
@@ -1637,6 +2545,24 @@ class GoldenRepoManager:
                 )
                 actual_path = None
                 repo_exists_on_disk = False
+
+            # Published index versions (index_store_backend='delegated') go
+            # BEFORE the registry row: a failure (ECONFLICT while a query pod
+            # holds a checkout lease, say) then aborts with the repository
+            # still registered, so re-running the removal completes it --
+            # after the row is gone the alias could no longer be removed, and
+            # its versions would stay published with nothing to name them.
+            # delete is idempotent (0 versions on a re-run). None: this
+            # store publishes nothing (local; nothing changes).
+            index_versions_deleted = self._delete_published_index_versions(alias)
+
+            # Content seam: on a delegated pod the clone is with workspace-mcp
+            # at the same path, and only its index state is here. The clone
+            # goes now, for the same reason as the index versions: a failure
+            # aborts with the repository still registered, and a re-run
+            # completes it (workspace-mcp's delete is idempotent). None: the
+            # repository is on this pod (local backend, or local://).
+            delegated_removal = self._delete_delegated_repository_for_removal(alias)
 
             # Bug #1317: remove the registry row BEFORE deleting any on-disk
             # files. The old order deleted files first and removed the row
@@ -1747,26 +2673,19 @@ class GoldenRepoManager:
                     f"Golden repository removed but access records may remain."
                 )
 
-            # Lifecycle hook: Delete wiki article view records (Story #287, AC4)
+            # Lifecycle hook: features keeping per-repository state are told
+            # (repository_events; the wiki deletes the alias's article view
+            # records, Story #287 AC4). A listener never fails the removal.
             try:
-                from code_indexer.server.wiki.wiki_cache import WikiCache
-                from code_indexer.server.utils.registry_factory import (
-                    resolve_backend_registry_attr,
+                from code_indexer.server.features.repository_events import (
+                    publish_repository_removed,
                 )
 
-                # Bug #1665: resolve the shared PostgreSQL wiki_cache backend
-                # in cluster mode so this hook (and every other reader/writer)
-                # sees the same store regardless of which node handles it.
-                wiki_backend, _ = resolve_backend_registry_attr(
-                    "wiki_cache",
-                    caller_name="golden_repo_manager.remove_golden_repo",
-                )
-                wiki_cache = WikiCache(self.db_path, storage_backend=wiki_backend)
-                wiki_cache.delete_views_for_repo(alias)
+                publish_repository_removed(alias)
             except Exception as hook_error:
                 logging.error(
-                    f"Wiki view cleanup hook failed for '{alias}': {hook_error}. "
-                    f"Golden repository removed but view records may remain."
+                    f"Repository removal event failed for '{alias}': {hook_error}. "
+                    f"Golden repository removed but feature state may remain."
                 )
 
             # Filesystem cleanup happens LAST -- after the registry row is
@@ -1813,7 +2732,12 @@ class GoldenRepoManager:
             try:
                 if repo_exists_on_disk:
                     assert actual_path is not None
-                    cleanup_successful = self._cleanup_repository_files(actual_path)
+                    if delegated_removal is not None:
+                        cleanup_successful = self._cleanup_repository_files(
+                            actual_path, delegated=True
+                        )
+                    else:
+                        cleanup_successful = self._cleanup_repository_files(actual_path)
                 else:
                     cleanup_successful = True
 
@@ -1826,8 +2750,12 @@ class GoldenRepoManager:
                 # MUST happen before the write lock is released below (codex
                 # review, turn 11): releasing first would open a window for a
                 # new refresh to write into the still-unquarantined wreckage.
+                # Never under delegation: the remains are index state plus
+                # entries cidx cannot prove are its own (_remove_pod_index_state
+                # left them on purpose), and a rename would move them anyway.
                 if (
                     not cleanup_successful
+                    and delegated_removal is None
                     and repo_exists_on_disk
                     and actual_path
                     and os.path.exists(actual_path)
@@ -1858,14 +2786,22 @@ class GoldenRepoManager:
             # Bug #1523: this signal is unchanged -- an incomplete cleanup is
             # still reported as a resource leak; it just no longer suppresses
             # the detach steps above.
+            repository_note = (
+                delegated_removal.note() if delegated_removal is not None else ""
+            )
             if not cleanup_successful:
                 raise GitOperationError(
                     "Repository metadata removed but cleanup incomplete. "
                     "Resource leak detected: some cleanup operations did not complete fully."
+                    + repository_note
                 )
 
             # Mark golden repo as deleted
             cascade_results["golden_repo_deleted"] = True
+            if delegated_removal is not None:
+                delegated_removal.record(cascade_results)
+            if index_versions_deleted is not None:
+                cascade_results["index_versions_deleted"] = index_versions_deleted
 
             # Build enhanced message with cascade deletion counts
             activated_count = len(cascade_results["activated_repos_deleted"])
@@ -1878,6 +2814,11 @@ class GoldenRepoManager:
                 message += (
                     f" (WARNING: {failed_count} activated repos failed to delete)"
                 )
+            if index_versions_deleted is not None:
+                message += (
+                    f" (deleted {index_versions_deleted} published index versions)"
+                )
+            message += repository_note
 
             return {
                 "success": True,
@@ -1908,20 +2849,27 @@ class GoldenRepoManager:
         """
         try:
             # Use git ls-remote to check if repository is accessible.
+            # EVO-64678: via the git seam; ls_remote() maps a non-zero exit to
+            # False, and a timeout still propagates to the handler below.
             # Repository credentials are supplied at run time, never on argv.
-            result = subprocess.run(
-                ["git", "ls-remote", remote_url_without_credentials(repo_url)],
-                capture_output=True,
-                text=True,
+            reachable: bool = self._git_backend.ls_remote(
+                remote_url_without_credentials(repo_url),
                 timeout=self.resource_config.git_clone_timeout,
-                env=build_non_interactive_git_env(repo_url),
+                credentials_url=(
+                    None if self._git_backend.owns_credentials else repo_url
+                ),
             )
-            return result.returncode == 0
+            return reachable
         except (subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
-            logger.debug(
-                "Repository accessibility check failed for %s: %s",
+            # WARNING, with the error's type: the caller only reports "Invalid
+            # or inaccessible", and the cause can be the git backend's, not
+            # the repository's -- e.g. git-mcp pages a many-ref ls-remote
+            # answer and the delegated backend refuses it (EVO-64616).
+            logger.warning(
+                "Repository accessibility check failed for %s: %s: %s",
                 mask_url_credentials(repo_url),
-                mask_url_credentials(str(e)),
+                type(e).__name__,
+                mask_url_credentials(str(e))[:300],
             )
             return False
 
@@ -1947,12 +2895,377 @@ class GoldenRepoManager:
         """
         clone_path = os.path.join(self.golden_repos_dir, alias)
 
+        if not self._content_backend.is_local:
+            return self._clone_for_delegated_content(repo_url, clone_path, branch)
+
         # For local repositories, use regular copying (NO CoW for golden repo registration)
         if self._is_local_path(repo_url):
             return self._clone_local_repository_with_regular_copy(repo_url, clone_path)
 
         # For remote repositories, use regular git clone
         return self._clone_remote_repository(repo_url, clone_path, branch)
+
+    def _clone_for_delegated_content(
+        self, repo_url: str, clone_path: str, branch: Optional[str]
+    ) -> str:
+        """Register a repository whose files this pod does not hold.
+
+        Under a delegated content backend the repository lives with the service
+        that owns the files: git-mcp clones it there (the git seam), and every
+        read goes through workspace-mcp. This pod keeps only the repository's
+        index state, which today still sits at ``<clone_path>/.code-indexer``
+        (the local IndexStore), so ``clone_path`` is created here as an
+        index-state directory -- it never holds the repository.
+
+        Refused rather than degraded:
+
+        * a local git backend, for ANY source -- a clone would land on THIS
+          pod's disk, where the content backend never looks, and the index would
+          come out empty; and even in place, the pre-flight ``ls-remote`` and the
+          branch lookup would run against this pod's disk, where the repository
+          is not, failing the add or silently recording ``main``;
+        * a local source that is not already at ``clone_path`` -- copying it
+          means reading this pod's disk, which a delegated pod may not have.
+
+        The clone must be visible THROUGH the content backend before indexing
+        starts: git-mcp and workspace-mcp can be different NFS clients, so a
+        clone git-mcp reports done can still be briefly missing for the reader.
+        """
+        if repo_url.startswith("local://"):
+            # cidx's own repositories (cidx-meta, uploads): created and written
+            # on THIS pod, never with workspace-mcp -- the local behaviour.
+            return self._clone_local_repository_with_regular_copy(repo_url, clone_path)
+        self._refuse_local_git_under_delegated_content()
+        if self._is_local_path(repo_url):
+            source = (
+                repo_url[len("file://") :]
+                if repo_url.startswith("file://")
+                else repo_url
+            )
+            if os.path.normpath(source) != os.path.normpath(clone_path):
+                raise GitOperationError(
+                    "content_backend='delegated': a local source can only be "
+                    "registered in place (already provisioned at "
+                    f"{clone_path!r}); copying {repo_url!r} would read this "
+                    "pod's disk"
+                )
+        else:
+            self._clone_remote_repository(repo_url, clone_path, branch)
+        self._await_clone_visible_through_content_backend(clone_path)
+        os.makedirs(clone_path, exist_ok=True)
+        return clone_path
+
+    def _refuse_temporal_under_delegated_content(self) -> None:
+        """Raise when temporal indexing could not read the repository's history.
+
+        Temporal indexing walks the history (``git log``, one diff per commit).
+        With a delegated git backend it does that through the git seam
+        (git-mcp). With LOCAL git on a pod that holds only the index state it
+        fails, and on refresh that failure fails the whole job -- refused at
+        the request instead, with the reason.
+        """
+        if not self._content_backend.is_local and isinstance(
+            self._git_backend, LocalGitBackend
+        ):
+            raise GitOperationError(
+                "temporal indexing with content_backend='delegated' needs "
+                "git_backend='delegated': with git run on this pod, which does "
+                "not hold the repository, there is no history to index"
+            )
+
+    def _refuse_local_git_under_delegated_content(self) -> None:
+        """Raise when the repositories are elsewhere but git would run here.
+
+        Checked at submission (before the pre-flight ``ls-remote``, which would
+        otherwise fail with a misleading "inaccessible repository") and again
+        in the job, which a reclaiming pod may run without the submission path.
+        """
+        if not self._content_backend.is_local and isinstance(
+            self._git_backend, LocalGitBackend
+        ):
+            raise GitOperationError(
+                "content_backend='delegated' needs git_backend='delegated': with "
+                "git run on this pod, a clone would land where the content "
+                "backend never reads and the branch would be looked up in a "
+                "directory that holds no repository"
+            )
+
+    def repositories_are_delegated(self) -> bool:
+        """True when this pod does not hold the repositories.
+
+        Either signal counts: this manager's own content backend, or the
+        running server's -- a secondary manager built without the injected
+        backend, on a delegated server, must not act as if the repository were
+        here. The destructive lifecycle steps branch on it: on a delegated pod a
+        directory missing HERE says nothing about the repository, and deleting a
+        directory here can only ever remove cidx's own index state.
+        """
+        if not self._content_backend.is_local:
+            return True
+        from code_indexer.server.startup.content_backend_wiring import (
+            is_content_seam_delegated,
+        )
+
+        return is_content_seam_delegated()
+
+    def delegated_git_backend(self, feature: str) -> GitBackend:
+        """The git seam to ask about a repository this pod does not hold.
+
+        This manager's own backend when it is delegated, else the running
+        server's. Raises rather than fall back to local git, which on a pod
+        without the repository answers "not a git repository".
+        """
+        if not isinstance(self._git_backend, LocalGitBackend):
+            return self._git_backend
+        from code_indexer.server.startup.git_backend_wiring import (
+            server_delegated_git_backend,
+        )
+
+        backend = server_delegated_git_backend()
+        if backend is None:
+            raise GitOperationError(
+                f"{feature}: content_backend='delegated' needs "
+                "git_backend='delegated': local git on this pod would read a "
+                "directory that holds no repository"
+            )
+        return backend
+
+    def _remove_pod_index_state(self, path: str) -> bool:
+        """The pod half of deleting a delegated golden clone: remove what is here.
+
+        On a delegated pod the directory at *path* holds only cidx's index
+        state; the repository is with workspace-mcp/git-mcp at the same path,
+        and is deleted THERE, through workspace-mcp (see
+        :meth:`_delete_delegated_repository_for_removal`), never through this
+        pod's disk. So this removes the
+        index state (``index_root``), then the directory itself only if that
+        left it EMPTY -- ``os.rmdir`` refuses a non-empty directory, so content
+        cidx cannot prove is its own (a mount that is still attached, say) is
+        never deleted. A symlink is unlinked, never followed.
+
+        Returns True when nothing is left at *path*; False (logged) when other
+        entries remain. Filesystem errors propagate to the caller.
+        """
+        from code_indexer.utils.index_store import index_root
+
+        if os.path.islink(path):
+            os.unlink(path)
+            return True
+        state = index_root(path)
+        if os.path.islink(state):
+            os.unlink(state)
+        elif state.is_dir():
+            shutil.rmtree(state)
+        try:
+            os.rmdir(path)
+        except FileNotFoundError:
+            return True
+        except OSError as exc:
+            logging.warning(
+                "content_backend='delegated': %s still holds entries other "
+                "than cidx's index state (%s) -- left in place; cidx deletes "
+                "only what it can prove is its own",
+                path,
+                exc,
+            )
+            return False
+        return True
+
+    def _delete_published_index_versions(self, alias: str) -> Optional[int]:
+        """Delete *alias*'s published index versions through the server's store.
+
+        The versions refresh published (``index_store_backend='delegated'``)
+        live with the artifact service, not in any directory removal deletes.
+        The alias is the one refresh publishes under: ``IndexStore.delete``
+        derives it from the same ``golden-repos/<alias>`` path ``publish``
+        does. Returns the number deleted, or None when no store publishes
+        anything (local store, or no running server).
+
+        Raises GitOperationError -- the removal aborts with the repository
+        still registered, to be re-run -- when a refresh is running (it would
+        publish again behind the deletion) or the versions could not be
+        deleted; the message says they were NOT deleted and why.
+        """
+        from code_indexer.server.startup.index_store_wiring import (
+            server_index_store,
+        )
+
+        store = server_index_store()
+        if store is None or store.is_local:
+            return None
+        not_deleted = (
+            f"Golden repository '{alias}' was NOT removed: its published index "
+            "versions were NOT deleted"
+        )
+        rerun = "; it is still registered -- re-run the removal to complete it"
+        scheduler = getattr(self, "_refresh_scheduler", None)
+        if scheduler is not None:
+            try:
+                scheduler.check_refresh_not_in_progress(alias)
+            except DuplicateJobError as refresh_error:
+                raise GitOperationError(
+                    f"{not_deleted} (a refresh is in progress: {refresh_error}){rerun}"
+                ) from refresh_error
+        try:
+            deleted = store.delete(os.path.join(self.golden_repos_dir, alias))
+        except Exception as exc:
+            if getattr(exc, "code", None) == _INDEX_ARTIFACT_ALIAS_BUSY:
+                reason = (
+                    "the index alias is busy: a publish is running or a "
+                    "checkout lease is live"
+                )
+            else:
+                reason = f"{type(exc).__name__}: {exc}"
+            logging.error("%s (%s)%s", not_deleted, reason, rerun)
+            raise GitOperationError(f"{not_deleted} ({reason}){rerun}") from exc
+        if deleted is None:
+            raise GitOperationError(
+                f"{not_deleted} (the {type(store).__name__} publishes versions but "
+                f"reported no deletion){rerun}"
+            )
+        logging.info(
+            "Deleted %d published index versions of golden repository '%s'",
+            deleted,
+            alias,
+        )
+        return deleted
+
+    def _delegated_working_copies(self, feature: str) -> Any:
+        """workspace-mcp's clone-path endpoints, for a clone this pod lacks.
+
+        The same access path activated repositories use: the server's
+        DelegatedCloneBackend (wired into the snapshot manager at startup and
+        shared with ActivatedRepoManager) behind ``DelegatedWorkingCopies``
+        (``/clone-path/stat`` and ``/clone-path/delete``). Raises -- never a
+        fallback to this pod's disk -- when no such backend is wired.
+        """
+        copies = self._delegated_working_copies_if_wired()
+        if copies is None:
+            clone_backend = getattr(self._snapshot_manager, "_clone_backend", None)
+            # No snapshot manager at all means it failed to build at startup
+            # (workspace-mcp unreachable then): say so, or "NoneType" reads
+            # like a configuration error on a pod that is merely degraded.
+            hint = (
+                " (VersionedSnapshotManager failed to initialize at startup; "
+                "see APP-GENERAL-510 in this pod's log -- restart the pod once "
+                "workspace-mcp is reachable)"
+                if self._snapshot_manager is None
+                else ""
+            )
+            raise GitOperationError(
+                f"{feature}: content_backend='delegated' keeps golden clones on "
+                "workspace-mcp, which this server reaches only through "
+                "clone_backend='delegated' (workspace_mcp.endpoint); its clone "
+                f"backend is {type(clone_backend).__name__}{hint}"
+            )
+        return copies
+
+    def _delegated_clone_retain_reason(
+        self, alias: str, repo_url: str, clone_path: str, *, removal: bool = False
+    ) -> Optional[str]:
+        """None when cidx may delete the delegated clone at *clone_path*; else
+        why not.
+
+        cidx owns exactly what it cloned: golden-repos/<alias> for a
+        non-local:// repository registered by URL. Never a ``local://``
+        repository (pod-local or cidx-meta), never a path that is not that
+        alias's own entry under the golden-repos root, and -- outside a
+        removal -- never an in-place registration: a source its provisioner
+        (workspace-mcp) materialized at the path and cidx only indexes
+        (EVO-64228), which a failed or retried add must leave alone.
+
+        *removal*: the repository is being removed on purpose, so an in-place
+        registration at the alias's own entry goes too (EVO-64616). Left
+        behind, it was an indexed clone with no registry row, which the
+        registry reconcile re-registered -- undoing the removal.
+        """
+        if is_pod_local_repo(repo_url, alias):
+            return "a local:// repository is not a workspace-mcp clone"
+        root = os.path.normpath(self.golden_repos_dir)
+        own = os.path.normpath(os.path.join(root, alias))
+        if (
+            os.path.dirname(own) != root
+            or os.path.basename(own).startswith(".")
+            or os.path.normpath(clone_path) != own
+        ):
+            return (
+                f"it is not golden repository '{alias}''s own clone under "
+                f"{root}, so cidx does not own it"
+            )
+        if not removal and self._is_in_place_registration(repo_url, clone_path):
+            return (
+                "it was registered in place (provisioned there by its owner, "
+                "not cloned by cidx), so it is not cidx's to delete"
+            )
+        return None
+
+    def _discard_failed_delegated_clone(
+        self, alias: str, repo_url: str, clone_path: str
+    ) -> None:
+        """Delete a failed add's clone on workspace-mcp, when nothing names it.
+
+        Only with no registry row for *alias* (the add's rollback removed it,
+        or it never got that far) and only a clone cidx owns. Never raises: it
+        runs while the add's own failure propagates, which must not be masked
+        -- a clone that could not be deleted is logged as a leak, and the next
+        add's :meth:`_remove_delegated_orphan_for_retry` removes it.
+        """
+        try:
+            reason = self._delegated_clone_retain_reason(alias, repo_url, clone_path)
+            if reason is None and self.get_golden_repo(alias) is not None:
+                reason = "a registry row still names it"
+            if reason is not None:
+                logging.warning(
+                    "Bug #1218: registration of '%s' failed; the clone at %s was "
+                    "NOT deleted on workspace-mcp: %s",
+                    alias,
+                    clone_path,
+                    reason,
+                )
+                return
+            deleted = self._delegated_working_copies(f"failed add of '{alias}'").remove(
+                clone_path
+            )
+        except Exception as exc:  # the add's own failure is what is reported
+            logging.error(
+                "RESOURCE LEAK WARNING: registration of '%s' failed and its clone "
+                "at %s could not be deleted on workspace-mcp (%s); the next add "
+                "of this alias removes it",
+                alias,
+                clone_path,
+                exc,
+            )
+            return
+        logging.info(
+            "Bug #1218: registration of '%s' failed; %s its clone at %s on "
+            "workspace-mcp",
+            alias,
+            "deleted" if deleted else "no clone was left of",
+            clone_path,
+        )
+
+    def _await_clone_visible_through_content_backend(
+        self, clone_path: str, *, attempts: int = 100, delay_seconds: float = 0.1
+    ) -> None:
+        """Block until the content backend can list *clone_path*.
+
+        The delegated twin of _await_clone_path_locally_visible: one page of
+        one entry is enough to prove the reader sees the repository. Bounded --
+        raises rather than hangs, and the last error says why.
+        """
+        last_exc: Optional[Exception] = None
+        for _ in range(max(1, attempts)):
+            try:
+                self._content_backend.manifest(clone_path, page_size=1)
+                return
+            except Exception as exc:  # the backend's transport, whatever it is
+                last_exc = exc
+                time.sleep(delay_seconds)
+        raise GitOperationError(
+            f"Cloned repository never became visible through the content "
+            f"backend at {clone_path!r} after {attempts} attempts "
+            f"(~{delay_seconds * attempts:.1f}s): {last_exc}"
+        )
 
     def _is_local_path(self, repo_url: str) -> bool:
         """
@@ -2168,9 +3481,10 @@ class GoldenRepoManager:
         self, clone_path: str, resolved_source_path: str, git_env: dict
     ) -> bool:
         """Add (or replace) an `origin` remote pointing at resolved_source_path."""
-        add_result = subprocess.run(
+        add_result = run_git_command(
             ["git", "remote", "add", "origin", resolved_source_path],
-            cwd=clone_path,
+            cwd=Path(clone_path),
+            check=False,
             capture_output=True,
             text=True,
             timeout=self._GIT_LOCAL_REMOTE_TIMEOUT_SECONDS,
@@ -2180,9 +3494,10 @@ class GoldenRepoManager:
             return True
 
         # origin already existed from the copied source config -- replace it.
-        set_url_result = subprocess.run(
+        set_url_result = run_git_command(
             ["git", "remote", "set-url", "origin", resolved_source_path],
-            cwd=clone_path,
+            cwd=Path(clone_path),
+            check=False,
             capture_output=True,
             text=True,
             timeout=self._GIT_LOCAL_REMOTE_TIMEOUT_SECONDS,
@@ -2192,16 +3507,17 @@ class GoldenRepoManager:
             logging.warning(
                 "Bug #1534: failed to configure origin remote for golden clone %s: %s",
                 clone_path,
-                set_url_result.stderr,
+                redact_url_credentials(set_url_result.stderr),
             )
             return False
         return True
 
     def _fetch_origin_for_golden_clone(self, clone_path: str, git_env: dict) -> bool:
         """Fetch origin so the remote-tracking ref exists locally."""
-        fetch_result = subprocess.run(
+        fetch_result = run_git_command(
             ["git", "fetch", "origin"],
-            cwd=clone_path,
+            cwd=Path(clone_path),
+            check=False,
             capture_output=True,
             text=True,
             timeout=self._GIT_LOCAL_FETCH_TIMEOUT_SECONDS,
@@ -2211,7 +3527,7 @@ class GoldenRepoManager:
             logging.warning(
                 "Bug #1534: failed to fetch origin for golden clone %s: %s",
                 clone_path,
-                fetch_result.stderr,
+                redact_url_credentials(fetch_result.stderr),
             )
             return False
         return True
@@ -2232,7 +3548,7 @@ class GoldenRepoManager:
             logging.warning(
                 "Bug #1534: failed to detect current branch for golden clone %s: %s",
                 clone_path,
-                branch_result.stderr,
+                redact_url_credentials(branch_result.stderr),
             )
             return None
 
@@ -2251,9 +3567,10 @@ class GoldenRepoManager:
         self, clone_path: str, branch: str, git_env: dict
     ) -> None:
         """Configure `branch` to track `origin/branch` (requires a prior fetch)."""
-        upstream_result = subprocess.run(
+        upstream_result = run_git_command(
             ["git", "branch", f"--set-upstream-to=origin/{branch}", branch],
-            cwd=clone_path,
+            cwd=Path(clone_path),
+            check=False,
             capture_output=True,
             text=True,
             timeout=self._GIT_LOCAL_REMOTE_TIMEOUT_SECONDS,
@@ -2265,7 +3582,7 @@ class GoldenRepoManager:
                 "%s branch %s: %s",
                 clone_path,
                 branch,
-                upstream_result.stderr,
+                redact_url_credentials(upstream_result.stderr),
             )
 
     def _clone_remote_repository(
@@ -2290,24 +3607,27 @@ class GoldenRepoManager:
             # Clone full repository with complete history for semantic search.
             # Only pass --branch when explicitly requested; omitting it lets git
             # resolve the remote HEAD, which works for any default branch name.
-            cmd = ["git", "-c", "core.fsync=none", "clone"]
-            if branch:
-                cmd.extend(["--branch", branch])
-            # The clone's stored origin is the credential-free URL; repository
-            # credentials are supplied to git at run time, never on argv.
-            cmd.extend([remote_url_without_credentials(repo_url), clone_path])
-
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=self.resource_config.git_pull_timeout,
-                env=build_non_interactive_git_env(repo_url),
-            )
-
-            if result.returncode != 0:
+            # EVO-64678: routed through the git seam (default LocalGitBackend ==
+            # today's behavior). The clone's stored origin is the
+            # credential-free URL; repository credentials are supplied to git
+            # at run time, never on argv (a backend owning its credentials gets
+            # none). CalledProcessError is caught here, before the outer
+            # SubprocessError handler, so the failure message keeps its exact
+            # "failed with code N: <stderr>" shape.
+            try:
+                self._git_backend.clone(
+                    remote_url_without_credentials(repo_url),
+                    clone_path,
+                    branch=branch,
+                    no_fsync=True,
+                    timeout=self.resource_config.git_pull_timeout,
+                    credentials_url=(
+                        None if self._git_backend.owns_credentials else repo_url
+                    ),
+                )
+            except subprocess.CalledProcessError as e:
                 raise GitOperationError(
-                    f"Git clone failed with code {result.returncode}: {result.stderr}"
+                    f"Git clone failed with code {e.returncode}: {redact_url_credentials(e.stderr)}"
                 )
 
             return clone_path
@@ -2329,15 +3649,15 @@ class GoldenRepoManager:
             the old behavior that always hardcoded 'main' regardless.
         """
         try:
-            result = subprocess.run(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                cwd=clone_path,
-                capture_output=True,
-                text=True,
-                check=True,
+            # EVO-64678: via the git seam. rev_parse() already strips stdout and
+            # raises CalledProcessError on failure, which the handler below
+            # catches exactly as before.
+            branch: str = self._git_backend.rev_parse(
+                clone_path,
+                "--abbrev-ref",
+                "HEAD",
                 timeout=self.resource_config.git_pull_timeout,
             )
-            branch = result.stdout.strip()
             if not branch:
                 logger.warning(
                     "git rev-parse returned empty output for cloned repo at %s. "
@@ -2347,6 +3667,14 @@ class GoldenRepoManager:
                 return "main"
             return branch
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            from code_indexer.services.git_head import is_unborn_head
+
+            if is_unborn_head(e):
+                # An empty repository: no commit, so no branch to detect yet.
+                logger.info(
+                    "Cloned repo at %s has no commit yet; using 'main'.", clone_path
+                )
+                return "main"
             logger.warning(
                 "Failed to detect default branch in cloned repo at %s: %s. "
                 "Falling back to 'main'.",
@@ -2418,7 +3746,119 @@ class GoldenRepoManager:
                 f"'{versioned_ns_dir}' for '{alias}': {dir_error}"
             )
 
-    def _cleanup_repository_files(self, clone_path: str) -> bool:
+    def _delete_delegated_repository_for_removal(
+        self, alias: str
+    ) -> Optional[DelegatedRepositoryRemoval]:
+        """Delete *alias*'s clone on workspace-mcp, before its registry row goes.
+
+        None when the repository is on this pod: a local content backend, or
+        a ``local://`` repository (pod-local by design, or cidx-meta, whose
+        directory here is what removal has always deleted) -- the local
+        removal then runs unchanged.
+
+        Otherwise the clone is with workspace-mcp at the same path as this
+        pod's index-state directory. A clone cidx owns (see
+        :meth:`_delegated_clone_retain_reason`) is deleted through
+        ``/clone-path/delete`` -- an in-place registration at the alias's own
+        entry included (EVO-64616); one it does not own -- a path outside
+        golden-repos, or a row that cannot be read -- is retained and the
+        result says why. The deletion runs under
+        the same guards the local file cleanup uses (no refresh in progress,
+        the alias write lock), because a refresh fetches into that clone.
+
+        Raises GitOperationError -- the removal aborts with the repository
+        still registered and is re-runnable (the delete is idempotent) --
+        when a refresh is running, the lock is held, or workspace-mcp could
+        not delete it; the message says it was NOT deleted.
+        """
+        if not self.repositories_are_delegated():
+            return None
+        record = self._resolve_golden_repo(alias)
+        if record is not None and record.repo_url.startswith("local://"):
+            return None
+        own_path = os.path.join(self.golden_repos_dir, alias)
+        if record is None:
+            return self._retain_delegated_repository(
+                alias,
+                own_path,
+                "its registry row could not be read, so cidx cannot show it "
+                "owns the clone",
+            )
+        clone_path = str(record.clone_path or own_path)
+        reason = self._delegated_clone_retain_reason(
+            alias, record.repo_url, clone_path, removal=True
+        )
+        if reason is not None:
+            return self._retain_delegated_repository(alias, clone_path, reason)
+
+        not_removed = (
+            f"Golden repository '{alias}' was NOT removed: its repository at "
+            f"{clone_path} was NOT deleted on workspace-mcp"
+        )
+        rerun = "; it is still registered -- re-run the removal to complete it"
+        scheduler = getattr(self, "_refresh_scheduler", None)
+        lock_acquired = False
+        if scheduler is not None:
+            try:
+                scheduler.check_refresh_not_in_progress(alias)
+            except DuplicateJobError as refresh_error:
+                raise GitOperationError(
+                    f"{not_removed} (a refresh is in progress: {refresh_error}){rerun}"
+                ) from refresh_error
+            if not scheduler.acquire_write_lock(alias, owner_name="remove_repo"):
+                raise GitOperationError(
+                    f"{not_removed} (the write lock is held by another "
+                    f"operation){rerun}"
+                )
+            lock_acquired = True
+        try:
+            working_copies = self._delegated_working_copies(
+                f"removal of golden repository '{alias}'"
+            )
+            deleted = working_copies.remove(clone_path)
+        except Exception as exc:  # workspace-mcp transport / HTTP / wiring
+            logging.error("%s (%s)%s", not_removed, exc, rerun)
+            raise GitOperationError(f"{not_removed} ({exc}){rerun}") from exc
+        finally:
+            if lock_acquired:
+                scheduler.release_write_lock(alias, owner_name="remove_repo")
+        if not deleted:
+            logging.info(
+                "Golden repository '%s': its clone at %s was already absent on "
+                "workspace-mcp",
+                alias,
+                clone_path,
+            )
+            return DelegatedRepositoryRemoval(
+                clone_path, DelegatedRepositoryRemoval.ALREADY_ABSENT
+            )
+        logging.info(
+            "Golden repository '%s': deleted its clone at %s on workspace-mcp",
+            alias,
+            clone_path,
+        )
+        return DelegatedRepositoryRemoval(
+            clone_path, DelegatedRepositoryRemoval.DELETED
+        )
+
+    @staticmethod
+    def _retain_delegated_repository(
+        alias: str, clone_path: str, reason: str
+    ) -> DelegatedRepositoryRemoval:
+        """Say, loudly, that removal leaves *alias*'s clone on workspace-mcp."""
+        logging.warning(
+            "Golden repository '%s': the repository at %s is NOT deleted: %s",
+            alias,
+            clone_path,
+            reason,
+        )
+        return DelegatedRepositoryRemoval(
+            clone_path, DelegatedRepositoryRemoval.RETAINED, reason
+        )
+
+    def _cleanup_repository_files(
+        self, clone_path: str, *, delegated: bool = False
+    ) -> bool:
         """
         Clean up repository files and directories using orchestrated cleanup.
 
@@ -2427,6 +3867,9 @@ class GoldenRepoManager:
 
         Args:
             clone_path: Path to repository directory to clean up
+            delegated: the repository is NOT on this pod (content_backend
+                'delegated'): only cidx's index state at *clone_path* is
+                removed -- see :meth:`_remove_pod_index_state`.
 
         Returns:
             bool: True if cleanup was successful, False if there were issues
@@ -2435,6 +3878,11 @@ class GoldenRepoManager:
         Raises:
             GitOperationError: Only for critical failures that should prevent deletion
         """
+        if delegated:
+            try:
+                return self._remove_pod_index_state(clone_path)
+            except OSError as e:
+                return self._handle_cleanup_errors(e, clone_path)
         if not os.path.exists(clone_path):
             return True  # Already cleaned up
 
@@ -2598,6 +4046,48 @@ class GoldenRepoManager:
             )
             raise GitOperationError(f"Unexpected cleanup failure: {str(error)}")
 
+    def _await_clone_path_locally_visible(
+        self, clone_path: str, *, attempts: int = 100, delay_seconds: float = 0.1
+    ) -> None:
+        """Block until *clone_path* is an enterable directory from THIS node's view.
+
+        EVO-64616 cross-client barrier: a delegated clone is written by git-mcp on
+        a different NFS client, so after the backend reports success this process's
+        client can still serve a NEGATIVE dcache entry for the freshly-created
+        directory — the very next ``cidx init``/``cidx index`` child, launched with
+        ``cwd=clone_path``, then dies with ``FileNotFoundError`` on the cwd before
+        it runs.
+
+        The load-bearing detail (measured): a direct ``os.scandir(clone_path)`` hits
+        that cached negative dentry and can keep missing for up to the mount's
+        ``acdirmax`` — ~28s observed on a warm cache. Re-reading the PARENT
+        directory (``os.listdir``) instead forces a fresh ``readdir`` that
+        revalidates the local dcache and picks up the new child immediately (attempt
+        0 even on the warm cache that made the scandir-only wait 28s). So each
+        iteration lists the parent first, then confirms the child is enterable.
+
+        No-op for a local clone (visible on the first pass). Bounded — raises rather
+        than hangs if the directory never appears.
+        """
+        parent = os.path.dirname(clone_path.rstrip("/")) or "/"
+        last_exc: Optional[OSError] = None
+        for _ in range(max(1, attempts)):
+            try:
+                # Force parent readdir -> revalidates the dcache (busts the stale
+                # negative entry), THEN confirm the child is a readable directory.
+                os.listdir(parent)
+                with os.scandir(clone_path):
+                    pass
+                return
+            except (FileNotFoundError, NotADirectoryError) as exc:
+                last_exc = exc
+                time.sleep(delay_seconds)
+        raise GitOperationError(
+            f"Cloned repository never became visible to this node at "
+            f"{clone_path!r} after {attempts} attempts "
+            f"(~{delay_seconds * attempts:.1f}s): {last_exc}"
+        )
+
     def _execute_post_clone_workflow(
         self,
         clone_path: str,
@@ -2606,7 +4096,9 @@ class GoldenRepoManager:
         temporal_options: Optional[Dict] = None,
         progress_callback=None,
         orphan_event_callback: Optional[Any] = None,
+        golden_repo_alias: Optional[str] = None,
         job_id: Optional[str] = None,
+        local_content: bool = False,
     ) -> None:
         """
         Execute the required workflow after successful repository cloning.
@@ -2627,6 +4119,8 @@ class GoldenRepoManager:
                 subprocess's stderr -- forwarded verbatim to
                 run_with_popen_progress. A channel entirely separate from
                 progress_callback (see _make_hnsw_orphan_event_logger).
+            golden_repo_alias: EVO-66113 optional alias to tag embed stats records.
+            job_id: EVO-66113 optional job id for embed stats correlation.
 
         Raises:
             GitOperationError: If any workflow step fails
@@ -2635,6 +4129,25 @@ class GoldenRepoManager:
             f"Executing post-clone workflow for {clone_path} (force_init={force_init})"
         )
 
+        # EVO-64616: with a DELEGATED clone, git-mcp writes the repo on a different
+        # NFS client than this cidx process. The delegated backend returns as soon
+        # as git-mcp reports success, but this node's NFS client can briefly still
+        # have a negative-cached view of the just-created directory — so the very
+        # next `cidx init`/`cidx index` child, launched with `cwd=clone_path`, dies
+        # with `FileNotFoundError` on the cwd before it can run. Block until this
+        # node can actually enter the directory, refreshing the local NFS caches,
+        # before spawning any child. A no-op for a local clone (visible first try).
+        #
+        # Without the golden-repos mount (repositories delegated, content not
+        # on this pod) there is nothing of git-mcp's to wait for HERE: the
+        # clone's visibility was proven through the content backend
+        # (_await_clone_visible_through_content_backend) and clone_path is this
+        # pod's own index-state directory, created by _clone_for_delegated_content;
+        # the children read the repository through the seams (stamped
+        # --content-backend/--git-backend=delegated). Listing it would only
+        # probe the mount.
+        if local_content or not self.repositories_are_delegated():
+            self._await_clone_path_locally_visible(clone_path)
         # Story #2118: the clone directory is golden_repos_dir/<alias>; every
         # child of this registration is charged to that golden repo's global
         # alias, the add job (nojob:golden_repo_add outside one), purpose index.
@@ -2681,6 +4194,9 @@ class GoldenRepoManager:
             # (CHUNKS_DB) rather than inheriting the CLI SHARDED_JSON default.
             temporal_command = append_server_layout_args(
                 ["cidx", "index", "--index-commits", "--progress-json"],
+                **repo_layout_kwargs(
+                    None, golden_repo_alias, local_content=local_content
+                ),
                 attribution=stats_attribution,
             )
 
@@ -2796,7 +4312,10 @@ class GoldenRepoManager:
                 error_label=error_label,
             )
             _popen_kwargs["env"] = build_embedding_stats_child_env(
-                _get_config_service_for_stats().get_config(), base_env=env
+                _get_config_service_for_stats().get_config(),
+                base_env=env,
+                golden_repo_alias=golden_repo_alias,
+                job_id=job_id,
             )
             # Bug #1388: only pass orphan_event_callback when not None, for
             # the same reason as env above -- defensive compatibility with
@@ -2828,7 +4347,9 @@ class GoldenRepoManager:
                 )
 
                 if result.returncode != 0:
-                    combined_output = result.stdout + result.stderr
+                    combined_output = redact_url_credentials(
+                        result.stdout
+                    ) + redact_url_credentials(result.stderr)
                     if self._is_recoverable_init_error(combined_output):
                         logging.warning(
                             f"Recoverable configuration conflict during init. "
@@ -2960,6 +4481,9 @@ class GoldenRepoManager:
             _run_popen_with_telemetry(
                 append_server_layout_args(
                     ["cidx", "index", "--fts", "--progress-json"],
+                    **repo_layout_kwargs(
+                        None, golden_repo_alias, local_content=local_content
+                    ),
                     attribution=stats_attribution,
                 ),
                 phase_name="semantic",
@@ -2967,6 +4491,39 @@ class GoldenRepoManager:
                 env=build_cidx_subprocess_env(_semantic_env_base),
             )
             logging.info(f"cidx index --fts completed for {clone_path}")
+
+            # EVO-66445: the `cidx index --fts` above runs FTS through
+            # smart_indexer, which SILENTLY degrades to semantic-only on any FTS
+            # init/build error ("graceful degradation") -- which is how the entire
+            # golden fleet ended up with a semantic index but no tantivy_index
+            # (search_mode="fts" errored fleet-wide). Verify the FTS index actually
+            # materialized and, if not, rebuild it via the reliable FTS-only path;
+            # surface a persistent failure loudly rather than swallowing it.
+            # Non-fatal: semantic is the load-bearing index, so a failed FTS build
+            # is logged at ERROR + reported, never a registration abort. When the
+            # --fts pass already built the index (healthy case) this is a cheap
+            # marker check -- no rebuild, no embedding cost.
+            from ..services.fts_index_builder import ensure_fts_index
+
+            _fts_outcome = ensure_fts_index(
+                Path(clone_path),
+                alias=golden_repo_alias,
+                subprocess_env=build_cidx_subprocess_env(),
+                local_content=local_content,
+            )
+            if not _fts_outcome.ok:
+                logging.error(
+                    "EVO-66445: FTS index unavailable after registration for "
+                    "alias=%s: %s",
+                    golden_repo_alias,
+                    _fts_outcome.detail,
+                )
+            else:
+                logging.info(
+                    "EVO-66445: FTS index %s for alias=%s",
+                    _fts_outcome.status.value,
+                    golden_repo_alias,
+                )
 
             # Step 3: cidx index --index-commits --progress-json (temporal, if enabled)
             if temporal_command is not None:
@@ -3172,7 +4729,7 @@ class GoldenRepoManager:
 
         except subprocess.CalledProcessError as e:
             logging.warning(
-                f"Init conflict resolution failed: Command failed with exit code {e.returncode}: {e.stderr}"
+                f"Init conflict resolution failed: Command failed with exit code {e.returncode}: {redact_url_credentials(e.stderr)}"
             )
             return False
         except subprocess.TimeoutExpired as e:
@@ -3239,7 +4796,7 @@ class GoldenRepoManager:
 
         except subprocess.CalledProcessError as e:
             logging.warning(
-                f"Service conflict resolution failed: Command failed with exit code {e.returncode}: {e.stderr}"
+                f"Service conflict resolution failed: Command failed with exit code {e.returncode}: {redact_url_credentials(e.stderr)}"
             )
             return False
         except subprocess.TimeoutExpired as e:
@@ -3349,14 +4906,23 @@ class GoldenRepoManager:
                         repo_dict
                     )  # Convert to Dict[str, Any]
                     repo_dict_any["canonical_url"] = canonical_url
-                    # Use canonical path resolution to handle versioned structure repos
-                    actual_path = self.get_actual_repo_path(repo.alias)
+                    # Use canonical path resolution to handle versioned structure repos.
+                    # Delegated: the registered clone, where git-mcp sees the
+                    # repository -- index state missing HERE must not drop it.
+                    if self.repositories_are_delegated():
+                        actual_path = repo.clone_path
+                    else:
+                        actual_path = self.get_actual_repo_path(repo.alias)
                     repo_dict_any["branches"] = self._get_repository_branches(
                         actual_path
                     )
 
                     matching_repos.append(repo_dict_any)
 
+            except GitOperationError:
+                # A delegated branch lookup that failed: an error, never a
+                # repository silently dropped from the match.
+                raise
             except Exception as e:
                 logging.warning(
                     f"Failed to normalize URL for repo {repo.alias}: {str(e)}"
@@ -3375,35 +4941,71 @@ class GoldenRepoManager:
         Returns:
             List of branch names
         """
+        if self.repositories_are_delegated():
+            return self._get_repository_branches_delegated(repo_path)
         try:
             if not os.path.exists(repo_path):
                 return ["main"]  # Default fallback
 
-            # Get branches using git command
-            result = subprocess.run(
-                ["git", "branch", "-r"],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                timeout=self.resource_config.git_untracked_file_timeout,
-            )
-
-            if result.returncode == 0:
-                branches = []
-                for line in result.stdout.strip().split("\n"):
-                    if line.strip():
-                        # Clean up branch name (remove origin/ prefix)
-                        branch = line.strip().replace("origin/", "")
-                        if branch and branch != "HEAD":
-                            branches.append(branch)
-
-                return branches if branches else ["main"]
-            else:
+            # Get branches using git command.
+            # EVO-64678: via the git seam. The raw call used check=False and
+            # returned ["main"] on a non-zero exit; list_branches() raises
+            # instead, so CalledProcessError is caught here to keep that exact
+            # tolerant behavior (and to avoid the generic warning below).
+            try:
+                remote_branch_lines = self._git_backend.list_branches(
+                    repo_path,
+                    remote=True,
+                    timeout=self.resource_config.git_untracked_file_timeout,
+                )
+            except subprocess.CalledProcessError:
                 return ["main"]
+
+            return self._branch_names_from_remote_lines(remote_branch_lines)
 
         except Exception as e:
             logging.warning(f"Failed to get branches for {repo_path}: {str(e)}")
             return ["main"]
+
+    @staticmethod
+    def _branch_names_from_remote_lines(remote_branch_lines: List[str]) -> List[str]:
+        """Branch names from ``git branch -r`` lines; ``["main"]`` when none."""
+        branches = []
+        for line in remote_branch_lines:
+            # Clean up branch name (remove origin/ prefix)
+            branch = line.replace("origin/", "")
+            if branch and branch != "HEAD":
+                branches.append(branch)
+
+        return branches if branches else ["main"]
+
+    def _get_repository_branches_delegated(self, repo_path: str) -> List[str]:
+        """The delegated twin of :meth:`_get_repository_branches`.
+
+        This pod holds only index state, so nothing here is probed: the git
+        seam is asked, at the path git-mcp sees (a versioned snapshot maps to
+        its base clone). A failure raises GitOperationError -- the local
+        method's ``["main"]`` fallback would report a repository git-mcp could
+        not read as one with a single ``main`` branch.
+        """
+        from code_indexer.server.startup.content_backend_wiring import (
+            golden_repo_content_root,
+        )
+
+        root = str(golden_repo_content_root(repo_path, consumer="branch listing"))
+        backend = self.delegated_git_backend("branch listing")
+        try:
+            remote_branch_lines = backend.list_branches(
+                root,
+                remote=True,
+                timeout=self.resource_config.git_untracked_file_timeout,
+            )
+        except subprocess.CalledProcessError as e:
+            raise GitOperationError(
+                f"Listing branches of {root} through the git backend failed: "
+                f"{redact_url_credentials(e.stderr or str(e))}"
+            ) from e
+        return self._branch_names_from_remote_lines(remote_branch_lines)
 
     def get_golden_repo(self, alias: str) -> Optional[GoldenRepo]:
         """
@@ -3461,6 +5063,87 @@ class GoldenRepoManager:
         except Exception as e:
             logger.warning("Failed to get wiki_enabled for alias '%s': %s", alias, e)
             return False
+
+    def get_workspace_id(self, alias: str) -> Optional[str]:
+        """Return the workspace-mcp ``workspace_id`` retained for *alias*, or None.
+
+        EVO-65021 read accessor. Resolves via the shared backend (source of
+        truth) so a repo registered on another worker/node is visible here.
+        Returns None both when the alias is unknown AND when the repo predates
+        workspace_id retention (has not been captured/backfilled). Callers that
+        must distinguish those cases, or that require a non-None id, should use
+        :meth:`resolve_workspace_id`.
+        """
+        repo = self._resolve_golden_repo(alias)
+        if repo is None:
+            return None
+        return repo.workspace_id
+
+    def resolve_workspace_id(self, alias: str) -> str:
+        """Resolve the workspace-mcp ``workspace_id`` for *alias* or raise.
+
+        EVO-65365: no longer on the Option-C production golden path (which
+        addresses golden repos by bare alias, not workspace_id); retained for the
+        workspace_id addressing/compat mode in ``build_scip_generator`` and tests.
+
+        EVO-65021: this is the accessor the delegated SCIP indexer (stream-01)
+        consumes to address sandbox-mcp (``sb-{workspace_id}``). Unlike
+        :meth:`get_workspace_id`, it never returns a falsy handle — it raises
+        :class:`WorkspaceIdNotRetainedError` when the alias is unknown or its
+        workspace_id has not been retained, so the delegated backend can
+        fail-soft (skip SCIP for that repo) on an explicit, typed signal rather
+        than silently building against ``sb-None``.
+
+        Args:
+            alias: Golden repository alias.
+
+        Returns:
+            The non-empty workspace-mcp workspace id.
+
+        Raises:
+            WorkspaceIdNotRetainedError: alias unknown, or workspace_id unset.
+        """
+        # EVO-65021 (Bug #1316 shape): workspace_id flips from NULL to a value at
+        # an arbitrary later point (backfill / registration on ANOTHER worker), so
+        # a per-worker cache HIT can serve a stale ``workspace_id=None`` forever
+        # (until process restart). Because THIS method's OUTCOME decides whether a
+        # delegated SCIP build runs, it MUST read the authoritative shared-backend
+        # state — a cache-first read here would wrongly fail-soft "no retained
+        # workspace_id" on a repo another worker has already backfilled.
+        repo = self._resolve_golden_repo_authoritative(alias)
+        if repo is None:
+            raise WorkspaceIdNotRetainedError(
+                f"Cannot resolve workspace_id: golden repo '{alias}' not found"
+            )
+        workspace_id = repo.workspace_id
+        if not workspace_id:
+            raise WorkspaceIdNotRetainedError(
+                f"Golden repo '{alias}' has no retained workspace_id "
+                "(registered before workspace_id retention, or not yet "
+                "backfilled). Re-register the repo or backfill its workspace_id "
+                "before enabling delegated SCIP."
+            )
+        return workspace_id
+
+    def set_workspace_id(self, alias: str, workspace_id: Optional[str]) -> bool:
+        """Persist the workspace-mcp ``workspace_id`` for *alias*.
+
+        EVO-65021 capture/backfill accessor: writes the handle to the shared
+        backend and refreshes the per-worker cache so subsequent
+        :meth:`get_workspace_id`/:meth:`resolve_workspace_id` reads on this
+        worker see it immediately. Passing None clears the handle.
+
+        Returns:
+            True if a record was updated, False if the alias does not exist.
+        """
+        updated: bool = self._sqlite_backend.update_workspace_id(alias, workspace_id)
+        if updated:
+            cached = self.golden_repos.get(alias)
+            if cached is not None:
+                self.golden_repos[alias] = cached.model_copy(
+                    update={"workspace_id": workspace_id}
+                )
+        return updated
 
     def set_wiki_enabled(self, alias: str, enabled: bool) -> None:
         """Set wiki_enabled flag for a golden repo (Story #280)."""
@@ -3654,35 +5337,122 @@ class GoldenRepoManager:
         *,
         credentials_url: Optional[str],
     ) -> None:
-        """Fetch remote and validate that target_branch exists (AC3).
+        """Fetch the target branch and validate that it exists (AC3); then make
+        the clone's fetch refspec cover it where needed (EVO-64616,
+        ``_cb_repair_fetch_refspec``).
 
         ``credentials_url`` is the registered repository URL; its credentials
-        are supplied to git at run time."""
-        subprocess.run(
-            ["git", "-c", "core.fsync=none", "fetch", "origin"],
-            cwd=base_clone_path,
-            capture_output=True,
-            text=True,
-            timeout=git_timeout,
-            check=True,
-            env=build_non_interactive_git_env(credentials_url),
+        are supplied to git at run time (a backend owning its credentials
+        ignores it)."""
+        # EVO-64678: both git calls route through the seam. Both ran with
+        # check=True, and the seam raises CalledProcessError on a non-zero exit,
+        # so failures propagate to change_branch() exactly as before.
+        # EVO-64616: only the TARGET branch is fetched. A plain fetch uses the
+        # clone's configured refspec, which on a single-branch clone names the
+        # CURRENT branch -- and moving off a branch upstream deleted (renamed
+        # default) then failed with "couldn't find remote ref" before it began.
+        from code_indexer.global_repos.git_error_classifier import (
+            names_missing_remote_ref,
         )
-        result = subprocess.run(
-            ["git", "branch", "-r"],
-            cwd=base_clone_path,
-            capture_output=True,
-            text=True,
-            timeout=git_timeout,
-            check=True,
-            env=build_non_interactive_git_env(),
+
+        try:
+            self._git_backend.fetch(
+                base_clone_path,
+                remote="origin",
+                no_fsync=True,
+                timeout=git_timeout,
+                credentials_url=credentials_url,
+                ref=target_branch,
+            )
+        except subprocess.CalledProcessError as exc:
+            if names_missing_remote_ref(exc.stderr):
+                raise ValueError(
+                    f"Branch '{target_branch}' does not exist on remote."
+                ) from exc
+            raise
+        remote_branches = set(
+            self._git_backend.list_branches(
+                base_clone_path,
+                remote=True,
+                timeout=git_timeout,
+            )
         )
-        remote_branches = {b.strip() for b in result.stdout.splitlines() if b.strip()}
         if f"origin/{target_branch}" not in remote_branches:
             available = sorted(remote_branches)
             raise ValueError(
                 f"Branch '{target_branch}' does not exist on remote. "
                 f"Available remote branches: {available}"
             )
+        # Before the checkout: git only creates the local branch from (and
+        # tracks) a remote-tracking branch the clone's fetch refspec covers.
+        self._cb_repair_fetch_refspec(
+            base_clone_path,
+            target_branch,
+            git_timeout,
+            credentials_url=credentials_url,
+        )
+
+    def _cb_repair_fetch_refspec(
+        self,
+        base_clone_path: str,
+        target_branch: str,
+        git_timeout: int,
+        *,
+        credentials_url: Optional[str],
+    ) -> None:
+        """Point a single-branch clone whose branch is gone upstream at the
+        target branch, before the checkout (EVO-64616).
+
+        A single-branch clone's configured refspec names the branch it was
+        cloned on. When that branch is gone upstream (the reason the branch is
+        being changed), its plain fetch -- every refresh's -- fails with
+        "couldn't find remote ref", and git will not check out or track a
+        remote-tracking branch the refspec does not cover. So a plain fetch is
+        tried once; only when it fails THAT way is ``remote.origin.fetch``
+        pointed at the target (still single-branch). A full-refspec clone
+        fetches fine and is left alone. Any other fetch failure is logged and
+        left to the checkout and the next refresh to report."""
+        from code_indexer.global_repos.git_error_classifier import (
+            names_missing_remote_ref,
+        )
+
+        try:
+            self._git_backend.fetch(
+                base_clone_path,
+                remote="origin",
+                no_fsync=True,
+                timeout=git_timeout,
+                credentials_url=credentials_url,
+            )
+            return
+        except subprocess.CalledProcessError as exc:
+            if not names_missing_remote_ref(exc.stderr):
+                logger.warning(
+                    "[change_branch] post-switch fetch of %s failed (refresh "
+                    "will report it): %s",
+                    base_clone_path,
+                    redact_url_credentials(exc.stderr),
+                )
+                return
+        refspec = f"+refs/heads/{target_branch}:refs/remotes/origin/{target_branch}"
+        try:
+            self._git_backend.config_set(
+                base_clone_path, "remote.origin.fetch", refspec, timeout=git_timeout
+            )
+        except Exception as exc:
+            logger.warning(
+                "[change_branch] could not point the fetch refspec of %s at %r: %s",
+                base_clone_path,
+                target_branch,
+                exc,
+            )
+            return
+        logger.info(
+            "[change_branch] %s fetched a branch upstream no longer has; its "
+            "fetch refspec now names %r",
+            base_clone_path,
+            target_branch,
+        )
 
     def _cb_checkout_and_pull(
         self,
@@ -3695,24 +5465,22 @@ class GoldenRepoManager:
         """Checkout target branch and pull latest commits.
 
         ``credentials_url`` is the registered repository URL; its credentials
-        are supplied to the pull at run time."""
-        subprocess.run(
-            ["git", "checkout", target_branch],
-            cwd=base_clone_path,
-            capture_output=True,
-            text=True,
+        are supplied to the pull at run time (a backend owning its
+        credentials ignores it)."""
+        # EVO-64678: both git calls route through the seam; check=True semantics
+        # are preserved (the seam raises CalledProcessError on non-zero exit).
+        self._git_backend.checkout(
+            base_clone_path,
+            target_branch,
             timeout=git_timeout,
-            check=True,
-            env=build_non_interactive_git_env(),
         )
-        subprocess.run(
-            ["git", "-c", "core.fsync=none", "pull", "origin", target_branch],
-            cwd=base_clone_path,
-            capture_output=True,
-            text=True,
+        self._git_backend.pull(
+            base_clone_path,
+            remote="origin",
+            branch=target_branch,
+            no_fsync=True,
             timeout=git_timeout,
-            check=True,
-            env=build_non_interactive_git_env(credentials_url),
+            credentials_url=credentials_url,
         )
 
     def _cb_cidx_index(self, base_clone_path: str) -> None:
@@ -3777,18 +5545,20 @@ class GoldenRepoManager:
             )
             if result.stdout:
                 logger.debug(
-                    "[change_branch] cidx index stdout:\n%s", result.stdout[-2000:]
+                    "[change_branch] cidx index stdout:\n%s",
+                    redact_url_credentials(result.stdout)[-2000:],
                 )
             if result.stderr:
                 logger.warning(
-                    "[change_branch] cidx index stderr:\n%s", result.stderr[-2000:]
+                    "[change_branch] cidx index stderr:\n%s",
+                    redact_url_credentials(result.stderr)[-2000:],
                 )
         except subprocess.CalledProcessError as e:
             logger.error(
                 "[change_branch] cidx index failed (exit %d):\nstdout: %s\nstderr: %s",
                 e.returncode,
-                (e.stdout or "")[-2000:],
-                (e.stderr or "")[-2000:],
+                (redact_url_credentials(e.stdout) or "")[-2000:],
+                (redact_url_credentials(e.stderr) or "")[-2000:],
             )
             raise
 
@@ -3863,10 +5633,22 @@ class GoldenRepoManager:
                 timeout=cow_timeout,
                 check=True,
             )
-        # fix-config on clone only (non-fatal)
+        # fix-config on clone only (non-fatal), stamped with the repository's
+        # backends like its `cidx index` spawn: on a pod that does not hold the
+        # repository it must not rewrite the git state the index run recorded.
         try:
+            golden_repo = self.get_golden_repo(alias)
             subprocess.run(
-                ["cidx", "fix-config", "--force"],
+                [
+                    "cidx",
+                    "fix-config",
+                    "--force",
+                    *server_backend_args(
+                        **repo_layout_kwargs(
+                            golden_repo.repo_url if golden_repo else None, alias
+                        )
+                    ),
+                ],
                 cwd=snapshot_path,
                 capture_output=True,
                 text=True,
@@ -4019,6 +5801,7 @@ class GoldenRepoManager:
             # Lazy import to keep cidx --help fast (per CLAUDE.md)
             from code_indexer.services.tantivy_index_manager import TantivyIndexManager
 
+
             # Open existing FTS index in snapshot (create_new=False to not wipe it)
             fts_manager = TantivyIndexManager(fts_index_dir)
             fts_manager.initialize_index(create_new=False)
@@ -4085,6 +5868,7 @@ class GoldenRepoManager:
                 is_postgres_storage_mode,
             )
 
+
             # Bug #1575 Part C review fix (Defect 3a bypass 1): thread the
             # postgres/cluster-mode signal, matching
             # FilesystemBackend.get_vector_store_client()'s existing
@@ -4138,18 +5922,126 @@ class GoldenRepoManager:
 
         return bool(is_versioned_snapshot(path))
 
-    def _cb_swap_alias(self, alias: str, new_snapshot_path: str) -> None:
-        """Atomically swap alias JSON to new snapshot; schedule old snapshot cleanup."""
+    def _run_meta_description_hook(
+        self, alias: str, repo_url: str, clone_path: str
+    ) -> None:
+        """Create *alias*'s cidx-meta description (Story #538) after it is
+        activated -- by an add, or by the reconcile's activation repair.
+        Never raises: a failure is logged and the registration stands."""
+        try:
+            from code_indexer.global_repos.meta_description_hook import (
+                on_repo_added,
+            )
+
+            on_repo_added(
+                repo_name=alias,
+                repo_url=repo_url,
+                clone_path=clone_path,
+                golden_repos_dir=self.golden_repos_dir,
+                mcp_registration_service=self._mcp_registration_service,
+            )
+        except Exception as hook_error:
+            logging.error(
+                f"Meta description hook failed for '{alias}': {hook_error}. "
+                f"Golden repository added but meta description not created."
+            )
+
+    def _activate_globally(
+        self,
+        *,
+        alias: str,
+        repo_url: str,
+        clone_path: str,
+        enable_temporal: bool,
+        temporal_options: Optional[Dict[str, Any]],
+        published: Optional[Dict[str, str]],
+    ) -> None:
+        """Register *alias* as ``<alias>-global``: the alias pointer (with the
+        published index version, when there is one) and the global registry
+        row. The one activation path shared by the add and the reconcile's
+        activation repair (``services/global_activation_repair.py``). Raises
+        ``GlobalActivationError``; the activator has already undone its own
+        partial writes by then."""
+        from code_indexer.global_repos.global_activation import GlobalActivator
+
+        GlobalActivator(self.golden_repos_dir).activate_golden_repo(
+            repo_name=alias,
+            repo_url=repo_url,
+            clone_path=clone_path,
+            enable_temporal=enable_temporal,
+            temporal_options=temporal_options,
+            **({"alias_extra": published} if published else {}),
+        )
+
+    def _publish_added_index(self, clone_path: str) -> Optional[Dict[str, str]]:
+        """Publish a newly added repository's index under a delegated IndexStore.
+
+        The add builds the index on this pod only; the alias points at the
+        clone path until the first refresh snapshots it. Publishing here and
+        recording the version with the pointer lets any other pod check the
+        same index out (``server/services/index_materializer.py``). None under
+        the local store (nothing to publish: today's add). Raises on failure,
+        which rolls the registration back like any activation failure.
+        """
+        return self._publish_index(clone_path, clone_path)
+
+    def _publish_index(
+        self, repo_path: str, built_from: str
+    ) -> Optional[Dict[str, str]]:
+        """Publish the index under ``built_from`` as ``repo_path``'s next
+        version (``utils.index_store.publish_index_fields``) with the store
+        the running server built. None under the local store.
+
+        A snapshot it was built from is marked as holding the version (a
+        checkout of it). A base clone is not (EVO-64616): published in place
+        by an add or the global-activation repair, the marker made it a
+        served-index cache entry, and eviction removed the index state the
+        refresh builds on -- on the shared golden-repos volume, for every
+        pod."""
+        from code_indexer.server.startup.index_store_wiring import (
+            server_index_store,
+        )
+        from code_indexer.utils.index_store import publish_index_fields
+
+        fields = publish_index_fields(server_index_store(), repo_path, built_from)
+        if fields is not None:
+            from code_indexer.server.services.index_materializer import (
+                is_base_clone,
+                mark_published_here,
+            )
+
+            if not is_base_clone(built_from, self.golden_repos_dir):
+                mark_published_here(built_from, fields)
+        return fields
+
+    def _cb_swap_alias(
+        self,
+        alias: str,
+        new_snapshot_path: str,
+        published: Optional[Dict[str, str]] = None,
+    ) -> None:
+        """Atomically swap alias JSON to new snapshot; schedule old snapshot cleanup.
+
+        ``published``: the alias-document fields of the snapshot's published
+        index (delegated IndexStore), written with the pointer. The recorded
+        temporal-shard version is carried over: the shards live outside the
+        snapshot and a branch change does not rebuild them.
+        """
         # Import here to avoid circular dependency (alias_manager imports from server)
         from code_indexer.global_repos.alias_manager import AliasManager
+        from code_indexer.utils.index_store import recorded_temporal_fields
 
         global_alias = f"{alias}-global"
-        aliases_dir = os.path.join(self.golden_repos_dir, "aliases")
-        os.makedirs(aliases_dir, exist_ok=True)
-        alias_manager = AliasManager(aliases_dir)
+        alias_manager = AliasManager(os.path.join(self.golden_repos_dir, "aliases"))
 
         current_target = alias_manager.read_alias(global_alias)
-        alias_manager.create_alias(global_alias, new_snapshot_path, repo_name=alias)
+        extra = {
+            **recorded_temporal_fields(alias_manager.read_record(global_alias)),
+            **(published or {}),
+        }
+        alias_manager.create_alias(
+            global_alias, new_snapshot_path, repo_name=alias, extra=extra or None
+        )
 
         # Evict stale HNSW + chunk-store cache entries for the old
         # versioned path (Bug #994 AC11, Bug #1775). Shared helper --
@@ -4331,9 +6223,10 @@ class GoldenRepoManager:
                     scheduler.raise_if_write_lock_ownership_lost(
                         alias, owner_name="branch_change"
                     )
+                published = self._publish_index(base, snapshot)
                 # ^ hazard discarding after the swap started => deletes the published snapshot
                 swap_started = True
-                self._cb_swap_alias(alias, snapshot)
+                self._cb_swap_alias(alias, snapshot, published)
                 if progress_callback is not None:
                     progress_callback(
                         100,
@@ -4344,13 +6237,10 @@ class GoldenRepoManager:
                 if snapshot is not None and not swap_started:
                     self._cb_discard_unpublished_snapshot(alias, snapshot)
                 # Bug #469: Rollback git HEAD to previous branch on partial failure.
+                # EVO-64678: via the git seam. The raw call passed no timeout,
+                # so none is passed here; check=True is preserved by the seam.
                 try:
-                    subprocess.run(
-                        ["git", "checkout", previous_branch],
-                        cwd=base,
-                        check=True,
-                        capture_output=True,
-                    )
+                    self._git_backend.checkout(base, previous_branch)
                 except Exception as rollback_exc:
                     logger.error(
                         "[change_branch] Rollback to '%s' failed for '%s': %s",
@@ -4487,7 +6377,7 @@ class GoldenRepoManager:
             submitter_username=submitter_username,
             is_admin=True,
             repo_alias=alias,
-            # Pod-pull: the executor is the bound change_branch method
+            # EVO-64545 (pod-pull): the executor is the bound change_branch method
             # reconstructed from these params on whichever pod claims the row.
             metadata={"alias": alias, "target_branch": target_branch},
         )
@@ -4522,6 +6412,114 @@ class GoldenRepoManager:
             index_types=[index_type],
             submitter_username=submitter_username,
         )
+
+    @staticmethod
+    def _add_index_builds_here(index_types: List[str]) -> bool:
+        """Whether an add-index of *index_types* builds anything on this pod:
+        every type but a feature-built type whose builder runs elsewhere (a
+        delegated SCIP build)."""
+        from code_indexer.kernel.index_builders import index_builder
+
+        for index_type in index_types:
+            builder = index_builder(index_type)
+            if builder is None or builder.builds_locally is None:
+                return True
+            if builder.builds_locally():
+                return True
+        return False
+
+    def _run_feature_index(
+        self,
+        index_type: str,
+        alias: str,
+        repo_path: str,
+        allocator: Any,
+        progress_callback: Optional[Callable[..., None]],
+    ) -> tuple[str, str]:
+        """Run the add-index step of a feature-built index type (SCIP) through
+        its builder (``Feature.index_builders()``).
+
+        Mirrors ``refresh_scheduler._run_source_scip``. A builder that runs
+        elsewhere (``scip_backend='delegated-plugin'``) enqueues the build
+        (never blocking this add-index job) and nothing runs here; the builder
+        is fail-soft, but an explicit add-index request whose build could not
+        be enqueued (``skipped``) fails the job (EVO-64616) -- reporting success
+        with no build behind it left repos at "not_indexed" with no reason. A
+        builder answering ``run_locally`` gets its command run here, unchanged
+        (``cidx scip generate``), still raising ``GoldenRepoError`` on failure.
+        Returns ``(stdout, stderr)`` for the caller to accumulate.
+        """
+        from cidx_sdk import IndexBuildRequest
+        from cidx_sdk.feature import INDEX_BUILD_RUN_LOCALLY, INDEX_BUILD_SKIPPED
+
+        from code_indexer.kernel.index_builders import index_builder
+
+        builder = index_builder(index_type)
+        if builder is None:
+            raise GoldenRepoError(
+                f"No enabled feature builds the {index_type!r} index on this server"
+            )
+        label = index_type.upper()
+        # Feature-built indexes are fast: coarse start/end markers only
+        if progress_callback is not None:
+            progress_callback(
+                int(allocator.phase_start(index_type)),
+                phase=index_type,
+                detail=f"{label}: generating...",
+            )
+        # EVO-64616: an explicit add-index request always builds (clear=True):
+        # the freshness marker can outlive the index it describes, and a
+        # FRESH answer used to complete the job with nothing indexed.
+        outcome = builder.build(
+            IndexBuildRequest(alias=alias, repo_root=str(repo_path), clear=True)
+        )
+        if outcome.status != INDEX_BUILD_RUN_LOCALLY:
+            logging.info(
+                "%s delegated backend: %s for golden repo %s",
+                label,
+                outcome.status,
+                alias,
+            )
+            if outcome.status == INDEX_BUILD_SKIPPED:
+                # The refresh tolerates a skip; a request for the index must
+                # not report success with no build behind it.
+                raise GoldenRepoError(
+                    f"The delegated {label} build of '{alias}' could not be "
+                    f"enqueued (see the server log for the reason); no {label} "
+                    "index was built"
+                )
+            if progress_callback is not None:
+                progress_callback(
+                    int(allocator.phase_end(index_type)),
+                    phase=index_type,
+                    detail=f"{label}: {outcome.status}",
+                )
+            return (
+                f"[{index_type}] delegated build {outcome.status}: it runs "
+                "asynchronously; get_index_status shows its progress and "
+                "outcome\n",
+                "",
+            )
+
+        result = subprocess.run(
+            list(outcome.command),
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            env=build_cidx_subprocess_env(),
+        )
+        if result.returncode != 0:
+            error_details = (
+                result.stderr or result.stdout or f"Exit code {result.returncode}"
+            )
+            raise GoldenRepoError(f"Failed to create {label} index: {error_details}")
+        if progress_callback is not None:
+            progress_callback(
+                int(allocator.phase_end(index_type)),
+                phase=index_type,
+                detail=f"{label}: complete",
+            )
+        return result.stdout or "", result.stderr or ""
 
     def add_indexes_to_golden_repo(
         self,
@@ -4589,13 +6587,27 @@ class GoldenRepoManager:
         if self._resolve_golden_repo(alias) is None:
             raise ValueError(f"Golden repository '{alias}' not found")
 
-        # Validate all index types up front
-        valid_index_types = ["semantic", "fts", "temporal", "scip"]
+        # Validate all index types up front: the core's, plus the types an
+        # enabled feature builds (SCIP: the cidx-scip feature).
+        from code_indexer.kernel.index_builders import contributed_index_types
+
+        valid_index_types = ["semantic", "fts", "temporal"] + list(
+            contributed_index_types()
+        )
         for index_type in index_types:
             if index_type not in valid_index_types:
                 raise ValueError(
                     f"Invalid index_type: {index_type}. Must be one of: {', '.join(valid_index_types)}"
                 )
+        if "temporal" in index_types:
+            self._refuse_temporal_under_delegated_content()
+
+        # EVO-66113: BackgroundJobManager._execute_job injects the assigned
+        # job_id into any worker whose signature declares a `job_id` param,
+        # straight from the dequeued (job_id, func, args, kwargs) tuple --
+        # race-free, so no post-submit mutable holder is needed.
+        _golden = self._resolve_golden_repo(alias)
+        _layout = repo_layout_kwargs(getattr(_golden, "repo_url", None), alias)
 
         def background_worker(progress_callback=None, job_id=None) -> Dict[str, Any]:
             """Execute add index operations in a single background thread with write lock + CoW."""
@@ -4717,7 +6729,10 @@ class GoldenRepoManager:
                         error_label=error_label,
                     )
                     _shared_kwargs["env"] = build_embedding_stats_child_env(
-                        _get_config_service_for_stats().get_config(), base_env=env
+                        _get_config_service_for_stats().get_config(),
+                        base_env=env,
+                        golden_repo_alias=alias,
+                        job_id=job_id,
                     )
                     # Bug #1575 Part C independent re-review: this closure
                     # is the SHARED convergence point for the semantic and
@@ -4749,6 +6764,7 @@ class GoldenRepoManager:
 
                         command = append_server_layout_args(
                             ["cidx", "index", "--clear", "--progress-json"],
+                            **_layout,
                             attribution=stats_attribution,
                         )
                         _run_with_popen_progress(
@@ -4774,6 +6790,7 @@ class GoldenRepoManager:
 
                         command = append_server_layout_args(
                             ["cidx", "index", "--rebuild-fts-index"],
+                            **_layout,
                             attribution=stats_attribution,
                         )
                         from code_indexer.storage.shared.hnsw_sync_state import (
@@ -4859,6 +6876,7 @@ class GoldenRepoManager:
                                 *_clear_flags,
                                 "--progress-json",
                             ],
+                            **_layout,
                             attribution=stats_attribution,
                         )
 
@@ -4939,12 +6957,16 @@ class GoldenRepoManager:
                             else None
                         )
 
+                        if scheduler is not None:
+                            scheduler.serve_temporal_shards(f"{alias}-global")
                         _run_with_popen_progress(
                             command,
                             phase_name="temporal",
                             error_label="create temporal index",
                             env=_temporal_env,
                         )
+                        if scheduler is not None:
+                            scheduler.note_temporal_indexed(f"{alias}-global")
 
                         # Bug #131: Update enable_temporal flag in BOTH tables
                         if self._sqlite_backend.update_enable_temporal(alias, True):
@@ -4998,39 +7020,16 @@ class GoldenRepoManager:
                                 f"Error updating global_repos table for {global_alias_temporal}: {e}"
                             )
 
-                    elif index_type == "scip":
-                        # SCIP is fast: coarse start/end markers only
-                        if progress_callback is not None:
-                            progress_callback(
-                                int(allocator.phase_start("scip")),
-                                phase="scip",
-                                detail="SCIP: generating...",
-                            )
-                        command = ["cidx", "scip", "generate"]
-                        result = subprocess.run(
-                            command,
-                            cwd=repo_path,
-                            capture_output=True,
-                            text=True,
-                            env=build_cidx_subprocess_env(),
+                    else:
+                        # A feature-built index type (SCIP): its builder routes
+                        # the build (mirrors refresh_scheduler._run_source_scip).
+                        # Delegated -> enqueue, nothing runs here (fail-soft);
+                        # local -> run its command (fail-loud, unchanged).
+                        _out, _err = self._run_feature_index(
+                            index_type, alias, repo_path, allocator, progress_callback
                         )
-                        all_stdout += result.stdout or ""
-                        all_stderr += result.stderr or ""
-                        if result.returncode != 0:
-                            error_details = (
-                                result.stderr
-                                or result.stdout
-                                or f"Exit code {result.returncode}"
-                            )
-                            raise GoldenRepoError(
-                                f"Failed to create SCIP index: {error_details}"
-                            )
-                        if progress_callback is not None:
-                            progress_callback(
-                                int(allocator.phase_end("scip")),
-                                phase="scip",
-                                detail="SCIP: complete",
-                            )
+                        all_stdout += _out
+                        all_stderr += _err
 
                 # CoW snapshot phase: coarse start marker before operation
                 if progress_callback is not None:
@@ -5040,8 +7039,15 @@ class GoldenRepoManager:
                         detail="Creating snapshot...",
                     )
 
+                # EVO-64616: a delegated SCIP build runs in the sandbox, after
+                # this job; nothing was built here, so there is no new index to
+                # snapshot or publish (snapshotting it failed validation on a
+                # pod without the index directory). Its outcome is tracked
+                # (the cidx-scip feature's build status).
+                built_here = self._add_index_builds_here(index_types)
+
                 # Bug #473 Fix 2: Create CoW snapshot + alias swap after all indexing succeeds
-                if scheduler is not None:
+                if scheduler is not None and built_here:
                     global_alias = f"{alias}-global"
                     # base clone path (NOT the versioned snapshot — indexing ran there)
                     source_path = str(
@@ -5068,6 +7074,7 @@ class GoldenRepoManager:
                         alias_name=global_alias,
                         new_target=new_snapshot,
                         old_target=current_target,
+                        **scheduler.published_swap_extra(global_alias, new_snapshot),
                     )
 
                     # Bug #1775: evict stale HNSW + chunk-store cache
@@ -5154,12 +7161,21 @@ class GoldenRepoManager:
                             f"succeeded): {_dedup_clear_exc}"
                         )
 
+                message = f"Index type(s) {index_types} added successfully to '{alias}'"
+                delegated = [
+                    t for t in index_types if not self._add_index_builds_here([t])
+                ]
+                if delegated:
+                    labels = ", ".join(t.upper() for t in delegated)
+                    message = (
+                        f"Index type(s) {index_types} for '{alias}': the delegated "
+                        f"{labels} build is enqueued and runs asynchronously -- "
+                        "get_index_status shows its progress and outcome"
+                    )
                 return {
                     "success": True,
                     "alias": alias,
-                    "message": (
-                        f"Index type(s) {index_types} added successfully to '{alias}'"
-                    ),
+                    "message": message,
                     "stdout": all_stdout,
                     "stderr": all_stderr,
                 }
@@ -5201,8 +7217,8 @@ class GoldenRepoManager:
             True if the index exists, False otherwise
         """
         # Use canonical path resolution to handle versioned structure repos
-        actual_path = self.get_actual_repo_path(golden_repo.alias)
-        repo_dir = Path(actual_path)
+        # (under a delegated IndexStore: the published index served here)
+        repo_dir = self._index_status_dir(golden_repo.alias)
 
         if index_type == "semantic":
             # semantic index: check every collection subdirectory for real
@@ -5309,13 +7325,66 @@ class GoldenRepoManager:
                     conn.close()
                     if count > 0:
                         return True
-                except Exception:
+                except Exception as exc:
+                    logger.warning(
+                        "_index_exists: swallowed %s: %s",
+                        type(exc).__name__,
+                        exc,
+                        exc_info=True,
+                    )
                     # Database corruption or schema issue - treat as not existing
                     continue
 
             return False
 
         return False
+
+    def _index_status_dir(self, alias: str) -> Path:
+        """Where an index-existence check reads golden repo *alias*'s index.
+
+        Local IndexStore: ``get_actual_repo_path``, exactly as before. Under a
+        delegated IndexStore the directory under golden-repos holds only what
+        this pod built or checked out, so "absent here" says nothing: the
+        alias target is read with its PUBLISHED version served on this pod
+        (``served_golden_target``). No pointer, or a pointer recording no
+        published version, raises -- never "no index".
+        """
+        from code_indexer.global_repos.alias_manager import served_golden_target
+        from code_indexer.server.startup.index_store_wiring import (
+            server_index_store,
+        )
+
+        if server_index_store().is_local:
+            return Path(self.get_actual_repo_path(alias))
+        served = served_golden_target(self.golden_repos_dir, alias)
+        if not served:
+            raise GoldenRepoNotFoundError(
+                f"Golden repository '{alias}' has no alias pointer: with "
+                "index_store_backend='delegated' its published index cannot be "
+                "read on this pod"
+            )
+        return Path(served)
+
+    def counts_as_indexed(self, golden_repo: GoldenRepo) -> bool:
+        """Whether *golden_repo* counts as indexed (the cidx.repos.indexed gauge).
+
+        Local IndexStore: a semantic index with real chunk data on this disk
+        (``_index_exists``), as before. Delegated: its alias records a
+        published index version -- control-plane metadata, read without
+        checking every repository's index out onto this pod.
+        """
+        from code_indexer.server.services.index_materializer import recorded_index
+        from code_indexer.server.startup.index_store_wiring import (
+            server_index_store,
+        )
+
+        if server_index_store().is_local:
+            return self._index_exists(golden_repo, "semantic")
+        from code_indexer.global_repos.alias_manager import AliasManager
+
+        aliases = AliasManager(os.path.join(self.golden_repos_dir, "aliases"))
+        record = aliases.read_record(f"{golden_repo.alias}-global")
+        return recorded_index(record) is not None
 
     def get_golden_repo_indexes(self, alias: str) -> Dict[str, Any]:
         """
@@ -5348,8 +7417,8 @@ class GoldenRepoManager:
         if golden_repo is None:
             raise ValueError(f"Golden repository '{alias}' not found")
         # Use canonical path resolution to handle versioned structure repos
-        actual_path = self.get_actual_repo_path(alias)
-        repo_dir = Path(actual_path)
+        # (under a delegated IndexStore: the published index served here)
+        repo_dir = self._index_status_dir(alias)
 
         # Check each index type using helper method
         # Return separate semantic and fts status (not combined semantic_fts)
@@ -5418,6 +7487,21 @@ class GoldenRepoManager:
                 f"Failed to get last modified time for {dir_path}: {e}"
             )
             return None
+
+    def _delegated_working_copies_if_wired(self) -> Any:
+        """:meth:`_delegated_working_copies`, or None when no DelegatedCloneBackend
+        is wired -- for a step that may proceed without workspace-mcp."""
+        from code_indexer.server.repositories.activated_working_copy import (
+            DelegatedWorkingCopies,
+        )
+        from code_indexer.server.storage.shared.clone_backend import (
+            DelegatedCloneBackend,
+        )
+
+        clone_backend = getattr(self._snapshot_manager, "_clone_backend", None)
+        if not isinstance(clone_backend, DelegatedCloneBackend):
+            return None
+        return DelegatedWorkingCopies(clone_backend)
 
 
 def get_golden_repo_manager() -> "GoldenRepoManager":

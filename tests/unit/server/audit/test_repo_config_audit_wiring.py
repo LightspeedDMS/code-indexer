@@ -18,7 +18,7 @@ _SERVER = Path(code_indexer.__file__).parent / "server"
 _DOOR_FILES: List[Path] = sorted(
     [
         *(_SERVER / "routers").glob("*.py"),
-        *(_SERVER / "web").glob("*.py"),
+        *(_SERVER / "web").rglob("*.py"),
         *(_SERVER / "global_routes").glob("*.py"),
         *(_SERVER / "mcp" / "handlers").rglob("*.py"),
         _SERVER / "auth" / "oidc" / "routes.py",
@@ -71,8 +71,18 @@ _AUDITED_ENTRY_POINTS = frozenset(
 # Routine internal maintenance that must stay on the unaudited scheduler call.
 _INTERNAL_REFRESH_CALLERS = [
     Path(code_indexer.__file__).parent / "global_repos" / "meta_description_hook.py",
-    _SERVER / "services" / "dependency_map_service.py",
-    _SERVER / "services" / "memory_store_service.py",
+    # The dependency map is the cidx-depmap feature's (modular phase 4g).
+    Path(code_indexer.__file__).parents[2]
+    / "packages/features/cidx-depmap/src/cidx_depmap/server/dependency_map_service.py",
+    # The memory store is the cidx-memory feature's (modular phase 4f).
+    Path(code_indexer.__file__).parents[2]
+    / "packages"
+    / "features"
+    / "cidx-memory"
+    / "src"
+    / "cidx_memory"
+    / "server"
+    / "memory_store_service.py",
     _SERVER / "services" / "langfuse_trace_sync_service.py",
 ]
 
@@ -126,7 +136,10 @@ def test_no_door_uses_an_unaudited_primitive() -> None:
 
 _REST_OPS = "routers/inline_admin_ops.py"
 _MCP_REPOS = "mcp/handlers/repos.py"
-_WEB = "web/routes.py"
+# The Web UI doors live in web/pages/ since web/routes.py was split.
+_WEB = "web/pages/golden_repos.py"
+_WEB_CONFIG = "web/pages/config.py"
+_WEB_SELF_MONITORING = "web/pages/self_monitoring.py"
 _REST_PROVIDER = "routers/provider_indexes.py"
 
 # capability -> {door module (relative to server/): audited entry point}
@@ -145,6 +158,7 @@ _DOORS_BY_CAPABILITY: Dict[str, Dict[str, str]] = {
         _REST_OPS: "request_golden_repo_refresh",
         _MCP_REPOS: "request_golden_repo_refresh",
         _WEB: "request_golden_repo_refresh",
+        "routers/index_store_admin.py": "request_golden_repo_refresh",
     },
     "golden_repo_index_added": {
         _REST_OPS: "add_indexes_to_golden_repo",
@@ -156,6 +170,14 @@ _DOORS_BY_CAPABILITY: Dict[str, Dict[str, str]] = {
     "golden_repo_branch_changed": {
         _MCP_REPOS: "change_branch_async",
         _WEB: "change_branch_async",
+    },
+    "golden_repo_renamed": {
+        _REST_OPS: "rename_golden_repo",
+        _MCP_REPOS: "rename_golden_repo",
+    },
+    "golden_catalog_sync_requested": {
+        _REST_OPS: "request_golden_catalog_sync",
+        _MCP_REPOS: "request_golden_catalog_sync",
     },
     "provider_index_added / recreated": {
         _REST_PROVIDER: "submit_provider_index_job",
@@ -169,10 +191,10 @@ _DOORS_BY_CAPABILITY: Dict[str, Dict[str, str]] = {
         _REST_PROVIDER: "bulk_add_provider_index_audited",
         _MCP_REPOS: "bulk_add_provider_index_audited",
     },
-    "config_changed (web sections)": {_WEB: "update_settings_audited"},
-    "config_changed (totp_elevation)": {_WEB: "update_totp_elevation_audited"},
-    "config_changed (reset)": {_WEB: "reset_to_defaults_audited"},
-    "config_changed (self-monitoring)": {_WEB: "apply_audited_change"},
+    "config_changed (web sections)": {_WEB_CONFIG: "update_settings_audited"},
+    "config_changed (totp_elevation)": {_WEB_CONFIG: "update_totp_elevation_audited"},
+    "config_changed (reset)": {_WEB_CONFIG: "reset_to_defaults_audited"},
+    "config_changed (self-monitoring)": {_WEB_SELF_MONITORING: "apply_audited_change"},
     "config_changed (global config)": {
         "global_routes/routes.py": "set_config",
         "mcp/handlers/admin/__init__.py": "set_config",
@@ -182,8 +204,8 @@ _DOORS_BY_CAPABILITY: Dict[str, Dict[str, str]] = {
     "git_settings_changed": {
         "global_routes/git_settings.py": "apply_git_settings_change"
     },
-    "ci_token_set": {_WEB: "save_token_audited"},
-    "ci_token_deleted": {_WEB: "delete_token_audited"},
+    "ci_token_set": {_WEB_CONFIG: "save_token_audited"},
+    "ci_token_deleted": {_WEB_CONFIG: "delete_token_audited"},
 }
 
 

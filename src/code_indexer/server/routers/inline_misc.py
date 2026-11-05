@@ -18,7 +18,7 @@ follow-up) -- see its docstring below.
 import logging
 import threading
 import time
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from fastapi import (
     FastAPI,
@@ -31,6 +31,10 @@ from fastapi.responses import JSONResponse
 
 from ..models.api_models import HealthCheckResponse, HealthStatus
 from ..auth import dependencies
+from ..features.registry import (
+    degraded_reasons as feature_degraded_reasons,
+    feature_health_payload,
+)
 from ..logging_utils import format_error_log
 from ..services import audit_capture
 from ..services.health_service import health_service
@@ -188,6 +192,25 @@ def _get_healthz_status() -> HealthStatus:
     return status_value
 
 
+def _served_index_cache_stats() -> Optional[Dict[str, Any]]:
+    """The served-index cache's size, hit/miss and eviction counts
+    (``index_store_backend: delegated``); None when no cache runs (the local
+    store), so those responses are unchanged."""
+    from code_indexer.server.services.served_index_cache import (
+        active_served_index_cache,
+    )
+
+    cache = active_served_index_cache()
+    if cache is None:
+        return None
+    try:
+        stats: Dict[str, Any] = cache.stats()
+        return stats
+    except Exception as e:
+        logger.warning("Served-index cache stats unavailable: %s", e)
+        return {"error": "unavailable"}
+
+
 def register_misc_routes(
     app: FastAPI,
     *,
@@ -323,6 +346,20 @@ def register_misc_routes(
                 "search_events": _search_event_health_block(),
             }
 
+            # Feature add-ons loaded in this process (modular phase 3). A
+            # report that is not healthy degrades a healthy status (never
+            # worse: an add-on's trouble does not drain the node).
+            features = feature_health_payload()
+            if features is not None:
+                health_response["features"] = features
+            feature_reasons = feature_degraded_reasons(features)
+            if feature_reasons and health_status == "healthy":
+                health_response["status"] = "degraded"
+                health_response["message"] = (
+                    "CIDX Server is running with degraded feature add-ons: "
+                    + "; ".join(feature_reasons)
+                )
+
             # Add version if available
             try:
                 from code_indexer import __version__
@@ -342,6 +379,11 @@ def register_misc_routes(
             # Add recent errors if available
             if recent_errors:
                 health_response["recent_errors"] = recent_errors  # type: ignore[assignment]
+
+            # IndexStore (delegated) only: this pod's served-index cache.
+            served_cache = _served_index_cache_stats()
+            if served_cache is not None:
+                health_response["served_index_cache"] = served_cache
 
             return health_response
 
@@ -461,7 +503,7 @@ def register_misc_routes(
             stats = cache.get_stats()
 
             # Convert to JSON-serializable dictionary
-            return {
+            response = {
                 "cached_repositories": stats.cached_repositories,
                 "total_memory_mb": stats.total_memory_mb,
                 "hit_count": stats.hit_count,
@@ -470,6 +512,10 @@ def register_misc_routes(
                 "eviction_count": stats.eviction_count,
                 "per_repository_stats": stats.per_repository_stats,
             }
+            served_cache = _served_index_cache_stats()
+            if served_cache is not None:
+                response["served_index_cache"] = served_cache
+            return response
 
         except Exception as e:
             # Log error but don't expose internal details

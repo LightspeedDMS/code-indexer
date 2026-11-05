@@ -24,6 +24,7 @@ from code_indexer.server.storage.json_column import parse_json_column
 
 from .backends import SiemBackendHarness
 from .tls_fixtures import make_ca, make_leaf
+from code_indexer.server.utils.route_table import iter_routes
 
 FP_KEY = "siem_delivery_config.trusted_ca_fingerprint"
 
@@ -175,7 +176,9 @@ def test_the_scheduler_destination_picks_up_the_committed_ca(
 def test_ca_and_credential_routes_require_elevation(path: str) -> None:
     from code_indexer.server.web.routes import web_router
 
-    routes = [r for r in web_router.routes if getattr(r, "path", None) == path]
+    routes = [
+        r for route_path, r in iter_routes(web_router.routes) if route_path == path
+    ]
     assert len(routes) == 1, path
     deps = [d.dependency for d in routes[0].dependencies]  # type: ignore[attr-defined]
     assert any("require_elevation" in getattr(d, "__qualname__", "") for d in deps)

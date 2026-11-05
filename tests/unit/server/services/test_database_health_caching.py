@@ -143,7 +143,8 @@ class TestDatabaseHealthCaching:
                 "logs.db": Path(temp_dir) / "logs.db",
                 "refresh_tokens.db": Path(temp_dir) / "refresh_tokens.db",
                 "groups.db": Path(temp_dir) / "groups.db",
-                "scip_audit.db": Path(temp_dir) / "scip_audit.db",
+                # scip_audit.db is gone: the cidx-scip feature keeps its audit
+                # table in the server database (modular phase 4d).
                 # Bug #1444: payload_cache.db lives directly under data_dir,
                 # same as cidx_server.db/api_metrics.db -- NOT under a
                 # golden-repos/.cache subdirectory.
@@ -499,7 +500,8 @@ class TestDatabaseHealthErrorCases:
                 "logs.db": Path(temp_dir) / "logs.db",
                 "refresh_tokens.db": Path(temp_dir) / "refresh_tokens.db",
                 "groups.db": Path(temp_dir) / "groups.db",
-                "scip_audit.db": Path(temp_dir) / "scip_audit.db",
+                # scip_audit.db is gone: the cidx-scip feature keeps its audit
+                # table in the server database (modular phase 4d).
                 # Bug #1444: payload_cache.db lives directly under data_dir,
                 # same as cidx_server.db/api_metrics.db -- NOT under a
                 # golden-repos/.cache subdirectory.

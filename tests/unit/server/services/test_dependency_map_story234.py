@@ -7,12 +7,13 @@ Tests the delta merge behavior in _update_domain_file() and related behaviors:
 - AC4: When invoke_delta_merge_file returns content, the file is updated normally
 """
 
+from tests.unit.server._depmap_feature import depmap_claude_config
 import logging
 from pathlib import Path
 from unittest.mock import Mock
 
 
-from code_indexer.server.services.dependency_map_service import DependencyMapService
+from cidx_depmap.server.dependency_map_service import DependencyMapService
 from code_indexer.server.utils.config_manager import ClaudeIntegrationConfig
 
 
@@ -138,7 +139,7 @@ def _make_service_with_mock_analyzer(
 ) -> DependencyMapService:
     """Create a DependencyMapService with a mock analyzer for unit testing."""
     config_manager = Mock()
-    config = ClaudeIntegrationConfig(
+    config = depmap_claude_config(
         dependency_map_enabled=True,
         dependency_map_interval_hours=24,
         dependency_map_pass_timeout_seconds=300,
@@ -159,7 +160,7 @@ def _make_service_with_mock_analyzer(
 
 def _make_config() -> ClaudeIntegrationConfig:
     """Create a ClaudeIntegrationConfig for testing."""
-    return ClaudeIntegrationConfig(
+    return depmap_claude_config(
         dependency_map_enabled=True,
         dependency_map_interval_hours=24,
         dependency_map_pass_timeout_seconds=300,

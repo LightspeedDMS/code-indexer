@@ -36,7 +36,7 @@ def progress_events(tmp_path):
         progress_callback=lambda p, i: events.append((p, i)),
     )
 
-    from code_indexer.server.services.dep_map_health_detector import (
+    from cidx_depmap.server.dep_map_health_detector import (
         DepMapHealthDetector,
     )
 

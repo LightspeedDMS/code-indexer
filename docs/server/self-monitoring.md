@@ -7,7 +7,7 @@ cost.
 
 Code: `src/code_indexer/server/self_monitoring/` (`service.py` schedules, `scanner.py` runs a scan,
 `issue_manager.py` files issues, `log_query.py` is the log-reading command); start-up wiring in
-`src/code_indexer/server/startup/lifespan.py`; the page in `src/code_indexer/server/web/routes.py`.
+`src/code_indexer/server/startup/lifespan.py`; the page in `src/code_indexer/server/web/pages/self_monitoring.py`.
 
 ## What a scan does
 

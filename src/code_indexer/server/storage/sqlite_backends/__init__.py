@@ -46,6 +46,7 @@ from .background_jobs_backend import (
     _owning_worker_process_is_alive,
 )
 from .ci_tokens_backend import CITokensSqliteBackend
+from .control_plane_metadata_backend import ControlPlaneMetadataSqliteBackend
 from .dependency_map_dashboard_cache_backend import (
     DependencyMapDashboardCacheBackend,
 )
@@ -76,7 +77,6 @@ from .payload_cache_backend import PayloadCacheSqliteBackend
 from .query_embedding_cache_backend import QueryEmbeddingCacheSqliteBackend
 from .refresh_token_backend import RefreshTokenSqliteBackend
 from .research_sessions_backend import ResearchSessionsSqliteBackend
-from .scip_audit_backend import SCIPAuditSqliteBackend
 from .self_monitoring_backend import SelfMonitoringSqliteBackend
 from .sessions_backend import SessionsSqliteBackend
 from .ssh_keys_backend import SSHKeysSqliteBackend
@@ -91,6 +91,7 @@ __all__ = [
     "PERIOD_TO_TIER",
     "BackgroundJobsSqliteBackend",
     "CITokensSqliteBackend",
+    "ControlPlaneMetadataSqliteBackend",
     "DependencyMapDashboardCacheBackend",
     "DependencyMapTrackingBackend",
     "DescriptionRefreshTrackingBackend",
@@ -108,7 +109,6 @@ __all__ = [
     "QueryEmbeddingCacheSqliteBackend",
     "RefreshTokenSqliteBackend",
     "ResearchSessionsSqliteBackend",
-    "SCIPAuditSqliteBackend",
     "SelfMonitoringSqliteBackend",
     "SessionsSqliteBackend",
     "SSHKeysSqliteBackend",

@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from code_indexer.server.repositories import background_jobs as bgj
 from code_indexer.server.repositories.background_jobs import (
     BackgroundJobManager,
     JobStatus,
@@ -56,8 +57,15 @@ class TestBackgroundJobManagerConcurrencyLimit:
         )
         assert self.manager is not None
 
-    def test_manager_uses_config_max_concurrent_jobs(self):
-        """AC1: Manager should use max_concurrent_background_jobs from config."""
+    def test_manager_uses_config_max_concurrent_jobs(self, monkeypatch):
+        """AC1: Manager should use max_concurrent_background_jobs from config.
+
+        R4: the config value is the NODE budget and the manager takes this
+        process's share of it, so the worker count is pinned to 1 -- otherwise
+        this asserts whatever ``workers`` happens to be in the config.json of
+        whichever host runs the suite.
+        """
+        monkeypatch.setattr(bgj, "detect_worker_count", lambda: 1)
         config = BackgroundJobsConfig(max_concurrent_background_jobs=3)
         self.manager = BackgroundJobManager(
             storage_path=str(self.job_storage_path),
@@ -65,8 +73,9 @@ class TestBackgroundJobManagerConcurrencyLimit:
         )
         assert self.manager.max_concurrent_jobs == 3
 
-    def test_manager_default_max_concurrent_jobs_is_five(self):
-        """AC1: Default max concurrent jobs should be 5."""
+    def test_manager_default_max_concurrent_jobs_is_five(self, monkeypatch):
+        """AC1: Default max concurrent jobs should be 5 on a single-worker node."""
+        monkeypatch.setattr(bgj, "detect_worker_count", lambda: 1)
         self.manager = BackgroundJobManager(
             storage_path=str(self.job_storage_path),
         )

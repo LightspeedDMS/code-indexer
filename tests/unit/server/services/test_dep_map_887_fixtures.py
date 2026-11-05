@@ -37,7 +37,7 @@ def make_parser(path: Path):
     """Construct a DepMapMCPParser with lazy import."""
     if path is None:
         raise ValueError("path must not be None")
-    from code_indexer.server.services.dep_map_mcp_parser import DepMapMCPParser
+    from cidx_depmap.server.dep_map_mcp_parser import DepMapMCPParser
 
     return DepMapMCPParser(path)
 

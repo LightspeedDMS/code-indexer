@@ -951,9 +951,8 @@ class TestBuildSnapshotManagerActivatedReposParam:
 # ---------------------------------------------------------------------------
 
 
-_ONTAP_CLIENT_PATH = (
-    "code_indexer.server.storage.shared.ontap_flexclone_client.OntapFlexCloneClient"
-)
+# The ontap mode's provider (cidx-backend-workspace) builds the client.
+_ONTAP_CLIENT_PATH = "cidx_backend_workspace.clone.OntapFlexCloneClient"
 
 
 class TestOntapBackend:
@@ -1148,3 +1147,253 @@ class TestCommit1Injection:
             clone_backend=mock_backend,
         )
         assert arm._clone_backend is mock_backend
+
+
+# ---------------------------------------------------------------------------
+# delegated backend (EVO-64616): clone delegated to workspace-mcp
+# ---------------------------------------------------------------------------
+
+
+def _make_delegated_config(
+    endpoint: str = "http://workspace-mcp:8080",
+    api_key: str = "secret",
+) -> MagicMock:
+    """Minimal config with clone_backend='delegated'."""
+    from code_indexer.server.utils.config_manager import WorkspaceMcpConfig
+
+    cfg = MagicMock()
+    cfg.clone_backend = "delegated"
+    cfg.cow_daemon = None
+    cfg.ontap = None
+    cfg.workspace_mcp = WorkspaceMcpConfig(
+        endpoint=endpoint,
+        api_key=api_key,
+        mount_point="/mnt/nfs/cidx",
+    )
+    return cfg
+
+
+class TestDelegatedBackend:
+    """build_snapshot_manager wires DelegatedCloneBackend for 'delegated'."""
+
+    def test_delegated_returns_snapshot_manager(self, tmp_path):
+        from code_indexer.server.startup.clone_backend_wiring import (
+            build_snapshot_manager,
+        )
+
+        cfg = _make_delegated_config()
+        with patch(
+            "code_indexer.server.startup.clone_backend_wiring._check_workspace_mcp_health"
+        ):
+            manager = build_snapshot_manager(cfg, versioned_base=str(tmp_path))
+
+        assert isinstance(manager, VersionedSnapshotManager)
+
+    def test_delegated_backend_is_delegated_clone_backend(self, tmp_path):
+        from code_indexer.server.startup.clone_backend_wiring import (
+            build_snapshot_manager,
+        )
+        from code_indexer.server.storage.shared.clone_backend import (
+            DelegatedCloneBackend,
+        )
+
+        cfg = _make_delegated_config()
+        with patch(
+            "code_indexer.server.startup.clone_backend_wiring._check_workspace_mcp_health"
+        ):
+            manager = build_snapshot_manager(cfg, versioned_base=str(tmp_path))
+
+        assert isinstance(manager._clone_backend, DelegatedCloneBackend)
+
+    def test_delegated_calls_health_check(self, tmp_path):
+        from code_indexer.server.startup.clone_backend_wiring import (
+            build_snapshot_manager,
+        )
+
+        cfg = _make_delegated_config()
+        with patch(
+            "code_indexer.server.startup.clone_backend_wiring._check_workspace_mcp_health"
+        ) as mock_health:
+            build_snapshot_manager(cfg, versioned_base=str(tmp_path))
+
+        mock_health.assert_called_once()
+
+    def test_delegated_raises_when_endpoint_missing(self, tmp_path):
+        from code_indexer.server.startup.clone_backend_wiring import (
+            build_snapshot_manager,
+        )
+
+        cfg = _make_delegated_config(endpoint="")
+        with pytest.raises(RuntimeError, match="requires workspace_mcp.endpoint"):
+            build_snapshot_manager(cfg, versioned_base=str(tmp_path))
+
+    def test_delegated_raises_when_health_check_fails_no_fallback(self, tmp_path):
+        """An unreachable workspace-mcp fails fast — no silent local fallback."""
+        from code_indexer.server.startup.clone_backend_wiring import (
+            build_snapshot_manager,
+        )
+
+        cfg = _make_delegated_config()
+        with patch(
+            "code_indexer.server.startup.clone_backend_wiring._check_workspace_mcp_health",
+            side_effect=RuntimeError("workspace-mcp not reachable"),
+        ):
+            with pytest.raises(RuntimeError, match="not reachable"):
+                build_snapshot_manager(cfg, versioned_base=str(tmp_path))
+
+
+class TestCheckWorkspaceMcpHealth:
+    """_check_workspace_mcp_health fail-fast behaviour."""
+
+    def test_passes_on_200(self):
+        import sys
+        from code_indexer.server.startup.clone_backend_wiring import (
+            _check_workspace_mcp_health,
+        )
+
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_requests = MagicMock()
+        mock_requests.get.return_value = mock_resp
+
+        with patch.dict(sys.modules, {"requests": mock_requests}):
+            _check_workspace_mcp_health("http://workspace-mcp:8080", "key")
+
+        url = mock_requests.get.call_args[0][0]
+        assert url == "http://workspace-mcp:8080/clone-path/health"
+        headers = mock_requests.get.call_args[1]["headers"]
+        assert headers["Authorization"] == "Bearer key"
+
+    def test_raises_when_unreachable(self):
+        import sys
+        from code_indexer.server.startup.clone_backend_wiring import (
+            _check_workspace_mcp_health,
+        )
+
+        import requests
+
+        mock_requests = MagicMock()
+        mock_requests.exceptions = requests.exceptions
+        mock_requests.get.side_effect = requests.exceptions.ConnectionError(
+            "conn refused"
+        )
+
+        with patch.dict(sys.modules, {"requests": mock_requests}):
+            with pytest.raises(RuntimeError, match="not reachable"):
+                _check_workspace_mcp_health(
+                    "http://workspace-mcp:8080", "key", wait_seconds=0
+                )
+        assert mock_requests.get.call_count == 1
+
+    def test_waits_for_a_workspace_mcp_that_is_still_starting(self):
+        """EVO-64616: a pod started during a workspace-mcp restart kept no
+        clone backend until its own restart; startup now retries."""
+        import sys
+        from code_indexer.server.startup.clone_backend_wiring import (
+            _check_workspace_mcp_health,
+        )
+
+        import requests
+
+        ok = MagicMock()
+        unavailable = requests.Response()
+        unavailable.status_code = 503
+        mock_requests = MagicMock()
+        mock_requests.exceptions = requests.exceptions
+        mock_requests.get.side_effect = [
+            requests.exceptions.ConnectionError("conn refused"),
+            requests.exceptions.HTTPError("503", response=unavailable),
+            ok,
+        ]
+        now = [0.0]
+        slept = []
+
+        def sleep(seconds):
+            slept.append(seconds)
+            now[0] += seconds
+
+        with patch.dict(sys.modules, {"requests": mock_requests}):
+            _check_workspace_mcp_health(
+                "http://workspace-mcp:8080",
+                "key",
+                wait_seconds=60,
+                sleep=sleep,
+                clock=lambda: now[0],
+            )
+        assert mock_requests.get.call_count == 3 and len(slept) == 2
+
+    def test_gives_up_after_the_wait(self, monkeypatch):
+        import sys
+        from code_indexer.server.startup import clone_backend_wiring as w
+
+        import requests
+
+        monkeypatch.setenv(w.WORKSPACE_MCP_STARTUP_WAIT_ENV, "12")
+        mock_requests = MagicMock()
+        mock_requests.exceptions = requests.exceptions
+        mock_requests.get.side_effect = requests.exceptions.Timeout("slow")
+        now = [0.0]
+
+        def sleep(seconds):
+            now[0] += seconds
+
+        with patch.dict(sys.modules, {"requests": mock_requests}):
+            with pytest.raises(RuntimeError, match="waited 12s"):
+                w._check_workspace_mcp_health(
+                    "http://workspace-mcp:8080",
+                    "key",
+                    sleep=sleep,
+                    clock=lambda: now[0],
+                )
+        assert mock_requests.get.call_count == 3  # t=0, 5, 10
+
+    @pytest.mark.parametrize("status", [401, 403, 404])
+    def test_a_4xx_answer_fails_fast_without_retrying(self, status):
+        """A refusal (wrong api_key / endpoint path) never fixes itself: no
+        90 s wait, and the error names the status, not "not reachable"."""
+        import sys
+
+        import requests
+
+        from code_indexer.server.startup import clone_backend_wiring as w
+
+        refused = requests.Response()
+        refused.status_code = status
+        mock_requests = MagicMock()
+        mock_requests.exceptions = requests.exceptions
+        mock_requests.get.side_effect = requests.exceptions.HTTPError(
+            str(status), response=refused
+        )
+        slept: list = []
+
+        with patch.dict(sys.modules, {"requests": mock_requests}):
+            with pytest.raises(RuntimeError, match=f"HTTP {status}"):
+                w._check_workspace_mcp_health(
+                    "http://workspace-mcp:8080",
+                    "key",
+                    wait_seconds=60,
+                    sleep=slept.append,
+                    clock=lambda: 0.0,
+                )
+        assert mock_requests.get.call_count == 1 and slept == []
+
+    def test_a_non_network_error_fails_fast(self):
+        import sys
+
+        import requests
+
+        from code_indexer.server.startup import clone_backend_wiring as w
+
+        mock_requests = MagicMock()
+        mock_requests.exceptions = requests.exceptions
+        mock_requests.get.side_effect = requests.exceptions.InvalidURL("bad")
+        with patch.dict(sys.modules, {"requests": mock_requests}):
+            with pytest.raises(RuntimeError, match="not reachable"):
+                w._check_workspace_mcp_health(
+                    "http://workspace-mcp:8080",
+                    "key",
+                    wait_seconds=60,
+                    sleep=lambda s: None,
+                    clock=lambda: 0.0,
+                )
+        assert mock_requests.get.call_count == 1

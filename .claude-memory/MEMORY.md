@@ -21,7 +21,6 @@
 - [Never assert on whole env](feedback_never_assert_on_whole_environment.md) - a failing env assertion dumps secrets; assert scalars only
 - [No leaked literals in guards](feedback_never_store_leaked_literals_in_public_guards.md) - never put a leaked value in a public denylist/test
 - [No secrets in memory](feedback_no_secrets_in_memory.md) - memory is versioned: no secrets, PII, topology
-- [reports/ subdirs tracked](feedback_reports_subdirs_not_gitignored.md) - only top-level reports/*.md is ignored; check-ignore before writing real detail
 - [Secrets in local output OK](feedback_staging_creds_local_exposure_ok.md) - local transcript exposure is not an incident; never commit secrets
 - [Auth retry loops](feedback_never_retry_loop_auth_endpoint.md) - auth rejection is terminal; retrying locks the account
 - [Own all changes](feedback_own_all_repo_changes.md) - never revert another subagent's changes
@@ -40,8 +39,7 @@
 - [Netns shares host PIDs](feedback_netns_shares_host_pids.md) - never kill by pgrep name (hits the dev server)
 - [No gates during edits](feedback_no_gates_while_worker_edits.md) - never run full gates while an agent edits the tree
 - [Probes isolate HOME](feedback_probes_must_isolate_server_home.md) - importing the server app writes the real ~/.cidx-server; point HOME at scratch
-- [Dispatch cap](feedback_parallel_dispatch_cap_4_on_20x.md) - parallel agent cap and polling rules (local only)
-- [Local-only memories](feedback_local_only_memories.md) - package/session state and environment, credential or business detail stay gitignored, never pushed
+- [Dispatch cap by tier](feedback_parallel_dispatch_cap_4_on_20x.md) - 20x: up to 3 agents (workers+reviewers); 5x: 1+1; extra usage: no timer polling
 
 ## Quality Standards
 - [Zero failures](feedback_zero_failures_no_excuses.md) - never dismiss failures as "pre-existing"
@@ -53,7 +51,6 @@
 - [E2E is execution](feedback_e2e_not_code_inspection.md) - E2E means executing real functionality
 - [E2E verifies indexes](feedback_e2e_verify_indexes_work.md) - indexes exist on disk AND return results
 - [No fallbacks](feedback_no_fallbacks_ever.md) - one path that works or fails loudly
-- [Hardening keeps capabilities](feedback_hardening_must_retain_all_capabilities.md) - hardening keeps every needed capability; close only intended doors (local only)
 - [900-repo scale](feedback_design_for_900_repo_scale.md) - design for ~900 repos; no sync I/O in async def
 - [No gating settings](feedback_no_settings_to_gate_bug_fixes.md) - never add a setting unasked or gate a fix behind one
 - [No half-wired features](feedback_no_half_wired_features.md) - write-path needs its read-path and status-path
@@ -64,7 +61,6 @@
 - [Prove root cause](feedback_prove_root_cause_before_fix.md) - prove stall/concurrency causes with py-spy first
 - [Description scheduler](feedback_description_refresh_scheduler_requires_staging_validation.md) - scheduler changes need staging validation (cost risk)
 - [X-Ray not in dashboard](feedback_xray_queries_not_in_dashboard.md) - xray_search jobs stay out of the dashboard
-- [Fast = unit tests](feedback_fast_automation_unit_tests_only.md) - real cidx-process tests go to slow-automation, which must stay a gate
 - [Test timeouts](feedback_run_tests_with_timeout_and_monitor.md) - never launch tests without a timeout
 - [Gate on pytest exit](feedback_test_gate_must_check_pytest_exit.md) - `pytest | tail && commit` gates on tail; capture pytest's own rc
 - [Faithful DB mocks](feedback_faithful_db_mocks.md) - DB mocks mirror the real driver; verify on real PG
@@ -83,7 +79,6 @@
 - [Commit on development](feedback_always_checkout_development_before_commit.md) - never commit on master/staging
 - [Bump before staging](feedback_bump_version_before_staging.md) - bump version BEFORE promoting to staging
 - [Lint before commit](feedback_lint_before_commit.md) - ruff/mypy before staging
-- [Skip gates for standalone tooling](feedback_skip_full_gates_for_standalone_tooling.md) - new perf-suite style tooling: no fast-/e2e-automation, no full lint.sh; targeted checks only
 - [No commit mid-agent](feedback_no_commit_during_background_agent.md) - never commit a running agent's files
 - [Bump is push tip](feedback_version_bump_must_be_push_tip.md) - version-bump commit must be the push tip
 - [Delete old junk freely](feedback_delete_old_junk_freely.md) - never ask before deleting junk in tmp/scratchpad
@@ -101,7 +96,6 @@
 - [CLI bugs reach server](feedback_cli_defects_reach_server.md) - the server spawns cidx; never defer as "CLI-only" unproven
 - [Release inclusion bar](feedback_release_inclusion_bar.md) - mid-release additions only for high-severity or P1/P2
 - [Targeted scope](feedback_targeted_scope_discipline.md) - targeted requests trigger no unrelated rewrites
-- [No mid-mission expansion](feedback_no_scope_expansion_mid_mission.md) - file findings during a mission; at the end ask only about critical/high
 - [Validation on scope](feedback_validation_runs_stay_on_scope.md) - staging validation proves the shipped fix; side anomalies = notes
 - [Code reviewer](feedback_use_code_reviewer.md) - Codex is the PRIMARY reviewer
 - [Agents on Opus](feedback_default_agents_to_sonnet5.md) - all agents on Opus (model: "opus"); reviews to Codex
@@ -134,7 +128,6 @@
 - [NFS host down](project_nfs_host_down_hangs_systemd.md) - hangs daemon-reload/sudo; timeout-wrap probes
 - [Temporal metadata PG](project_cluster_temporal_metadata_pg_backed.md) - PG-backed in cluster (#1313)
 - [Workers config](project_staging_workers_config_durability.md) - worker count = DB runtime.workers, web-UI only
-- [Multi-worker supported](project_multi_worker_is_supported.md) - `--workers N` is supported; a multi-worker-only defect is a real defect
 - [Local server solo](project_local_server_solo_sqlite.md) - local is solo/SQLite; PG needs staging
 - [Production solo SQLite](project_production_is_solo_sqlite.md) - verify SQLite first, PG is parity
 - [Backup scope](project_backup_scope_dev_staging_only.md) - backup-before-migration is dev/staging only
@@ -146,12 +139,10 @@
 - [Backlog to zero](project_backlog_clear_to_zero_mandate.md) - clear the bug backlog, running tally
 - [Backlog closing E2E](project_backlog_clear_ends_with_staging_e2e.md) - at priority-4-only, raise staging E2E (discuss first)
 - [Batch 1950-1956](project_batch_1950_1956_pending_staging.md) - NOT done until driven through both staging front doors
-- [Current package resume](project_package_12_94_resume_state.md) - READ FIRST after a reset: current package state (local only)
-- [Package 2087 resume](project_release_package_2087_resume_state.md) - older package state (local only)
-- [Release 1873-1876](project_release_1873_1876_overnight_state.md) - older release state (local only)
-- [Backlog paused 08-27](project_backlog_session_paused_2026_08_27.md) - older sweep state (local only; supersedes [VM migration pause](project_backlog_session_paused_for_vm_migration.md))
+- [Package 2087 resume](project_release_package_2087_resume_state.md) - READ FIRST after a reset: 12.87.0 in production; release issues closed, review follow-ups stay open
+- [Release 1873-1876](project_release_1873_1876_overnight_state.md) - resume state for the 2026-09-16 release
+- [Backlog paused 08-27](project_backlog_session_paused_2026_08_27.md) - resume state for the 2026-08-27 sweep (supersedes [VM migration pause](project_backlog_session_paused_for_vm_migration.md))
 - [pytest tmp](project_pytest_tmp_accumulates_unbounded.md) - clean pytest tmp dirs >15 min old
-- [Test host storage](local_test_host_storage.md) - test host disks are slow; size test lanes by sync contention (local only)
 
 ## External References
 - [Staging MFA](project_staging_cluster_mfa_is_self_serviceable.md) - cluster staging MFA is ours to complete

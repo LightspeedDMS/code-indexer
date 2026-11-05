@@ -36,6 +36,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+from tests.unit.server._scip_feature import scip_pipeline_installed
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -380,6 +382,9 @@ def test_sync_job_with_reindex_flag_triggers_real_followup_reindex_job(
 
     try:
         with (
+            # The SCIP step runs while the scip feature's index builder is
+            # installed (modular phase 4d), as with "scip" enabled.
+            scip_pipeline_installed(),
             patch(
                 "code_indexer.server.routers.activated_repos._get_activated_repo_manager",
                 return_value=sync_fixture.activated_manager,

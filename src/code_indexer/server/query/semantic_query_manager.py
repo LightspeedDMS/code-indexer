@@ -5,9 +5,12 @@ Provides semantic search functionality for activated repositories with user isol
 background job integration, and proper resource management.
 """
 
+from code_indexer.server.services.served_index_cache import reads_served_indexes
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
 from code_indexer.storage.filesystem_vector_store import LocalIndexNotFoundError
+from code_indexer.server.services.activated_index_store import serve_activated_index
+from code_indexer.utils.index_store import index_root
 from code_indexer.utils.content_availability import (
     CONTENT_UNAVAILABLE_KEY,
     CONTENT_UNAVAILABLE_MARKER,
@@ -61,6 +64,10 @@ from ..repositories.background_jobs import BackgroundJobManager
 from ..services.constants import is_internal_meta_repo
 from ..services.deactivation_query_drain import track_activated_repo_query
 from ..services.repo_access_guard import narrow_global_repos_to_accessible
+from ..startup.search_backend_wiring import (
+    TEMPORAL_NOT_DELEGATED_MESSAGE,
+    active_search_backend,
+)
 from ...search.query import SearchResult
 from ...proxy.config_manager import ProxyConfigManager
 from ...proxy.cli_integration import _execute_query
@@ -331,7 +338,7 @@ def reconstruct_temporal_backend(
     index_path = (
         Path(temporal_index_dir)
         if temporal_index_dir is not None
-        else repo_path / ".code-indexer" / "index"
+        else index_root(repo_path) / "index"
     )
     return config, index_path, vector_store
 
@@ -399,7 +406,7 @@ def load_golden_temporal_config(
     # golden_path (e.g. an under-wired collaborator in a test, or a
     # dangling registry entry) silently overwrite a correct clone config
     # with default (wrong) embedder settings instead of failing open.
-    golden_config_file = Path(golden_path) / ".code-indexer" / "config.json"
+    golden_config_file = index_root(golden_path) / "config.json"
     if not golden_config_file.exists():
         logger.warning(
             "Golden repo path has no config.json for temporal embedder "
@@ -460,6 +467,40 @@ def convert_temporal_result_to_query_result(
         metadata=result_metadata,
         temporal_context=temporal_context,
     )
+
+
+def _delegated_query_results(
+    raw_results: List[Dict[str, Any]],
+    repository_alias: str,
+    file_extensions: Optional[List[str]],
+) -> List["QueryResult"]:
+    """A delegated search backend's rows as QueryResults (EVO-69846).
+
+    #2047: the backend carries no ``file_extensions`` filter, so the one
+    extension rule (``py``, ``.py`` and ``PY`` alike) is applied to what
+    comes back.
+    """
+    from code_indexer.services.extension_filter import (
+        normalize_extensions,
+        path_matches_extensions,
+    )
+
+    extension_set = normalize_extensions(file_extensions)
+    return [
+        QueryResult(
+            file_path=r.get("file_path", ""),
+            line_number=r.get("line_number", 0),
+            code_snippet=r.get("code_snippet", ""),
+            similarity_score=r.get("similarity_score", 0.0),
+            repository_alias=repository_alias,
+            source_repo=r.get("source_repo"),
+            match_text=r.get("match_text"),
+        )
+        for r in raw_results
+        if extension_set is None
+        or path_matches_extensions(r.get("file_path", ""), extension_set)
+    ]
+
 
 
 def fts_query_results(
@@ -586,6 +627,15 @@ class SemanticQueryManager:
         """
         self.query_tracker = query_tracker
 
+    def _get_search_backend(self) -> Any:
+        """Return the delegated search backend, or None for local.
+
+        Reads from app.state.search_backend, which is parked at startup by
+        search_backend_wiring. None means "use the existing local Tantivy/HNSW
+        code paths" -- no delegation in effect.
+        """
+        return active_search_backend()
+
     def _owns_for_cache(self, repository_alias: str) -> bool:
         """Whether this node should use its shared index cache for ``alias``.
 
@@ -611,7 +661,7 @@ class SemanticQueryManager:
         Raises:
             json.JSONDecodeError: If config file contains invalid JSON
         """
-        config_file = repo_path / ".code-indexer" / "config.json"
+        config_file = index_root(repo_path) / "config.json"
         if not config_file.exists():
             self.logger.debug(
                 f"Config file not found at {config_file}, defaulting to single repository mode",
@@ -1297,6 +1347,7 @@ class SemanticQueryManager:
         if min_score is not None and (min_score < 0.0 or min_score > 1.0):
             raise SearchRequestError("Min score must be between 0.0 and 1.0")
 
+    @reads_served_indexes
     def _perform_search(
         self,
         username: str,
@@ -1497,6 +1548,8 @@ class SemanticQueryManager:
                     alias_manager = AliasManager(str(aliases_dir))
 
                     target_path = alias_manager.read_alias(repo_alias)
+                    if target_path:
+                        alias_manager.ensure_served_here(repo_alias, target_path)
                     if not target_path:
                         logger.warning(
                             format_error_log(
@@ -1540,6 +1593,11 @@ class SemanticQueryManager:
                     # Fall back to activated repo manager for regular activated repos
                     repo_path = self.activated_repo_manager.get_activated_repo_path(
                         username, repo_alias
+                    )
+                    # Delegated IndexStore: this pod holds the copy's recorded
+                    # index version before it is searched (no-op locally).
+                    serve_activated_index(
+                        self.activated_repo_manager, username, repo_alias
                     )
                     # Story #1457 AC1/AC2: the UNDERLYING golden repo this
                     # activation was cloned from -- NEVER repo_alias itself
@@ -1946,6 +2004,46 @@ class SemanticQueryManager:
         Returns:
             List of QueryResult objects from this repository
         """
+        # Search delegation seam (EVO-69846): when a delegated search
+        # backend is configured, forward the ENTIRE query (fts, semantic,
+        # or hybrid) to the remote service. Placed BEFORE strategy and
+        # composite branching so no local code path bypasses delegation.
+        # A temporal query is REFUSED under delegation: the SearchBackend
+        # protocol carries no temporal parameters, and the local temporal
+        # index a stateless pod lacks must never be read as a fallback.
+        _search_backend = self._get_search_backend()
+        if _search_backend is not None:
+            _has_temporal = any(
+                [time_range, time_range_all, at_commit, chunk_type, diff_type, author]
+            )
+            if _has_temporal:
+                self.logger.error(
+                    TEMPORAL_NOT_DELEGATED_MESSAGE,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                # The caller's own request: its text reaches the client
+                # (search_error_policy keeps a SearchRequestError's message).
+                raise SearchRequestError(TEMPORAL_NOT_DELEGATED_MESSAGE)
+            raw_results = _search_backend.search(
+                repository_alias=repository_alias,
+                query_text=query_text,
+                search_mode=search_mode,
+                limit=limit,
+                min_score=min_score,
+                language=language,
+                exclude_language=exclude_language,
+                path_filter=path_filter,
+                exclude_path=exclude_path,
+                case_sensitive=case_sensitive,
+                fuzzy=fuzzy,
+                edit_distance=edit_distance,
+                snippet_lines=snippet_lines,
+                regex=regex,
+                accuracy=accuracy or "balanced",
+            )
+            return _delegated_query_results(
+                raw_results, repository_alias, file_extensions
+            )
         if extension_deadline is None:
             extension_deadline = extension_overfetch_deadline(file_extensions)
 
@@ -2956,6 +3054,16 @@ class SemanticQueryManager:
         if chunk_type is not None:
             args.extend(["--chunk-type", chunk_type])
 
+        # EVO-64616: each member directory on this pod holds index state only
+        # when the repositories are delegated; the child then asks git-mcp for
+        # its branch filter and the content backend for staleness. Nothing is
+        # stamped under the local backends (the command line is unchanged).
+        from code_indexer.server.utils.index_command_layout import (
+            server_backend_args,
+        )
+
+        args.extend(server_backend_args())
+
         return args
 
     def _execute_cli_query(
@@ -3196,15 +3304,14 @@ class SemanticQueryManager:
         if not golden_repo_alias:
             return None
 
-        from ...services.temporal.temporal_server_paths import (
-            server_temporal_index_root,
-        )
+        from ..services.temporal_index_store import served_temporal_index_root
 
         golden_repos_dir = (
             Path(self.activated_repo_manager.activated_repos_dir).parent
             / "golden-repos"
         )
-        return server_temporal_index_root(golden_repos_dir, golden_repo_alias)
+        # Delegated IndexStore: this pod holds the recorded temporal version.
+        return served_temporal_index_root(golden_repos_dir, golden_repo_alias)
 
     def _execute_temporal_query(
         self,
@@ -3462,8 +3569,33 @@ class SemanticQueryManager:
         Raises:
             SemanticQueryError: If FTS index not available or search fails
         """
+        # Search delegation seam (EVO-69846): when a delegated search backend
+        # is configured, forward the FTS query to the remote service instead
+        # of reading local Tantivy index files.
+        search_backend = self._get_search_backend()
+        if search_backend is not None:
+            raw_results = search_backend.search(
+                repository_alias=repository_alias,
+                query_text=query_text,
+                search_mode="fts",
+                limit=limit,
+                min_score=min_score,
+                language=language,
+                exclude_language=exclude_language,
+                path_filter=path_filter,
+                exclude_path=exclude_path,
+                case_sensitive=case_sensitive,
+                fuzzy=fuzzy,
+                edit_distance=edit_distance,
+                snippet_lines=snippet_lines,
+                regex=regex,
+            )
+            return _delegated_query_results(
+                raw_results, repository_alias, file_extensions
+            )
+
         # Check if FTS index exists
-        fts_index_dir = repo_path / ".code-indexer" / "tantivy_index"
+        fts_index_dir = index_root(repo_path) / "tantivy_index"
         if not fts_index_dir.exists():
             raise SearchRequestError(
                 f"FTS index not available for repository '{repository_alias}'. "

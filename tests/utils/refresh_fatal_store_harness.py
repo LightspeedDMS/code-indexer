@@ -10,8 +10,10 @@ the caller passes in.
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -118,6 +120,14 @@ class Harness:
 
 def sha256_of(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def age_source_files(harness: "Harness") -> None:
+    """No new data for a local:// repository (its change check is mtimes)."""
+    an_hour_ago = time.time() - 3600
+    for path in harness.source.iterdir():
+        if path.is_file() and not path.name.startswith("."):
+            os.utime(path, (an_hour_ago, an_hour_ago))
 
 
 def iter_chain(exc: Optional[BaseException]) -> Iterator[BaseException]:

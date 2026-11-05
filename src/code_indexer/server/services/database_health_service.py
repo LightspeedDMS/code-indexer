@@ -1,9 +1,10 @@
 """
-Database Health Service for monitoring all 8 central databases.
+Database Health Service for monitoring the central databases.
 
 Story #712: Dashboard Refinements - Database Health Honeycomb
 Story #3: Removed search_config.db and file_content_limits.db (migrated to config.json)
-         Added scip_audit.db for SCIP indexing audit tracking
+         Added scip_audit.db for SCIP indexing audit tracking (removed again:
+         the cidx-scip feature keeps the table in the server database)
 Story #505: Storage-mode-aware health - skip migrated DBs in postgres mode,
             add PostgreSQL health entry instead.
 
@@ -43,7 +44,6 @@ POSTGRES_MIGRATED_DATABASES = frozenset(
         "payload_cache.db",
         "groups.db",
         "oauth.db",
-        "scip_audit.db",
         "refresh_tokens.db",
         "query_embedding_cache.db",
     }
@@ -183,14 +183,14 @@ class DatabaseHealthResult:
 
 # Database file to display name mapping (central server databases only)
 # Story #3: Removed search_config.db and file_content_limits.db (migrated to config.json)
-# Added scip_audit.db for SCIP indexing audit tracking
+# scip_audit.db left with the cidx-scip feature (its table is in the server
+# database since modular phase 4d)
 DATABASE_DISPLAY_NAMES: Dict[str, str] = {
     "cidx_server.db": "Main Server",
     "oauth.db": "OAuth",
     "refresh_tokens.db": "Refresh Tokens",
     "logs.db": "Logs",
     "groups.db": "Groups",
-    "scip_audit.db": "SCIP Audit",
     "payload_cache.db": "Payload Cache",
     "api_metrics.db": "API Metrics",
     "query_embedding_cache.db": "Embedding Cache",

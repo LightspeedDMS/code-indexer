@@ -332,7 +332,13 @@ OTHER_POLICY_TOOLS = {
 
 
 def test_every_alias_and_path_tool_is_classified() -> None:
-    assert set(_alias_and_path_tools()) == FILE_DOOR_TOOLS | OTHER_POLICY_TOOLS
+    # X-Ray's tools are the feature's: classified as an app with "xray"
+    # enabled registers them.
+    from tests.unit.server._xray_feature import xray_tools_installed
+
+    with xray_tools_installed():
+        tools = set(_alias_and_path_tools())
+    assert tools == FILE_DOOR_TOOLS | OTHER_POLICY_TOOLS
 
 
 @pytest.mark.parametrize("tool_name", sorted(FILE_DOOR_TOOLS))

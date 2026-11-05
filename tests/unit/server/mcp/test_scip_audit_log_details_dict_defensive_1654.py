@@ -40,9 +40,9 @@ of a real PostgreSQL JSONB scenario, which cannot occur for this column.
 
 import logging
 
-from code_indexer.server.mcp.handlers.scip import _parse_log_details
+from cidx_scip.server.mcp.scip import _parse_log_details
 
-_SCIP_MODULE = "code_indexer.server.mcp.handlers.scip"
+_SCIP_MODULE = "cidx_scip.server.mcp.scip"
 _JSON_COLUMN_MODULE = "code_indexer.server.storage.json_column"
 
 

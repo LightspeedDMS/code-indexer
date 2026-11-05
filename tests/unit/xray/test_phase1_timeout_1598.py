@@ -125,7 +125,7 @@ def _make_search_result(matches, read_capped: bool = False):
 def search_engine():
     """Instantiate XRaySearchEngine, skipping if tree-sitter extras not installed."""
     pytest.importorskip("tree_sitter_languages", reason="xray extras not installed")
-    from code_indexer.xray.search_engine import XRaySearchEngine
+    from cidx_xray.search_engine import XRaySearchEngine
 
     return XRaySearchEngine()
 
@@ -137,7 +137,7 @@ def grep_engine_probe(monkeypatch):
 
     real_which = shutil.which
     monkeypatch.setattr(
-        "code_indexer.xray.search_engine.shutil.which",
+        "cidx_xray.search_engine.shutil.which",
         lambda cmd, *a, **kw: None if cmd == "rg" else real_which(cmd, *a, **kw),
     )
 
@@ -308,7 +308,7 @@ class TestFilenameModeTimeout:
 
 class TestContentModeTimeout:
     def test_timeout_reports_empty_partial(self, search_engine, tmp_path):
-        with patch("code_indexer.xray.search_engine.RegexSearchService") as MockService:
+        with patch("cidx_xray.search_engine.RegexSearchService") as MockService:
             instance = MockService.return_value
             instance.search = AsyncMock(side_effect=TimeoutError("ripgrep timed out"))
 
@@ -330,7 +330,7 @@ class TestContentModeTimeout:
     def test_timeout_does_not_crash_run(self, search_engine, tmp_path):
         """AC-5: a raw TimeoutError from RegexSearchService.search must never
         propagate out of XRaySearchEngine.run() as an unhandled exception."""
-        with patch("code_indexer.xray.search_engine.RegexSearchService") as MockService:
+        with patch("cidx_xray.search_engine.RegexSearchService") as MockService:
             instance = MockService.return_value
             instance.search = AsyncMock(side_effect=TimeoutError("ripgrep timed out"))
 
@@ -354,7 +354,7 @@ class TestContentModeTimeout:
 class TestContentModeTimeoutForwarding:
     def test_forwards_timeout_seconds_to_main_search(self, search_engine, tmp_path):
         fake_result = _make_search_result([])
-        with patch("code_indexer.xray.search_engine.RegexSearchService") as MockService:
+        with patch("cidx_xray.search_engine.RegexSearchService") as MockService:
             instance = MockService.return_value
             instance.search = AsyncMock(return_value=fake_result)
 
@@ -374,7 +374,7 @@ class TestContentModeTimeoutForwarding:
         fake_match = _make_regex_match("a.py")
         fake_result = _make_search_result([fake_match])
 
-        with patch("code_indexer.xray.search_engine.RegexSearchService") as MockService:
+        with patch("cidx_xray.search_engine.RegexSearchService") as MockService:
             instance = MockService.return_value
             instance.search = AsyncMock(return_value=fake_result)
 
@@ -382,7 +382,9 @@ class TestContentModeTimeoutForwarding:
                 tmp_path,
                 "password",
                 "content",
-                ["**/*.py"],
+                # "docs/*.md" selects no returned file, so it alone is probed
+                # (a pattern the main result already matched is not).
+                ["**/*.py", "docs/*.md"],
                 [],
                 timeout_seconds=42,
             )
@@ -440,7 +442,7 @@ class TestZeroMatchProbeSharedBudget:
             await asyncio.sleep(PROBE_DELAY)
             return probe_result
 
-        with patch("code_indexer.xray.search_engine.RegexSearchService") as MockService:
+        with patch("cidx_xray.search_engine.RegexSearchService") as MockService:
             instance = MockService.return_value
             instance.search = AsyncMock(side_effect=_search_side_effect)
 
@@ -514,7 +516,7 @@ class TestZeroMatchProbeTimeoutPreservesMainSearch:
                 return main_result
             raise TimeoutError("zero-match-pattern probe timed out")
 
-        with patch("code_indexer.xray.search_engine.RegexSearchService") as MockService:
+        with patch("cidx_xray.search_engine.RegexSearchService") as MockService:
             instance = MockService.return_value
             instance.search = AsyncMock(side_effect=_search_side_effect)
 
@@ -522,7 +524,8 @@ class TestZeroMatchProbeTimeoutPreservesMainSearch:
                 tmp_path,
                 "password",
                 "content",
-                ["**/*.py"],
+                # "docs/*.md" matched no returned file, so it is the one probed.
+                ["**/*.py", "docs/*.md"],
                 [],
                 timeout_seconds=5,
             )
@@ -552,7 +555,7 @@ class TestZeroMatchProbeTimeoutPreservesMainSearch:
                 return main_result
             raise TimeoutError("zero-match-pattern probe timed out")
 
-        with patch("code_indexer.xray.search_engine.RegexSearchService") as MockService:
+        with patch("cidx_xray.search_engine.RegexSearchService") as MockService:
             instance = MockService.return_value
             instance.search = AsyncMock(side_effect=_search_side_effect)
 

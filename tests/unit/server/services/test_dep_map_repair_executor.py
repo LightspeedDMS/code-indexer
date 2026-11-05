@@ -39,7 +39,7 @@ from tests.unit.server.services.test_dep_map_health_detector import (
 
 def _get_health_detector():
     """Import DepMapHealthDetector -- real instance, no mocking."""
-    from code_indexer.server.services.dep_map_health_detector import (
+    from cidx_depmap.server.dep_map_health_detector import (
         DepMapHealthDetector,
     )
 
@@ -48,14 +48,14 @@ def _get_health_detector():
 
 def _get_index_regenerator():
     """Import IndexRegenerator -- real instance, no mocking."""
-    from code_indexer.server.services.dep_map_index_regenerator import IndexRegenerator
+    from cidx_depmap.server.dep_map_index_regenerator import IndexRegenerator
 
     return IndexRegenerator()
 
 
 def _get_executor(domain_analyzer=None, journal_callback=None):
     """Build a DepMapRepairExecutor with real health detector and index regenerator."""
-    from code_indexer.server.services.dep_map_repair_executor import (
+    from cidx_depmap.server.dep_map_repair_executor import (
         DepMapRepairExecutor,
     )
 
@@ -1080,7 +1080,7 @@ Additional integration tests verify backward compatibility on every release.
         result = executor.execute(tmp_path, health_report)
 
         # All MAX_DOMAIN_RETRIES attempts must have been made
-        from code_indexer.server.services.dep_map_repair_executor import (
+        from cidx_depmap.server.dep_map_repair_executor import (
             DepMapRepairExecutor,
         )
 
@@ -1534,7 +1534,7 @@ class TestPhase1SkipsFrontmatterJsonMismatch1259:
         "does this anomaly need Claude CLI re-analysis" set) must exclude it while
         keeping every other repairable anomaly type.
         """
-        from code_indexer.server.services.dep_map_health_detector import (
+        from cidx_depmap.server.dep_map_health_detector import (
             PHASE1_REANALYSIS_ANOMALY_TYPES,
             REPAIRABLE_ANOMALY_TYPES,
         )

@@ -9,7 +9,9 @@ lifespan, which wires a real `DependencyMapService` (bound to this
 machine's actual golden-repos directory) onto `app.state`. Lifespan
 shutdown stops the scheduler thread but never resets that app.state
 attribute, so the stale real service leaks into any later test file in the
-same pytest session that reads `app.state.dependency_map_service`.
+same pytest session that reads `app.state.dependency_map_service` (since
+modular phase 4g+ the service lives in the cidx-depmap feature's own slot,
+never on `app.state`; the leak class this guards is unchanged).
 
 Bug #1694 found the IDENTICAL defect shape in four more files under
 `tests/unit/server/routers/` (`test_git_cat_endpoint.py`,
@@ -39,7 +41,7 @@ in for either the generator or `app.state`.
 
 Because the REAL autouse fixture of the same name is ALSO active for
 every test in this suite (this file lives under `tests/unit/server/`),
-each test here saves and restores `app.state.dependency_map_service`
+each test here saves and restores the `app.state` attribute it uses
 itself around its own manually-driven generator (restoring absence with
 `delattr`, never fabricating a `None` value that did not previously
 exist), so it cannot leak into sibling tests via the very mechanism it is
@@ -87,29 +89,33 @@ def test_changed_app_state_attribute_value_is_reverted_after_teardown() -> None:
     from a naive "only delete newly-added keys" implementation that would
     leave a changed pre-existing value stale.
     """
-    had_original_value = hasattr(shared_app.state, "dependency_map_service")
-    original_value = getattr(shared_app.state, "dependency_map_service", None)
+    had_original_value = hasattr(shared_app.state, "example_lifespan_service_1694")
+    original_value = getattr(shared_app.state, "example_lifespan_service_1694", None)
     try:
-        shared_app.state.dependency_map_service = "original-sentinel-1694"
+        shared_app.state.example_lifespan_service_1694 = "original-sentinel-1694"
 
         gen = _snapshot_restore_shared_app_state_impl()
         next(gen)  # setup phase: snapshot taken with the sentinel in place
 
-        shared_app.state.dependency_map_service = "leaked-real-service-1694"
-        assert shared_app.state.dependency_map_service == "leaked-real-service-1694"
+        shared_app.state.example_lifespan_service_1694 = "leaked-real-service-1694"
+        assert (
+            shared_app.state.example_lifespan_service_1694 == "leaked-real-service-1694"
+        )
 
         try:
             next(gen)  # teardown phase: restore
         except StopIteration:
             pass
 
-        assert shared_app.state.dependency_map_service == "original-sentinel-1694", (
+        assert (
+            shared_app.state.example_lifespan_service_1694 == "original-sentinel-1694"
+        ), (
             "Bug #1694: an app.state attribute changed mid-test was not "
             "reverted to its pre-test value by the shared app.state "
             "snapshot/restore fixture's teardown."
         )
     finally:
         if had_original_value:
-            shared_app.state.dependency_map_service = original_value
+            shared_app.state.example_lifespan_service_1694 = original_value
         else:
-            delattr(shared_app.state, "dependency_map_service")
+            delattr(shared_app.state, "example_lifespan_service_1694")

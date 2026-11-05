@@ -24,7 +24,7 @@ import shutil
 
 import pytest
 
-from code_indexer.xray.search_engine import XRaySearchEngine
+from cidx_xray.search_engine import XRaySearchEngine
 
 
 # ---------------------------------------------------------------------------

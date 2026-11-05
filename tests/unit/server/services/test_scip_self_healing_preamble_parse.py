@@ -18,7 +18,7 @@ import json
 
 import pytest
 
-from code_indexer.server.services.scip_self_healing import (
+from cidx_scip.server.self_healing import (
     ClaudeResponse,
     SCIPSelfHealingService,
 )

@@ -158,7 +158,17 @@ def _run_and_finish_provider_temporal_index(
         ),
     )
     success, stdout_out, stderr_out = _run_provider_subprocess(
-        cmd, actual_path, env, "temporal", ["temporal"], progress_callback
+        cmd,
+        actual_path,
+        env,
+        "temporal",
+        ["temporal"],
+        progress_callback,
+        # EVO-66105: tag embed-stats records with the owning job and golden
+        # repo. Upstream's extraction of this job into its own module dropped
+        # both kwargs, which silently un-attributed every temporal index job.
+        golden_repo_alias=repo_alias,
+        job_id=job_id,
     )
 
     if success:

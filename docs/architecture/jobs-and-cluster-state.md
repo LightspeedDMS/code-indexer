@@ -129,7 +129,7 @@ It refuses to signal the caller's own process group. `cancellable_subprocess.py`
 `activity_watchdog.py` use it.
 
 Three other paths terminate children themselves: `RustNativeBackend` sends `SIGKILL` to the `xray-cli` process group
-on timeout (`xray/rust_backend.py`), `CodexInvoker` does the same on timeout (`server/services/codex_invoker.py`), and
+on timeout (`cidx_xray/rust_backend.py`), `CodexInvoker` does the same on timeout (`server/services/codex_invoker.py`), and
 `BackgroundJobManager._terminate_child_processes()` signals each registered child process (not its group) with
 `terminate()` and then `kill()`.
 

@@ -79,17 +79,19 @@ class TestMcpThreadPool:
 
     def test_subsidiary_pool_defaults(self):
         """multi_search_max_workers, scip_multi_max_workers, subprocess_max_workers, xray_worker_threads must be 8, 8, 8, 4."""
+        from cidx_xray.config import WORKER_THREADS, default_values
+
         from code_indexer.server.utils.config_manager import (
             MultiSearchLimitsConfig,
             BackgroundJobsConfig,
-            XRayConfig,
         )
 
         multi = MultiSearchLimitsConfig()
         bg = BackgroundJobsConfig()
-        xray = XRayConfig()
+        # The xray feature's config section (phase 4c) owns this default.
+        xray_worker_threads = default_values()[WORKER_THREADS]
 
         assert multi.multi_search_max_workers == EXPECTED_MULTI_SEARCH_MAX_WORKERS
         assert multi.scip_multi_max_workers == EXPECTED_SCIP_MULTI_MAX_WORKERS
         assert bg.subprocess_max_workers == EXPECTED_SUBPROCESS_MAX_WORKERS
-        assert xray.xray_worker_threads == EXPECTED_XRAY_WORKER_THREADS
+        assert xray_worker_threads == EXPECTED_XRAY_WORKER_THREADS

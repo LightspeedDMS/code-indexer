@@ -301,7 +301,13 @@ WantedBy=multi-user.target
                 }
             else:
                 return {"installed": True, "configured": False}
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "get_installation_info: swallowed %s: %s",
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
             return {"installed": True, "configured": False, "error": "Invalid config"}
 
     def uninstall(self) -> bool:
@@ -848,7 +854,11 @@ WantedBy=multi-user.target
                 timeout=10,
             )
             return result.returncode == 0
-        except (FileNotFoundError, subprocess.TimeoutExpired):
+        except (OSError, subprocess.TimeoutExpired):
+            # OSError beyond FileNotFoundError: a `cs` that cannot run (an
+            # empty or truncated binary from an interrupted download fails
+            # with ENOEXEC, a non-executable one with EACCES) is not an
+            # installed Coursier; install_coursier then replaces it.
             return False
 
     def install_coursier(self) -> bool:

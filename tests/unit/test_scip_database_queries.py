@@ -13,19 +13,19 @@ except ImportError:
     import sqlite3
 
 from code_indexer.config import Config
-from code_indexer.scip.database.schema import DatabaseManager
-from code_indexer.scip.database.builder import (
+from cidx_scip.database.schema import DatabaseManager
+from cidx_scip.database.builder import (
     SCIPDatabaseBuilder,
     ROLE_DEFINITION,
     ROLE_IMPORT,
     ROLE_READ_ACCESS,
 )
-from code_indexer.scip.database.queries import (
+from cidx_scip.database.queries import (
     get_dependencies,
     trace_call_chain_v2,
     trace_call_chain_v2_batched,
 )
-from code_indexer.scip.protobuf import scip_pb2
+from cidx_scip.protobuf import scip_pb2
 
 
 # ========== SCIP Database Version Schema Tests (Story #609) ==========
@@ -41,7 +41,7 @@ def test_resolve_db_path_raises_clear_error_for_non_file_backed_connection():
     OperationalError deep inside the worker rather than a clear error
     here at the boundary.
     """
-    from code_indexer.scip.database.queries import _resolve_db_path
+    from cidx_scip.database.queries import _resolve_db_path
 
     conn = sqlite3.connect(":memory:")
     try:
@@ -97,7 +97,7 @@ def test_index_migration_creates_all_indexes():
 
     Tests acceptance criteria #1 - Index creation on first SCIP query.
     """
-    from code_indexer.scip.database.migration import ensure_indexes_created
+    from cidx_scip.database.migration import ensure_indexes_created
 
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "test.db"
@@ -146,7 +146,7 @@ def test_index_migration_is_idempotent():
 
     Tests acceptance criteria #2 - Migration is safe to run multiple times.
     """
-    from code_indexer.scip.database.migration import ensure_indexes_created
+    from cidx_scip.database.migration import ensure_indexes_created
 
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "test.db"
@@ -195,8 +195,8 @@ def test_database_backend_auto_runs_migration():
     Tests acceptance criteria #1 - Migration triggered in production code.
     Tests acceptance criteria #3 - Fast path skips migration when version >= 2.
     """
-    from code_indexer.scip.query.backends import DatabaseBackend
-    from code_indexer.scip.database.migration import get_scip_db_version
+    from cidx_scip.query.backends import DatabaseBackend
+    from cidx_scip.database.migration import get_scip_db_version
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_path = Path(tmpdir)
@@ -299,7 +299,7 @@ def test_migration_flow_with_version_persistence():
     - Migration skipped when version >= 2
     """
     from code_indexer.config import ConfigManager
-    from code_indexer.scip.database.migration import ensure_indexes_created
+    from cidx_scip.database.migration import ensure_indexes_created
 
     with tempfile.TemporaryDirectory() as tmpdir:
         # Setup: Create config and database without indexes
@@ -946,7 +946,7 @@ class TestFindDefinition:
         builder.build(scip_file, manager.db_path)
 
         # Import queries module (will fail until we create it)
-        from code_indexer.scip.database.queries import find_definition
+        from cidx_scip.database.queries import find_definition
 
         # Execute query
         conn = sqlite3.connect(manager.db_path)
@@ -977,7 +977,7 @@ class TestFindDefinition:
 
         This test will FAIL with current LIKE-based queries (full table scans).
         """
-        from code_indexer.scip.database.queries import find_definition
+        from cidx_scip.database.queries import find_definition
 
         # Create production-scale database
         conn, target_symbol = _create_production_scale_database(tmp_path)
@@ -1017,7 +1017,7 @@ class TestFindReferences:
         Then exactly 3 results are returned
         And query uses idx_occurrences_symbol index
         """
-        from code_indexer.scip.database.builder import ROLE_READ_ACCESS
+        from cidx_scip.database.builder import ROLE_READ_ACCESS
 
         # Create SCIP protobuf with one symbol and 5 references
         index = scip_pb2.Index()
@@ -1059,7 +1059,7 @@ class TestFindReferences:
         builder.build(scip_file, manager.db_path)
 
         # Import queries module
-        from code_indexer.scip.database.queries import find_references
+        from cidx_scip.database.queries import find_references
 
         # Execute query with limit
         conn = sqlite3.connect(manager.db_path)
@@ -1087,7 +1087,7 @@ class TestFindReferences:
         This test documents the bug where limit=0 causes SQL LIMIT 0 clause,
         which returns 0 rows instead of unlimited results.
         """
-        from code_indexer.scip.database.queries import find_references
+        from cidx_scip.database.queries import find_references
 
         # Create production-scale database (includes 20 references to TargetClass)
         conn, target_symbol = _create_production_scale_database(tmp_path)
@@ -1117,7 +1117,7 @@ class TestFindReferences:
 
         This test will FAIL with current LIKE-based queries (full table scans).
         """
-        from code_indexer.scip.database.queries import find_references
+        from cidx_scip.database.queries import find_references
 
         # Create production-scale database
         conn, target_symbol = _create_production_scale_database(tmp_path)
@@ -1161,7 +1161,7 @@ class TestGetDependencies:
 
         Target: 150x faster than 3s protobuf baseline.
         """
-        from code_indexer.scip.database.queries import get_dependencies
+        from cidx_scip.database.queries import get_dependencies
 
         # Create production-scale database with call_graph
         conn, target_symbol = _create_production_scale_database(tmp_path)
@@ -1201,7 +1201,7 @@ class TestGetDependencies:
 
         Target: 100x faster than 5s protobuf baseline.
         """
-        from code_indexer.scip.database.queries import get_dependencies
+        from cidx_scip.database.queries import get_dependencies
 
         # Create production-scale database with call_graph
         conn, target_symbol = _create_production_scale_database(tmp_path)
@@ -1240,7 +1240,7 @@ class TestGetDependencies:
         Then results exclude symbols with kind='Local' or kind='Parameter'
         And only class/method/function symbols are returned
         """
-        from code_indexer.scip.database.queries import get_dependencies
+        from cidx_scip.database.queries import get_dependencies
 
         # Create database with local variables
         conn, target_symbol = _create_production_scale_database(tmp_path)
@@ -1275,7 +1275,7 @@ class TestGetDependencies:
 
         This test will FAIL with current implementation and PASS after fix.
         """
-        from code_indexer.scip.database.queries import get_dependencies
+        from cidx_scip.database.queries import get_dependencies
 
         # Create SCIP protobuf with NULL kind symbols
         index = scip_pb2.Index()
@@ -1411,7 +1411,7 @@ class TestGetDependents:
 
         Target: 150x faster than 3s protobuf baseline.
         """
-        from code_indexer.scip.database.queries import get_dependents
+        from cidx_scip.database.queries import get_dependents
 
         # Create production-scale database with call_graph
         conn, target_symbol = _create_production_scale_database(tmp_path)
@@ -1451,7 +1451,7 @@ class TestGetDependents:
 
         Target: 100x faster than 5s protobuf baseline.
         """
-        from code_indexer.scip.database.queries import get_dependents
+        from cidx_scip.database.queries import get_dependents
 
         # Create production-scale database with call_graph
         conn, target_symbol = _create_production_scale_database(tmp_path)
@@ -1490,7 +1490,7 @@ class TestGetDependents:
         Then results exclude symbols with kind='Local' or kind='Parameter'
         And only class/method/function symbols are returned
         """
-        from code_indexer.scip.database.queries import get_dependents
+        from cidx_scip.database.queries import get_dependents
 
         # Create database with local variables
         conn, target_symbol = _create_production_scale_database(tmp_path)
@@ -1525,7 +1525,7 @@ class TestGetDependents:
 
         This test will FAIL with current implementation and PASS after fix.
         """
-        from code_indexer.scip.database.queries import get_dependents
+        from cidx_scip.database.queries import get_dependents
 
         # Create SCIP protobuf with NULL kind symbols
         index = scip_pb2.Index()
@@ -1654,7 +1654,7 @@ class TestGetDependents:
 
         This test will FAIL until hybrid implementation is complete.
         """
-        from code_indexer.scip.database.queries import get_dependents
+        from cidx_scip.database.queries import get_dependents
 
         # Create test database with diverse symbol references
         conn, scip_file, target_id, refs = _create_hybrid_test_database(tmp_path)
@@ -1695,7 +1695,7 @@ class TestGetDependents:
         Expected: get_dependencies returns ALL 4 dependency types.
         This test will FAIL until hybrid implementation is complete.
         """
-        from code_indexer.scip.database.queries import get_dependencies
+        from cidx_scip.database.queries import get_dependencies
 
         # Create test database for dependencies (target USES other symbols)
         conn, scip_file, target_id, deps = _create_hybrid_dependencies_test_database(
@@ -1734,7 +1734,7 @@ class TestGetDependents:
 
         Creates chain: A <- B <- C <- D (depth=3 dependents)
         """
-        from code_indexer.scip.database.queries import get_dependents
+        from cidx_scip.database.queries import get_dependents
 
         # Create base database with 4 symbols
         conn, scip_file, symbol_ids = _create_depth3_transitive_database(
@@ -1787,7 +1787,7 @@ class TestGetDependents:
 
         Creates chain: A -> B -> C -> D (depth=3 dependencies)
         """
-        from code_indexer.scip.database.queries import get_dependencies
+        from cidx_scip.database.queries import get_dependencies
 
         # Create database with transitive chain A->B->C->D
         conn, scip_file, symbol_ids = _create_depth3_transitive_database(
@@ -1830,8 +1830,8 @@ class TestQueryEngineIntegration:
         Then it uses database backend for queries
         And results are identical to protobuf backend format
         """
-        from code_indexer.scip.query.primitives import SCIPQueryEngine
-        from code_indexer.scip.database.builder import ROLE_READ_ACCESS
+        from cidx_scip.query.primitives import SCIPQueryEngine
+        from cidx_scip.database.builder import ROLE_READ_ACCESS
 
         # Create SCIP protobuf with multiple symbols
         index = scip_pb2.Index()
@@ -1937,7 +1937,7 @@ class TestQueryEngineIntegration:
         Then it delegates to backend.trace_call_chain()
         And returns List[CallChain] with path tracing results
         """
-        from code_indexer.scip.query.primitives import SCIPQueryEngine
+        from cidx_scip.query.primitives import SCIPQueryEngine
 
         # Create SCIP protobuf with call chain
         index = scip_pb2.Index()
@@ -2057,7 +2057,7 @@ class TestAnalyzeImpact:
         And each result has file_path, symbol_count, and symbols list
         And results are sorted by symbol_count DESC
         """
-        from code_indexer.scip.database.queries import analyze_impact
+        from cidx_scip.database.queries import analyze_impact
 
         # Arrange: Create test database with call graph
         conn, target_id, dependents = _create_impact_test_database(tmp_path)
@@ -2099,7 +2099,7 @@ class TestAnalyzeImpact:
         Then results include ClassB (depth=1), ClassC (depth=2), ClassD (depth=3)
         And results are grouped by file with symbol counts
         """
-        from code_indexer.scip.database.queries import analyze_impact
+        from cidx_scip.database.queries import analyze_impact
 
         # Create SCIP protobuf with chain of dependencies
         index = scip_pb2.Index()
@@ -2187,7 +2187,7 @@ class TestAnalyzeImpact:
 
         Target: 150x faster than 30s protobuf baseline.
         """
-        from code_indexer.scip.database.queries import analyze_impact
+        from cidx_scip.database.queries import analyze_impact
 
         # Create production-scale database
         conn, target_symbol = _create_production_scale_database(tmp_path)
@@ -2228,7 +2228,7 @@ class TestAnalyzeImpact:
 
         This tests Issue #1 from Story #603 code review.
         """
-        from code_indexer.scip.database.queries import analyze_impact
+        from cidx_scip.database.queries import analyze_impact
 
         # Create SCIP index with 2 definitions for "process" method
         index = scip_pb2.Index()
@@ -2337,7 +2337,7 @@ class TestAnalyzeImpact:
 
         This tests Issue #2 from Story #603 code review (queries.py lines 459, 478).
         """
-        from code_indexer.scip.database.queries import analyze_impact
+        from cidx_scip.database.queries import analyze_impact
 
         # Create SCIP index with symbol containing comma
         index = scip_pb2.Index()
@@ -2510,7 +2510,7 @@ class TestTraceCallChain:
         And path length is 1
         And has_cycle is False
         """
-        from code_indexer.scip.database.queries import trace_call_chain
+        from cidx_scip.database.queries import trace_call_chain
 
         # Create database with call chain
         conn, entry_id, middle_id, target_id = _create_call_chain_test_database(
@@ -2552,7 +2552,7 @@ class TestTraceCallChain:
         And path length is 2
         And has_cycle is False
         """
-        from code_indexer.scip.database.queries import trace_call_chain
+        from cidx_scip.database.queries import trace_call_chain
 
         # Create database with call chain
         conn, entry_id, middle_id, target_id = _create_call_chain_test_database(
@@ -2598,7 +2598,7 @@ class TestTraceCallChain:
         Then results contain both paths
         And paths are sorted by length (shortest first)
         """
-        from code_indexer.scip.database.queries import trace_call_chain
+        from cidx_scip.database.queries import trace_call_chain
 
         # Create SCIP protobuf with symbols
         index = scip_pb2.Index()
@@ -2712,7 +2712,7 @@ class TestTraceCallChain:
         Then cycle is detected and path stops at cycle point
         And has_cycle is False (we stop before following the cycle)
         """
-        from code_indexer.scip.database.queries import trace_call_chain
+        from cidx_scip.database.queries import trace_call_chain
 
         # Create SCIP protobuf with symbols
         index = scip_pb2.Index()
@@ -2828,7 +2828,7 @@ class TestTraceCallChain:
         Graph: A -> B -> C -> C (C calls itself)
         Expected: Cycle detected when C revisits C
         """
-        from code_indexer.scip.database.queries import trace_call_chain
+        from cidx_scip.database.queries import trace_call_chain
 
         # Create SCIP protobuf with self-referencing symbol
         index = scip_pb2.Index()
@@ -2947,7 +2947,7 @@ class TestTraceCallChainV2BidirectionalBFS:
         This test documents the bug where limit=0 causes SQL LIMIT 0 clause,
         which returns 0 rows instead of unlimited results.
         """
-        from code_indexer.scip.database.queries import trace_call_chain_v2
+        from cidx_scip.database.queries import trace_call_chain_v2
 
         # Use production database
         db_path = Path.home() / "Dev/code-indexer/.code-indexer/scip/index.scip.db"
@@ -3002,7 +3002,7 @@ class TestTraceCallChainV2BidirectionalBFS:
 
         Uses real code-indexer database. Expected to find 11 call chains.
         """
-        from code_indexer.scip.database.queries import trace_call_chain_v2
+        from cidx_scip.database.queries import trace_call_chain_v2
 
         # Use production database
         db_path = Path.home() / "Dev/code-indexer/.code-indexer/scip/index.scip.db"
@@ -3059,7 +3059,7 @@ class TestTraceCallChainV2BidirectionalBFS:
         Previous forward-only approach: 4.5 seconds (165K intermediate rows).
         Target with bidirectional BFS: <2 seconds (1K-5K rows).
         """
-        from code_indexer.scip.database.queries import trace_call_chain_v2
+        from cidx_scip.database.queries import trace_call_chain_v2
 
         # Use production database
         db_path = Path.home() / "Dev/code-indexer/.code-indexer/scip/index.scip.db"
@@ -3101,7 +3101,7 @@ class TestTraceCallChainV2BidirectionalBFS:
 
         The shortest path from DaemonService to _is_text_file should be 3 hops.
         """
-        from code_indexer.scip.database.queries import trace_call_chain_v2
+        from cidx_scip.database.queries import trace_call_chain_v2
 
         # Use production database
         db_path = Path.home() / "Dev/code-indexer/.code-indexer/scip/index.scip.db"
@@ -3146,7 +3146,7 @@ class TestTraceCallChainV2BidirectionalBFS:
 
         All paths should have has_cycle=False (cycles blocked by forward search).
         """
-        from code_indexer.scip.database.queries import trace_call_chain_v2
+        from cidx_scip.database.queries import trace_call_chain_v2
 
         # Use production database
         db_path = Path.home() / "Dev/code-indexer/.code-indexer/scip/index.scip.db"
@@ -3188,7 +3188,7 @@ class TestTraceCallChainV2BidirectionalBFS:
 
         Pick two unconnected symbols and verify zero paths returned.
         """
-        from code_indexer.scip.database.queries import trace_call_chain_v2
+        from cidx_scip.database.queries import trace_call_chain_v2
 
         # Use production database
         db_path = Path.home() / "Dev/code-indexer/.code-indexer/scip/index.scip.db"
@@ -3624,7 +3624,7 @@ class TestDependenciesHybridClassLevelBug:
         - UserRepository INTERFACE (ID=8) should expand to [findById, save, delete]
         - UserController#getUser METHOD (ID=5) should return [5] (no expansion)
         """
-        from code_indexer.scip.query.backends import DatabaseBackend
+        from cidx_scip.query.backends import DatabaseBackend
         from pathlib import Path
 
         scip_file = Path("test-fixtures/scip-java-mock/index.scip")
@@ -3635,8 +3635,8 @@ class TestDependenciesHybridClassLevelBug:
 
         # Ensure database exists
         if not db_path.exists():
-            from code_indexer.scip.database.schema import DatabaseManager
-            from code_indexer.scip.database.builder import SCIPDatabaseBuilder
+            from cidx_scip.database.schema import DatabaseManager
+            from cidx_scip.database.builder import SCIPDatabaseBuilder
 
             db_manager = DatabaseManager(scip_file)
             db_manager.create_schema()
@@ -3769,7 +3769,7 @@ def test_trace_call_chain_java_mock_bug():
         )
 
         # Execute trace_call_chain (which auto-detects and uses trace_call_chain_v2)
-        from code_indexer.scip.database.queries import trace_call_chain
+        from cidx_scip.database.queries import trace_call_chain
 
         chains = trace_call_chain(conn, from_id, to_id, max_depth=5, limit=100)
 
@@ -4209,7 +4209,7 @@ class TestTraceCallChainWorkerThreadSuccess:
     ):
         """Discriminating RED test: must genuinely fail pre-fix with the
         worker-thread ValueError; post-fix, real chains come back."""
-        from code_indexer.scip.database.queries import trace_call_chain_v2_batched
+        from cidx_scip.database.queries import trace_call_chain_v2_batched
 
         db_path = _build_single_edge_call_chain_db(tmp_path)
         with caplog.at_level(logging.WARNING):
@@ -4233,7 +4233,7 @@ class TestTraceCallChainWorkerThreadSuccess:
     ):
         """Same discriminating test as above, for the non-batched
         trace_call_chain_v2 (single from/to id) entry point."""
-        from code_indexer.scip.database.queries import trace_call_chain_v2
+        from cidx_scip.database.queries import trace_call_chain_v2
 
         db_path = _build_single_edge_call_chain_db(tmp_path)
         with caplog.at_level(logging.WARNING):
@@ -4254,7 +4254,7 @@ class TestTraceCallChainWorkerThreadSuccess:
         regress the pre-existing main-thread (CLI/solo) call path -- a
         normal within-timeout query from the main thread must still return
         real results, not a timeout."""
-        from code_indexer.scip.database.queries import trace_call_chain_v2_batched
+        from cidx_scip.database.queries import trace_call_chain_v2_batched
 
         db_path = _build_single_edge_call_chain_db(tmp_path)
         conn = sqlite3.connect(str(db_path))
@@ -4382,7 +4382,7 @@ class TestTraceCallChainWatchdogTimeout:
     def test_trace_call_chain_v2_batched_timeout_still_fires_from_main_thread(
         self, tmp_path: Path
     ):
-        from code_indexer.scip.database.queries import trace_call_chain_v2_batched
+        from cidx_scip.database.queries import trace_call_chain_v2_batched
 
         db_path, target_id = _build_fanout_call_chain_db(tmp_path, _FANOUT_WIDTH)
         conn = sqlite3.connect(str(db_path))
@@ -4403,7 +4403,7 @@ class TestTraceCallChainWatchdogTimeout:
     def test_trace_call_chain_v2_timeout_still_fires_from_main_thread(
         self, tmp_path: Path
     ):
-        from code_indexer.scip.database.queries import trace_call_chain_v2
+        from cidx_scip.database.queries import trace_call_chain_v2
 
         db_path, target_id = _build_fanout_call_chain_db(tmp_path, _FANOUT_WIDTH)
         conn = sqlite3.connect(str(db_path))
@@ -4443,7 +4443,7 @@ class TestTraceCallChainWatchdogTimeout:
         """
         import threading
 
-        from code_indexer.scip.database.queries import trace_call_chain_v2_batched
+        from cidx_scip.database.queries import trace_call_chain_v2_batched
 
         db_path, target_id = _build_fanout_call_chain_db(tmp_path, _FANOUT_WIDTH)
         conn = sqlite3.connect(str(db_path))
@@ -4482,7 +4482,7 @@ class TestTraceCallChainWatchdogTimeout:
         point (Bug #1603 code review Priority 1, CRITICAL)."""
         import threading
 
-        from code_indexer.scip.database.queries import trace_call_chain_v2
+        from cidx_scip.database.queries import trace_call_chain_v2
 
         db_path, target_id = _build_fanout_call_chain_db(tmp_path, _FANOUT_WIDTH)
         conn = sqlite3.connect(str(db_path))
@@ -4516,7 +4516,7 @@ def _delayed_batched_work(
     duration spent INSIDE that real call (excluding the injected sleep),
     for the test to observe whether it bailed out promptly (fixed) or ran
     the full combinatorial fan-out query to completion (unfixed)."""
-    from code_indexer.scip.database.queries import _trace_call_chain_v2_batched_impl
+    from cidx_scip.database.queries import _trace_call_chain_v2_batched_impl
 
     def delayed_work():
         time.sleep(delay_seconds)
@@ -4590,7 +4590,7 @@ class TestTraceCallChainPrePublishTimeoutRace:
     ):
         import queue
 
-        from code_indexer.scip.database.queries import (
+        from cidx_scip.database.queries import (
             _run_with_thread_watchdog,
             _ConnectionHolder,
         )
@@ -4645,7 +4645,7 @@ class TestTraceCallChainLegacyWrapperTimeoutPropagation:
     def test_trace_call_chain_raises_query_timeout_error_on_real_timeout(
         self, tmp_path: Path
     ):
-        from code_indexer.scip.database.queries import (
+        from cidx_scip.database.queries import (
             trace_call_chain,
             QueryTimeoutError,
         )

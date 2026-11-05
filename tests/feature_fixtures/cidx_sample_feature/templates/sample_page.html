@@ -1,0 +1,9 @@
+{% extends shell_template %}
+
+{% block title %}{{ page_title }}{% endblock %}
+
+{% block content %}
+<h1 id="sample-feature-page">{{ page_title }}</h1>
+<p class="sample-greeting">{{ greeting }}</p>
+<p class="sample-viewer">Viewer: {{ principal.username }}</p>
+{% endblock %}

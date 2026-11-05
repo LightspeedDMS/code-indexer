@@ -21,7 +21,7 @@ import importlib
 import json
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional, cast
 
 import pytest
 from fastapi.testclient import TestClient
@@ -97,7 +97,7 @@ def env(
             state = vars(importlib.import_module("code_indexer.server.app"))[
                 "app"
             ].state
-            state.user_manager = client.app.state.user_manager  # type: ignore[attr-defined]
+            state.user_manager = cast(Any, client.app).state.user_manager
             state.activated_repo_manager = e.activated_repo_manager
             yield e
     finally:
@@ -112,7 +112,7 @@ def _mcp(
     session_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """One ``tools/call`` through ``POST /mcp``; the JSON-RPC body."""
-    account = client.app.state.user_manager.get_user(username)  # type: ignore[attr-defined]
+    account = cast(Any, client.app).state.user_manager.get_user(username)
     assert account is not None
     jwt = dependencies.jwt_manager
     assert jwt is not None
@@ -152,7 +152,7 @@ def _refusal(body: Dict[str, Any], alias: str) -> Dict[str, Any]:
 
 def _impersonating(client: TestClient, target: str) -> str:
     """An ADMIN MCP session that impersonates *target*; its session id."""
-    accounts = client.app.state.user_manager  # type: ignore[attr-defined]
+    accounts = cast(Any, client.app).state.user_manager
     session_id = f"example-session-{uuid.uuid4()}"
     session = get_session_registry().get_or_create_session(
         session_id, accounts.get_user(ADMIN)

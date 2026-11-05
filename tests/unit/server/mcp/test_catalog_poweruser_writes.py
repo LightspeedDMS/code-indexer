@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import hashlib
 from types import SimpleNamespace
-from typing import Any, Dict, Iterator, Optional
+from typing import Any, Dict, Iterator, Optional, cast
 
 import pytest
 from fastapi.testclient import TestClient
@@ -35,9 +35,14 @@ from tests.shared.cidx_meta_visibility_fixture import (
     RESTRICTED_USER,
 )
 
-from ..routers.test_catalog_write_gate_rest import client  # noqa: F401
+from ..routers import test_catalog_write_gate_rest as _test_catalog_write_gate_rest
 from .catalog_file_door_env import CATALOG_ALIAS, CatalogFileDoorEnv, mcp_data, user
-from .test_catalog_write_gate import REFUSAL, env  # noqa: F401
+from .test_catalog_write_gate import REFUSAL
+from . import test_catalog_write_gate as _test_catalog_write_gate
+
+# Shared fixtures (pytest finds them as module attributes).
+client = _test_catalog_write_gate_rest.client
+env = _test_catalog_write_gate.env
 
 POWER_USER = "fixture-power"
 DESCRIPTION = f"{ALPHA}.md"
@@ -60,7 +65,7 @@ def _powerusers(door: CatalogFileDoorEnv) -> Any:
 
 
 @pytest.fixture
-def power(env: CatalogFileDoorEnv) -> Iterator[CatalogFileDoorEnv]:  # noqa: F811
+def power(env: CatalogFileDoorEnv) -> Iterator[CatalogFileDoorEnv]:
     gam, group = _powerusers(env)
     for name in GRANTED:
         gam.grant_repo_access(name, group.id, granted_by="test")
@@ -120,11 +125,11 @@ def test_full_visibility_power_user_edits_via_mcp(
 @pytest.mark.parametrize("path", [DESCRIPTION, DOMAIN])
 def test_full_visibility_power_user_edits_via_rest(
     power: CatalogFileDoorEnv,
-    client: TestClient,  # noqa: F811
+    client: TestClient,
     path: str,
 ) -> None:
     caller = _caller()
-    client.app.dependency_overrides[get_current_user] = lambda: caller  # type: ignore[attr-defined]
+    cast(Any, client.app).dependency_overrides[get_current_user] = lambda: caller
     body = {
         "old_string": ALPHA,
         "new_string": "renamed-sample",
@@ -201,7 +206,7 @@ def test_powerusers_member_without_the_write_permission_is_refused(
 
 def test_group_read_failure_gets_the_fixed_refusal(
     power: CatalogFileDoorEnv,
-    client: TestClient,  # noqa: F811
+    client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def unavailable(_username: str) -> Any:
@@ -209,7 +214,7 @@ def test_group_read_failure_gets_the_fixed_refusal(
 
     monkeypatch.setattr(power.fx.group_manager, "get_user_group", unavailable)
     caller = _caller()
-    client.app.dependency_overrides[get_current_user] = lambda: caller  # type: ignore[attr-defined]
+    cast(Any, client.app).dependency_overrides[get_current_user] = lambda: caller
 
     response = client.delete(f"/api/v1/repos/{CATALOG_ALIAS}/files/{DESCRIPTION}")
 

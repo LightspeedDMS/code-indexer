@@ -1,6 +1,6 @@
 """Unit tests for SCIP enclosing symbol resolver."""
 
-from code_indexer.scip.database.enclosing_resolver import EnclosingSymbolResolver
+from cidx_scip.database.enclosing_resolver import EnclosingSymbolResolver
 
 
 class TestEnclosingRangeResolution:

@@ -22,6 +22,7 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
+from tests.unit.server._depmap_feature import depmap_service_installed
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Elevation bypass (same pattern as test_repo_category_routes.py)
@@ -60,7 +61,7 @@ def _make_service_with_mocks():
     Mocks _job_tracker and run_refinement_cycle so we can test only the
     run_tracked_refinement wrapper logic without executing real analysis.
     """
-    from code_indexer.server.services.dependency_map_service import DependencyMapService
+    from cidx_depmap.server.dependency_map_service import DependencyMapService
 
     mock_config_manager = MagicMock()
     mock_config = MagicMock()
@@ -275,7 +276,10 @@ def app():
     cross-test contamination.
     """
     from code_indexer.server.app import app as _app
-    from code_indexer.server.web.dependency_map_routes import dependency_map_router
+    from tests.unit.server._depmap_feature import ensure_depmap_routes
+
+    ensure_depmap_routes(_app)
+    from cidx_depmap.server.web.routes import dependency_map_router
 
     original_overrides = dict(_app.dependency_overrides)
     _bypass_elevation(_app, dependency_map_router)
@@ -326,6 +330,9 @@ class TestTriggerRefinementRoute:
     def test_returns_202_when_service_available(self, client, admin_session_cookie):
         """Route returns 202 Accepted when dep_map_service is available and idle."""
         from code_indexer.server.app import app
+        from tests.unit.server._depmap_feature import ensure_depmap_routes
+
+        ensure_depmap_routes(app)
 
         mock_service = MagicMock()
         mock_service.is_available.return_value = True
@@ -333,9 +340,7 @@ class TestTriggerRefinementRoute:
             return_value={"status": "completed"}
         )
 
-        original_service = getattr(app.state, "dependency_map_service", None)
-        app.state.dependency_map_service = mock_service
-        try:
+        with depmap_service_installed(mock_service):
             response = client.post(
                 "/admin/dependency-map/trigger-refinement",
                 cookies=admin_session_cookie,
@@ -346,8 +351,6 @@ class TestTriggerRefinementRoute:
             body = response.json()
             assert body.get("success") is True
             assert "job_id" in body
-        finally:
-            app.state.dependency_map_service = original_service
 
     def test_returns_401_without_auth(self, client):
         """Route returns 401 when not authenticated."""
@@ -357,39 +360,40 @@ class TestTriggerRefinementRoute:
     def test_returns_503_when_service_unavailable(self, client, admin_session_cookie):
         """Route returns 503 when dep_map_service is None."""
         from code_indexer.server.app import app
+        from tests.unit.server._depmap_feature import ensure_depmap_routes
 
-        original_service = getattr(app.state, "dependency_map_service", None)
-        app.state.dependency_map_service = None
-        try:
+        ensure_depmap_routes(app)
+
+        with depmap_service_installed(None):
             response = client.post(
                 "/admin/dependency-map/trigger-refinement",
                 cookies=admin_session_cookie,
             )
             assert response.status_code == 503
-        finally:
-            app.state.dependency_map_service = original_service
 
     def test_returns_409_when_analysis_in_progress(self, client, admin_session_cookie):
         """Route returns 409 when service is_available() returns False."""
         from code_indexer.server.app import app
+        from tests.unit.server._depmap_feature import ensure_depmap_routes
+
+        ensure_depmap_routes(app)
 
         mock_service = MagicMock()
         mock_service.is_available.return_value = False
 
-        original_service = getattr(app.state, "dependency_map_service", None)
-        app.state.dependency_map_service = mock_service
-        try:
+        with depmap_service_installed(mock_service):
             response = client.post(
                 "/admin/dependency-map/trigger-refinement",
                 cookies=admin_session_cookie,
             )
             assert response.status_code == 409
-        finally:
-            app.state.dependency_map_service = original_service
 
     def test_job_id_has_refinement_prefix(self, client, admin_session_cookie):
         """Returned job_id must start with 'dep-map-refinement-'."""
         from code_indexer.server.app import app
+        from tests.unit.server._depmap_feature import ensure_depmap_routes
+
+        ensure_depmap_routes(app)
 
         mock_service = MagicMock()
         mock_service.is_available.return_value = True
@@ -397,9 +401,7 @@ class TestTriggerRefinementRoute:
             return_value={"status": "completed"}
         )
 
-        original_service = getattr(app.state, "dependency_map_service", None)
-        app.state.dependency_map_service = mock_service
-        try:
+        with depmap_service_installed(mock_service):
             response = client.post(
                 "/admin/dependency-map/trigger-refinement",
                 cookies=admin_session_cookie,
@@ -409,8 +411,6 @@ class TestTriggerRefinementRoute:
             assert body["job_id"].startswith("dep-map-refinement-"), (
                 f"job_id should start with 'dep-map-refinement-', got: {body['job_id']}"
             )
-        finally:
-            app.state.dependency_map_service = original_service
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -427,8 +427,11 @@ class TestRefinementButtonInTemplate:
 
         template_path = (
             Path(__file__).parent.parent.parent.parent.parent
+            / "packages"
+            / "features"
+            / "cidx-depmap"
             / "src"
-            / "code_indexer"
+            / "cidx_depmap"
             / "server"
             / "web"
             / "templates"
@@ -450,8 +453,11 @@ class TestRefinementButtonInTemplate:
 
         template_path = (
             Path(__file__).parent.parent.parent.parent.parent
+            / "packages"
+            / "features"
+            / "cidx-depmap"
             / "src"
-            / "code_indexer"
+            / "cidx_depmap"
             / "server"
             / "web"
             / "templates"

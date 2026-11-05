@@ -25,7 +25,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from code_indexer.server.wiki.wiki_service import WikiService
+from cidx_wiki.server.wiki_service import WikiService
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +54,7 @@ def _as_dict(pairs):
 
 
 def _make_wiki_config(**kwargs):
-    from code_indexer.server.utils.config_manager import WikiConfig
+    from cidx_wiki.config import WikiConfig
 
     return WikiConfig(**kwargs)
 
@@ -436,7 +436,7 @@ class TestConfigRoundTrip:
     def test_ac9_metadata_display_order_round_trips_json(self):
         """AC9: WikiConfig with metadata_display_order survives JSON round-trip."""
         from dataclasses import asdict
-        from code_indexer.server.utils.config_manager import WikiConfig
+        from cidx_wiki.config import WikiConfig
 
         original = WikiConfig(metadata_display_order="author,visibility,created")
         serialized = json.dumps(asdict(original))
@@ -446,7 +446,7 @@ class TestConfigRoundTrip:
     def test_ac9_empty_order_round_trips(self):
         """AC9: Empty metadata_display_order round-trips as empty string."""
         from dataclasses import asdict
-        from code_indexer.server.utils.config_manager import WikiConfig
+        from cidx_wiki.config import WikiConfig
 
         original = WikiConfig(metadata_display_order="")
         serialized = json.dumps(asdict(original))
@@ -455,18 +455,16 @@ class TestConfigRoundTrip:
 
     def test_ac9_wiki_config_dataclass_has_metadata_display_order_field(self):
         """AC9: WikiConfig dataclass must have metadata_display_order field."""
-        from code_indexer.server.utils.config_manager import WikiConfig
+        from cidx_wiki.config import WikiConfig
 
         cfg = WikiConfig()
         assert hasattr(cfg, "metadata_display_order")
         assert cfg.metadata_display_order == ""
 
     def test_ac9_load_config_preserves_metadata_display_order(self):
-        """AC9: load_config() restores metadata_display_order from JSON file."""
-        from code_indexer.server.utils.config_manager import (
-            ServerConfigManager,
-            WikiConfig,
-        )
+        """AC9: load_config() carries metadata_display_order into the cidx-wiki
+        feature's section (feature_settings["wiki"], modular phase 4e)."""
+        from code_indexer.server.utils.config_manager import ServerConfigManager
 
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "config.json"
@@ -483,10 +481,9 @@ class TestConfigRoundTrip:
             config_path.write_text(json.dumps(raw_config))
             manager = ServerConfigManager(tmpdir)
             loaded = manager.load_config()
-            assert isinstance(loaded.wiki_config, WikiConfig)
-            assert (
-                loaded.wiki_config.metadata_display_order == "author,visibility,created"
-            )
+            assert loaded is not None
+            section = loaded.feature_settings["wiki"]
+            assert section["metadata_display_order"] == "author,visibility,created"
 
 
 # ---------------------------------------------------------------------------
@@ -537,7 +534,7 @@ class TestGoldenRegression:
 
     def test_ac12_default_wiki_config_equals_none(self, svc):
         """AC12: Default WikiConfig() output identical to wiki_config=None."""
-        from code_indexer.server.utils.config_manager import WikiConfig
+        from cidx_wiki.config import WikiConfig
 
         cache = _make_cache(view_count=5)
         metadata = {
@@ -557,7 +554,7 @@ class TestGoldenRegression:
 
     def test_ac12_default_order_is_empty_string(self):
         """AC12: Default WikiConfig has metadata_display_order='' (empty)."""
-        from code_indexer.server.utils.config_manager import WikiConfig
+        from cidx_wiki.config import WikiConfig
 
         cfg = WikiConfig()
         assert cfg.metadata_display_order == ""
@@ -622,48 +619,37 @@ class TestRealViewsOrdering:
 
 
 # ---------------------------------------------------------------------------
-# ConfigService: _update_wiki_setting for metadata_display_order
+# metadata_display_order through the feature config door
 # ---------------------------------------------------------------------------
 
 
-class TestConfigServiceDisplayOrderSetting:
-    """AC10: ConfigService can save metadata_display_order as string setting."""
+def _order(config) -> str:
+    return str(config.feature_settings["wiki"]["metadata_display_order"])
 
-    def test_config_service_saves_metadata_display_order(self):
-        """AC10: _update_wiki_setting handles 'metadata_display_order' key as string."""
-        from code_indexer.server.services.config_service import ConfigService
+
+class TestDisplayOrderSetting:
+    """AC10: metadata_display_order is saved as a string setting (through
+    the feature config door: the cidx-wiki feature's section)."""
+
+    def _set(self, config, value) -> None:
+        from cidx_wiki.config import WIKI_CONFIG_SECTION
+
+        from code_indexer.server.features import config as feature_config
+
+        feature_config.runtime_update_mutator(
+            "wiki", WIKI_CONFIG_SECTION, {"metadata_display_order": value}
+        )(config)
+
+    def test_saves_metadata_display_order(self):
         from code_indexer.server.utils.config_manager import ServerConfig
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            svc = ConfigService(tmpdir)
-            config = ServerConfig(server_dir=tmpdir)
-            svc._update_wiki_setting(
-                config, "metadata_display_order", "author,visibility,created"
-            )
-            assert (
-                config.wiki_config.metadata_display_order == "author,visibility,created"
-            )
+        config = ServerConfig(server_dir="/srv/example")
+        self._set(config, "author,visibility,created")
+        assert _order(config) == "author,visibility,created"
 
-    def test_config_service_saves_empty_metadata_display_order(self):
-        """AC10: _update_wiki_setting handles empty string for metadata_display_order."""
-        from code_indexer.server.services.config_service import ConfigService
+    def test_saves_empty_metadata_display_order(self):
         from code_indexer.server.utils.config_manager import ServerConfig
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            svc = ConfigService(tmpdir)
-            config = ServerConfig(server_dir=tmpdir)
-            svc._update_wiki_setting(config, "metadata_display_order", "")
-            assert config.wiki_config.metadata_display_order == ""
-
-    def test_config_service_metadata_display_order_unknown_key_still_raises_for_others(
-        self,
-    ):
-        """AC10: Other unknown keys still raise ValueError."""
-        from code_indexer.server.services.config_service import ConfigService
-        from code_indexer.server.utils.config_manager import ServerConfig
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            svc = ConfigService(tmpdir)
-            config = ServerConfig(server_dir=tmpdir)
-            with pytest.raises(ValueError, match="Unknown wiki setting"):
-                svc._update_wiki_setting(config, "totally_unknown_key", "value")
+        config = ServerConfig(server_dir="/srv/example")
+        self._set(config, "")
+        assert _order(config) == ""

@@ -7,11 +7,7 @@ from pathlib import Path
 
 _ROUTES_PATH = (
     Path(__file__).resolve().parents[4]
-    / "src"
-    / "code_indexer"
-    / "server"
-    / "web"
-    / "dependency_map_routes.py"
+    / "packages/features/cidx-depmap/src/cidx_depmap/server/web/routes.py"
 )
 
 
@@ -32,7 +28,14 @@ _REPO_ROOT_DEPTH = 4
 _REPO_ROOT = Path(__file__).resolve().parents[_REPO_ROOT_DEPTH]
 
 _LIFESPAN_PATH = (
-    _REPO_ROOT / "src" / "code_indexer" / "server" / "startup" / "lifespan.py"
+    _REPO_ROOT
+    / "packages"
+    / "features"
+    / "cidx-depmap"
+    / "src"
+    / "cidx_depmap"
+    / "server"
+    / "lifecycle.py"
 )
 
 
@@ -144,10 +147,10 @@ def _invoke_repair_closure(dep_map_dir: "Path", job_id: str = "test-job-id") -> 
     def spy_execute_repair_body(**kwargs):
         captured.update(kwargs)
 
-    from code_indexer.server.startup.lifespan import _make_dep_map_repair_invoker_fn
+    from cidx_depmap.server.lifecycle import _make_dep_map_repair_invoker_fn
 
     with patch(
-        "code_indexer.server.web.dependency_map_routes._execute_repair_body",
+        "cidx_depmap.server.web.routes._execute_repair_body",
         side_effect=spy_execute_repair_body,
     ):
         invoker = _make_dep_map_repair_invoker_fn(
@@ -221,7 +224,7 @@ def _build_real_dep_map_service():
     rather than a stub. Collaborators are MagicMock so no real infrastructure is needed.
     """
     from unittest.mock import MagicMock
-    from code_indexer.server.services.dependency_map_service import DependencyMapService
+    from cidx_depmap.server.dependency_map_service import DependencyMapService
 
     return DependencyMapService(
         golden_repos_manager=MagicMock(name="golden_repos_manager"),
@@ -245,7 +248,7 @@ def _invoke_late_bound_repair(service_instance, dep_map_dir: Path) -> dict:
     Returns kwargs dict captured from _execute_repair_body.
     """
     from unittest.mock import MagicMock, patch
-    from code_indexer.server.startup.lifespan import _make_dep_map_repair_invoker_fn
+    from cidx_depmap.server.lifecycle import _make_dep_map_repair_invoker_fn
 
     captured: dict = {}
 
@@ -253,7 +256,7 @@ def _invoke_late_bound_repair(service_instance, dep_map_dir: Path) -> dict:
         captured.update(kwargs)
 
     with patch(
-        "code_indexer.server.web.dependency_map_routes._execute_repair_body",
+        "cidx_depmap.server.web.routes._execute_repair_body",
         side_effect=spy_execute_repair_body,
     ):
         invoker = _make_dep_map_repair_invoker_fn(
@@ -286,7 +289,7 @@ class TestLifespanCallSiteOrdering:
 
     def test_set_repair_invoker_fn_exists_on_service(self):
         """DependencyMapService must expose set_repair_invoker_fn for late-binding."""
-        from code_indexer.server.services.dependency_map_service import (
+        from cidx_depmap.server.dependency_map_service import (
             DependencyMapService,
         )
 
@@ -356,9 +359,9 @@ class TestLifespanCallSiteOrdering:
         This test asserts the full ordering: construct -> factory -> setter -> start.
         """
         import inspect
-        from code_indexer.server.startup import lifespan
+        from cidx_depmap.server import lifecycle as lifespan
 
-        source = inspect.getsource(lifespan.make_lifespan)
+        source = inspect.getsource(lifespan._start_service)
 
         construct_pos = source.find("DependencyMapService(")
         factory_pos = source.find("_make_dep_map_repair_invoker_fn(")

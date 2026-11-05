@@ -33,13 +33,14 @@ from unittest.mock import patch
 import pytest
 
 from code_indexer.server.auth.user_manager import User, UserRole
-from code_indexer.xray.rust_backend import RustNativeBackend, _XRAY_CLI_DEFAULT
+from cidx_xray import rust_backend
+from cidx_xray.rust_backend import resolve_xray_cli_path
 
 
 def _require_xray_cli_binary() -> None:
-    if not _XRAY_CLI_DEFAULT.exists():
+    if not resolve_xray_cli_path().exists():
         pytest.skip(
-            f"xray-cli binary not built at {_XRAY_CLI_DEFAULT}; "
+            f"xray-cli binary not built at {resolve_xray_cli_path()}; "
             "run 'cargo build --release' inside rust/ to enable this test."
         )
 
@@ -58,7 +59,7 @@ def _parse_response(result: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _import_handler():
-    from code_indexer.server.mcp.handlers.xray_graph import handle_analyze_graph
+    from cidx_xray.server.mcp.xray_graph import handle_analyze_graph
 
     return handle_analyze_graph
 
@@ -162,7 +163,7 @@ async def test_refine_true_with_populated_refine_set_produces_refine_findings(
         "refine": True,
     }
     with patch(
-        "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path",
+        "cidx_xray.server.mcp.xray_graph._resolve_repo_path",
         return_value=str(repo_root),
     ):
         result = await handler(params, _make_user())
@@ -204,10 +205,10 @@ async def test_refine_false_by_default_never_invokes_refine_pass(
     }
     with (
         patch(
-            "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path",
+            "cidx_xray.server.mcp.xray_graph._resolve_repo_path",
             return_value=str(repo_root),
         ),
-        patch.object(RustNativeBackend, "_run_refine_step") as mock_refine_step,
+        patch.object(rust_backend, "_graph_refine_phase") as mock_refine_step,
     ):
         result = await handler(params, _make_user())
 
@@ -241,10 +242,10 @@ async def test_refine_true_with_empty_refine_set_skips_invocation(
     }
     with (
         patch(
-            "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path",
+            "cidx_xray.server.mcp.xray_graph._resolve_repo_path",
             return_value=str(repo_root),
         ),
-        patch.object(RustNativeBackend, "_run_refine_step") as mock_refine_step,
+        patch.object(rust_backend, "_graph_refine_phase") as mock_refine_step,
     ):
         result = await handler(params, _make_user())
 
@@ -276,7 +277,7 @@ async def test_refine_true_degrades_honestly_when_dylib_has_no_refine_export(
         "refine": True,
     }
     with patch(
-        "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path",
+        "cidx_xray.server.mcp.xray_graph._resolve_repo_path",
         return_value=str(repo_root),
     ):
         result = await handler(params, _make_user())
@@ -301,9 +302,7 @@ async def test_refine_invalid_type_returns_structured_error() -> None:
         "evaluator_code": EVALUATOR_WITH_EMPTY_REFINE_SET,
         "refine": "yes",
     }
-    with patch(
-        "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path"
-    ) as mock_resolve:
+    with patch("cidx_xray.server.mcp.xray_graph._resolve_repo_path") as mock_resolve:
         result = await handler(params, _make_user())
 
     mock_resolve.assert_not_called()

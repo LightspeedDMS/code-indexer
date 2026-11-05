@@ -28,6 +28,7 @@ from _audit_repos_support import (
     make_refresh_scheduler,
     register_repo,
 )
+from tests.unit.server._scip_feature import scip_pipeline_installed
 
 _SECOND_ADMIN = "example-second-admin"
 
@@ -105,9 +106,11 @@ class TestAdd:
 class TestIndexAndBranch:
     def test_add_indexes_records_one_row(self, store, manager) -> None:
         register_repo(manager)
-        job_id = manager.add_indexes_to_golden_repo(
-            EXAMPLE_ALIAS, ["fts", "scip"], submitter_username=_SECOND_ADMIN
-        )
+        # "scip" is the cidx-scip feature's index type (modular phase 4d).
+        with scip_pipeline_installed():
+            job_id = manager.add_indexes_to_golden_repo(
+                EXAMPLE_ALIAS, ["fts", "scip"], submitter_username=_SECOND_ADMIN
+            )
         (row,) = store.rows("golden_repo_index_added")
         assert (row.actor, row.target_id, row.outcome) == (
             _SECOND_ADMIN,

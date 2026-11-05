@@ -35,6 +35,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from cidx_testkit.registry import child_pythonpath
 
 import code_indexer
 from code_indexer.server.repositories.golden_repo_manager import GoldenRepoManager
@@ -175,7 +176,9 @@ def test_branch_change_index_child_stores_attributed_rows(
     report = tmp_path / "child-report.jsonl"
     _install_namespaced_cidx(tmp_path / "bin", report)
     monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}")
-    monkeypatch.setenv("PYTHONPATH", str(_SRC_DIR))
+    monkeypatch.setenv(
+        "PYTHONPATH", child_pythonpath(_SRC_DIR.parent, tmp_path / "meta")
+    )
     monkeypatch.setenv("VOYAGE_API_KEY", _SENTINEL_KEY)
     monkeypatch.delenv("CIDX_EMBEDDING_STATS_BOOTSTRAP_DIR", raising=False)
     base_clone = tmp_path / "golden-repos" / "example-repo"

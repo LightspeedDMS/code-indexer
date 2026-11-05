@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cidx-xray"
+dynamic = ["version"]
+description = "X-Ray, precision AST-aware code search: a code-indexer feature add-on"
+readme = "README.md"
+license = {text = "MIT"}
+# Tracks the core's requires-python (see the root pyproject.toml).
+requires-python = ">=3.10,<3.13"
+# The SDK by path, as the core references it: the name is not ours on public
+# indexes, so pip must never resolve it from one. A feature depends on the SDK
+# and third-party packages only -- never on code-indexer (the core depends on
+# this distribution, not the reverse; see src/cidx_xray/_platform.py for the
+# one transitional exception and how it goes away).
+dependencies = [
+    "cidx-sdk @ {root:parent:parent:uri}/cidx-sdk",
+    # The AST engine. Imported only inside AstSearchEngine.__init__ (the
+    # lazy-load invariant), never at package import.
+    "tree-sitter>=0.21,<0.22",
+    "tree-sitter-languages==1.10.2",
+    # The `cidx xray` CLI group (cidx_xray.cli).
+    "click>=8.0.0",
+    # The server side (cidx_xray.server): REST routes, request models, the
+    # graph handler's worker-thread offload, pattern YAML. Loaded only by the
+    # server, through the feature's hooks; the core depends on the same.
+    "fastapi>=0.116.0",
+    "pydantic>=2.0.0",
+    "anyio>=3.0.0",
+    "pyyaml>=6.0",
+]
+
+[project.entry-points."code_indexer.features"]
+xray = "cidx_xray.feature:make_feature"
+
+[tool.hatch.version]
+path = "src/cidx_xray/_version.py"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cidx_xray"]

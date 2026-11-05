@@ -91,7 +91,11 @@ def _run_on_repo_added(
     Returns:
         (mock_atomic_write, mock_invoke_verification_pass)
     """
+    from cidx_depmap.server.lifecycle import DescriptionFactCheck
+
     from code_indexer.global_repos.meta_description_hook import on_repo_added
+    from code_indexer.kernel.capabilities import DESCRIPTION_FACT_CHECK_HOST
+    from tests.unit.server._depmap_feature import depmap_context_installed
 
     mock_cli_manager = MagicMock()
     mock_cli_manager.check_cli_available.return_value = True
@@ -127,16 +131,29 @@ def _run_on_repo_added(
             create=True,
         ),
         patch(
-            "code_indexer.global_repos.dependency_map_analyzer.DependencyMapAnalyzer.invoke_verification_pass",
+            "cidx_depmap.server.dependency_map_analyzer.DependencyMapAnalyzer.invoke_verification_pass",
             mock_invoke,
         ),
+        # The fact check is the cidx-depmap feature's (modular phase 4g): its
+        # setting is the feature's section, and the check is installed in the
+        # core's kernel slot at on_startup.
+        depmap_context_installed(
+            settings={
+                "dep_map_fact_check_enabled": enabled,
+                "dependency_map_pass_timeout_seconds": 600,
+            }
+        ),
     ):
-        on_repo_added(
-            repo_name=dirs["repo_name"],
-            repo_url=dirs["repo_url"],
-            clone_path=dirs["clone_path"],
-            golden_repos_dir=dirs["golden_repos_dir"],
-        )
+        DESCRIPTION_FACT_CHECK_HOST.install(DescriptionFactCheck())
+        try:
+            on_repo_added(
+                repo_name=dirs["repo_name"],
+                repo_url=dirs["repo_url"],
+                clone_path=dirs["clone_path"],
+                golden_repos_dir=dirs["golden_repos_dir"],
+            )
+        finally:
+            DESCRIPTION_FACT_CHECK_HOST.uninstall()
 
     return mock_atomic_write, mock_invoke
 

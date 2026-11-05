@@ -72,7 +72,7 @@ def _make_search_result(matches, read_capped: bool = False):
 
 @pytest.fixture
 def search_engine():
-    from code_indexer.xray.search_engine import XRaySearchEngine
+    from cidx_xray.search_engine import XRaySearchEngine
 
     return XRaySearchEngine()
 
@@ -94,7 +94,7 @@ class TestEventLoopNotLeakedAcrossTests:
         )
         fake_result = _make_search_result([fake_match], read_capped=True)
 
-        with patch("code_indexer.xray.search_engine.RegexSearchService") as MockService:
+        with patch("cidx_xray.search_engine.RegexSearchService") as MockService:
             instance = MockService.return_value
             instance.search = AsyncMock(return_value=fake_result)
 

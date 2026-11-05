@@ -43,7 +43,7 @@ class TestImpactRouteDelegation:
     ):
         """AC: /scip/impact route delegates to SCIPQueryService.analyze_impact()."""
         from fastapi import Request
-        from code_indexer.server.routers.scip_queries import get_impact
+        from cidx_scip.server.routes import get_impact
 
         mock_scip_service.analyze_impact.return_value = {
             "target_symbol": "UserService",
@@ -75,7 +75,7 @@ class TestImpactRouteDelegation:
         mock_request = MagicMock(spec=Request)
 
         with patch(
-            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            "cidx_scip.server.routes._get_scip_query_service",
             return_value=mock_scip_service,
         ):
             response = get_impact(
@@ -105,7 +105,7 @@ class TestImpactRouteDelegation:
     ):
         """Verify project parameter is passed as repository_alias to service."""
         from fastapi import Request
-        from code_indexer.server.routers.scip_queries import get_impact
+        from cidx_scip.server.routes import get_impact
 
         mock_scip_service.analyze_impact.return_value = {
             "target_symbol": "UserService",
@@ -119,7 +119,7 @@ class TestImpactRouteDelegation:
         mock_request = MagicMock(spec=Request)
 
         with patch(
-            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            "cidx_scip.server.routes._get_scip_query_service",
             return_value=mock_scip_service,
         ):
             get_impact(
@@ -147,7 +147,7 @@ class TestCallchainRouteDelegation:
     ):
         """AC: /scip/callchain route delegates to SCIPQueryService.trace_callchain()."""
         from fastapi import Request
-        from code_indexer.server.routers.scip_queries import get_callchain
+        from cidx_scip.server.routes import get_callchain
 
         mock_scip_service.trace_callchain.return_value = (
             [
@@ -163,7 +163,7 @@ class TestCallchainRouteDelegation:
         mock_request = MagicMock(spec=Request)
 
         with patch(
-            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            "cidx_scip.server.routes._get_scip_query_service",
             return_value=mock_scip_service,
         ):
             response = get_callchain(
@@ -194,14 +194,14 @@ class TestCallchainRouteDelegation:
     ):
         """Verify project parameter is passed as repository_alias to service."""
         from fastapi import Request
-        from code_indexer.server.routers.scip_queries import get_callchain
+        from cidx_scip.server.routes import get_callchain
 
         mock_scip_service.trace_callchain.return_value = ([], [])
 
         mock_request = MagicMock(spec=Request)
 
         with patch(
-            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            "cidx_scip.server.routes._get_scip_query_service",
             return_value=mock_scip_service,
         ):
             get_callchain(
@@ -231,7 +231,7 @@ class TestContextRouteDelegation:
     ):
         """AC: /scip/context route delegates to SCIPQueryService.get_context()."""
         from fastapi import Request
-        from code_indexer.server.routers.scip_queries import get_context
+        from cidx_scip.server.routes import get_context
 
         mock_scip_service.get_context.return_value = {
             "target_symbol": "UserService",
@@ -262,7 +262,7 @@ class TestContextRouteDelegation:
         mock_request = MagicMock(spec=Request)
 
         with patch(
-            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            "cidx_scip.server.routes._get_scip_query_service",
             return_value=mock_scip_service,
         ):
             response = get_context(
@@ -293,7 +293,7 @@ class TestContextRouteDelegation:
     ):
         """Verify project parameter is passed as repository_alias to service."""
         from fastapi import Request
-        from code_indexer.server.routers.scip_queries import get_context
+        from cidx_scip.server.routes import get_context
 
         mock_scip_service.get_context.return_value = {
             "target_symbol": "UserService",
@@ -307,7 +307,7 @@ class TestContextRouteDelegation:
         mock_request = MagicMock(spec=Request)
 
         with patch(
-            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            "cidx_scip.server.routes._get_scip_query_service",
             return_value=mock_scip_service,
         ):
             get_context(

@@ -198,16 +198,12 @@ def _import_what_create_app_imports_first() -> None:
         mcp_self_registration_service,
         memory_governor,
     )
-    from code_indexer.server.services.xray_graph_governor import (  # noqa: F401
-        k_calibration_store,
-    )
     from code_indexer.server.startup import (  # noqa: F401
         app_wiring,
         lifespan,
         service_init,
     )
     from code_indexer.server.web import auth  # noqa: F401
-    from code_indexer.server.wiki import wiki_cache_invalidator  # noqa: F401
     from code_indexer.utils import exception_logger  # noqa: F401
 
 

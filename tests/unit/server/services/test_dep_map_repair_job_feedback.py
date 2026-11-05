@@ -28,6 +28,7 @@ from unittest.mock import Mock, patch
 from tests.unit.server.services.test_dep_map_health_detector import (
     make_healthy_output_dir,
 )
+from tests.unit.server._depmap_feature import depmap_service_installed
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -36,7 +37,7 @@ from tests.unit.server.services.test_dep_map_health_detector import (
 
 
 def _get_health_detector():
-    from code_indexer.server.services.dep_map_health_detector import (
+    from cidx_depmap.server.dep_map_health_detector import (
         DepMapHealthDetector,
     )
 
@@ -44,14 +45,14 @@ def _get_health_detector():
 
 
 def _get_index_regenerator():
-    from code_indexer.server.services.dep_map_index_regenerator import IndexRegenerator
+    from cidx_depmap.server.dep_map_index_regenerator import IndexRegenerator
 
     return IndexRegenerator()
 
 
 def _make_executor(domain_analyzer=None, journal_callback=None, progress_callback=None):
     """Build DepMapRepairExecutor with real detector/regenerator."""
-    from code_indexer.server.services.dep_map_repair_executor import (
+    from cidx_depmap.server.dep_map_repair_executor import (
         DepMapRepairExecutor,
     )
 
@@ -126,7 +127,7 @@ class TestAC1TrackingBackendStatus:
         Then tracking_backend.update_tracking(status='running') is called
         before the executor runs.
         """
-        from code_indexer.server.web.dependency_map_routes import (
+        from cidx_depmap.server.web.routes import (
             _run_repair_with_feedback,
         )
 
@@ -161,7 +162,7 @@ class TestAC1TrackingBackendStatus:
         Given repair completes successfully
         Then tracking_backend.update_tracking(status='completed') is called.
         """
-        from code_indexer.server.web.dependency_map_routes import (
+        from cidx_depmap.server.web.routes import (
             _run_repair_with_feedback,
         )
 
@@ -194,7 +195,7 @@ class TestAC1TrackingBackendStatus:
         Given repair throws an unexpected exception
         Then tracking_backend.update_tracking(status='failed') is called in finally block.
         """
-        from code_indexer.server.web.dependency_map_routes import (
+        from cidx_depmap.server.web.routes import (
             _run_repair_with_feedback,
         )
 
@@ -220,9 +221,9 @@ class TestAC1TrackingBackendStatus:
 
         # Use an exploding domain_analyzer to force failure path
         with patch(
-            "code_indexer.server.web.dependency_map_routes._build_repair_executor"
+            "cidx_depmap.server.web.routes._build_repair_executor"
         ) as mock_build:
-            from code_indexer.server.services.dep_map_repair_executor import (
+            from cidx_depmap.server.dep_map_repair_executor import (
                 DepMapRepairExecutor,
             )
 
@@ -265,9 +266,7 @@ class TestAC2ActivityJournalInitialization:
         """
         from unittest.mock import MagicMock
 
-        import unittest.mock as _mock
-
-        from code_indexer.server.web.dependency_map_routes import (
+        from cidx_depmap.server.web.routes import (
             _run_repair_with_feedback,
         )
 
@@ -285,10 +284,7 @@ class TestAC2ActivityJournalInitialization:
         journal.log = Mock()
         journal.finalize = Mock()
 
-        with _mock.patch(
-            "code_indexer.server.web.dependency_map_routes._get_dep_map_service_from_state",
-            return_value=mock_dep_map_service,
-        ):
+        with depmap_service_installed(mock_dep_map_service):
             _run_repair_with_feedback(
                 output_dir=output_dir,
                 tracking_backend=tracking_backend,
@@ -309,9 +305,7 @@ class TestAC2ActivityJournalInitialization:
         """
         from unittest.mock import MagicMock
 
-        import unittest.mock as _mock
-
-        from code_indexer.server.web.dependency_map_routes import (
+        from cidx_depmap.server.web.routes import (
             _run_repair_with_feedback,
         )
 
@@ -329,10 +323,7 @@ class TestAC2ActivityJournalInitialization:
         journal.log = Mock()
         journal.finalize = Mock()
 
-        with _mock.patch(
-            "code_indexer.server.web.dependency_map_routes._get_dep_map_service_from_state",
-            return_value=mock_dep_map_service,
-        ):
+        with depmap_service_installed(mock_dep_map_service):
             _run_repair_with_feedback(
                 output_dir=output_dir,
                 tracking_backend=tracking_backend,
@@ -354,7 +345,7 @@ class TestAC2ActivityJournalInitialization:
         Given journal.init() raises an exception
         Then repair continues (does not raise) and tracking backend is still updated.
         """
-        from code_indexer.server.web.dependency_map_routes import (
+        from cidx_depmap.server.web.routes import (
             _run_repair_with_feedback,
         )
 
@@ -400,7 +391,7 @@ class TestAC3JobTrackerAndProgressMilestones:
         Given repair is triggered
         Then job_tracker.register_job() is called with operation_type='dependency_map_repair'.
         """
-        from code_indexer.server.web.dependency_map_routes import (
+        from cidx_depmap.server.web.routes import (
             _run_repair_with_feedback,
         )
 
@@ -431,7 +422,7 @@ class TestAC3JobTrackerAndProgressMilestones:
         When _get_progress_from_service() is called
         Then it returns the progress and progress_info for that job.
         """
-        from code_indexer.server.web.dependency_map_routes import (
+        from cidx_depmap.server.web.routes import (
             _get_progress_from_service,
         )
 
@@ -479,7 +470,7 @@ class TestAC3JobTrackerAndProgressMilestones:
         output_dir = tmp_path
         executor = _make_executor(progress_callback=_capture_progress)
 
-        from code_indexer.server.services.dep_map_health_detector import (
+        from cidx_depmap.server.dep_map_health_detector import (
             DepMapHealthDetector,
         )
 
@@ -509,7 +500,7 @@ class TestAC3JobTrackerAndProgressMilestones:
         output_dir = tmp_path
         executor = _make_executor(progress_callback=_capture_progress)
 
-        from code_indexer.server.services.dep_map_health_detector import (
+        from cidx_depmap.server.dep_map_health_detector import (
             DepMapHealthDetector,
         )
 
@@ -529,7 +520,7 @@ class TestAC3JobTrackerAndProgressMilestones:
         Given repair completes successfully
         Then job_tracker.complete_job() is called with the registered job_id.
         """
-        from code_indexer.server.web.dependency_map_routes import (
+        from cidx_depmap.server.web.routes import (
             _run_repair_with_feedback,
         )
 
@@ -554,7 +545,7 @@ class TestAC3JobTrackerAndProgressMilestones:
         Given repair executor raises an exception
         Then job_tracker.fail_job() is called (not complete_job).
         """
-        from code_indexer.server.web.dependency_map_routes import (
+        from cidx_depmap.server.web.routes import (
             _run_repair_with_feedback,
         )
 
@@ -565,9 +556,9 @@ class TestAC3JobTrackerAndProgressMilestones:
         journal = _make_mock_activity_journal(tmp_path)
 
         with patch(
-            "code_indexer.server.web.dependency_map_routes._build_repair_executor"
+            "cidx_depmap.server.web.routes._build_repair_executor"
         ) as mock_build:
-            from code_indexer.server.services.dep_map_repair_executor import (
+            from cidx_depmap.server.dep_map_repair_executor import (
                 DepMapRepairExecutor,
             )
 
@@ -632,7 +623,7 @@ class TestAC4JournalPathPropagation:
         This verifies that _build_activity_journal_appendix() will be
         included in Claude's Pass 2 prompt.
         """
-        from code_indexer.server.web.dependency_map_routes import _build_domain_analyzer
+        from cidx_depmap.server.web.routes import _build_domain_analyzer
 
         journal_dir = tmp_path / "repair-journal"
         journal_dir.mkdir()
@@ -694,7 +685,7 @@ class TestAC5CompletionStateCleanup:
         Then tracking_backend.update_tracking is called with a terminal status
         (never left stuck in 'running' state).
         """
-        from code_indexer.server.web.dependency_map_routes import (
+        from cidx_depmap.server.web.routes import (
             _run_repair_with_feedback,
         )
 
@@ -705,7 +696,7 @@ class TestAC5CompletionStateCleanup:
         journal = _make_mock_activity_journal(tmp_path)
 
         with patch(
-            "code_indexer.server.web.dependency_map_routes._build_repair_executor"
+            "cidx_depmap.server.web.routes._build_repair_executor"
         ) as mock_build:
             executor = Mock()
             executor.execute.side_effect = RuntimeError("Catastrophic failure")
@@ -734,7 +725,7 @@ class TestAC5CompletionStateCleanup:
         Given repair completes
         Then activity_journal.finalize() is called to clean up the journal.
         """
-        from code_indexer.server.web.dependency_map_routes import (
+        from cidx_depmap.server.web.routes import (
             _run_repair_with_feedback,
         )
 
@@ -758,7 +749,7 @@ class TestAC5CompletionStateCleanup:
         Given repair executor raises an exception
         Then activity_journal.clear() is still called (in finally block).
         """
-        from code_indexer.server.web.dependency_map_routes import (
+        from cidx_depmap.server.web.routes import (
             _run_repair_with_feedback,
         )
 
@@ -769,7 +760,7 @@ class TestAC5CompletionStateCleanup:
         journal = _make_mock_activity_journal(tmp_path)
 
         with patch(
-            "code_indexer.server.web.dependency_map_routes._build_repair_executor"
+            "cidx_depmap.server.web.routes._build_repair_executor"
         ) as mock_build:
             executor = Mock()
             executor.execute.side_effect = RuntimeError("Catastrophic failure")
@@ -799,7 +790,7 @@ class TestRepairExecutorProgressCallback:
         When progress_callback is passed
         Then it is accepted without error.
         """
-        from code_indexer.server.services.dep_map_repair_executor import (
+        from cidx_depmap.server.dep_map_repair_executor import (
             DepMapRepairExecutor,
         )
 
@@ -821,7 +812,7 @@ class TestRepairExecutorProgressCallback:
         When execute() is called on a healthy output dir (phases 1-4 skipped)
         Then progress_callback is called at least for Phase 5 and completion.
         """
-        from code_indexer.server.services.dep_map_repair_executor import (
+        from cidx_depmap.server.dep_map_repair_executor import (
             DepMapRepairExecutor,
         )
 
@@ -838,7 +829,7 @@ class TestRepairExecutorProgressCallback:
             progress_callback=cb,
         )
 
-        from code_indexer.server.services.dep_map_health_detector import (
+        from cidx_depmap.server.dep_map_health_detector import (
             DepMapHealthDetector,
         )
 
@@ -861,7 +852,7 @@ class TestRepairExecutorProgressCallback:
         When execute() runs
         Then no exception is raised.
         """
-        from code_indexer.server.services.dep_map_repair_executor import (
+        from cidx_depmap.server.dep_map_repair_executor import (
             DepMapRepairExecutor,
         )
 
@@ -873,7 +864,7 @@ class TestRepairExecutorProgressCallback:
             progress_callback=None,
         )
 
-        from code_indexer.server.services.dep_map_health_detector import (
+        from cidx_depmap.server.dep_map_health_detector import (
             DepMapHealthDetector,
         )
 
@@ -909,7 +900,7 @@ class TestNoneComponentsGracefulDegradation:
         This tests the explicit None guards (Finding 2): without them, calling
         activity_journal.init() on None raises AttributeError.
         """
-        from code_indexer.server.web.dependency_map_routes import (
+        from cidx_depmap.server.web.routes import (
             _run_repair_with_feedback,
         )
 
@@ -933,7 +924,7 @@ class TestNoneComponentsGracefulDegradation:
         Verifies the function does not short-circuit or fail early due to
         missing components.
         """
-        from code_indexer.server.web.dependency_map_routes import (
+        from cidx_depmap.server.web.routes import (
             _run_repair_with_feedback,
         )
 
@@ -945,10 +936,10 @@ class TestNoneComponentsGracefulDegradation:
         # Patch _build_repair_executor to verify it is actually called
         # (confirms repair proceeds, not just bails out silently)
         with patch(
-            "code_indexer.server.web.dependency_map_routes._build_repair_executor"
+            "cidx_depmap.server.web.routes._build_repair_executor"
         ) as mock_build:
             from unittest.mock import Mock as _Mock
-            from code_indexer.server.services.dep_map_repair_executor import (
+            from cidx_depmap.server.dep_map_repair_executor import (
                 DepMapRepairExecutor,
             )
 
@@ -984,7 +975,7 @@ class TestNoneComponentsGracefulDegradation:
         tracking_backend.update_tracking(status='failed') on None raises
         AttributeError, leaving the system state ambiguous.
         """
-        from code_indexer.server.web.dependency_map_routes import (
+        from cidx_depmap.server.web.routes import (
             _run_repair_with_feedback,
         )
 
@@ -992,7 +983,7 @@ class TestNoneComponentsGracefulDegradation:
         output_dir = tmp_path
 
         with patch(
-            "code_indexer.server.web.dependency_map_routes._build_repair_executor"
+            "cidx_depmap.server.web.routes._build_repair_executor"
         ) as mock_build:
             from unittest.mock import Mock as _Mock
 

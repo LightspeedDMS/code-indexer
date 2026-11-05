@@ -39,6 +39,8 @@ import subprocess
 from collections.abc import Sequence as _Sequence
 from typing import Optional, Sequence, Union
 
+from cidx_sdk.seams.git import redact_url_credentials as redact_url_credentials
+
 from code_indexer.utils.credential_redaction import (
     redact_command,
     redact_command_output,
@@ -63,16 +65,50 @@ def _cap(text: Optional[str], max_chars: int) -> str:
     return text[: max(0, max_chars)]
 
 
+# Masks the userinfo of a ``scheme://user:secret@host`` URL. A git failure
+# echoes a credentialed remote URL back (in ``stderr`` as well as argv), and
+# the formatted diagnostic travels into job errors, API responses and logs, so
+# every channel the formatter emits passes through it. It lives in the SDK
+# (``cidx_sdk.seams.git``) because the local git backend, its own
+# distribution, redacts the same way; re-exported here for existing imports.
+
+
+def _redact_and_cap(
+    text: object,
+    max_chars: int,
+    cmd: Union[str, Sequence[str], None] = None,
+) -> str:
+    """Redact credentials, THEN bound the length. The order is load-bearing.
+
+    Capping first can sever a credentialed URL before the ``@`` the pattern
+    anchors on; the regex then no longer matches, and a PREFIX of a live token
+    survives into the output. Redacting first cannot do that, and never costs
+    room -- ``***`` is shorter than any userinfo it replaces, so the redacted
+    text is always <= the original and the cap still bounds the result.
+    """
+    # redact_command_output masks what ``cmd`` carried wherever the output
+    # echoes it; redact_url_credentials then renders any stream type (bytes,
+    # None, test doubles) as text with URL userinfo masked.
+    return _cap(
+        redact_url_credentials(redact_command_output(text or "", cmd or ())),
+        max_chars,
+    )
+
+
 def _format_cmd(cmd: Union[str, Sequence[str], None]) -> str:
     """cmd mirrors Popen's args and may be a str, a non-str/bytes
     sequence, or (for a genuinely unknown command) None. Only join real
     sequences -- joining a str's characters would corrupt it into
-    space-separated letters."""
+    space-separated letters.
+
+    Credentials embedded in a URL argument are redacted: the command text is
+    surfaced to callers and logs, and a repo URL may carry a PAT.
+    """
     if cmd is None:
         return "<unknown>"
     if isinstance(cmd, _Sequence) and not isinstance(cmd, (str, bytes)):
-        return " ".join(str(part) for part in cmd)
-    return str(cmd)
+        return redact_url_credentials(" ".join(str(part) for part in cmd))
+    return redact_url_credentials(str(cmd))
 
 
 def format_subprocess_failure_diagnostic(
@@ -88,17 +124,21 @@ def format_subprocess_failure_diagnostic(
     which can be empty when the failing command's real diagnostic lands
     on stdout instead (Bug #1832).
 
+    This is the single formatting boundary every public entry point in this
+    module funnels through, so credential redaction is applied HERE -- to argv
+    and to both captured streams alike -- rather than to argv only.
+
     Bug #2012: the command and both streams are credential-redacted (URL
-    userinfo, token-bearing option values) -- a diagnostic is logged and
-    returned, so it must never carry what the command was given.
+    userinfo, token-bearing option values, any credential the argv carried
+    that the output echoes) -- a diagnostic is logged and returned, so it must
+    never carry what the command was given. Streams are redacted BEFORE they
+    are capped (see ``_redact_and_cap``).
     """
     safe_cmd = redact_command(cmd) if cmd is not None else None
-    safe_stdout = redact_command_output(stdout, cmd or ())
-    safe_stderr = redact_command_output(stderr, cmd or ())
     return (
         f"command='{_format_cmd(safe_cmd)}' exit_code={returncode} "
-        f"stdout={_cap(safe_stdout, max_chars)!r} "
-        f"stderr={_cap(safe_stderr, max_chars)!r}"
+        f"stdout={_redact_and_cap(stdout, max_chars, cmd)!r} "
+        f"stderr={_redact_and_cap(stderr, max_chars, cmd)!r}"
     )
 
 

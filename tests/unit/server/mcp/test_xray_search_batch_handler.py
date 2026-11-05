@@ -44,7 +44,7 @@ def _xray_batch_access_filtering_bypass():
     mock_access_service = MagicMock()
     mock_access_service.is_admin_user.return_value = True
     with patch(
-        "code_indexer.server.mcp.handlers.xray_batch._get_access_filtering_service",
+        "cidx_xray.server.mcp.xray_batch._get_access_filtering_service",
         return_value=mock_access_service,
     ):
         yield
@@ -111,7 +111,7 @@ class TestResolveBatchEvaluator:
     """Pure resolver returns (eval_code, None) or ('', structured_error)."""
 
     def test_inline_evaluator_code_returned(self):
-        from code_indexer.server.mcp.handlers.xray_batch import resolve_batch_evaluator
+        from cidx_xray.server.mcp.xray_batch import resolve_batch_evaluator
 
         scan = {"driver_regex": r"def ", "evaluator_code": VALID_EVAL}
         code, err = resolve_batch_evaluator(scan, "myrepo-global", Path("/cidx-meta"))
@@ -119,7 +119,7 @@ class TestResolveBatchEvaluator:
         assert "evaluate_node" in code
 
     def test_neither_returns_default_evaluator(self):
-        from code_indexer.server.mcp.handlers.xray_batch import resolve_batch_evaluator
+        from cidx_xray.server.mcp.xray_batch import resolve_batch_evaluator
 
         scan = {"driver_regex": r"def "}
         code, err = resolve_batch_evaluator(scan, "myrepo-global", Path("/cidx-meta"))
@@ -127,7 +127,7 @@ class TestResolveBatchEvaluator:
         assert "evaluate_node" in code
 
     def test_pattern_not_found_returns_structured_error(self, tmp_path):
-        from code_indexer.server.mcp.handlers.xray_batch import resolve_batch_evaluator
+        from cidx_xray.server.mcp.xray_batch import resolve_batch_evaluator
 
         cidx_meta = tmp_path / "cidx-meta"
         cidx_meta.mkdir()
@@ -139,7 +139,7 @@ class TestResolveBatchEvaluator:
         assert err["error"] == "pattern_not_found"
 
     def test_pattern_found_in_any_scope(self, tmp_path):
-        from code_indexer.server.mcp.handlers.xray_batch import resolve_batch_evaluator
+        from cidx_xray.server.mcp.xray_batch import resolve_batch_evaluator
 
         cidx_meta = tmp_path / "cidx-meta"
         any_dir = cidx_meta / "xray-patterns" / "__any__"
@@ -155,7 +155,7 @@ class TestResolveBatchEvaluator:
         assert "evaluate_node" in code
 
     def test_repo_specific_pattern_shadows_any(self, tmp_path):
-        from code_indexer.server.mcp.handlers.xray_batch import resolve_batch_evaluator
+        from cidx_xray.server.mcp.xray_batch import resolve_batch_evaluator
 
         cidx_meta = tmp_path / "cidx-meta"
         any_dir = cidx_meta / "xray-patterns" / "__any__"
@@ -180,7 +180,7 @@ class TestResolveBatchEvaluator:
         assert "repo_scope" in code
 
     def test_malformed_yaml_returns_structured_error(self, tmp_path):
-        from code_indexer.server.mcp.handlers.xray_batch import resolve_batch_evaluator
+        from cidx_xray.server.mcp.xray_batch import resolve_batch_evaluator
 
         cidx_meta = tmp_path / "cidx-meta"
         any_dir = cidx_meta / "xray-patterns" / "__any__"
@@ -221,7 +221,7 @@ class TestTruncateXrayBatchResult:
         return cache
 
     def test_small_result_returns_inline(self, tmp_path):
-        from code_indexer.server.mcp.handlers.xray_batch import (
+        from cidx_xray.server.mcp.xray_batch import (
             _truncate_xray_batch_result,
         )
 
@@ -249,7 +249,7 @@ class TestTruncateXrayBatchResult:
         assert len(out["matches"]) == 1
 
     def test_large_result_stores_cache(self, tmp_path):
-        from code_indexer.server.mcp.handlers.xray_batch import (
+        from cidx_xray.server.mcp.xray_batch import (
             _truncate_xray_batch_result,
         )
 
@@ -292,7 +292,7 @@ class TestTruncateXrayBatchResult:
         still content-equal (matches/errors/evaluation_errors preserved),
         but is no longer the SAME object -- the degrade path always
         builds a fresh dict, now also flagged cache_unavailable=True."""
-        from code_indexer.server.mcp.handlers.xray_batch import (
+        from cidx_xray.server.mcp.xray_batch import (
             _truncate_xray_batch_result,
         )
 
@@ -315,13 +315,13 @@ class TestTruncateXrayBatchResult:
 
 class TestXraySearchBatchAuth:
     def test_unauthenticated_returns_auth_required(self):
-        from code_indexer.server.mcp.handlers.xray_batch import handle_xray_search_batch
+        from cidx_xray.server.mcp.xray_batch import handle_xray_search_batch
 
         resp = _parse_response(handle_xray_search_batch(_valid_params(), None))
         assert resp["error"] == "auth_required"
 
     def test_user_without_query_repos_returns_auth_required(self):
-        from code_indexer.server.mcp.handlers.xray_batch import handle_xray_search_batch
+        from cidx_xray.server.mcp.xray_batch import handle_xray_search_batch
         from unittest.mock import MagicMock
 
         # Build a user whose has_permission("query_repos") returns False.
@@ -338,7 +338,7 @@ class TestXraySearchBatchAuth:
 
 class TestXraySearchBatchValidation:
     def test_missing_repository_alias_returns_alias_required(self):
-        from code_indexer.server.mcp.handlers.xray_batch import handle_xray_search_batch
+        from cidx_xray.server.mcp.xray_batch import handle_xray_search_batch
 
         user = _make_user()
         params = _valid_params()
@@ -347,7 +347,7 @@ class TestXraySearchBatchValidation:
         assert resp["error"] == "alias_required"
 
     def test_empty_string_alias_returns_alias_required(self):
-        from code_indexer.server.mcp.handlers.xray_batch import handle_xray_search_batch
+        from cidx_xray.server.mcp.xray_batch import handle_xray_search_batch
 
         user = _make_user()
         resp = _parse_response(
@@ -356,7 +356,7 @@ class TestXraySearchBatchValidation:
         assert resp["error"] == "alias_required"
 
     def test_empty_list_alias_returns_alias_required(self):
-        from code_indexer.server.mcp.handlers.xray_batch import handle_xray_search_batch
+        from cidx_xray.server.mcp.xray_batch import handle_xray_search_batch
 
         user = _make_user()
         resp = _parse_response(
@@ -365,7 +365,7 @@ class TestXraySearchBatchValidation:
         assert resp["error"] == "alias_required"
 
     def test_missing_scans_returns_scans_required(self):
-        from code_indexer.server.mcp.handlers.xray_batch import handle_xray_search_batch
+        from cidx_xray.server.mcp.xray_batch import handle_xray_search_batch
 
         user = _make_user()
         params = _valid_params()
@@ -374,14 +374,14 @@ class TestXraySearchBatchValidation:
         assert resp["error"] == "scans_required"
 
     def test_empty_scans_returns_scans_required(self):
-        from code_indexer.server.mcp.handlers.xray_batch import handle_xray_search_batch
+        from cidx_xray.server.mcp.xray_batch import handle_xray_search_batch
 
         user = _make_user()
         resp = _parse_response(handle_xray_search_batch(_valid_params(scans=[]), user))
         assert resp["error"] == "scans_required"
 
     def test_scans_not_list_returns_scans_required(self):
-        from code_indexer.server.mcp.handlers.xray_batch import handle_xray_search_batch
+        from cidx_xray.server.mcp.xray_batch import handle_xray_search_batch
 
         user = _make_user()
         resp = _parse_response(
@@ -390,7 +390,7 @@ class TestXraySearchBatchValidation:
         assert resp["error"] == "scans_required"
 
     def test_too_many_repositories(self):
-        from code_indexer.server.mcp.handlers.xray_batch import handle_xray_search_batch
+        from cidx_xray.server.mcp.xray_batch import handle_xray_search_batch
 
         user = _make_user()
         aliases = [f"repo-{i}" for i in range(51)]
@@ -400,7 +400,7 @@ class TestXraySearchBatchValidation:
         assert resp["error"] == "too_many_repositories"
 
     def test_too_many_scans(self):
-        from code_indexer.server.mcp.handlers.xray_batch import handle_xray_search_batch
+        from cidx_xray.server.mcp.xray_batch import handle_xray_search_batch
 
         user = _make_user()
         scans = [{"driver_regex": "x", "search_target": "content"}] * 51
@@ -410,7 +410,7 @@ class TestXraySearchBatchValidation:
         assert resp["error"] == "too_many_scans"
 
     def test_timeout_too_low(self):
-        from code_indexer.server.mcp.handlers.xray_batch import handle_xray_search_batch
+        from cidx_xray.server.mcp.xray_batch import handle_xray_search_batch
 
         user = _make_user()
         resp = _parse_response(
@@ -419,7 +419,7 @@ class TestXraySearchBatchValidation:
         assert resp["error"] == "timeout_out_of_range"
 
     def test_timeout_too_high(self):
-        from code_indexer.server.mcp.handlers.xray_batch import handle_xray_search_batch
+        from cidx_xray.server.mcp.xray_batch import handle_xray_search_batch
 
         user = _make_user()
         resp = _parse_response(
@@ -428,7 +428,7 @@ class TestXraySearchBatchValidation:
         assert resp["error"] == "timeout_out_of_range"
 
     def test_await_seconds_out_of_range(self):
-        from code_indexer.server.mcp.handlers.xray_batch import handle_xray_search_batch
+        from cidx_xray.server.mcp.xray_batch import handle_xray_search_batch
 
         user = _make_user()
         resp = _parse_response(
@@ -437,7 +437,7 @@ class TestXraySearchBatchValidation:
         assert resp["error"] == "await_seconds_out_of_range"
 
     def test_missing_driver_regex_returns_error_with_scan_index(self):
-        from code_indexer.server.mcp.handlers.xray_batch import handle_xray_search_batch
+        from cidx_xray.server.mcp.xray_batch import handle_xray_search_batch
 
         user = _make_user()
         scans = [
@@ -451,7 +451,7 @@ class TestXraySearchBatchValidation:
         assert resp["scan_index"] == 1
 
     def test_empty_driver_regex_returns_error_with_scan_index(self):
-        from code_indexer.server.mcp.handlers.xray_batch import handle_xray_search_batch
+        from cidx_xray.server.mcp.xray_batch import handle_xray_search_batch
 
         user = _make_user()
         scans = [{"driver_regex": "", "search_target": "content"}]
@@ -462,7 +462,7 @@ class TestXraySearchBatchValidation:
         assert resp["scan_index"] == 0
 
     def test_mutually_exclusive_params_with_scan_index(self):
-        from code_indexer.server.mcp.handlers.xray_batch import handle_xray_search_batch
+        from cidx_xray.server.mcp.xray_batch import handle_xray_search_batch
 
         user = _make_user()
         scans = [
@@ -480,7 +480,7 @@ class TestXraySearchBatchValidation:
         assert resp["scan_index"] == 0
 
     def test_invalid_evaluator_code_returns_validation_error_with_scan_index(self):
-        from code_indexer.server.mcp.handlers.xray_batch import handle_xray_search_batch
+        from cidx_xray.server.mcp.xray_batch import handle_xray_search_batch
 
         user = _make_user()
         scans = [
@@ -497,7 +497,7 @@ class TestXraySearchBatchValidation:
         assert resp["scan_index"] == 0
 
     def test_json_string_array_alias_is_parsed(self):
-        from code_indexer.server.mcp.handlers.xray_batch import handle_xray_search_batch
+        from cidx_xray.server.mcp.xray_batch import handle_xray_search_batch
 
         user = _make_user()
         mock_bjm = MagicMock()
@@ -505,19 +505,19 @@ class TestXraySearchBatchValidation:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._resolve_repo_path",
+                "cidx_xray.server.mcp.xray_batch._resolve_repo_path",
                 return_value="/repos/myrepo",
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._get_arm_and_grm",
+                "cidx_xray.server.mcp.xray_batch._get_arm_and_grm",
                 return_value=(None, None),
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._get_background_job_manager",
+                "cidx_xray.server.mcp.xray_batch._get_background_job_manager",
                 return_value=mock_bjm,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._get_cidx_meta_path",
+                "cidx_xray.server.mcp.xray_batch._get_cidx_meta_path",
                 return_value=Path("/cidx-meta"),
             ),
         ):
@@ -526,7 +526,7 @@ class TestXraySearchBatchValidation:
         assert "job_id" in resp
 
     def test_duplicate_aliases_deduped(self):
-        from code_indexer.server.mcp.handlers.xray_batch import handle_xray_search_batch
+        from cidx_xray.server.mcp.xray_batch import handle_xray_search_batch
 
         user = _make_user()
         mock_bjm = MagicMock()
@@ -534,19 +534,19 @@ class TestXraySearchBatchValidation:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._resolve_repo_path",
+                "cidx_xray.server.mcp.xray_batch._resolve_repo_path",
                 return_value="/repos/myrepo",
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._get_arm_and_grm",
+                "cidx_xray.server.mcp.xray_batch._get_arm_and_grm",
                 return_value=(None, None),
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._get_background_job_manager",
+                "cidx_xray.server.mcp.xray_batch._get_background_job_manager",
                 return_value=mock_bjm,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._get_cidx_meta_path",
+                "cidx_xray.server.mcp.xray_batch._get_cidx_meta_path",
                 return_value=Path("/cidx-meta"),
             ),
         ):
@@ -565,16 +565,16 @@ class TestXraySearchBatchValidation:
 
 class TestXraySearchBatchRepoResolution:
     def test_no_repositories_resolved_returns_error_with_errors_list(self):
-        from code_indexer.server.mcp.handlers.xray_batch import handle_xray_search_batch
+        from cidx_xray.server.mcp.xray_batch import handle_xray_search_batch
 
         user = _make_user()
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._resolve_repo_path",
+                "cidx_xray.server.mcp.xray_batch._resolve_repo_path",
                 return_value=None,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._get_arm_and_grm",
+                "cidx_xray.server.mcp.xray_batch._get_arm_and_grm",
                 return_value=(None, None),
             ),
         ):
@@ -583,7 +583,7 @@ class TestXraySearchBatchRepoResolution:
         assert "errors" in resp
 
     def test_partial_resolution_submits_job_for_resolved_repos(self):
-        from code_indexer.server.mcp.handlers.xray_batch import handle_xray_search_batch
+        from cidx_xray.server.mcp.xray_batch import handle_xray_search_batch
 
         user = _make_user()
         mock_bjm = MagicMock()
@@ -594,19 +594,19 @@ class TestXraySearchBatchRepoResolution:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._resolve_repo_path",
+                "cidx_xray.server.mcp.xray_batch._resolve_repo_path",
                 side_effect=_resolve,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._get_arm_and_grm",
+                "cidx_xray.server.mcp.xray_batch._get_arm_and_grm",
                 return_value=(None, None),
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._get_background_job_manager",
+                "cidx_xray.server.mcp.xray_batch._get_background_job_manager",
                 return_value=mock_bjm,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._get_cidx_meta_path",
+                "cidx_xray.server.mcp.xray_batch._get_cidx_meta_path",
                 return_value=Path("/cidx-meta"),
             ),
         ):
@@ -615,7 +615,7 @@ class TestXraySearchBatchRepoResolution:
         assert "job_id" in resp
 
     def test_global_alias_fallback_resolves_bare_alias(self):
-        from code_indexer.server.mcp.handlers.xray_batch import handle_xray_search_batch
+        from cidx_xray.server.mcp.xray_batch import handle_xray_search_batch
 
         user = _make_user()
         mock_bjm = MagicMock()
@@ -633,19 +633,19 @@ class TestXraySearchBatchRepoResolution:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._resolve_repo_path",
+                "cidx_xray.server.mcp.xray_batch._resolve_repo_path",
                 side_effect=_resolve,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._get_arm_and_grm",
+                "cidx_xray.server.mcp.xray_batch._get_arm_and_grm",
                 return_value=(mock_arm, mock_grm),
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._get_background_job_manager",
+                "cidx_xray.server.mcp.xray_batch._get_background_job_manager",
                 return_value=mock_bjm,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._get_cidx_meta_path",
+                "cidx_xray.server.mcp.xray_batch._get_cidx_meta_path",
                 return_value=Path("/cidx-meta"),
             ),
         ):
@@ -661,7 +661,7 @@ class TestXraySearchBatchRepoResolution:
 
 class TestXraySearchBatchJobSubmission:
     def test_returns_single_job_id_not_job_ids(self):
-        from code_indexer.server.mcp.handlers.xray_batch import handle_xray_search_batch
+        from cidx_xray.server.mcp.xray_batch import handle_xray_search_batch
 
         user = _make_user()
         mock_bjm = MagicMock()
@@ -669,19 +669,19 @@ class TestXraySearchBatchJobSubmission:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._resolve_repo_path",
+                "cidx_xray.server.mcp.xray_batch._resolve_repo_path",
                 return_value="/repos/myrepo",
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._get_arm_and_grm",
+                "cidx_xray.server.mcp.xray_batch._get_arm_and_grm",
                 return_value=(None, None),
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._get_background_job_manager",
+                "cidx_xray.server.mcp.xray_batch._get_background_job_manager",
                 return_value=mock_bjm,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._get_cidx_meta_path",
+                "cidx_xray.server.mcp.xray_batch._get_cidx_meta_path",
                 return_value=Path("/cidx-meta"),
             ),
         ):
@@ -690,7 +690,7 @@ class TestXraySearchBatchJobSubmission:
         assert "job_ids" not in resp
 
     def test_operation_type_is_xray_search_batch(self):
-        from code_indexer.server.mcp.handlers.xray_batch import handle_xray_search_batch
+        from cidx_xray.server.mcp.xray_batch import handle_xray_search_batch
 
         user = _make_user()
         mock_bjm = MagicMock()
@@ -698,19 +698,19 @@ class TestXraySearchBatchJobSubmission:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._resolve_repo_path",
+                "cidx_xray.server.mcp.xray_batch._resolve_repo_path",
                 return_value="/repos/myrepo",
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._get_arm_and_grm",
+                "cidx_xray.server.mcp.xray_batch._get_arm_and_grm",
                 return_value=(None, None),
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._get_background_job_manager",
+                "cidx_xray.server.mcp.xray_batch._get_background_job_manager",
                 return_value=mock_bjm,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._get_cidx_meta_path",
+                "cidx_xray.server.mcp.xray_batch._get_cidx_meta_path",
                 return_value=Path("/cidx-meta"),
             ),
         ):
@@ -720,7 +720,7 @@ class TestXraySearchBatchJobSubmission:
         assert call_kwargs["operation_type"] == "xray_search_batch"
 
     def test_repo_alias_none_passed_to_submit_job(self):
-        from code_indexer.server.mcp.handlers.xray_batch import handle_xray_search_batch
+        from cidx_xray.server.mcp.xray_batch import handle_xray_search_batch
 
         user = _make_user()
         mock_bjm = MagicMock()
@@ -728,19 +728,19 @@ class TestXraySearchBatchJobSubmission:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._resolve_repo_path",
+                "cidx_xray.server.mcp.xray_batch._resolve_repo_path",
                 return_value="/repos/myrepo",
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._get_arm_and_grm",
+                "cidx_xray.server.mcp.xray_batch._get_arm_and_grm",
                 return_value=(None, None),
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._get_background_job_manager",
+                "cidx_xray.server.mcp.xray_batch._get_background_job_manager",
                 return_value=mock_bjm,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._get_cidx_meta_path",
+                "cidx_xray.server.mcp.xray_batch._get_cidx_meta_path",
                 return_value=Path("/cidx-meta"),
             ),
         ):
@@ -759,7 +759,7 @@ class TestRunXrayBatchJob:
     """Tests for the batch worker."""
 
     def test_matches_tagged_with_repo_alias_scan_index_line_number(self, tmp_path):
-        from code_indexer.server.mcp.handlers.xray_batch import _run_xray_batch_job
+        from cidx_xray.server.mcp.xray_batch import _run_xray_batch_job
 
         match = {"file_path": "a.py", "line_number": 5, "pattern": "fn", "snippet": "x"}
         cell_result = _make_cell_result(matches=[match])
@@ -783,11 +783,11 @@ class TestRunXrayBatchJob:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch.XRaySearchEngine",
+                "cidx_xray.server.mcp.xray_batch.XRaySearchEngine",
                 return_value=mock_engine,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch.resolve_batch_evaluator",
+                "cidx_xray.server.mcp.xray_batch.resolve_batch_evaluator",
                 return_value=(VALID_EVAL, None),
             ),
         ):
@@ -811,7 +811,7 @@ class TestRunXrayBatchJob:
         assert m["line_number"] == 5
 
     def test_pattern_name_tagged_in_match(self, tmp_path):
-        from code_indexer.server.mcp.handlers.xray_batch import _run_xray_batch_job
+        from cidx_xray.server.mcp.xray_batch import _run_xray_batch_job
 
         match = {"file_path": "a.py", "line_number": 3, "pattern": "fn", "snippet": "x"}
         mock_engine = MagicMock()
@@ -833,11 +833,11 @@ class TestRunXrayBatchJob:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch.XRaySearchEngine",
+                "cidx_xray.server.mcp.xray_batch.XRaySearchEngine",
                 return_value=mock_engine,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch.resolve_batch_evaluator",
+                "cidx_xray.server.mcp.xray_batch.resolve_batch_evaluator",
                 return_value=(VALID_EVAL, None),
             ),
         ):
@@ -856,7 +856,7 @@ class TestRunXrayBatchJob:
         assert result["matches"][0]["pattern_name"] == "catch-rethrow"
 
     def test_progress_called_once_per_repo(self, tmp_path):
-        from code_indexer.server.mcp.handlers.xray_batch import _run_xray_batch_job
+        from cidx_xray.server.mcp.xray_batch import _run_xray_batch_job
 
         mock_engine = MagicMock()
         mock_engine.run.return_value = _make_cell_result()
@@ -889,11 +889,11 @@ class TestRunXrayBatchJob:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch.XRaySearchEngine",
+                "cidx_xray.server.mcp.xray_batch.XRaySearchEngine",
                 return_value=mock_engine,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch.resolve_batch_evaluator",
+                "cidx_xray.server.mcp.xray_batch.resolve_batch_evaluator",
                 return_value=(VALID_EVAL, None),
             ),
         ):
@@ -915,7 +915,7 @@ class TestRunXrayBatchJob:
         assert progress_calls[1] == 100
 
     def test_phase1_failed_captured_as_cell_error(self, tmp_path):
-        from code_indexer.server.mcp.handlers.xray_batch import _run_xray_batch_job
+        from cidx_xray.server.mcp.xray_batch import _run_xray_batch_job
 
         mock_engine = MagicMock()
         mock_engine.run.return_value = _make_cell_result(phase1_failed=True)
@@ -936,11 +936,11 @@ class TestRunXrayBatchJob:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch.XRaySearchEngine",
+                "cidx_xray.server.mcp.xray_batch.XRaySearchEngine",
                 return_value=mock_engine,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch.resolve_batch_evaluator",
+                "cidx_xray.server.mcp.xray_batch.resolve_batch_evaluator",
                 return_value=(VALID_EVAL, None),
             ),
         ):
@@ -962,7 +962,7 @@ class TestRunXrayBatchJob:
         assert result["partial"] is True
 
     def test_evaluation_errors_tagged_with_repo_and_scan_index(self, tmp_path):
-        from code_indexer.server.mcp.handlers.xray_batch import _run_xray_batch_job
+        from cidx_xray.server.mcp.xray_batch import _run_xray_batch_job
 
         eval_error = {
             "file_path": "a.py",
@@ -989,11 +989,11 @@ class TestRunXrayBatchJob:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch.XRaySearchEngine",
+                "cidx_xray.server.mcp.xray_batch.XRaySearchEngine",
                 return_value=mock_engine,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch.resolve_batch_evaluator",
+                "cidx_xray.server.mcp.xray_batch.resolve_batch_evaluator",
                 return_value=(VALID_EVAL, None),
             ),
         ):
@@ -1017,7 +1017,7 @@ class TestRunXrayBatchJob:
         assert result["partial"] is True
 
     def test_cancellation_before_first_cell_stops_loop(self, tmp_path):
-        from code_indexer.server.mcp.handlers.xray_batch import _run_xray_batch_job
+        from cidx_xray.server.mcp.xray_batch import _run_xray_batch_job
 
         mock_engine = MagicMock()
         mock_bjm = MagicMock()
@@ -1040,11 +1040,11 @@ class TestRunXrayBatchJob:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch.XRaySearchEngine",
+                "cidx_xray.server.mcp.xray_batch.XRaySearchEngine",
                 return_value=mock_engine,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch.resolve_batch_evaluator",
+                "cidx_xray.server.mcp.xray_batch.resolve_batch_evaluator",
                 return_value=(VALID_EVAL, None),
             ),
         ):
@@ -1065,7 +1065,7 @@ class TestRunXrayBatchJob:
         mock_engine.run.assert_not_called()
 
     def test_cell_execution_exception_captured_as_cell_error(self, tmp_path):
-        from code_indexer.server.mcp.handlers.xray_batch import _run_xray_batch_job
+        from cidx_xray.server.mcp.xray_batch import _run_xray_batch_job
 
         mock_engine = MagicMock()
         mock_engine.run.side_effect = RuntimeError("engine exploded")
@@ -1086,11 +1086,11 @@ class TestRunXrayBatchJob:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch.XRaySearchEngine",
+                "cidx_xray.server.mcp.xray_batch.XRaySearchEngine",
                 return_value=mock_engine,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch.resolve_batch_evaluator",
+                "cidx_xray.server.mcp.xray_batch.resolve_batch_evaluator",
                 return_value=(VALID_EVAL, None),
             ),
         ):
@@ -1116,7 +1116,7 @@ class TestRunXrayBatchJob:
     def test_pattern_resolution_error_becomes_cell_error_and_skips_engine(
         self, tmp_path
     ):
-        from code_indexer.server.mcp.handlers.xray_batch import _run_xray_batch_job
+        from cidx_xray.server.mcp.xray_batch import _run_xray_batch_job
 
         mock_engine = MagicMock()
         mock_bjm = MagicMock()
@@ -1136,11 +1136,11 @@ class TestRunXrayBatchJob:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch.XRaySearchEngine",
+                "cidx_xray.server.mcp.xray_batch.XRaySearchEngine",
                 return_value=mock_engine,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch.resolve_batch_evaluator",
+                "cidx_xray.server.mcp.xray_batch.resolve_batch_evaluator",
                 return_value=(
                     "",
                     {"error": "pattern_not_found", "message": "not found"},
@@ -1166,7 +1166,7 @@ class TestRunXrayBatchJob:
         mock_engine.run.assert_not_called()
 
     def test_result_counters_correct_for_full_matrix(self, tmp_path):
-        from code_indexer.server.mcp.handlers.xray_batch import _run_xray_batch_job
+        from cidx_xray.server.mcp.xray_batch import _run_xray_batch_job
 
         mock_engine = MagicMock()
         mock_engine.run.return_value = _make_cell_result()
@@ -1198,11 +1198,11 @@ class TestRunXrayBatchJob:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch.XRaySearchEngine",
+                "cidx_xray.server.mcp.xray_batch.XRaySearchEngine",
                 return_value=mock_engine,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch.resolve_batch_evaluator",
+                "cidx_xray.server.mcp.xray_batch.resolve_batch_evaluator",
                 return_value=(VALID_EVAL, None),
             ),
         ):
@@ -1227,7 +1227,7 @@ class TestRunXrayBatchJob:
         assert result["cancelled"] is False
 
     def test_pre_flight_repo_errors_make_result_partial(self, tmp_path):
-        from code_indexer.server.mcp.handlers.xray_batch import _run_xray_batch_job
+        from cidx_xray.server.mcp.xray_batch import _run_xray_batch_job
 
         mock_engine = MagicMock()
         mock_engine.run.return_value = _make_cell_result()
@@ -1256,11 +1256,11 @@ class TestRunXrayBatchJob:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch.XRaySearchEngine",
+                "cidx_xray.server.mcp.xray_batch.XRaySearchEngine",
                 return_value=mock_engine,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch.resolve_batch_evaluator",
+                "cidx_xray.server.mcp.xray_batch.resolve_batch_evaluator",
                 return_value=(VALID_EVAL, None),
             ),
         ):
@@ -1281,7 +1281,7 @@ class TestRunXrayBatchJob:
         assert result["partial"] is True
 
     def test_timeout_stops_matrix(self, tmp_path):
-        from code_indexer.server.mcp.handlers.xray_batch import _run_xray_batch_job
+        from cidx_xray.server.mcp.xray_batch import _run_xray_batch_job
 
         mock_engine = MagicMock()
         mock_engine.run.return_value = _make_cell_result()
@@ -1305,11 +1305,11 @@ class TestRunXrayBatchJob:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch.XRaySearchEngine",
+                "cidx_xray.server.mcp.xray_batch.XRaySearchEngine",
                 return_value=mock_engine,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch.resolve_batch_evaluator",
+                "cidx_xray.server.mcp.xray_batch.resolve_batch_evaluator",
                 return_value=(VALID_EVAL, None),
             ),
         ):
@@ -1337,7 +1337,7 @@ class TestRunXrayBatchJob:
         """
         import time as _time
 
-        from code_indexer.server.mcp.handlers.xray_batch import _run_xray_batch_job
+        from cidx_xray.server.mcp.xray_batch import _run_xray_batch_job
 
         first_match = {
             "file_path": "a.py",
@@ -1388,15 +1388,15 @@ class TestRunXrayBatchJob:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch.XRaySearchEngine",
+                "cidx_xray.server.mcp.xray_batch.XRaySearchEngine",
                 return_value=mock_engine,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch.resolve_batch_evaluator",
+                "cidx_xray.server.mcp.xray_batch.resolve_batch_evaluator",
                 return_value=(VALID_EVAL, None),
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch.time.monotonic",
+                "cidx_xray.server.mcp.xray_batch.time.monotonic",
                 side_effect=_fake_monotonic,
             ),
         ):
@@ -1424,7 +1424,7 @@ class TestRunXrayBatchJob:
         Uses two repos; the job flag is set to cancelled after the first repo's
         between-cell check, so the second repo is never processed.
         """
-        from code_indexer.server.mcp.handlers.xray_batch import _run_xray_batch_job
+        from cidx_xray.server.mcp.xray_batch import _run_xray_batch_job
 
         first_match = {
             "file_path": "b.py",
@@ -1471,11 +1471,11 @@ class TestRunXrayBatchJob:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch.XRaySearchEngine",
+                "cidx_xray.server.mcp.xray_batch.XRaySearchEngine",
                 return_value=mock_engine,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch.resolve_batch_evaluator",
+                "cidx_xray.server.mcp.xray_batch.resolve_batch_evaluator",
                 return_value=(VALID_EVAL, None),
             ),
         ):
@@ -1501,7 +1501,7 @@ class TestRunXrayBatchJob:
 
     def test_max_files_passed_to_engine(self, tmp_path):
         """max_results is forwarded as max_files= to XRaySearchEngine.run."""
-        from code_indexer.server.mcp.handlers.xray_batch import _run_xray_batch_job
+        from cidx_xray.server.mcp.xray_batch import _run_xray_batch_job
 
         mock_engine = MagicMock()
         mock_engine.run.return_value = _make_cell_result()
@@ -1522,11 +1522,11 @@ class TestRunXrayBatchJob:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch.XRaySearchEngine",
+                "cidx_xray.server.mcp.xray_batch.XRaySearchEngine",
                 return_value=mock_engine,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch.resolve_batch_evaluator",
+                "cidx_xray.server.mcp.xray_batch.resolve_batch_evaluator",
                 return_value=(VALID_EVAL, None),
             ),
         ):
@@ -1546,7 +1546,7 @@ class TestRunXrayBatchJob:
 
     def test_on_process_spawned_is_wired_to_engine_run(self, tmp_path):
         """on_process_spawned is passed as a kwarg to XRaySearchEngine.run."""
-        from code_indexer.server.mcp.handlers.xray_batch import _run_xray_batch_job
+        from cidx_xray.server.mcp.xray_batch import _run_xray_batch_job
 
         mock_engine = MagicMock()
         mock_engine.run.return_value = _make_cell_result()
@@ -1569,11 +1569,11 @@ class TestRunXrayBatchJob:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch.XRaySearchEngine",
+                "cidx_xray.server.mcp.xray_batch.XRaySearchEngine",
                 return_value=mock_engine,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch.resolve_batch_evaluator",
+                "cidx_xray.server.mcp.xray_batch.resolve_batch_evaluator",
                 return_value=(VALID_EVAL, None),
             ),
         ):
@@ -1603,8 +1603,8 @@ class TestRunXrayBatchJob:
 class TestDefaultEvaluatorValidation:
     def test_default_evaluator_passes_rust_validation(self):
         """_DEFAULT_EVALUATOR_CODE must pass validate_rust_evaluator to catch future edits."""
-        from code_indexer.server.mcp.handlers.xray_batch import _DEFAULT_EVALUATOR_CODE
-        from code_indexer.xray.sandbox import validate_rust_evaluator
+        from cidx_xray.server.mcp.xray_batch import _DEFAULT_EVALUATOR_CODE
+        from cidx_xray.sandbox import validate_rust_evaluator
 
         result = validate_rust_evaluator(_DEFAULT_EVALUATOR_CODE)
         assert result.ok, (

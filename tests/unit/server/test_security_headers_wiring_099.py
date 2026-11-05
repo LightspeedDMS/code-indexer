@@ -40,6 +40,11 @@ def clients(
     try:
         with isolated_app(root) as app:
             db_health._reset_singleton_for_testing()
+            # The wiki (and its /wiki/_static files) is the cidx-wiki
+            # feature's, mounted as on a server with "wiki" enabled.
+            from tests.unit.server._wiki_feature import mount_wiki_routes
+
+            mount_wiki_routes(app)
             yield (
                 TestClient(app, follow_redirects=False),
                 TestClient(app, base_url="https://testserver", follow_redirects=False),

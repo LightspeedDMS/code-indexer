@@ -464,20 +464,20 @@ TEMPLATE_PATH = (
 def test_codex_section_appears_immediately_after_claude_section():
     """Story #844 placement constraint: Codex section MUST appear after the
     Claude CLI Integration section (its conceptual sibling), not at the end of
-    the template after wiki/langfuse/etc. Verifies section ordering."""
+    the template after langfuse/etc. Verifies section ordering."""
     text = TEMPLATE_PATH.read_text()
     claude_idx = text.find('id="section-claude-integration"')
     codex_idx = text.find('id="section-codex-integration"')
-    wiki_idx = text.find('id="section-wiki"')
+    tail_idx = text.find('id="section-langfuse_pull"')
     assert claude_idx > 0, "Claude integration section not found"
     assert codex_idx > 0, "Codex integration section not found"
-    assert wiki_idx > 0, "Wiki section not found (sanity)"
+    assert tail_idx > 0, "Langfuse pull section not found (sanity)"
     # Codex must come AFTER Claude
     assert codex_idx > claude_idx, "Codex must come after Claude in template"
-    # Codex must come BEFORE wiki (it's a Claude-sibling, not a tail-section)
-    assert codex_idx < wiki_idx, (
-        f"Codex section is misplaced: appears after wiki section. "
-        f"Claude at {claude_idx}, codex at {codex_idx}, wiki at {wiki_idx}. "
+    # Codex must come BEFORE the tail sections (it's a Claude-sibling)
+    assert codex_idx < tail_idx, (
+        f"Codex section is misplaced: appears after the langfuse pull section. "
+        f"Claude at {claude_idx}, codex at {codex_idx}, tail at {tail_idx}. "
         f"Codex should be right after Claude (Claude-sibling)."
     )
     # Tighter: nothing between Claude's closing </details> and Codex's opening

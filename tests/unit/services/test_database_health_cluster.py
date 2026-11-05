@@ -283,9 +283,10 @@ class TestAllDatabasesMigratedToPostgres:
         """refresh_tokens.db is now in POSTGRES_MIGRATED_DATABASES."""
         assert "refresh_tokens.db" in POSTGRES_MIGRATED_DATABASES
 
-    def test_scip_audit_db_is_postgres_migrated(self):
-        """scip_audit.db is now in POSTGRES_MIGRATED_DATABASES."""
-        assert "scip_audit.db" in POSTGRES_MIGRATED_DATABASES
+    def test_scip_audit_db_is_no_longer_a_central_database(self):
+        """scip_audit.db left with the cidx-scip feature (modular phase 4d):
+        its table is in the server database, so the file is not checked."""
+        assert "scip_audit.db" not in POSTGRES_MIGRATED_DATABASES
 
 
 class TestSingletonStorageMode:

@@ -21,12 +21,12 @@ import pytest
 from code_indexer.global_repos.meta_description_hook import CidxMetaRefreshDebouncer
 from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
 from code_indexer.global_repos.write_lock_manager import WriteLockManager
-from code_indexer.server.services.memory_file_lock_manager import MemoryFileLockManager
-from code_indexer.server.services.memory_rate_limiter import (
+from cidx_memory.server.memory_file_lock_manager import MemoryFileLockManager
+from cidx_memory.server.memory_rate_limiter import (
     MemoryRateLimiter,
     RateLimitConfig,
 )
-from code_indexer.server.services.memory_store_service import (
+from cidx_memory.server.memory_store_service import (
     MemoryStoreConfig,
     MemoryStoreService,
 )

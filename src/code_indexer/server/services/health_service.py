@@ -26,6 +26,10 @@ from ..models.api_models import (
     HealthStatus,
     VolumeInfo,
 )
+from code_indexer.server.features.registry import (
+    degraded_reasons as feature_degraded_reasons,
+    feature_health_payload,
+)
 from code_indexer.server.services import audit_capture
 from code_indexer.server.services.search_event_health import (
     process_search_event_health,
@@ -235,9 +239,12 @@ class HealthCheckService:
         db_health_service = get_database_health_service()
         database_health = db_health_service.get_all_database_health()
 
+        # Read ONCE: feeds both the overall status and the features block.
+        features = feature_health_payload()
+
         # Determine overall health status with all indicators (Story #727)
         overall_status, failure_reasons = self._calculate_overall_status(
-            services, system_info, database_health
+            services, system_info, database_health, features=features
         )
 
         # Issue #1383 Finding 1: surface the golden-repo reconcile auto-heal
@@ -269,6 +276,7 @@ class HealthCheckService:
             fleet_migration_dedup_state=dedup_state_summary,
             audit=_audit_health_info(),
             search_events=process_search_event_health(),
+            features=features,
         )
 
     def _check_database_health(self) -> ServiceHealthInfo:
@@ -1490,6 +1498,7 @@ class HealthCheckService:
         services: Dict[str, ServiceHealthInfo],
         system_info: SystemHealthInfo,
         database_health: List[DatabaseHealthResult],
+        features: Optional[Dict[str, Any]] = None,
     ) -> Tuple[HealthStatus, List[str]]:
         """
         Calculate overall system health based on all indicators (Story #727).
@@ -1498,6 +1507,8 @@ class HealthCheckService:
             services: Dictionary of service health information
             system_info: System resource information
             database_health: List of DatabaseHealthResult from DatabaseHealthService
+            features: the ``features`` health block (feature add-ons); a
+                report that is not healthy is DEGRADED only, never an error
 
         Returns:
             Tuple of (overall_status, failure_reasons)
@@ -1562,6 +1573,12 @@ class HealthCheckService:
         has_warning = has_warning or urf_warn
         failure_reasons.extend(urf_reasons)
 
+        # Feature add-ons (modular phase 4a): a report that is not healthy
+        # (even "unhealthy") is DEGRADED only -- an add-on's trouble never
+        # drains the node.
+        feature_reasons = feature_degraded_reasons(features)
+        has_warning = has_warning or bool(feature_reasons)
+        failure_reasons.extend(feature_reasons)
         # Stored credentials needing re-entry -- DEGRADED only.
         scr_warn, _scr_err, scr_reasons = self._collect_stored_credential_failures()
         has_warning = has_warning or scr_warn

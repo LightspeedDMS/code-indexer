@@ -42,6 +42,7 @@ from tests.unit.server.query.test_search_failures_front_doors_2109 import (
     _post,
     _user_repos,
 )
+from tests.unit.server.app_state_patch import patch_app_state
 
 # The #2047 / #2109 fixtures, shared by binding them here.
 multi_client = omni_2047.multi_client
@@ -76,12 +77,10 @@ def omni_env(env, _omni_access, tmp_path, monkeypatch) -> Any:
     is set for this test only, so ``rest`` tests see the app untouched."""
     app, repo = env
     (tmp_path / "golden-repos").mkdir()
-    monkeypatch.setattr(
-        app.state, "golden_repos_dir", str(tmp_path / "golden-repos"), raising=False
+    patch_app_state(
+        monkeypatch, app.state, "golden_repos_dir", str(tmp_path / "golden-repos")
     )
-    monkeypatch.setattr(
-        app.state, "access_filtering_service", _omni_access, raising=False
-    )
+    patch_app_state(monkeypatch, app.state, "access_filtering_service", _omni_access)
     return app, {alias: Path(repo) for alias in OMNI_ALIASES}
 
 

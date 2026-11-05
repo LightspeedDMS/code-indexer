@@ -34,6 +34,7 @@ from unittest.mock import Mock
 import pytest
 
 from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
+from code_indexer.server.storage.shared import git_backend as _git_backend_module
 from code_indexer.server.storage.sqlite_backends import (
     GoldenRepoMetadataSqliteBackend,
 )
@@ -62,8 +63,14 @@ def git_out(*args: str, cwd: Path) -> str:
     """Run the REAL git binary (never a PATH shim a test installed for the
     refresh) and return its stripped stdout."""
     assert REAL_GIT is not None
+    # An explicit identity: a CI runner has no global git config to commit with.
+    identity = ["-c", "user.name=t", "-c", "user.email=t@example.com"]
     result = subprocess.run(
-        [REAL_GIT, *args], cwd=cwd, capture_output=True, text=True, check=True
+        [REAL_GIT, *identity, *args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=True,
     )
     return result.stdout.strip()
 
@@ -455,7 +462,9 @@ def test_postgres_mode_registry_supplied_store_is_used(
     assert current_branch(master) == "main"
 
 
-BRANCH_READ_ARGV = ["git", "branch", "--show-current"]
+# EVO-64678: the branch check reads the clone's branch through the git seam
+# (head_branch -> GitBackend.symbolic_ref), not `git branch --show-current`.
+BRANCH_READ_ARGV = ["git", "symbolic-ref", "--short", "HEAD"]
 BRANCH_READ_STDERR = "fatal: example branch read failure"
 BRANCH_READ_FAILED = "current branch could not be read"
 
@@ -463,36 +472,44 @@ BRANCH_READ_FAILED = "current branch could not be read"
 def fail_branch_read_with_exit_code(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``git branch`` exits 128 (a real process: a PATH shim that runs the
-    real git for every other subcommand)."""
+    """The branch read (``git symbolic-ref``) exits 128 (a real process: a
+    PATH shim that runs the real git for every other subcommand)."""
     install_fake_git(
         tmp_path,
         monkeypatch,
         tmp_path / "fake_git_pids.json",
-        fail_on="branch",
+        fail_on="symbolic-ref",
         fail_stderr=BRANCH_READ_STDERR + "\n",
+        # Only the branch check's read: change detection reads HEAD the
+        # same way later (head_branch), and must still work.
+        fail_once=True,
     )
 
 
-def raise_on_git(monkeypatch: pytest.MonkeyPatch, argv_prefix: list) -> None:
+def raise_on_git(
+    monkeypatch: pytest.MonkeyPatch, argv_prefix: list, once: bool = False
+) -> None:
     """The refresh's git call starting with *argv_prefix* raises
     TimeoutExpired, as a hung git does at its timeout; every other call
-    runs the real git."""
-    module = sys.modules[RefreshScheduler.__module__]
-    real = module.run_with_cancel
+    runs the real git. Patched at the git seam's local runner, where every
+    git command of the scheduler's LocalGitBackend bottoms out (EVO-64678)."""
+    real = _git_backend_module.run_git_command
+    raised: list = []
 
     def wrapper(cmd: Any, *args: Any, **kwargs: Any) -> Any:
-        if list(cmd[: len(argv_prefix)]) == argv_prefix:
+        if list(cmd[: len(argv_prefix)]) == argv_prefix and not (once and raised):
+            raised.append(cmd)
             raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout", 0))
         return real(cmd, *args, **kwargs)
 
-    monkeypatch.setattr(module, "run_with_cancel", wrapper)
+    monkeypatch.setattr(_git_backend_module, "run_git_command", wrapper)
 
 
 def fail_branch_read_with_exception(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    raise_on_git(monkeypatch, BRANCH_READ_ARGV)
+    # Only the branch check's read (see fail_branch_read_with_exit_code).
+    raise_on_git(monkeypatch, BRANCH_READ_ARGV, once=True)
 
 
 def reset_errors(caplog: pytest.LogCaptureFixture, branch: str) -> list:
@@ -599,17 +616,16 @@ DETACHED_REGISTRATION = "HEAD"
 
 
 def record_git_commands(monkeypatch: pytest.MonkeyPatch) -> list:
-    """Record every git argv the refresh scheduler runs; the real git still
-    runs for each one."""
-    module = sys.modules[RefreshScheduler.__module__]
-    real = module.run_with_cancel
+    """Record every git argv the refresh scheduler runs through its git seam
+    (LocalGitBackend); the real git still runs for each one."""
+    real = _git_backend_module.run_git_command
     commands: list = []
 
     def wrapper(cmd: Any, *args: Any, **kwargs: Any) -> Any:
         commands.append(list(cmd))
         return real(cmd, *args, **kwargs)
 
-    monkeypatch.setattr(module, "run_with_cancel", wrapper)
+    monkeypatch.setattr(_git_backend_module, "run_git_command", wrapper)
     return commands
 
 
@@ -660,7 +676,12 @@ def test_detached_registration_on_detached_clone_switches_nothing(
             refresh(scheduler)
         except RuntimeError as e:
             assert "branch" not in str(e), str(e)
-    assert [c[:2] for c in commands].count(["git", "branch"]) == 1
+    # One branch read by the branch check, before change detection fetches
+    # (which reads HEAD again through head_branch).
+    first_fetch = next(
+        (i for i, c in enumerate(commands) if "fetch" in c), len(commands)
+    )
+    assert commands[:first_fetch].count(BRANCH_READ_ARGV) == 1
 
     assert [c for c in commands if c[:2] == ["git", "checkout"]] == []
     assert branch_check_records(caplog) == []

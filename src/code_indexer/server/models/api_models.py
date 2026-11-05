@@ -219,6 +219,15 @@ class HealthCheckResponse(BaseModel):
         "overflow (null when the search event log is not running). A drop in "
         "the last 15 minutes also adds a DEGRADED reason (never unhealthy).",
     )
+    # Any: the block is assembled by server/features/registry.py from
+    # cidx_sdk HealthReport objects, with every value coerced to JSON.
+    features: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Feature add-ons in this process: sdk_version, loaded "
+        "(name, version, requires_sdk, source, started, health reports) and "
+        "installed_not_enabled. Null when this process did not load features "
+        "(no server lifespan). Informational: never changes `status`.",
+    )
 
 
 class RepositoryFilesInfo(BaseModel):
@@ -405,6 +414,15 @@ class FileListQueryParams(BaseModel):
     language: Optional[str] = Field(None, description="Programming language filter")
     sort_by: Optional[str] = Field(
         default="path", description="Sort field: path, size, modified_at"
+    )
+    indexed_only: bool = Field(
+        default=False,
+        description=(
+            "EVO-66189 fast path: when true, serve the listing from the index's "
+            "path_index (indexed source files only) instead of walking the working "
+            "tree over NFS. size_bytes/modified_at are not populated in this mode. "
+            "Falls back to the full walk when no index is present."
+        ),
     )
     direct_children_of: Optional[str] = Field(
         default=None,

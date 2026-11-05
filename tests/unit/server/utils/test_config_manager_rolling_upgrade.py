@@ -12,6 +12,12 @@ additional claude_integration_config keys. An old-code node reads the same
 blob at startup. Old code must not crash on the unknown keys.
 """
 
+import pytest as _pytest
+
+from tests.unit.server._depmap_feature import (
+    depmap_registry_active,
+    depmap_section_of,
+)
 import pytest
 
 from code_indexer.server.utils.config_manager import ServerConfigManager
@@ -60,7 +66,7 @@ class TestRollingUpgradeUnknownKeys:
         cfg = manager._dict_to_server_config(
             _build_dict_with_unknown_keys(str(tmp_path))
         )
-        ci = cfg.claude_integration_config
+        ci = depmap_section_of(cfg)
         assert ci.dep_map_fact_check_enabled is True
         assert ci.fact_check_timeout_seconds == CUSTOM_TIMEOUT_SECONDS
 
@@ -69,7 +75,7 @@ class TestRollingUpgradeUnknownKeys:
         cfg = manager._dict_to_server_config(
             _build_dict_with_unknown_keys(str(tmp_path))
         )
-        ci = cfg.claude_integration_config
+        ci = depmap_section_of(cfg)
         assert not hasattr(ci, "some_future_field_old_code_doesnt_know")
         assert not hasattr(ci, "another_future_field")
         assert not hasattr(ci, "yet_another_nested_thing")
@@ -83,6 +89,15 @@ class TestRollingUpgradeDefaults:
         cfg = manager._dict_to_server_config(
             {"server_dir": str(tmp_path), "claude_integration_config": {}}
         )
-        ci = cfg.claude_integration_config
+        ci = depmap_section_of(cfg)
         assert ci.dep_map_fact_check_enabled is False
         assert ci.fact_check_timeout_seconds == DEFAULT_TIMEOUT_SECONDS
+
+
+@_pytest.fixture(autouse=True)
+def _depmap_loaded():
+    """The dependency-map settings are the cidx-depmap feature's section
+    (modular phase 4g): the config service lists and updates them while the
+    feature is loaded."""
+    with depmap_registry_active():
+        yield

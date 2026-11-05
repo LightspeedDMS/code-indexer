@@ -33,6 +33,7 @@ from tests.unit.server.query.catalog_search_env import (
     dump,
 )
 from tests.unit.server.query.extension_filter_env_2047 import ranked_store_search
+from tests.unit.server.app_state_patch import patch_app_state
 
 pytestmark = pytest.mark.timeout(60)
 ROUND_LOGGER = "code_indexer.server.services.cidx_meta_access.catalog_search"
@@ -238,14 +239,14 @@ def test_missing_access_service_serves_projected_hits_to_everyone(
     env: CatalogEnv, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     assert _search_canary(env, ADMIN_USER)  # control: admin sees canary hits
-    monkeypatch.setattr(env.app.state, "access_filtering_service", None)
+    patch_app_state(monkeypatch, env.app.state, "access_filtering_service", None)
     assert _search_canary(env, ADMIN_USER) == []
 
 
 def test_missing_registry_raises_instead_of_serving_unprojected(
     env: CatalogEnv, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(env.app.state, "backend_registry", None)
+    patch_app_state(monkeypatch, env.app.state, "backend_registry", None)
     with pytest.raises(RuntimeError):
         _search_canary(env, RESTRICTED_USER)
 

@@ -18,8 +18,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from code_indexer.global_repos import dependency_map_analyzer as dma
-from code_indexer.global_repos.dependency_map_analyzer import DependencyMapAnalyzer
+from cidx_depmap.server import dependency_map_analyzer as dma
+from cidx_depmap.server.dependency_map_analyzer import DependencyMapAnalyzer
 
 
 @pytest.fixture(autouse=True)
@@ -30,7 +30,7 @@ def _isolate_verification_semaphore():
     import threading
 
     with patch(
-        "code_indexer.global_repos.dependency_map_analyzer._get_verification_semaphore",
+        "cidx_depmap.server.dependency_map_analyzer._get_verification_semaphore",
         return_value=threading.Semaphore(10),
     ):
         yield

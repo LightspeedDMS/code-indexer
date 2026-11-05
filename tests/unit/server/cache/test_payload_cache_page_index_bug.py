@@ -73,7 +73,7 @@ class TestSmallPayloadPageIndexBug:
         After the fix: handle_cidx_fetch_cached_payload translates page=1 to
         internal page=0 and returns the full content.
         """
-        from code_indexer.server.mcp.handlers.xray import (
+        from code_indexer.server.mcp.handlers.cached_payload import (
             handle_cidx_fetch_cached_payload,
         )
 
@@ -87,7 +87,7 @@ class TestSmallPayloadPageIndexBug:
         params = {"cache_handle": handle, "page": 1}
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._utils.app_module",
+            "code_indexer.server.mcp.handlers._utils.app_module",
             mock_app_module,
         ):
             result = handle_cidx_fetch_cached_payload(params, _make_user())
@@ -105,7 +105,7 @@ class TestSmallPayloadPageIndexBug:
         is a pages-v1 (xray-pv1-*) handle-only contract. A legacy handle
         (produced by the plain cache.store() used here) must keep its
         pre-#1928 lenient coercion exactly -- page=0 clamps to 1."""
-        from code_indexer.server.mcp.handlers.xray import (
+        from code_indexer.server.mcp.handlers.cached_payload import (
             handle_cidx_fetch_cached_payload,
         )
 
@@ -118,7 +118,7 @@ class TestSmallPayloadPageIndexBug:
         params = {"cache_handle": handle, "page": 0}
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._utils.app_module",
+            "code_indexer.server.mcp.handlers._utils.app_module",
             mock_app_module,
         ):
             result = handle_cidx_fetch_cached_payload(params, _make_user())
@@ -131,7 +131,7 @@ class TestSmallPayloadPageIndexBug:
         self, cache: PayloadCache
     ) -> None:
         """Multi-page payload: page=1 (1-indexed) returns first 5000 chars."""
-        from code_indexer.server.mcp.handlers.xray import (
+        from code_indexer.server.mcp.handlers.cached_payload import (
             handle_cidx_fetch_cached_payload,
         )
 
@@ -146,7 +146,7 @@ class TestSmallPayloadPageIndexBug:
         params = {"cache_handle": handle, "page": 1}
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._utils.app_module",
+            "code_indexer.server.mcp.handlers._utils.app_module",
             mock_app_module,
         ):
             result = handle_cidx_fetch_cached_payload(params, _make_user())
@@ -161,7 +161,7 @@ class TestSmallPayloadPageIndexBug:
         self, cache: PayloadCache
     ) -> None:
         """Multi-page payload: page=2 (1-indexed) returns second chunk."""
-        from code_indexer.server.mcp.handlers.xray import (
+        from code_indexer.server.mcp.handlers.cached_payload import (
             handle_cidx_fetch_cached_payload,
         )
 
@@ -176,7 +176,7 @@ class TestSmallPayloadPageIndexBug:
         params = {"cache_handle": handle, "page": 2}
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._utils.app_module",
+            "code_indexer.server.mcp.handlers._utils.app_module",
             mock_app_module,
         ):
             result = handle_cidx_fetch_cached_payload(params, _make_user())
@@ -189,7 +189,7 @@ class TestSmallPayloadPageIndexBug:
 
     def test_truly_out_of_range_page_still_errors(self, cache: PayloadCache) -> None:
         """Page beyond actual range still raises cache_expired error."""
-        from code_indexer.server.mcp.handlers.xray import (
+        from code_indexer.server.mcp.handlers.cached_payload import (
             handle_cidx_fetch_cached_payload,
         )
 
@@ -204,7 +204,7 @@ class TestSmallPayloadPageIndexBug:
         params = {"cache_handle": handle, "page": 2}
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._utils.app_module",
+            "code_indexer.server.mcp.handlers._utils.app_module",
             mock_app_module,
         ):
             result = handle_cidx_fetch_cached_payload(params, _make_user())

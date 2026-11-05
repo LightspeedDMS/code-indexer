@@ -11,7 +11,7 @@ import os
 from dataclasses import dataclass, asdict, field, fields
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, List, Union
+from typing import Any, Optional, Dict, List, Tuple, Union
 
 from .host_validation import validate_server_host
 from .siem_delivery_config import SiemDeliveryConfig
@@ -28,6 +28,10 @@ EXPECTED_ORPHAN_KEYS: frozenset = frozenset(
         "mfa_config",  # Story #558 - removed in cleanup Story #682
         "auth_config",  # Story #3 Phase 2 AC36 - removed in cleanup Story #683
         "launch_restart_generation",  # Story #1195/#1198 - runtime DB key written into config.json by auto-updater; not a bootstrap ServerConfig field
+        "scip_build_stateless",  # EVO-64616 - only the removed scip_backend='delegated' read it
+        "scip_query_backend",  # EVO-64616 - SCIP query delegation removed; a value other than "local" stops startup first (startup/removed_scip_settings.check_scip_query_backend_at_startup)
+        "scip_sandbox",  # EVO-64616 - only the removed DelegatedSCIPQueryService read it
+        "query_vector_cache_config",  # EVO-70528 - fork-only in-process query-vector cache, removed with the v11.30 snapshot; superseded by the DB-backed QueryEmbeddingCacheConfig (different shape, nothing to migrate)
     }
 )
 
@@ -120,7 +124,7 @@ class CacheConfig:
     # Memory-Pressure-Aware Index-Cache Governor settings (Story #1213 Story 2).
     # All 8 fields are runtime CacheConfig knobs — hot-reloaded via the Web UI
     # Config screen without a server restart.  The governor reads them LIVE on
-    # each band decision (mirrors coalesce_enabled / memory_retrieval_enabled).
+    # each band decision (mirrors coalesce_enabled).
     #
     # memory_governor_enabled:
     #   False => kill-switch: should_evict_after_shard() always returns True
@@ -189,6 +193,21 @@ class ServerResourceConfig:
     git_update_index_timeout: int = 300  # 5 minutes for git update-index during refresh
     git_restore_timeout: int = 300  # 5 minutes for git restore during refresh
     cidx_fix_config_timeout: int = 60  # 1 minute for cidx fix-config
+    # IndexStore (delegated): every pod's sweep of leftover checkouts of
+    # deactivated copies / removed golden repos (server/services/checkout_sweep.py)
+    index_checkout_sweep_interval_seconds: int = 900
+    index_checkout_sweep_grace_seconds: int = 900  # never removes a younger checkout
+    # IndexStore (delegated): LRU eviction of this pod's served-index checkouts
+    # by disk usage (server/services/served_index_cache.py). Defaults fit a
+    # 20 GiB pod disk; 0 disables a limit. Evicts from the high watermark
+    # (max_bytes / min_free_percent) down to the low one (low_bytes /
+    # target_free_percent).
+    served_index_cache_max_bytes: int = 14 * 1024**3
+    served_index_cache_low_bytes: int = 12 * 1024**3
+    served_index_cache_min_free_percent: float = 15.0
+    served_index_cache_target_free_percent: float = 25.0
+    served_index_cache_min_idle_seconds: int = 900  # never evicts a fresher one
+    served_index_cache_interval_seconds: int = 60
     # Story #683 AC7: cidx_scip_generate_timeout removed — SCIP generate uses
     # ScipConfig.scip_generation_timeout_seconds (see scip_config in ServerConfig).
 
@@ -236,6 +255,46 @@ class OIDCProviderConfig:
                     "external_group_id": external_id,
                     "cidx_group": cidx_group,
                 }
+                for external_id, cidx_group in self.group_mappings.items()
+            ]
+
+
+@dataclass
+class TrustedGatewayConfig:
+    """EVO-66121: trust an mcp-gateway as an external RS256 bearer-token issuer.
+
+    When enabled, cidx validates per-user RS256 JWTs the gateway forwards (verified
+    against the gateway JWKS) and JIT-provisions the user via the OIDC path, so cidx
+    enforces its OWN per-user access (groups / repo_group_access). Disabled by default
+    -- zero effect on fresh installs.
+
+    Distinct from ``oidc_provider_config`` (the interactive SSO-login IdP): the gateway
+    is a separate issuer and cidx only accepts *bearer* tokens from it, never runs an
+    interactive login against it. The claim names feed the token validator; the
+    provisioning fields (``default_role`` / ``require_email_verification`` /
+    ``enable_jit_provisioning`` / ``group_mappings``) feed the shared OIDCManager path.
+    """
+
+    enabled: bool = False
+    issuer: str = ""  # expected `iss`; also routes the auth dispatch
+    jwks_uri: str = ""  # gateway JWKS endpoint (RS256 signing keys)
+    audience: str = ""  # expected `aud` == this cidx deployment
+    username_claim: str = "preferred_username"
+    email_claim: str = "email"
+    groups_claim: str = "groups"
+    default_role: str = "normal_user"
+    require_email_verification: bool = True
+    enable_jit_provisioning: bool = True
+    group_mappings: Optional[Union[Dict[str, str], List[Dict[str, str]]]] = None
+    leeway_seconds: int = 60
+
+    def __post_init__(self):
+        if self.group_mappings is None:
+            self.group_mappings = []
+        elif isinstance(self.group_mappings, dict):
+            # Backward compatibility: old dict format -> list format (mirrors OIDC).
+            self.group_mappings = [
+                {"external_group_id": external_id, "cidx_group": cidx_group}
                 for external_id, cidx_group in self.group_mappings.items()
             ]
 
@@ -402,7 +461,7 @@ class EmbeddingStatsConfig:
 
     # Global kill-switch. When False, EmbeddingStatsWriter.get_active()
     # resolves to NoOpWriter regardless of what writer was previously
-    # installed (mirrors the memory_retrieval_enabled kill-switch pattern).
+    # installed (a kill-switch read live, like coalesce_enabled).
     enabled: bool = True
 
     # Periodic background-flush cadence, in seconds. Default MUST match
@@ -529,10 +588,13 @@ class HealthConfig:
 @dataclass
 class ScipConfig:
     """
-    SCIP indexing configuration (Story #3 - Phase 2, AC9-AC11, AC31-AC34).
+    Indexing staleness configuration (Story #3 - Phase 2, AC9-AC11).
 
-    Controls SCIP indexing staleness thresholds and query limits.
-    Migrated from hardcoded constants in activated_repo_index_manager.py and scip_query_engine.py.
+    Keeps its historical name (stored configurations carry ``scip_config``)
+    and only the core's temporal staleness threshold. The SCIP query limits
+    (AC31-AC34) and the workspace retention left with the cidx-scip feature
+    (modular phase 4d): its ``scip`` config section, filled from stored
+    ``scip_config`` values by :func:`_migrate_feature_owned_keys`.
 
     Note (Bug #1218): whole-job and per-subprocess indexing timeouts have been removed.
     The only legitimate timeout on the indexing path is the per-request outbound
@@ -541,30 +603,6 @@ class ScipConfig:
 
     # AC11: Temporal staleness threshold in days (default 7 days, minimum 1 day)
     temporal_stale_threshold_days: int = 7
-    # AC31: SCIP reference limit (default 100, range 10-10000)
-    scip_reference_limit: int = 100
-    # AC32: SCIP dependency depth (default 3, range 1-10)
-    # Bug #1625: ceiling lowered from 20 to 10 to match the SCIP engine's
-    # real get_dependencies()/get_dependents() ceiling (hardcoded 10 in
-    # scip/database/queries.py) -- kept in sync with
-    # server/services/constants.py's MAX_SCIP_DEPENDENCY_DEPTH and with
-    # the validate_config() check below.
-    scip_dependency_depth: int = 3
-    # AC33: SCIP callchain max depth (validated range 1-50, kept for
-    # backward compatibility with already-persisted config.json values).
-    # Default changed from 10 to 3 (Bug #1603): the underlying
-    # combinatorial-path query (scip/database/queries.py MAX_DEPTH_CAP,
-    # SCIPMultiService._trace_callchain_in_repo) is unsafe above depth 3
-    # and clamps to 3 regardless of what this setting allows -- 3 is the
-    # honest default for NEW deployments. The 1-50 validation ceiling is
-    # deliberately NOT tightened to avoid breaking startup on any
-    # already-deployed node whose on-disk config.json still has a value
-    # above 3 from before this fix.
-    scip_callchain_max_depth: int = 3
-    # AC34: SCIP callchain limit (default 100, range 1-1000)
-    scip_callchain_limit: int = 100
-    # Story #15 AC2: SCIP workspace retention (moved from ServerConfig, default 7 days)
-    scip_workspace_retention_days: int = 7
 
 
 @dataclass
@@ -707,6 +745,15 @@ class IndexingConfig:
     # boundaries and skipped (with a WARNING) at command-build sites.
     temporal_all_branches_enabled: bool = False
 
+    # EVO-65484: gate the synchronous meta-description / lifecycle generation that
+    # runs inside every golden-repo add worker (via the orchestrator -> Claude seam).
+    # Default True (unchanged behavior). Set False to skip it: when that seam is
+    # failing (e.g. a 401 on leased LLM creds), the description step still adds
+    # latency + error spam to every add, so disabling it lets golden-repo
+    # registration keep up with the catalog. Purely additive metadata -- disabling
+    # never affects search/index correctness, only the generated description.
+    golden_description_generation_enabled: bool = True
+
     # Story #223 - AC1: Configurable file extensions for indexing.
     # 60 unique extensions with leading dots matching CLI Config.file_extensions defaults.
     indexable_extensions: List[str] = field(
@@ -805,43 +852,10 @@ class ClaudeIntegrationConfig:
     scheduled_catchup_interval_minutes: int = 60
     # Research Assistant Claude CLI timeout in seconds (default: 20 minutes)
     research_assistant_timeout_seconds: int = 1200
-    # Story #192: Dependency map configuration
-    # Enable/disable dependency map generation
-    dependency_map_enabled: bool = False
-    # Dependency map refresh interval in hours (default: 168 = 1 week)
-    dependency_map_interval_hours: int = 168
-    # Pass timeout in seconds (default: 1800 = 30 minutes, Pass 2 uses full, Pass 1/3 use half)
-    dependency_map_pass_timeout_seconds: int = 1800  # Fix 5: Increased from 600
-    # Story #724: Fact-check pass after dependency map generation
-    # Enable/disable fact-check pass on dependency map output (default: off for upgrade safety)
-    dep_map_fact_check_enabled: bool = False
-    # Timeout in seconds for the fact-check Claude CLI pass (default: 600 = 10 minutes)
-    fact_check_timeout_seconds: int = 600
-    # Pass 1 (synthesis) max turns (default: 0 = single-shot mode, no tool use)
-    dependency_map_pass1_max_turns: int = 0
-    # Pass 2 (per-domain) max turns (default: 0 = unlimited agentic mode; Bug #1261:
-    # a hard turn cap can truncate a legitimately long per-domain analysis mid-flight,
-    # the same anti-pattern removed from the indexing path in Bug #1218)
-    dependency_map_pass2_max_turns: int = 0
-    # Delta analysis max turns (default: 0 = unlimited, matching pass1/pass2; Bug #1261)
-    dependency_map_delta_max_turns: int = 0
-    # Story #359: Refinement job configuration
-    # Enable/disable continuous dependency document refinement
-    refinement_enabled: bool = False
-    dep_map_auto_repair_enabled: bool = False
-    """Story #927: when True, scheduled delta and refinement jobs automatically
-    trigger a single repair pass once if anomalies are detected via health-check.
-
-    Default False (operator opts in via Web UI Config Screen). Auto-repair fires
-    only after SCHEDULER-triggered jobs (manual operator-triggered runs do NOT
-    auto-repair). Re-entrance guard skips if any dep-map job is in-flight.
-    Anti-fallback: health-check failure -> skip auto-repair (never repair against
-    unknown anomaly state).
-    """
-    # Refinement interval in hours (default: 24 = once per day)
-    refinement_interval_hours: int = 24
-    # Number of domains to refine per scheduled run (default: 3)
-    refinement_domains_per_run: int = 3
+    # Story #192/#359/#724/#927: the dependency map's settings (scheduler,
+    # pass timeouts and turns, refinement, fact check, auto-repair) are the
+    # cidx-depmap feature's config section (feature_settings["depmap"]) since
+    # modular phase 4g; FEATURE_OWNED_NESTED_KEYS moves stored values there.
     # Story #366: Subscription mode credential lifecycle
     # Authentication mode: "api_key" (default) or "subscription"
     claude_auth_mode: str = "api_key"
@@ -985,24 +999,50 @@ class BackgroundJobsConfig:
     Note: Job history retention period moved to DataRetentionConfig (Story #400).
     """
 
-    # Maximum number of concurrent background jobs (default: 5)
-    # Jobs exceeding this limit stay in PENDING until a slot is available
+    # Maximum number of concurrent background jobs on this NODE (default: 5).
+    # Jobs exceeding this limit stay in PENDING until a slot is available.
+    #
+    # R4 (docs/background-work-distribution.md): this is a node budget. The value
+    # stored here is what an admin sets and what the Web UI shows; each uvicorn
+    # worker process takes max(1, value // workers) of it when it sizes its pool
+    # (BackgroundJobManager.__init__). Do NOT divide it here -- an admin who sets
+    # 5 must keep reading back 5.
     max_concurrent_background_jobs: int = 5
 
     # Story #27: Maximum concurrent workers for SubprocessExecutor
     # Controls parallelism of subprocess-based operations like regex search
     # Default 8 (Story #1009: enlarged from 2 for burst concurrency)
+    #
+    # R4 exemption (docs/background-work-distribution.md): NOT divided by the
+    # uvicorn worker count. These are short, read-only ripgrep spawns answering a
+    # live request, so the pool is request burst capacity, not a standing
+    # resource reservation -- dividing it would halve search latency headroom on
+    # a 2-worker pod to fix an over-count that never materialises, because the
+    # two processes are not both bursting on the same query.
     subprocess_max_workers: int = 8
 
-    # Bug #1063 Part 1: per-cycle refresh submission budget.
+    # Bug #1063 Part 1: per-cycle refresh submission budget, per NODE.
     # Default -1 means "derive from max_concurrent_background_jobs // 2" in
     # __post_init__. Set explicitly to override the derived default.
+    #
+    # R4: divided by the worker count at the point of use
+    # (RefreshScheduler._get_refresh_budget), for the same reason as
+    # max_concurrent_background_jobs above -- stored as the node target, spent as
+    # this process's share.
     max_concurrent_refresh_jobs: int = -1
 
     # Bug #1070: dedicated xray executor pool size.
     # xray_search and xray_explore are read-only and must NOT share the 5-worker
     # BJM pool with refresh/indexing/depmap. This dedicated pool serves only xray
     # compute and allows up to 20 concurrent xray jobs without starvation.
+    #
+    # R4 exemption (docs/background-work-distribution.md): NOT divided by the
+    # uvicorn worker count, because the resource that actually needs bounding
+    # here is already bounded per-process elsewhere. An xray job's cost is the
+    # rustc compile, and xray/rust_backend.py divides _XRAY_COMPILE_BUDGET_PER_NODE
+    # by the worker count behind its own semaphore. This number is a job-slot
+    # ceiling in front of that gate; halving it would only make queries queue
+    # earlier for a compile slot they would wait for anyway.
     xray_max_concurrent_jobs: int = 20
 
     # Story #1400 (CRITICAL 1, FINAL LOCKED DESIGN): dedicated temporal-lane
@@ -1014,7 +1054,7 @@ class BackgroundJobsConfig:
     # RESTART_REQUIRED_FIELDS in web/routes.py), not live-reloaded.
     temporal_lane_concurrency: int = 2
 
-    # Memory-aware admission for heavy index jobs.
+    # Memory-aware admission for heavy index jobs (EVO-64538 / C10).
     # A fixed pool size (above) is memory-blind: under bulk golden-repo indexing
     # the combined HNSW + FTS + embedding footprint of pool_size concurrent jobs
     # can exceed the process/cgroup memory limit and OOM the server. When the
@@ -1262,22 +1302,156 @@ class AliasLockConfig:
     db_backed_enabled_promoted: bool = False
 
 
+#: metadata_read_source values: where alias pointers and write-mode markers
+#: are READ from (content seam step 5a).
+METADATA_READ_SOURCE_REGISTRY = "registry"
+METADATA_READ_SOURCE_FILES = "files"
+METADATA_READ_SOURCES = (METADATA_READ_SOURCE_REGISTRY, METADATA_READ_SOURCE_FILES)
+
+#: metadata_outbox_sink values: how the outbox sweeper writes the files.
+#: ``auto`` is a selection, not a sink: :func:`resolve_metadata_outbox_sink`
+#: turns it into one of the other two from the ``content_backend`` setting.
+METADATA_OUTBOX_SINK_AUTO = "auto"
+METADATA_OUTBOX_SINK_WORKSPACE_MCP = "workspace-mcp"
+METADATA_OUTBOX_SINK_LOCAL_FILES = "local-files"
+METADATA_OUTBOX_SINKS = (
+    METADATA_OUTBOX_SINK_AUTO,
+    METADATA_OUTBOX_SINK_WORKSPACE_MCP,
+    METADATA_OUTBOX_SINK_LOCAL_FILES,
+)
+DEFAULT_METADATA_OUTBOX_DRAIN_TIMEOUT_S = 600
+
+
+def resolve_metadata_outbox_sink(sink: str, content_backend: Optional[str]) -> str:
+    """The sink a ``metadata_outbox_sink`` value selects on this server.
+
+    ``auto`` follows the content backend: ``workspace-mcp`` when it is
+    ``delegated`` (the golden-repos volume is not on this pod, so only
+    workspace-mcp can write the files), else ``local-files`` -- so a server
+    with no delegated backend behaves exactly as before ``auto`` existed.
+    Every other value, including an unknown one, is returned unchanged.
+    """
+    if sink != METADATA_OUTBOX_SINK_AUTO:
+        return sink
+    if content_backend == "delegated":
+        return METADATA_OUTBOX_SINK_WORKSPACE_MCP
+    return METADATA_OUTBOX_SINK_LOCAL_FILES
+
+
 @dataclass
-class XRayConfig:
+class ControlPlaneMetadataConfig:
+    """Control-plane metadata in the registry, with a file rollback window
+    (content seam step 5a; docs/content-seam-remaining-consumers.md).
+
+    Golden-repo alias pointers and write-mode markers live in the server's
+    registry (SQLite solo, PostgreSQL cluster). Until the canary is released
+    fleet-wide they are also written to the old files, so a rollback can read
+    them there.
+
+    Runtime (DB-backed, Web UI Config screen), not bootstrap: every node must
+    switch together, which a per-pod config.json cannot guarantee.
+
+    - ``metadata_read_source``: ``registry`` (default) or ``files``. Rollback
+      sets ``files``; with ``files`` a write lands in the file FIRST and the
+      registry second, synchronously, so the server reads its own writes.
+    - ``metadata_file_dual_write``: also write the files (default on). Turned
+      off, and the files removed, by the release that retires the canary.
+      A change commits with an outbox row; the sweeper on the leader replays
+      it to the file.
+    - ``metadata_outbox_sink``: how the sweeper writes the files.
+      ``workspace-mcp`` (the mount-less fleet: through the server's content
+      writer, workspace-mcp's ``POST /content/write``), ``local-files`` (this
+      pod's own disk), or ``auto`` (default): ``workspace-mcp`` when
+      ``content_backend`` is ``delegated``, else ``local-files``. The sweeper
+      only ever sees the resolved name (:func:`resolve_metadata_outbox_sink`).
+    - ``metadata_outbox_drain_timeout_s``: with (resolved) ``local-files``,
+      how long replay may fail continuously before the leader stops, logs
+      every undrained key, and falls back to one recovery probe a minute
+      (default 600).
     """
-    Configuration for X-Ray precision AST-aware code search (Story #977).
 
-    Controls the default per-job timeout and ThreadPoolExecutor worker count
-    used by XRaySearchEngine. Both values are runtime-tunable via the Web UI
-    Config Screen and persist via get_config_service().get_config().
+    metadata_read_source: str = METADATA_READ_SOURCE_REGISTRY
+    metadata_file_dual_write: bool = True
+    metadata_outbox_sink: str = METADATA_OUTBOX_SINK_AUTO
+    metadata_outbox_drain_timeout_s: int = DEFAULT_METADATA_OUTBOX_DRAIN_TIMEOUT_S
+
+
+@dataclass
+class FtsBackfillSweepConfig:
+    """EVO-66445: golden-repo FTS backfill sweep configuration.
+
+    Controls the paced background sweep that builds the Tantivy FTS index on
+    golden repos registered before the forward fix existed (the fleet had a
+    semantic index but no ``tantivy_index``, so ``search_mode="fts"`` errored).
+    Ships ON by default with conservative pacing so the backlog pays down
+    automatically after deploy (mirrors the HNSW orphan sweep's settled design);
+    the FTS rebuild is FTS-only, so it performs no embedding calls (no VoyageAI
+    cost). Idempotent + re-discovery-based, so no durable cursor is needed.
     """
 
-    # Default per-job wall-clock timeout in seconds (range 10..600)
-    xray_timeout_seconds: int = 120
+    # Whether the FTS backfill sweep scheduler is active (default: True -- ships ON).
+    enabled: bool = True
 
-    # ThreadPoolExecutor worker count for Phase 2 AST evaluation (range 1..8)
-    # Default 4 (Story #1009: enlarged from 2 for burst concurrency)
-    xray_worker_threads: int = 4
+    # Golden repos ENQUEUED per tick (default: 50). EVO-66445: since the DRY-engine
+    # refactor (MR !73), these are per-repo POD_PULL `fts_backfill_build` jobs that every
+    # pod's IndexJobClaimLoop claims and runs in parallel -- so the batch is drained by
+    # the whole cluster, not one pod serially. The bound caps NFS/CPU load per tick, not
+    # per pod; a larger batch is fine because the cheap local tantivy builds fan out. The
+    # scan short-circuits once `batch_size` missing repos are enqueued, so this is also
+    # (present-at-top + batch_size) worth of golden-dir walk per tick.
+    batch_size: int = 50
+
+    # Minutes between ticks (default: 5). Paced faster than the original 15 now that the
+    # backlog drains cross-pod (batch_size x cluster) rather than one-pod-serial, so the
+    # existing fleet's FTS backlog pays down in a handful of ticks post-deploy. In steady
+    # state (backlog empty) a tick is a cheap full-dir `is_present` walk that finds nothing
+    # to enqueue. To dial pacing without a code change, edit the persisted
+    # `fts_backfill_sweep_config` (dict->dataclass on load); there is no Config-screen
+    # control for it yet, unlike hnsw_orphan_sweep.
+    tick_interval_minutes: int = 5
+
+    # Per-repo wall-clock timeout (seconds) for the sweep's FTS rebuild subprocess
+    # (default: 1800 = 30 min). Unlike the registration path -- which stays
+    # timeout-free per Bug #1218 (indexing has no wall-clock clock) -- the
+    # maintenance sweep bounds each build so one stuck/deadlocked repo can't wedge a
+    # whole tick; a timeout is reported as a FAILED outcome and retried next pass.
+    # FTS is a local text index (no embeddings), so 30 min is generous headroom.
+    build_timeout_seconds: int = 1800
+
+
+@dataclass
+class SemanticBackfillSweepConfig:
+    """Golden-repo SEMANTIC (vector) index self-heal backfill configuration.
+
+    Closes the reverse-fill gap the FTS backfill closed for tantivy: a golden repo whose
+    ``.code-indexer/index/`` semantic vectors were wiped had no loop to rebuild them
+    (``reconcile_registry_from_filesystem`` skips a repo with a missing index; it "NEVER
+    re-indexes"). This paced sweep re-embeds those repos.
+
+    SHIPS OFF by default — unlike the FTS backfill (a free local tantivy build), a semantic
+    re-embed calls VoyageAI ($), so auto-refilling the whole fleet could burn cost; the
+    operator opts in (set ``enabled: true`` in the persisted config). When enabled, the
+    defaults are deliberately conservative (one repo per tick, 24h per-repo cooldown) so it
+    trickles rather than storms.
+    """
+
+    # Whether the semantic backfill sweep is active (default: FALSE -- ships OFF; cost gate).
+    enabled: bool = False
+
+    # Golden repos ENQUEUED per tick (default: 1). A semantic re-embed is a heavy,
+    # $-bearing VoyageAI job (POD_PULL + memory-heavy, like add_golden_repo), so the batch
+    # is intentionally tiny -- it drips one repo per tick rather than fanning a re-embed
+    # storm across the cluster.
+    batch_size: int = 1
+
+    # Minutes between ticks (default: 30). Slow on purpose: the backlog of wiped indexes is
+    # small and each rebuild is expensive, so there is no reason to hurry (contrast FTS's 5).
+    tick_interval_minutes: int = 30
+
+    # Per-repo attempt cooldown (seconds, default: 86400 = 24h). Once a repo's re-embed is
+    # enqueued, it is not re-attempted for a day -- a large monorepo re-embed can run long,
+    # and a failed one should back off hard rather than retry-storm the provider.
+    attempt_cooldown_seconds: int = 86400
 
 
 @dataclass
@@ -1403,32 +1577,6 @@ class LangfuseConfig:
 
 
 @dataclass
-class WikiConfig:
-    """
-    Wiki metadata fields configuration (Story #323).
-
-    Controls which knowledge-base-specific metadata behaviors are active.
-    All toggles default to True to preserve current behavior for existing deployments.
-    Set individual toggles to False to suppress KB-specific fields for generic wikis.
-    """
-
-    # Parse and strip legacy header block (Article Number / Title / Publication Status lines)
-    enable_header_block_parsing: bool = True
-    # Display article_number / original_article in the metadata panel
-    enable_article_number: bool = True
-    # Display publication_status in the metadata panel
-    enable_publication_status: bool = True
-    # Seed wiki_article_views DB from front matter 'views' field; also controls
-    # whether the 'views' key appears in the metadata panel as "Salesforce Views"
-    enable_views_seeding: bool = True
-    # Comma-separated list of metadata field keys controlling display order in the
-    # metadata panel. Empty string = preserve current behavior (article_number first,
-    # remaining in YAML key order). Non-empty = sort according to configured order,
-    # unlisted fields appended alphabetically. Disabled fields excluded regardless.
-    metadata_display_order: str = ""
-
-
-@dataclass
 class MCPSelfRegistrationConfig:
     """
     MCP self-registration credentials (Story #203).
@@ -1486,6 +1634,25 @@ class CowDaemonConfig:
     # individual round-trip so a lost/dropped daemon response fails loudly
     # instead of hanging the caller forever.
     request_timeout_seconds: int = _COW_DAEMON_DEFAULT_REQUEST_TIMEOUT_SECONDS
+
+
+@dataclass
+class WorkspaceMcpConfig:
+    """workspace-mcp delegated clone-backend configuration (EVO-64616 Phase 1).
+
+    When ``clone_backend="delegated"``, per-user activation clones are performed
+    by workspace-mcp (the disk owner) via its ``cow_clone_path`` endpoint instead
+    of a local ``cp``, so cidx does no filesystem copy itself. workspace-mcp runs
+    on reflink-capable storage, making the clone a real near-instant CoW.
+    """
+
+    endpoint: str = ""  # workspace-mcp base URL exposing cow_clone_path (e.g. https://.../workspace)
+    api_key: str = (
+        ""  # bearer token (shared-authorizer); sent as Authorization: Bearer {api_key}
+    )
+    mount_point: str = ""  # shared-volume root both source and dest must resolve under
+    timeout_seconds: int = _COW_DAEMON_DEFAULT_TIMEOUT_SECONDS
+    poll_interval_seconds: int = _COW_DAEMON_DEFAULT_POLL_INTERVAL_SECONDS
 
 
 @dataclass
@@ -1561,26 +1728,6 @@ class QueryOrchestrationConfig:
     all_providers_sinbinned_retry_limit: int = 2
     provider_health_probe_interval_seconds: int = 30
     provider_health_probe_join_timeout_seconds: int = 5
-
-
-@dataclass
-class MemoryRetrievalConfig:
-    """Server-side memory retrieval configuration (Story #883).
-
-    Controls automatic parallel memory lookup triggered by semantic/hybrid queries.
-    All keys are runtime (DB-backed) — NOT bootstrap config.json keys.
-    """
-
-    # Master kill-switch: set False to suppress memory retrieval and nudge entirely
-    memory_retrieval_enabled: bool = True
-    # HNSW cosine floor from Voyage embedding search
-    memory_voyage_min_score: float = 0.5
-    # Post-rerank floor from Cohere reranker (skipped when reranker is disabled)
-    memory_cohere_min_score: float = 0.4
-    # k = max(20, request.limit * k_multiplier) candidates fetched before reranking
-    memory_retrieval_k_multiplier: int = 5
-    # Maximum body characters included in each memory entry; excess is truncated
-    memory_retrieval_max_body_chars: int = 2000
 
 
 @dataclass
@@ -1689,6 +1836,8 @@ class ServerConfig:
     resource_config: Optional[ServerResourceConfig] = None
     cache_config: Optional[CacheConfig] = None
     oidc_provider_config: Optional[OIDCProviderConfig] = None
+    # EVO-66121: trust an mcp-gateway as an external RS256 bearer issuer (default off).
+    trusted_gateway_config: Optional["TrustedGatewayConfig"] = None
     telemetry_config: Optional[TelemetryConfig] = None
 
     # Story #3 - Configuration Consolidation: Migrated settings
@@ -1733,9 +1882,6 @@ class ServerConfig:
     # Story #203 - MCP self-registration credentials
     mcp_self_registration: Optional[MCPSelfRegistrationConfig] = None
 
-    # Story #323 - Wiki metadata fields configuration
-    wiki_config: Optional[WikiConfig] = None
-
     # Story #400 - Unified data retention configuration
     data_retention_config: Optional[DataRetentionConfig] = None
 
@@ -1758,16 +1904,18 @@ class ServerConfig:
     # Issue #1546 Phase 2 - DB-backed golden-repo alias lock rollout gate
     alias_lock_config: Optional[AliasLockConfig] = None
 
-    # Story #977 - X-Ray precision AST-aware code search configuration (runtime, not bootstrap)
-    xray_config: Optional[XRayConfig] = None
+    # Content seam step 5a - aliases and write-mode markers in the registry
+    control_plane_metadata_config: Optional[ControlPlaneMetadataConfig] = None
+
+    # EVO-66445 - golden-repo FTS backfill sweep configuration
+    fts_backfill_sweep_config: Optional[FtsBackfillSweepConfig] = None
+    #: Semantic (vector) index self-heal backfill — ships OFF (cost gate).
+    semantic_backfill_sweep_config: Optional[SemanticBackfillSweepConfig] = None
 
     password_expiry_config: Optional[PasswordExpiryConfig] = None  # Story #565
 
     # Story #652 - Reranking configuration (None = use defaults, both providers disabled)
     rerank_config: Optional[RerankConfig] = None
-
-    # Story #883 - Memory retrieval configuration (runtime only, not bootstrap)
-    memory_retrieval_config: Optional[MemoryRetrievalConfig] = None
 
     # Story #1105 - Query embedding cache configuration (runtime only, not bootstrap)
     query_embedding_cache_config: Optional[QueryEmbeddingCacheConfig] = None
@@ -1801,8 +1949,50 @@ class ServerConfig:
     postgres_dsn: Optional[str] = None  # PostgreSQL connection string for cluster mode
     ontap: Optional[OntapConfig] = None  # ONTAP FlexClone settings for cluster mode
     cluster: Optional[ClusterConfig] = None  # Cluster node identity
-    clone_backend: str = "local"  # Story #510: "local", "ontap", or "cow-daemon"
+    clone_backend: str = "local"  # Story #510: "local", "ontap", "cow-daemon", or "delegated" (EVO-64616)
+    git_backend: str = (
+        "local"  # EVO-64678: "local" (in-process git) or "delegated" (git-mcp)
+    )
+    # Content seam: where repository BYTES come from. "local" reads this
+    # container's filesystem (the default, and what every deployment does
+    # today); "delegated" reads them through the service that owns filesystem
+    # access, so cidx needs no repository mount. There is deliberately no
+    # fallback -- see server/startup/content_backend_wiring.py.
+    content_backend: str = "local"
+    # Where a ripgrep argv is executed. "local" runs the binary in this
+    # container (the default); "delegated" hands it to the service that owns
+    # the repositories, so cidx needs neither the mount nor the binary. No
+    # fallback -- see server/startup/ripgrep_backend_wiring.py.
+    ripgrep_backend: str = "local"
+    # Where FTS and semantic queries execute. "local" reads this container's
+    # Tantivy/HNSW indexes (the default); "delegated" forwards queries to the
+    # service that owns the indexes, so cidx needs neither index files nor the
+    # embedder. No fallback -- see server/startup/search_backend_wiring.py.
+    search_backend: str = "local"
+    # Where a built index is read from. "local" reads it where it was built
+    # (the default); "delegated" publishes each refresh's index to the
+    # artifact service and reads a checked-out, verified version. No fallback
+    # -- see server/startup/index_store_wiring.py.
+    index_store_backend: str = "local"
+    # Feature add-ons (modular phase 3) that MUST be installed and loaded:
+    # entry point names in group code_indexer.features. Bootstrap, because
+    # features are loaded while the app is created, before the runtime DB is
+    # read. An enabled name with no installed add-on stops startup -- no
+    # silent absence. See server/startup/feature_wiring.py.
+    enabled_features: List[str] = field(default_factory=list)
+    # Feature config sections (modular phase 4a, server/features/config.py),
+    # keyed by feature name. feature_settings holds RUNTIME keys (database,
+    # Web UI); feature_bootstrap_settings holds BOOTSTRAP keys (config.json,
+    # a BOOTSTRAP_KEYS entry). A key absent here reads as its declared default.
+    feature_settings: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    feature_bootstrap_settings: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     cow_daemon: Optional[CowDaemonConfig] = None  # Story #510: CoW daemon settings
+    workspace_mcp: Optional[WorkspaceMcpConfig] = (
+        None  # EVO-64616: workspace-mcp delegated clone backend settings
+    )
+    # EVO-65021's scip_backend left with the cidx-scip feature (modular phase
+    # 4d): feature_bootstrap_settings["scip"]["scip_backend"], filled from a
+    # stored top-level value by _migrate_feature_owned_keys.
 
     # Story #923 - Admin TOTP step-up elevation enforcement (runtime, never bootstrap)
     # Kill switch: False = elevation enforcement disabled (protected routes pass
@@ -1987,6 +2177,8 @@ class ServerConfig:
             self.cache_config = CacheConfig()
         if self.oidc_provider_config is None:
             self.oidc_provider_config = OIDCProviderConfig()
+        if self.trusted_gateway_config is None:
+            self.trusted_gateway_config = TrustedGatewayConfig()
         if self.telemetry_config is None:
             self.telemetry_config = TelemetryConfig()
         # Story #3 - Configuration Consolidation: Initialize migrated configs
@@ -2039,9 +2231,6 @@ class ServerConfig:
         # Story #203 - Initialize MCP self-registration config
         if self.mcp_self_registration is None:
             self.mcp_self_registration = MCPSelfRegistrationConfig()
-        # Story #323 - Initialize wiki config
-        if self.wiki_config is None:
-            self.wiki_config = WikiConfig()
         # Story #400 - Initialize data retention config
         if self.data_retention_config is None:
             self.data_retention_config = DataRetentionConfig()
@@ -2051,6 +2240,11 @@ class ServerConfig:
         # Story #1360 (Epic #1333 S3) - Initialize HNSW orphan repair sweep config
         if self.hnsw_orphan_repair_sweep_config is None:
             self.hnsw_orphan_repair_sweep_config = HNSWOrphanRepairSweepConfig()
+        # EVO-66445 - Initialize FTS backfill sweep config
+        if self.fts_backfill_sweep_config is None:
+            self.fts_backfill_sweep_config = FtsBackfillSweepConfig()
+        if self.semantic_backfill_sweep_config is None:
+            self.semantic_backfill_sweep_config = SemanticBackfillSweepConfig()
         if self.siem_delivery_config is None:
             self.siem_delivery_config = SiemDeliveryConfig()
         # Issue #1530 - Initialize indexing watchdog config
@@ -2067,9 +2261,9 @@ class ServerConfig:
         # Issue #1546 Phase 2 - Initialize alias lock rollout-gate config
         if self.alias_lock_config is None:
             self.alias_lock_config = AliasLockConfig()
-        # Story #977 - Initialize X-Ray config
-        if self.xray_config is None:
-            self.xray_config = XRayConfig()
+        # Content seam step 5a - control-plane metadata read source / dual-write
+        if self.control_plane_metadata_config is None:
+            self.control_plane_metadata_config = ControlPlaneMetadataConfig()
         # Story #565 - Initialize password expiry config
         if self.password_expiry_config is None:
             self.password_expiry_config = PasswordExpiryConfig()
@@ -2080,9 +2274,6 @@ class ServerConfig:
             self.cohere_sinbin = ProviderSinBinConfig()
         if self.query_orchestration is None:
             self.query_orchestration = QueryOrchestrationConfig()
-        # Story #883 - Initialize memory retrieval config
-        if self.memory_retrieval_config is None:
-            self.memory_retrieval_config = MemoryRetrievalConfig()
         # Story #1105 - Initialize query embedding cache config
         if self.query_embedding_cache_config is None:
             self.query_embedding_cache_config = QueryEmbeddingCacheConfig()
@@ -2110,6 +2301,20 @@ class ServerConfig:
         old_enforce = self.__dict__.pop("enforce_pace_maker_pacing_only", None)
         if old_enforce is not None:
             self.pace_maker_mode = "on" if old_enforce else "disabled"
+
+
+def golden_description_generation_enabled(
+    server_config: Optional[ServerConfig],
+) -> bool:
+    """EVO-65484: whether golden-repo description generation is enabled.
+
+    Reads ``indexing.golden_description_generation_enabled`` -- an opt-OUT knob,
+    so an absent config or ``indexing_config`` means enabled (default True).
+    """
+    indexing = getattr(server_config, "indexing_config", None)
+    if indexing is None:
+        return True
+    return bool(getattr(indexing, "golden_description_generation_enabled", True))
 
 
 class ServerConfigManager:
@@ -2193,6 +2398,23 @@ class ServerConfigManager:
         """
         self._atomic_write_json(config_dict, trailing_newline=True)
 
+    def read_config_file(self) -> Optional[Dict[str, Any]]:
+        """``config.json`` as written, or None when there is no file.
+
+        Nothing is converted or stripped. A startup check for a removed key
+        reads this: :meth:`load_config` drops keys ServerConfig no longer has,
+        and the first strip to bootstrap keys rewrites the file without them.
+
+        Raises:
+            json.JSONDecodeError: The file is not valid JSON.
+            OSError: The file exists but cannot be read.
+        """
+        if not self.config_file_path.exists():
+            return None
+        with open(self.config_file_path, "r") as f:
+            config_dict: Dict[str, Any] = json.load(f)
+        return config_dict
+
     def load_config(self) -> Optional[ServerConfig]:
         """
         Load configuration from file.
@@ -2203,12 +2425,10 @@ class ServerConfigManager:
         Raises:
             ValueError: If configuration file is malformed
         """
-        if not self.config_file_path.exists():
-            return None
-
         try:
-            with open(self.config_file_path, "r") as f:
-                config_dict = json.load(f)
+            config_dict = self.read_config_file()
+            if config_dict is None:
+                return None
 
             # Ensure server_dir is set if missing from file
             if "server_dir" not in config_dict:
@@ -2237,6 +2457,8 @@ class ServerConfigManager:
         Raises:
             TypeError: If a nested dict cannot be converted to its dataclass.
         """
+        _migrate_feature_owned_keys(config_dict)
+
         # Convert nested password_security dict to PasswordSecurityConfig
         if "password_security" in config_dict and isinstance(
             config_dict["password_security"], dict
@@ -2328,6 +2550,14 @@ class ServerConfigManager:
         ):
             config_dict["oidc_provider_config"] = OIDCProviderConfig(
                 **config_dict["oidc_provider_config"]
+            )
+
+        # EVO-66121: convert nested trusted_gateway_config dict to TrustedGatewayConfig
+        if "trusted_gateway_config" in config_dict and isinstance(
+            config_dict["trusted_gateway_config"], dict
+        ):
+            config_dict["trusted_gateway_config"] = TrustedGatewayConfig(
+                **config_dict["trusted_gateway_config"]
             )
 
         # Convert nested telemetry_config dict to TelemetryConfig
@@ -2459,35 +2689,6 @@ class ServerConfigManager:
                 )
             config_dict["indexing_config"] = IndexingConfig(**idx_dict)
 
-        # Story #15 AC2 Migration: Move scip_workspace_retention_days to scip_config
-        if "scip_workspace_retention_days" in config_dict:
-            retention_days = config_dict.pop("scip_workspace_retention_days")
-            if "scip_config" not in config_dict:
-                config_dict["scip_config"] = {}
-            if isinstance(config_dict["scip_config"], dict):
-                config_dict["scip_config"]["scip_workspace_retention_days"] = (
-                    retention_days
-                )
-            elif isinstance(config_dict["scip_config"], ScipConfig):
-                config_dict[
-                    "scip_config"
-                ].scip_workspace_retention_days = retention_days
-
-        # Story #15 AC2: Final conversion of scip_config after migration
-        # This handles the case where scip_config was created by migration above
-        if "scip_config" in config_dict and isinstance(
-            config_dict["scip_config"], dict
-        ):
-            # Bug #1218: strip removed overarching timeout fields here too
-            scip_dict_ac2 = config_dict["scip_config"].copy()
-            for _removed in (
-                "indexing_timeout_seconds",
-                "scip_generation_timeout_seconds",
-                "registration_indexing_timeout_seconds",
-            ):
-                scip_dict_ac2.pop(_removed, None)
-            config_dict["scip_config"] = ScipConfig(**scip_dict_ac2)
-
         # Story #15 AC3 Migration: Move Claude CLI settings to claude_integration_config
         claude_settings_keys = [
             "anthropic_api_key",
@@ -2589,7 +2790,7 @@ class ServerConfigManager:
 
         # Story #26: Convert background_jobs_config dict to BackgroundJobsConfig
         # Unknown keys are filtered for rolling-upgrade safety — same fields() pattern
-        # used for ClaudeIntegrationConfig, MemoryRetrievalConfig, CodexIntegrationConfig.
+        # used for ClaudeIntegrationConfig, CodexIntegrationConfig.
         if "background_jobs_config" in config_dict and isinstance(
             config_dict["background_jobs_config"], dict
         ):
@@ -2638,36 +2839,15 @@ class ServerConfigManager:
                 **config_dict["mcp_self_registration"]
             )
 
-        # Story #323: Convert wiki_config dict to WikiConfig
-        if "wiki_config" in config_dict and isinstance(
-            config_dict["wiki_config"], dict
-        ):
-            config_dict["wiki_config"] = WikiConfig(**config_dict["wiki_config"])
-
         # Story #652: Convert rerank_config dict to RerankConfig
         if "rerank_config" in config_dict and isinstance(
             config_dict["rerank_config"], dict
         ):
             config_dict["rerank_config"] = RerankConfig(**config_dict["rerank_config"])
 
-        # Bug #891: Convert memory_retrieval_config dict to MemoryRetrievalConfig.
-        # asdict() converts the nested dataclass to a plain dict; without this block
-        # _merge_runtime_config would leave memory_retrieval_config as a dict, causing
-        # AttributeError at search.py:847 (mem_cfg.memory_retrieval_enabled).
-        # Unknown keys are filtered for rolling-upgrade safety — same fields() pattern
-        # as claude_integration_config conversion above.
-        if "memory_retrieval_config" in config_dict and isinstance(
-            config_dict["memory_retrieval_config"], dict
-        ):
-            _mem_dict = config_dict["memory_retrieval_config"]
-            _mem_allowed = {f.name for f in fields(MemoryRetrievalConfig)}
-            config_dict["memory_retrieval_config"] = MemoryRetrievalConfig(
-                **{k: v for k, v in _mem_dict.items() if k in _mem_allowed}
-            )
-
         # Story #1105: Convert query_embedding_cache_config dict to
         # QueryEmbeddingCacheConfig.  Unknown keys are filtered for rolling-upgrade
-        # safety — same fields() pattern as memory_retrieval_config conversion.
+        # safety — same fields() pattern as claude_integration_config conversion.
         if "query_embedding_cache_config" in config_dict and isinstance(
             config_dict["query_embedding_cache_config"], dict
         ):
@@ -2761,7 +2941,7 @@ class ServerConfigManager:
         # `cfg.enabled` / `cfg.batch_size` raise AttributeError on every
         # normal cluster/solo deployment. Unknown keys are filtered for
         # rolling-upgrade safety -- same fields() pattern as
-        # memory_retrieval_config / admission_control_config conversion.
+        # admission_control_config conversion.
         if "hnsw_orphan_repair_sweep_config" in config_dict and isinstance(
             config_dict["hnsw_orphan_repair_sweep_config"], dict
         ):
@@ -2771,6 +2951,27 @@ class ServerConfigManager:
                 HNSWOrphanRepairSweepConfig(
                     **{k: v for k, v in _hnsw_dict.items() if k in _hnsw_allowed}
                 )
+            )
+
+        # EVO-66445: Convert fts_backfill_sweep_config dict to FtsBackfillSweepConfig
+        # (fields() filter for rolling-upgrade safety, same pattern as above).
+        if "fts_backfill_sweep_config" in config_dict and isinstance(
+            config_dict["fts_backfill_sweep_config"], dict
+        ):
+            _fts_dict = config_dict["fts_backfill_sweep_config"]
+            _fts_allowed = {f.name for f in fields(FtsBackfillSweepConfig)}
+            config_dict["fts_backfill_sweep_config"] = FtsBackfillSweepConfig(
+                **{k: v for k, v in _fts_dict.items() if k in _fts_allowed}
+            )
+
+        # Convert semantic_backfill_sweep_config dict to SemanticBackfillSweepConfig
+        if "semantic_backfill_sweep_config" in config_dict and isinstance(
+            config_dict["semantic_backfill_sweep_config"], dict
+        ):
+            _sem_dict = config_dict["semantic_backfill_sweep_config"]
+            _sem_allowed = {f.name for f in fields(SemanticBackfillSweepConfig)}
+            config_dict["semantic_backfill_sweep_config"] = SemanticBackfillSweepConfig(
+                **{k: v for k, v in _sem_dict.items() if k in _sem_allowed}
             )
 
         # SIEM delivery section: same round-trip conversion (unknown keys
@@ -2842,11 +3043,16 @@ class ServerConfigManager:
                 **{k: v for k, v in _alc_dict.items() if k in _alc_allowed}
             )
 
-        # Story #977: Convert xray_config dict to XRayConfig
-        if "xray_config" in config_dict and isinstance(
-            config_dict["xray_config"], dict
+        # Content seam step 5a: same dict-to-dataclass conversion, unknown
+        # keys filtered for rolling-upgrade safety.
+        if "control_plane_metadata_config" in config_dict and isinstance(
+            config_dict["control_plane_metadata_config"], dict
         ):
-            config_dict["xray_config"] = XRayConfig(**config_dict["xray_config"])
+            _cpm_dict = config_dict["control_plane_metadata_config"]
+            _cpm_allowed = {f.name for f in fields(ControlPlaneMetadataConfig)}
+            config_dict["control_plane_metadata_config"] = ControlPlaneMetadataConfig(
+                **{k: v for k, v in _cpm_dict.items() if k in _cpm_allowed}
+            )
 
         # Issue #1398: Convert search_timeouts_config dict to SearchTimeoutsConfig.
         # Same rationale as hnsw_orphan_repair_sweep_config above -- without this
@@ -2903,6 +3109,14 @@ class ServerConfigManager:
         # Story #510: Convert cow_daemon dict to CowDaemonConfig
         if "cow_daemon" in config_dict and isinstance(config_dict["cow_daemon"], dict):
             config_dict["cow_daemon"] = CowDaemonConfig(**config_dict["cow_daemon"])
+
+        # EVO-64616: Convert workspace_mcp dict to WorkspaceMcpConfig
+        if "workspace_mcp" in config_dict and isinstance(
+            config_dict["workspace_mcp"], dict
+        ):
+            config_dict["workspace_mcp"] = WorkspaceMcpConfig(
+                **config_dict["workspace_mcp"]
+            )
 
         # Story #565: Convert password_expiry_config dict to PasswordExpiryConfig
         if "password_expiry_config" in config_dict and isinstance(
@@ -2989,16 +3203,8 @@ class ServerConfigManager:
         if log_level_env := os.environ.get("CIDX_LOG_LEVEL"):
             config.log_level = log_level_env.upper()
 
-        # SCIP workspace retention days override (Story #647 - AC1, Story #15 AC2: use scip_config)
-        if retention_env := os.environ.get("CIDX_SCIP_WORKSPACE_RETENTION_DAYS"):
-            try:
-                assert config.scip_config is not None  # Guaranteed by __post_init__
-                config.scip_config.scip_workspace_retention_days = int(retention_env)
-            except ValueError:
-                assert config.scip_config is not None  # Guaranteed by __post_init__
-                logging.warning(
-                    f"Invalid CIDX_SCIP_WORKSPACE_RETENTION_DAYS environment variable value '{retention_env}'. Using default {config.scip_config.scip_workspace_retention_days} days"
-                )
+        # CIDX_SCIP_WORKSPACE_RETENTION_DAYS (Story #647 AC1) is read by the
+        # cidx-scip feature, which owns scip_workspace_retention_days.
 
         # Story #1676 AC1: telemetry configuration is managed exclusively via
         # the Web UI Config Screen (DB-backed) -- the env var overrides that
@@ -3100,12 +3306,8 @@ class ServerConfigManager:
                 f"max_concurrent_claude_cli must be greater than 0, got {config.claude_integration_config.max_concurrent_claude_cli}"
             )
 
-        # Validate SCIP workspace retention days (Story #647 - AC1, Story #15 AC2: use scip_config)
-        assert config.scip_config is not None  # Guaranteed by __post_init__
-        if not (1 <= config.scip_config.scip_workspace_retention_days <= 365):
-            raise ValueError(
-                f"scip_workspace_retention_days must be between 1 and 365, got {config.scip_config.scip_workspace_retention_days}"
-            )
+        # scip_workspace_retention_days is the cidx-scip feature's setting:
+        # its config section bounds it (1..365).
 
         # Validate description_refresh_interval_hours (Story #15 AC3: use claude_integration_config)
         if config.claude_integration_config.description_refresh_interval_hours < 1:
@@ -3273,41 +3475,8 @@ class ServerConfigManager:
                     f"refresh_interval_seconds must be >= 60, got {config.golden_repos_config.refresh_interval_seconds}"
                 )
 
-        # Validate scip_config (Story #3 - Phase 2, AC31-AC34)
-        if config.scip_config:
-            # AC31: scip_reference_limit range 10-10000
-            if not (10 <= config.scip_config.scip_reference_limit <= 10000):
-                raise ValueError(
-                    f"scip_reference_limit must be between 10 and 10000, got {config.scip_config.scip_reference_limit}"
-                )
-            # AC32: scip_dependency_depth range (Bug #1625: sourced from
-            # server/services/constants.py, kept in sync with the SCIP
-            # engine's real get_dependencies()/get_dependents() ceiling in
-            # scip/database/queries.py)
-            from ..services.constants import (
-                MIN_SCIP_DEPENDENCY_DEPTH,
-                MAX_SCIP_DEPENDENCY_DEPTH,
-            )
-
-            if not (
-                MIN_SCIP_DEPENDENCY_DEPTH
-                <= config.scip_config.scip_dependency_depth
-                <= MAX_SCIP_DEPENDENCY_DEPTH
-            ):
-                raise ValueError(
-                    f"scip_dependency_depth must be between {MIN_SCIP_DEPENDENCY_DEPTH} "
-                    f"and {MAX_SCIP_DEPENDENCY_DEPTH}, got {config.scip_config.scip_dependency_depth}"
-                )
-            # AC33: scip_callchain_max_depth range 1-50
-            if not (1 <= config.scip_config.scip_callchain_max_depth <= 50):
-                raise ValueError(
-                    f"scip_callchain_max_depth must be between 1 and 50, got {config.scip_config.scip_callchain_max_depth}"
-                )
-            # AC34: scip_callchain_limit range 1-1000
-            if not (1 <= config.scip_config.scip_callchain_limit <= 1000):
-                raise ValueError(
-                    f"scip_callchain_limit must be between 1 and 1000, got {config.scip_config.scip_callchain_limit}"
-                )
+        # The SCIP query limits (Story #3 - Phase 2, AC31-AC34) are the
+        # cidx-scip feature's settings: its config section bounds them.
 
         # Validate git_timeouts_config (Story #3 - Phase 2, AC12-AC15, AC27-AC30)
         if config.git_timeouts_config:
@@ -3616,3 +3785,102 @@ class ServerConfigManager:
         # Create data directory
         data_dir = self.server_dir / "data"
         data_dir.mkdir(exist_ok=True)
+
+
+#: Settings a feature add-on now owns, by their former place in
+#: ``ServerConfig``: ``old key -> (feature, ServerConfig field, keys)``. A
+#: nested dict's keys move one by one; a top-level scalar moves as itself.
+#: Values stored before the move (runtime database row, ``config.json``) are
+#: carried into the feature's section on load, so an upgrade loses nothing.
+#: An explicit value already in the section wins.
+FEATURE_OWNED_KEYS: Dict[str, Tuple[str, str]] = {
+    # Story #977 runtime settings -> feature_settings["xray"].
+    "xray_config": ("xray", "feature_settings"),
+    # X-Ray execution seam (bootstrap) -> feature_bootstrap_settings["xray"].
+    "xray_backend": ("xray", "feature_bootstrap_settings"),
+    # Story #323 wiki metadata settings -> feature_settings["wiki"] (cidx-wiki).
+    "wiki_config": ("wiki", "feature_settings"),
+    # Story #883 memory retrieval settings -> feature_settings["memory"]
+    # (cidx-memory).
+    "memory_retrieval_config": ("memory", "feature_settings"),
+    # EVO-65021 SCIP build backend (bootstrap) -> feature_bootstrap_settings["scip"].
+    "scip_backend": ("scip", "feature_bootstrap_settings"),
+    # Story #647's pre-Story #15 top-level retention -> feature_settings["scip"].
+    "scip_workspace_retention_days": ("scip", "feature_settings"),
+}
+
+#: Settings a feature owns that sit in a ``ServerConfig`` section the core
+#: keeps: ``(section, feature, field)`` -> the keys that move out of the
+#: section, one by one (the section keeps the rest).
+FEATURE_OWNED_NESTED_KEYS: Dict[Tuple[str, str, str], Tuple[str, ...]] = {
+    # Story #192/#359/#724/#927 dependency-map settings ->
+    # feature_settings["depmap"] (cidx-depmap); claude_integration_config keeps
+    # the rest of the Claude CLI integration.
+    ("claude_integration_config", "depmap", "feature_settings"): (
+        "dependency_map_enabled",
+        "dependency_map_interval_hours",
+        "dependency_map_pass_timeout_seconds",
+        "dep_map_fact_check_enabled",
+        "fact_check_timeout_seconds",
+        "dependency_map_pass1_max_turns",
+        "dependency_map_pass2_max_turns",
+        "dependency_map_delta_max_turns",
+        "refinement_enabled",
+        "refinement_interval_hours",
+        "refinement_domains_per_run",
+        "dep_map_auto_repair_enabled",
+    ),
+    # Story #3 AC31-AC34 SCIP query limits and Story #15 AC2 retention ->
+    # feature_settings["scip"]; scip_config keeps temporal_stale_threshold_days.
+    ("scip_config", "scip", "feature_settings"): (
+        "scip_reference_limit",
+        "scip_dependency_depth",
+        "scip_callchain_max_depth",
+        "scip_callchain_limit",
+        "scip_workspace_retention_days",
+    ),
+}
+
+
+def _move_into_feature_section(
+    config_dict: Dict[str, Any],
+    feature: str,
+    target_field: str,
+    values: Dict[str, Any],
+) -> None:
+    """Merge *values* into ``config_dict[target_field][feature]``; a value
+    already in the section wins."""
+    by_feature = dict(config_dict.get(target_field) or {})
+    section = dict(by_feature.get(feature) or {})
+    for key, value in values.items():
+        section.setdefault(key, value)
+    by_feature[feature] = section
+    config_dict[target_field] = by_feature
+
+
+def _migrate_feature_owned_keys(config_dict: Dict[str, Any]) -> None:
+    """Move pre-feature settings (X-Ray's ``xray_config``/``xray_backend``,
+    SCIP's ``scip_backend`` and ``scip_config`` query limits, the wiki's
+    ``wiki_config``, the memory feature's ``memory_retrieval_config``) out
+    of *config_dict* into the owning feature's section
+    (in place)."""
+    for old_key, (feature, target_field) in FEATURE_OWNED_KEYS.items():
+        if old_key not in config_dict:
+            continue
+        old_value = config_dict.pop(old_key)
+        if old_value is None:
+            continue
+        values = (
+            {k: v for k, v in old_value.items() if v is not None}
+            if isinstance(old_value, dict)
+            else {old_key: old_value}
+        )
+        _move_into_feature_section(config_dict, feature, target_field, values)
+    for (old_section, feature, target_field), keys in FEATURE_OWNED_NESTED_KEYS.items():
+        nested = config_dict.get(old_section)
+        if not isinstance(nested, dict):
+            continue
+        moved = {k: nested.pop(k) for k in keys if k in nested}
+        values = {k: v for k, v in moved.items() if v is not None}
+        if values:
+            _move_into_feature_section(config_dict, feature, target_field, values)

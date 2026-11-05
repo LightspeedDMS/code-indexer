@@ -15,8 +15,10 @@ class TestSingletonSharing:
         and is used directly by inline_auth.py."""
         import inspect
 
-        from code_indexer.server.web import routes
+        from code_indexer.server.web.pages import session as routes
 
+        # The web login routes live in web/pages/session.py since web/routes.py
+        # was split.
         source = inspect.getsource(routes)
 
         assert "LoginRateLimiter()" not in source, (

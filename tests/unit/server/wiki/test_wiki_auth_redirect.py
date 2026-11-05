@@ -1,7 +1,11 @@
 """Tests for Bug #296: wiki auth should redirect to login instead of returning JSON 401.
 
-Tests verify that get_wiki_user_hybrid() catches 401 from get_current_user_hybrid and
-issues a 303 redirect to /login?redirect_to=<current_path> instead of returning raw JSON.
+Since modular phase 4e the wiki is the cidx-wiki feature: the core
+authenticates its routes (``RouterContribution(auth="hybrid",
+login_redirect=True)`` -> ``features.web.hybrid_principal_dependency``), turning
+a 401 from the hybrid authentication into a 303 to
+/login?redirect_to=<current_path>; the routes' own ``get_wiki_user_hybrid``
+reads the principal the core put on the request.
 """
 
 import inspect
@@ -11,7 +15,8 @@ import pytest
 from fastapi import HTTPException
 from starlette import status
 
-from code_indexer.server.auth.user_manager import User
+from code_indexer.server.auth.user_manager import User, UserRole
+from tests.unit.server.wiki.wiki_test_helpers import app_golden_repos_dir
 
 
 def _make_request(path: str, query: str = "") -> MagicMock:
@@ -22,6 +27,14 @@ def _make_request(path: str, query: str = "") -> MagicMock:
     request.headers = {}  # Empty dict — no Authorization header
     request.cookies = {}  # No session cookies
     return request
+
+
+def _login_redirecting_dependency():
+    """The core dependency the wiki's page routes are mounted behind."""
+    from code_indexer.server.features.web import hybrid_principal_dependency
+
+    dependency = hybrid_principal_dependency(None, True)
+    return lambda request: dependency(request, None)
 
 
 def _make_user(username: str = "alice") -> User:
@@ -35,22 +48,22 @@ class TestGetWikiUserHybridExists:
     """get_wiki_user_hybrid must be importable from wiki routes."""
 
     def test_function_is_exported_from_routes(self):
-        from code_indexer.server.wiki.routes import get_wiki_user_hybrid  # noqa: F401
+        from cidx_wiki.server.routes import get_wiki_user_hybrid  # noqa: F401
 
         assert callable(get_wiki_user_hybrid)
 
     def test_function_accepts_request_parameter(self):
-        from code_indexer.server.wiki.routes import get_wiki_user_hybrid
+        from cidx_wiki.server.routes import get_wiki_user_hybrid
 
         sig = inspect.signature(get_wiki_user_hybrid)
         assert "request" in sig.parameters
 
 
 class TestGetWikiUserHybridRedirectBehavior:
-    """401 from get_current_user_hybrid must become a 303 redirect."""
+    """401 from the core's hybrid authentication must become a 303 redirect."""
 
     def test_redirects_when_401_raised(self):
-        from code_indexer.server.wiki.routes import get_wiki_user_hybrid
+        get_wiki_user_hybrid = _login_redirecting_dependency()
 
         request = _make_request("/wiki/my-repo/")
         exc_401 = HTTPException(status_code=401, detail="Authentication required")
@@ -65,7 +78,7 @@ class TestGetWikiUserHybridRedirectBehavior:
         assert exc_info.value.status_code == status.HTTP_303_SEE_OTHER
 
     def test_redirect_location_points_to_login(self):
-        from code_indexer.server.wiki.routes import get_wiki_user_hybrid
+        get_wiki_user_hybrid = _login_redirecting_dependency()
 
         request = _make_request("/wiki/my-repo/")
         exc_401 = HTTPException(status_code=401, detail="Authentication required")
@@ -81,7 +94,7 @@ class TestGetWikiUserHybridRedirectBehavior:
         assert location.startswith("/login?redirect_to=")
 
     def test_redirect_preserves_full_wiki_path(self):
-        from code_indexer.server.wiki.routes import get_wiki_user_hybrid
+        get_wiki_user_hybrid = _login_redirecting_dependency()
 
         path = "/wiki/sf-kb-wiki/Customer/some-article"
         request = _make_request(path)
@@ -102,7 +115,7 @@ class TestGetWikiUserHybridRedirectBehavior:
         )
 
     def test_redirect_preserves_query_string(self):
-        from code_indexer.server.wiki.routes import get_wiki_user_hybrid
+        get_wiki_user_hybrid = _login_redirecting_dependency()
 
         path = "/wiki/my-repo/article"
         query = "version=2&lang=en"
@@ -121,7 +134,7 @@ class TestGetWikiUserHybridRedirectBehavior:
         assert "version%3D2" in location or "version=2" in location
 
     def test_non_401_error_passes_through(self):
-        from code_indexer.server.wiki.routes import get_wiki_user_hybrid
+        get_wiki_user_hybrid = _login_redirecting_dependency()
 
         request = _make_request("/wiki/admin-only/")
         exc_403 = HTTPException(status_code=403, detail="Admin access required")
@@ -138,10 +151,13 @@ class TestGetWikiUserHybridRedirectBehavior:
         assert exc_info.value.detail == "Admin access required"
 
     def test_authenticated_user_passes_through(self):
-        from code_indexer.server.wiki.routes import get_wiki_user_hybrid
+        get_wiki_user_hybrid = _login_redirecting_dependency()
 
         request = _make_request("/wiki/my-repo/")
-        user = _make_user("alice")
+        user = MagicMock()
+        user.username = "alice"
+        user.role = UserRole.NORMAL_USER
+        user.has_permission.return_value = True
 
         with patch(
             "code_indexer.server.auth.dependencies._hybrid_auth_impl",
@@ -149,7 +165,7 @@ class TestGetWikiUserHybridRedirectBehavior:
         ):
             result = get_wiki_user_hybrid(request)
 
-        assert result is user
+        assert result.username == "alice"
 
 
 class TestJsonSearchRoutesStillReturn401:
@@ -157,7 +173,7 @@ class TestJsonSearchRoutesStillReturn401:
 
     def test_wiki_search_uses_original_dependency(self):
         """wiki_search route must NOT use get_wiki_user_hybrid."""
-        from code_indexer.server.wiki import routes as wiki_routes
+        from cidx_wiki.server import routes as wiki_routes
 
         source = inspect.getsource(wiki_routes.wiki_search)
         # Must reference get_current_user_hybrid, not get_wiki_user_hybrid
@@ -166,7 +182,7 @@ class TestJsonSearchRoutesStillReturn401:
 
     def test_user_wiki_search_uses_original_dependency(self):
         """user_wiki_search route must NOT use get_wiki_user_hybrid."""
-        from code_indexer.server.wiki import routes as wiki_routes
+        from cidx_wiki.server import routes as wiki_routes
 
         source = inspect.getsource(wiki_routes.user_wiki_search)
         assert "get_current_user_hybrid" in source
@@ -177,37 +193,37 @@ class TestHtmlRoutesUseWikiDependency:
     """HTML-serving routes must use get_wiki_user_hybrid (produces 303 redirects)."""
 
     def test_serve_wiki_root_uses_wiki_dependency(self):
-        from code_indexer.server.wiki import routes as wiki_routes
+        from cidx_wiki.server import routes as wiki_routes
 
         source = inspect.getsource(wiki_routes.serve_wiki_root)
         assert "get_wiki_user_hybrid" in source
 
     def test_serve_wiki_article_uses_wiki_dependency(self):
-        from code_indexer.server.wiki import routes as wiki_routes
+        from cidx_wiki.server import routes as wiki_routes
 
         source = inspect.getsource(wiki_routes.serve_wiki_article)
         assert "get_wiki_user_hybrid" in source
 
     def test_serve_wiki_asset_uses_wiki_dependency(self):
-        from code_indexer.server.wiki import routes as wiki_routes
+        from cidx_wiki.server import routes as wiki_routes
 
         source = inspect.getsource(wiki_routes.serve_wiki_asset)
         assert "get_wiki_user_hybrid" in source
 
     def test_serve_user_wiki_root_uses_wiki_dependency(self):
-        from code_indexer.server.wiki import routes as wiki_routes
+        from cidx_wiki.server import routes as wiki_routes
 
         source = inspect.getsource(wiki_routes.serve_user_wiki_root)
         assert "get_wiki_user_hybrid" in source
 
     def test_serve_user_wiki_article_uses_wiki_dependency(self):
-        from code_indexer.server.wiki import routes as wiki_routes
+        from cidx_wiki.server import routes as wiki_routes
 
         source = inspect.getsource(wiki_routes.serve_user_wiki_article)
         assert "get_wiki_user_hybrid" in source
 
     def test_serve_user_wiki_asset_uses_wiki_dependency(self):
-        from code_indexer.server.wiki import routes as wiki_routes
+        from cidx_wiki.server import routes as wiki_routes
 
         source = inspect.getsource(wiki_routes.serve_user_wiki_asset)
         assert "get_wiki_user_hybrid" in source
@@ -235,7 +251,7 @@ class TestGetWikiUserHybridRealCallPath:
 
     def test_no_session_no_bearer_raises_303_not_500(self):
         """Without session cookie or Bearer token, must get 303 redirect, not 500 AttributeError."""
-        from code_indexer.server.wiki.routes import get_wiki_user_hybrid
+        get_wiki_user_hybrid = _login_redirecting_dependency()
         from code_indexer.server.web.auth import init_session_manager
         from unittest.mock import patch
 
@@ -266,7 +282,7 @@ class TestGetWikiUserHybridRealCallPath:
 
     def test_no_session_no_bearer_redirect_location_correct(self):
         """303 redirect must point to /login?redirect_to=<path>."""
-        from code_indexer.server.wiki.routes import get_wiki_user_hybrid
+        get_wiki_user_hybrid = _login_redirecting_dependency()
         from code_indexer.server.web.auth import init_session_manager
         from unittest.mock import patch
 
@@ -308,10 +324,9 @@ class TestEndToEndRedirectBehavior:
         """Without any auth, wiki root must redirect to /login, not return JSON 401."""
         import os
         import tempfile
-        from pathlib import Path
         from fastapi import FastAPI, Request
         from fastapi.testclient import TestClient
-        from code_indexer.server.wiki.routes import (
+        from cidx_wiki.server.routes import (
             wiki_router,
             get_wiki_user_hybrid,
             _reset_wiki_cache,
@@ -336,8 +351,7 @@ class TestEndToEndRedirectBehavior:
 
         app.state.golden_repo_manager = MagicMock()
         app.state.golden_repo_manager.get_wiki_enabled.return_value = True
-        _tmp_golden = tempfile.mkdtemp(suffix="-golden-repos")
-        (Path(_tmp_golden) / "aliases").mkdir(parents=True, exist_ok=True)
+        _tmp_golden = str(app_golden_repos_dir(app, suffix="-golden-repos"))
         app.state.golden_repo_manager.golden_repos_dir = _tmp_golden
         _db_fd, _db_path = tempfile.mkstemp(suffix=".db")
         os.close(_db_fd)
@@ -350,3 +364,20 @@ class TestEndToEndRedirectBehavior:
         assert resp.status_code == 303
         assert "Location" in resp.headers
         assert "/login" in resp.headers["Location"]
+
+
+class TestSearchRoutesAnswer401:
+    """Without login_redirect (the wiki's _search routes) a 401 stays a 401."""
+
+    def test_unauthenticated_search_dependency_raises_401(self):
+        from code_indexer.server.features.web import hybrid_principal_dependency
+
+        dependency = hybrid_principal_dependency(None, False)
+        exc_401 = HTTPException(status_code=401, detail="Authentication required")
+        with patch(
+            "code_indexer.server.auth.dependencies._hybrid_auth_impl",
+            side_effect=exc_401,
+        ):
+            with pytest.raises(HTTPException) as exc_info:
+                dependency(_make_request("/wiki/my-repo/_search"), None)
+        assert exc_info.value.status_code == 401

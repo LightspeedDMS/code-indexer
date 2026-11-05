@@ -7,6 +7,7 @@ Story #216 AC9:
 - DependencyMapDashboardService.get_job_status() includes run_history
 """
 
+from tests.unit.server._depmap_feature import depmap_claude_config
 import pytest
 from unittest.mock import Mock
 
@@ -134,13 +135,12 @@ class TestDashboardRunHistory:
     """AC9: DependencyMapDashboardService.get_job_status includes run_history."""
 
     def _make_dashboard_service(self, tmp_path, run_count=2):
-        from code_indexer.server.services.dependency_map_dashboard_service import (
+        from cidx_depmap.server.dependency_map_dashboard_service import (
             DependencyMapDashboardService,
         )
         from code_indexer.server.storage.sqlite_backends import (
             DependencyMapTrackingBackend,
         )
-        from code_indexer.server.utils.config_manager import ClaudeIntegrationConfig
 
         backend = DependencyMapTrackingBackend(str(tmp_path / "test.db"))
         for i in range(run_count):
@@ -151,7 +151,7 @@ class TestDashboardRunHistory:
                 )
             )
 
-        config = ClaudeIntegrationConfig(
+        config = depmap_claude_config(
             dependency_map_enabled=True,
             dependency_map_interval_hours=24,
         )

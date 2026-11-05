@@ -15,8 +15,10 @@ Architecture:
 - Immediate queuing feedback before async processing
 """
 
+import contextvars
 import hashlib
 import logging
+import os
 import sqlite3
 import time
 from concurrent.futures import CancelledError, ThreadPoolExecutor, Future
@@ -29,6 +31,8 @@ if TYPE_CHECKING:
 
 from .vector_calculation_manager import VectorCalculationManager
 from ..indexing.fixed_size_chunker import FixedSizeChunker
+from ..indexing import file_facts
+from ..indexing.file_facts import ContentUnavailableError
 from .clean_slot_tracker import CleanSlotTracker, FileData, FileStatus
 from .run_spend_meter import get_run_spend_meter
 from ..storage.sqlite_chunk_store import (
@@ -36,6 +40,14 @@ from ..storage.sqlite_chunk_store import (
     is_fatal_chunk_store_write_error,
 )
 import threading
+
+if TYPE_CHECKING:
+    from ..indexing.repo_manifest import RepoManifest
+
+    # Type only: the prefetcher pulls in the server's content seam, which
+    # local-only indexing never constructs and must not have to import.
+    from ..indexing.content_prefetcher import ContentPrefetcher
+    from .multimodal_utils import ImageSource
 
 # Token counting for large file handling - using embedded tokenizer
 # No imports needed here - lazy import in _count_tokens_accurately()
@@ -50,19 +62,31 @@ logger = logging.getLogger(__name__)
 THREAD_POOL_SHUTDOWN_TIMEOUT = 30.0  # 30 seconds for graceful shutdown
 
 
-def _multimodal_content_hash(text: str, image_paths: List[Path]) -> str:
+def _multimodal_content_hash(
+    text: str,
+    image_paths: List[Path],
+    image_source: Optional["ImageSource"] = None,
+) -> str:
     """Bug #2153: the ``content_hash`` (reuse key) of a multimodal chunk.
 
     It covers everything the provider is sent: the chunk text AND the bytes
     of every image, in order, so a changed image under unchanged text is a
     miss, never a stale reuse. The text is length-prefixed and each image
-    contributes a fixed-size digest, so the encoding is unambiguous."""
+    contributes a fixed-size digest, so the encoding is unambiguous.
+
+    ``image_source``: where image bytes come from on a pod that does not hold
+    the repository (the content seam); None reads this container's disk."""
     text_bytes = text.encode("utf-8")
     digest = hashlib.sha256(b"cidx-multimodal-v1\0")
     digest.update(len(text_bytes).to_bytes(8, "big"))
     digest.update(text_bytes)
     for image_path in image_paths:
-        digest.update(hashlib.sha256(image_path.read_bytes()).digest())
+        data = (
+            image_path.read_bytes()
+            if image_source is None
+            else image_source.read(image_path)
+        )
+        digest.update(hashlib.sha256(data).digest())
     return digest.hexdigest()
 
 
@@ -76,6 +100,10 @@ class FileProcessingResult:
     processing_time: float
     error: Optional[str] = None
     vanished: bool = False  # True when file disappeared before stat() (TOCTOU skip)
+    #: EVO-64616: image chunks of a successful file that got no multimodal
+    #: point (no resolvable image, or the provider failed). Their text is
+    #: still in the text index; the count keeps the gap visible.
+    multimodal_chunks_failed: int = 0
 
 
 def _vector_storage_failure_result(
@@ -110,6 +138,9 @@ class FileChunkingManager:
         codebase_dir: Path,  # CRITICAL FOR COW CLONING: Needed for path normalization
         fts_manager=None,  # Optional FTS index manager
         multimodal_client=None,  # Optional VoyageMultimodalClient for multimodal embeddings
+        manifest: Optional["RepoManifest"] = None,
+        content_source: Optional["ContentPrefetcher"] = None,
+        image_source: Optional["ImageSource"] = None,
         fts_write_failures: Optional["FtsWriteFailures"] = None,
     ):
         """
@@ -124,6 +155,15 @@ class FileChunkingManager:
             codebase_dir: Repository root directory for path normalization
             fts_manager: Optional FTS index manager
             multimodal_client: Optional VoyageMultimodalClient for multimodal embeddings
+            manifest: The pass's delegated manifest, if any. When set, file size
+                and mtime come from it instead of a local stat.
+            content_source: Where file bytes come from. None (the default) reads
+                this container's disk; a ContentPrefetcher serves them from a
+                delegated content backend, with no local read.
+            image_source: Where referenced images' existence, size and bytes
+                come from. None (the default) asks this container's disk,
+                exactly as before; an ImagePrefetcher answers through the
+                content seam for a pod that does not hold the repository.
             fts_write_failures: Optional run-scoped record of files whose FTS
                 documents could not be replaced (Bug #2056: the run's finish
                 retries them from disk; still failing, they are missing from
@@ -153,6 +193,9 @@ class FileChunkingManager:
         self.codebase_dir = codebase_dir
         self.fts_manager = fts_manager
         self.multimodal_client = multimodal_client
+        self.manifest = manifest
+        self.content_source = content_source
+        self.image_source = image_source
         self.fts_write_failures = fts_write_failures
 
         # CRITICAL FIX: Single cancellation event shared with VectorCalculationManager
@@ -348,8 +391,14 @@ class FileChunkingManager:
         # Always use clean implementation
         process_method = self._process_file_clean_lifecycle
 
+        # Capture current context (including embed stats ContextVars) so
+        # the ThreadPoolExecutor worker inherits them — without this, the
+        # worker thread starts with empty ContextVars and embed stats tags
+        # (golden_repo_alias, job_id, node_id) are all NULL.
+        _stats_ctx = contextvars.copy_context()
         if after is None:
             future = self.executor.submit(
+                _stats_ctx.run,
                 process_method,
                 file_path,
                 metadata,
@@ -358,6 +407,7 @@ class FileChunkingManager:
             )
         else:
             future = self.executor.submit(
+                _stats_ctx.run,
                 self._process_after_first_copy,
                 after,
                 file_path,
@@ -460,9 +510,9 @@ class FileChunkingManager:
 
         # UNIVERSAL TIMESTAMP COLLECTION: Always collect file modification timestamp
         try:
-            file_stat = file_path.stat()
-            file_last_modified = file_stat.st_mtime
-            file_size = file_stat.st_size
+            file_last_modified, file_size = file_facts.file_mtime_and_size(
+                file_path, self.manifest
+            )
         except (OSError, IOError) as e:
             # Don't fail indexing for timestamp issues - set to None and continue
             logger.warning(f"Failed to get file stats for {file_path}: {e}")
@@ -540,6 +590,49 @@ class FileChunkingManager:
 
         return vector_point
 
+    def _image_path(self, img_ref_path: str) -> Path:
+        """A referenced image's absolute path under the codebase.
+
+        Resolved on this disk (following symlinks) for a local pass. With an
+        image source the repository is not on this machine -- there is nothing
+        here to resolve against -- so the path is normalised lexically, keeping
+        the codebase prefix the image source answers for.
+        """
+        if self.image_source is None:
+            return (self.codebase_dir / img_ref_path).resolve()
+        return Path(os.path.normpath(self.codebase_dir / img_ref_path))
+
+    def _image_exists(self, img_path: Path) -> bool:
+        """Whether a referenced image is there: the image source's answer when
+        there is one (the pod may not mount the repository), else the disk's."""
+        if self.image_source is None:
+            return img_path.exists()
+        return self.image_source.has(img_path)
+
+    def _image_source_kwargs(self) -> Dict[str, Any]:
+        """``image_source=`` for the multimodal client, only when there is one,
+        so a local pass calls the client exactly as it always has."""
+        if self.image_source is None:
+            return {}
+        return {"image_source": self.image_source}
+
+    def _read_content(self, file_path: Path) -> bytes:
+        """This file's bytes: from the content source when there is one, else disk.
+
+        A delegated source never falls back to the disk -- the pod may not mount
+        the repository. Its "gone" is raised as FileNotFoundError so the caller's
+        vanished-file handling is the same for both; any other refusal (changed
+        since the manifest, a transport failure) is an ordinary failure.
+        """
+        if self.content_source is None:
+            return file_path.read_bytes()
+        fetched = self.content_source.take(file_path)
+        if fetched.vanished:
+            raise FileNotFoundError(fetched.error)
+        if fetched.error is not None or fetched.data is None:
+            raise ContentUnavailableError(f"{file_path}: {fetched.error}")
+        return fetched.data
+
     def _lookup_reusable_embeddings(
         self,
         file_path: Path,
@@ -590,8 +683,8 @@ class FileChunkingManager:
             if img_ref_path.startswith(("http://", "https://")):
                 logger.debug(f"Skipping remote image URL: {img_ref_path}")
                 continue
-            img_path = (self.codebase_dir / img_ref_path).resolve()
-            if not img_path.exists():
+            img_path = self._image_path(img_ref_path)
+            if not self._image_exists(img_path):
                 logger.debug(f"Image not found: {img_path} - skipping")
                 continue
             try:
@@ -633,7 +726,9 @@ class FileChunkingManager:
         with the same content_hash (text + image bytes) is reused without a
         provider call; only a miss is registered with the run-spend meter
         (Story #2122) and sent."""
-        content_hash = _multimodal_content_hash(chunk["text"], image_paths)
+        content_hash = _multimodal_content_hash(
+            chunk["text"], image_paths, self.image_source
+        )
         reusable = stored.get(content_hash)
         if reusable:
             embedding = reusable["vector"]
@@ -645,7 +740,9 @@ class FileChunkingManager:
                     max_retries=self.multimodal_client.request_max_retries(),
                 )
             embedding = self.multimodal_client.get_multimodal_embedding(
-                text=chunk["text"], image_paths=image_paths
+                text=chunk["text"],
+                image_paths=image_paths,
+                **self._image_source_kwargs(),
             )
         chunk_data = {
             "text": chunk["text"],
@@ -676,7 +773,11 @@ class FileChunkingManager:
         them after every regular embedding of the file is validated.
         Bug #2153: as on the text path (Story #2119), the multimodal store is
         consulted first with ONE fail-closed lookup per file. A per-chunk
-        provider or image-read failure skips that chunk."""
+        provider or image-read failure skips that chunk -- except a content
+        backend that could not serve an image (ContentUnavailableError: a
+        transport failure, not a missing image), which fails the file so a
+        later pass retries it instead of recording it without its multimodal
+        points."""
         # Cohere: collection_name property ("embed-v4.0-multimodal");
         # VoyageAI: falls back to config.model ("voyage-multimodal-3").
         collection_name = getattr(
@@ -706,6 +807,8 @@ class FileChunkingManager:
                 vector_point = self._multimodal_vector_point(
                     chunk, image_paths, stored, metadata, file_path
                 )
+            except ContentUnavailableError:
+                raise
             except Exception as e:
                 logger.error(f"Failed to generate or store multimodal embedding: {e}")
                 continue
@@ -734,7 +837,7 @@ class FileChunkingManager:
         """
         start_time = time.time()
         try:
-            file_size = file_path.stat().st_size
+            file_size = file_facts.file_size(file_path, self.manifest)
         except FileNotFoundError as e:
             # Bug #1118 — TOCTOU: file vanished between enumeration and chunking.
             # Return a vanished result (not raise) so the collector skips it gracefully.
@@ -770,9 +873,44 @@ class FileChunkingManager:
             # ALL work in try block
             slot_tracker.update_slot(slot_id, FileStatus.CHUNKING)
 
+            # Read ONCE and let everything downstream work from these bytes. The
+            # metadata phase used to read the whole file just to sha256 it and
+            # this worker read it again to chunk it; one read collapses that pair
+            # and closes the window between them, where the two reads could see
+            # different content and leave the stored hash describing bytes that
+            # were never chunked.
+            #
+            # INSIDE this try on purpose. Only ENOENT is the "vanished" case,
+            # which the collector skips benignly -- it increments neither
+            # files_processed nor failed_files and never records the path. Any
+            # other OSError (PermissionError, an NFS stale handle, EIO) must stay
+            # an ordinary failure, exactly as it was when it came out of
+            # chunk_file, instead of dropping the file while the run reports
+            # clean stats.
+            try:
+                content = self._read_content(file_path)
+            except FileNotFoundError as e:
+                logger.warning(
+                    f"Skipping file that vanished during chunking: {file_path}"
+                )
+                return FileProcessingResult(
+                    success=False,
+                    vanished=True,
+                    file_path=file_path,
+                    chunks_processed=0,
+                    processing_time=time.time() - start_time,
+                    error=f"File vanished before processing: {e}",
+                )
+
+            # Fill in a hash the metadata phase deferred rather than read for.
+            if metadata.get("file_hash") is None:
+                metadata["file_hash"] = "sha256:" + hashlib.sha256(content).hexdigest()
+
             # Phase 1: Chunk the file
             logger.debug(f"Starting chunking for {file_path}")
-            chunks = self.chunker.chunk_file(file_path, repo_root=self.codebase_dir)
+            chunks = self.chunker.chunk_file(
+                file_path, repo_root=self.codebase_dir, content=content
+            )
 
             if not chunks:
                 # Empty files are valid but don't need indexing
@@ -806,23 +944,24 @@ class FileChunkingManager:
 
             logger.debug(f"Generated {len(chunks)} chunks for {file_path}")
 
-            # MULTIMODAL ROUTING: Separate chunks into regular (code-only) and multimodal (with images)
-            regular_chunks = []
-            multimodal_chunks = []
-
-            for chunk in chunks:
-                if chunk.get("images") and len(chunk["images"]) > 0:
-                    multimodal_chunks.append(chunk)
-                    logger.debug(
-                        f"Chunk {chunk.get('chunk_index')} has {len(chunk['images'])} images - "
-                        "routing to multimodal embedding path"
-                    )
-                else:
-                    regular_chunks.append(chunk)
-
-            logger.debug(
-                f"Separated {len(regular_chunks)} regular chunks and "
-                f"{len(multimodal_chunks)} multimodal chunks for {file_path}"
+            # EVO-64616: EVERY chunk's text goes to the text index; a chunk
+            # with images is ALSO embedded multimodally when a multimodal
+            # client exists. Image chunks used to go to the multimodal path
+            # only, so their text was lost whenever that path produced
+            # nothing: with multimodal indexing off (EVO-65484) always -- a
+            # page whose every chunk referenced an image failed with "No
+            # batches created" on every run (5605 .htm files of jplanner) --
+            # and with it on, for a chunk whose images could not be resolved
+            # or embedded. The text collection now holds every chunk of
+            # every indexed file, which is what reconcile's chunk-coverage
+            # check (chunk_coverage.incomplete_chunk_paths) relies on.
+            # Query-time merging already deduplicates the two collections by
+            # (path, chunk offset).
+            regular_chunks = list(chunks)
+            multimodal_chunks = (
+                [chunk for chunk in chunks if chunk.get("images")]
+                if self.multimodal_client
+                else []
             )
 
             # Update status after chunking
@@ -970,6 +1109,7 @@ class FileChunkingManager:
             # which would violate file atomicity if a later regular
             # embedding turned out falsy and failed the whole file.
             pending_multimodal_points: List[Dict[str, Any]] = []
+            multimodal_chunks_failed = 0
 
             # MULTIMODAL PROCESSING: Handle chunks with images
             if (
@@ -978,9 +1118,21 @@ class FileChunkingManager:
                 and self.multimodal_client
             ):
                 # Bug #2153: committed multimodal rows are reused (Story #2119).
-                pending_multimodal_points = self._embed_multimodal_chunks(
-                    multimodal_chunks, len(chunks), metadata, file_path
-                )
+                try:
+                    pending_multimodal_points = self._embed_multimodal_chunks(
+                        multimodal_chunks, len(chunks), metadata, file_path
+                    )
+                    multimodal_chunks_failed = len(multimodal_chunks) - len(
+                        pending_multimodal_points
+                    )
+                except ContentUnavailableError:
+                    # An image batch the backend could not serve fails the
+                    # file, as a text-fetch failure does: its queued text
+                    # batches are discarded; the ones not yet started are
+                    # cancelled.
+                    for batch_future in batch_futures:
+                        batch_future.cancel()
+                    raise
 
             # Bug #1502 (Codex finding 4): pending_multimodal_points is the
             # POST-embedding-attempt result -- unlike multimodal_chunks
@@ -1276,6 +1428,7 @@ class FileChunkingManager:
                 chunks_processed=len(file_points),
                 processing_time=processing_time,
                 error=None,
+                multimodal_chunks_failed=multimodal_chunks_failed,
             )
 
         except ChunkStoreUnavailableError:

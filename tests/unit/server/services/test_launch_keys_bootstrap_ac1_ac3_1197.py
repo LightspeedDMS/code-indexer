@@ -135,7 +135,6 @@ class TestAC1BootstrapKeysRemoved:
                 "voyage_ai_sinbin",
                 "cohere_sinbin",
                 "query_orchestration",
-                "memory_retrieval_config",
                 "lifecycle_analysis_config",
                 "codex_integration_config",
                 "elevation_enforcement_enabled",
