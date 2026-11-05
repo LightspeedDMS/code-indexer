@@ -1,0 +1,316 @@
+# Package dependency contracts (modular packaging, phase 1).
+#
+# Target rules: plans/designs/modular-endstate.md, section 3.
+# How they are enforced and how to update the baseline:
+# docs/architecture/invariants/import-contracts.md
+#
+# Today's tree breaks every contract below. CI does not run `lint-imports`
+# directly; it runs scripts/check_import_contracts.py, which evaluates these
+# same contracts with import-linter and compares the violations, line by line,
+# against scripts/import_contracts_ratchet.json: a new violation fails, and so
+# does a baseline entry that no longer occurs (the count only goes down).
+#
+# Every contract is `forbidden` with allow_indirect_imports = True: each DIRECT
+# import is one violation, wherever it sits in the module (top level, inside a
+# function, under TYPE_CHECKING). Indirect chains are not counted yet; they
+# become meaningful once the direct counts reach zero.
+
+[importlinter]
+root_packages =
+    code_indexer
+    cidx_git_backend
+    cidx_orchestrator_invoker
+    cidx_backend_workspace
+    cidx_backend_git
+    cidx_testkit
+    cidx_xray
+    cidx_scip
+    cidx_wiki
+    cidx_memory
+    cidx_depmap
+include_external_packages = False
+exclude_type_checking_imports = False
+
+# The library packages named in the end state must not reach into the server.
+# (X-Ray left the core in phase 4c and SCIP in phase 4d: their packages are
+# cidx_xray and cidx_scip, covered below; code_indexer.scip is only SCIP's
+# plugin-API compatibility module.)
+[importlinter:contract:library-packages-no-server]
+name = Library packages (global_repos, storage, scip) do not import the server
+type = forbidden
+source_modules =
+    code_indexer.global_repos
+    code_indexer.storage
+    code_indexer.scip
+forbidden_modules =
+    code_indexer.server
+allow_indirect_imports = True
+
+# Every other non-shell package of the core. The server is the core's HTTP
+# shell; a library that imports it inverts the layering, and no library can
+# move into its own distribution while it does. The CLI and daemon shells
+# (cli*, daemon, ...) may import the server and are listed in
+# scripts/check_import_contracts.py (SHELL_MODULES).
+[importlinter:contract:core-libraries-no-server]
+name = Other core library packages do not import the server
+type = forbidden
+source_modules =
+    code_indexer.api_clients
+    code_indexer.backends
+    code_indexer.config
+    code_indexer.config_global
+    code_indexer.indexing
+    code_indexer.kernel
+    code_indexer.logging
+    code_indexer.mode_detection
+    code_indexer.password_policy
+    code_indexer.progress
+    code_indexer.proxy
+    code_indexer.remote
+    code_indexer.search
+    code_indexer.services
+    code_indexer.sync
+    code_indexer.test_infrastructure
+    code_indexer.utils
+    code_indexer.validation
+forbidden_modules =
+    code_indexer.server
+allow_indirect_imports = True
+
+# The core never imports a feature, and a feature never imports another
+# feature. Both tool features are their own distributions now (X-Ray since
+# phase 4b/4c, SCIP since phase 4d: core-does-not-import-*-feature below).
+# code_indexer.scip is what is left of SCIP's old in-core package: the
+# delegated-build plugin API, kept at its old path for SCIP backend plugins.
+# No core module may import it (baseline 0); the wildcard covers every module
+# of the core, including packages added later.
+[importlinter:contract:features-not-imported]
+name = Nothing in the core imports SCIP's compatibility package (code_indexer.scip)
+type = forbidden
+source_modules =
+    code_indexer.*
+forbidden_modules =
+    code_indexer.scip
+allow_indirect_imports = True
+
+# The in-repo plugins are the future delegate distributions (cidx-delegate-*).
+# Delegates depend on the SDK only, never on the kernel (the code_indexer
+# package).
+[importlinter:contract:plugins-no-kernel]
+name = Plugins do not import the kernel
+type = forbidden
+source_modules =
+    cidx_git_backend
+    cidx_orchestrator_invoker
+forbidden_modules =
+    code_indexer
+allow_indirect_imports = True
+
+# Local seam implementations (cidx-backend-*) and the dev test kit are add-ons
+# too: they depend on the SDK only, never on the kernel.
+[importlinter:contract:backends-no-kernel]
+name = Backends and the test kit do not import the kernel
+type = forbidden
+source_modules =
+    cidx_backend_workspace
+    cidx_backend_git
+    cidx_testkit
+forbidden_modules =
+    code_indexer
+allow_indirect_imports = True
+
+# Feature add-ons depend on the SDK only (end state, section 3). cidx_xray is
+# the first feature in its own distribution (packages/features/cidx-xray). Its
+# baseline is the ONE adapter module, cidx_xray._platform, which reaches the
+# capability and seam interfaces and a few pure helpers in the core until
+# cidx_sdk provides them; no other module of the feature may import the core.
+[importlinter:contract:xray-feature-no-core]
+name = The xray feature (cidx_xray) does not import the core
+type = forbidden
+source_modules =
+    cidx_xray
+forbidden_modules =
+    code_indexer
+allow_indirect_imports = True
+
+# ...and the core does not import the feature: it loads X-Ray only through the
+# feature contract (entry point, hooks). Since phase 4c the baseline is empty;
+# X-Ray's old in-core import paths are aliases the test suites install
+# (cidx_xray.legacy_paths), not core modules.
+[importlinter:contract:core-does-not-import-xray-feature]
+name = The core does not import the xray feature (cidx_xray)
+type = forbidden
+source_modules =
+    code_indexer
+forbidden_modules =
+    cidx_xray
+allow_indirect_imports = True
+
+# The SCIP feature (packages/features/cidx-scip, phase 4d) under the same two
+# rules as X-Ray: its baseline is the ONE adapter module, cidx_scip._platform,
+# which reaches the capability interfaces, a few pure core helpers and the
+# server platform slot until cidx_sdk provides them; no other module of the
+# feature may import the core.
+[importlinter:contract:scip-feature-no-core]
+name = The scip feature (cidx_scip) does not import the core
+type = forbidden
+source_modules =
+    cidx_scip
+forbidden_modules =
+    code_indexer
+allow_indirect_imports = True
+
+# ...and the core does not import the feature: it loads SCIP only through the
+# feature contract (entry point, hooks: tools, routers, the query page's
+# search mode, the indexing pipeline's index builder). Baseline 0.
+[importlinter:contract:core-does-not-import-scip-feature]
+name = The core does not import the scip feature (cidx_scip)
+type = forbidden
+source_modules =
+    code_indexer
+forbidden_modules =
+    cidx_scip
+allow_indirect_imports = True
+
+# The wiki feature (packages/features/cidx-wiki, phase 4e) by the same rules as
+# X-Ray and SCIP: its baseline is the ONE adapter module, cidx_wiki._platform.
+[importlinter:contract:wiki-feature-no-core]
+name = The wiki feature (cidx_wiki) does not import the core
+type = forbidden
+source_modules =
+    cidx_wiki
+forbidden_modules =
+    code_indexer
+allow_indirect_imports = True
+
+# ...and the core does not import the wiki: it loads it only through the
+# feature contract (entry point, hooks). Baseline 0.
+[importlinter:contract:core-does-not-import-wiki-feature]
+name = The core does not import the wiki feature (cidx_wiki)
+type = forbidden
+source_modules =
+    code_indexer
+forbidden_modules =
+    cidx_wiki
+allow_indirect_imports = True
+
+# A feature never imports another feature (end state, section 3): what they
+# share becomes an SDK capability. Baseline 0.
+[importlinter:contract:wiki-feature-no-other-feature]
+name = The wiki feature does not import another feature
+type = forbidden
+source_modules =
+    cidx_wiki
+forbidden_modules =
+    cidx_xray
+    cidx_scip
+    cidx_memory
+    cidx_depmap
+allow_indirect_imports = True
+
+[importlinter:contract:xray-feature-no-other-feature]
+name = The xray feature does not import another feature
+type = forbidden
+source_modules =
+    cidx_xray
+forbidden_modules =
+    cidx_wiki
+    cidx_scip
+    cidx_memory
+    cidx_depmap
+allow_indirect_imports = True
+
+[importlinter:contract:scip-feature-no-other-feature]
+name = The scip feature does not import another feature
+type = forbidden
+source_modules =
+    cidx_scip
+forbidden_modules =
+    cidx_wiki
+    cidx_xray
+    cidx_memory
+    cidx_depmap
+allow_indirect_imports = True
+
+# The memory feature (packages/features/cidx-memory, phase 4f) by the same
+# rules: its baseline is the ONE adapter module, cidx_memory._platform.
+[importlinter:contract:memory-feature-no-core]
+name = The memory feature (cidx_memory) does not import the core
+type = forbidden
+source_modules =
+    cidx_memory
+forbidden_modules =
+    code_indexer
+allow_indirect_imports = True
+
+# ...and the core does not import the memory feature. Baseline 0.
+[importlinter:contract:core-does-not-import-memory-feature]
+name = The core does not import the memory feature (cidx_memory)
+type = forbidden
+source_modules =
+    code_indexer
+forbidden_modules =
+    cidx_memory
+allow_indirect_imports = True
+
+[importlinter:contract:memory-feature-no-other-feature]
+name = The memory feature does not import another feature
+type = forbidden
+source_modules =
+    cidx_memory
+forbidden_modules =
+    cidx_xray
+    cidx_scip
+    cidx_wiki
+    cidx_depmap
+allow_indirect_imports = True
+
+# ...and the core does not import a local backend: it reaches each one only
+# through the seam resolver, by entry name, so a pod that delegates a seam can
+# leave the local module out. The baseline is the compatibility re-exports at
+# the old import paths (LocalContentBackend, LocalGitBackend, the clone
+# backends and the ONTAP client, LocalRipgrepBackend, LocalIndexStore), which
+# keep existing imports, isinstance checks and test patches working; each goes
+# when nothing imports its old path.
+[importlinter:contract:core-does-not-import-backends]
+name = The core does not import the local backends (cidx_backend_*)
+type = forbidden
+source_modules =
+    code_indexer
+forbidden_modules =
+    cidx_backend_workspace
+    cidx_backend_git
+allow_indirect_imports = True
+
+# The dependency-map feature (packages/features/cidx-depmap, phase 4g) by the
+# same rules: its baseline is the ONE adapter module, cidx_depmap._platform.
+[importlinter:contract:depmap-feature-no-core]
+name = The dependency-map feature (cidx_depmap) does not import the core
+type = forbidden
+source_modules =
+    cidx_depmap
+forbidden_modules =
+    code_indexer
+allow_indirect_imports = True
+
+# ...and the core does not import the dependency-map feature. Baseline 0.
+[importlinter:contract:core-does-not-import-depmap-feature]
+name = The core does not import the dependency-map feature (cidx_depmap)
+type = forbidden
+source_modules =
+    code_indexer
+forbidden_modules =
+    cidx_depmap
+allow_indirect_imports = True
+
+[importlinter:contract:depmap-feature-no-other-feature]
+name = The dependency-map feature does not import another feature
+type = forbidden
+source_modules =
+    cidx_depmap
+forbidden_modules =
+    cidx_xray
+    cidx_scip
+    cidx_wiki
+    cidx_memory
+allow_indirect_imports = True

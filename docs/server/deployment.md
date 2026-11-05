@@ -95,7 +95,7 @@ sudo firewall-cmd --reload
 | `~/code-indexer/` | Repository checkout the server runs from (`WorkingDirectory`, `PYTHONPATH=<checkout>/src`) |
 | `~/.cidx-server/config.json` | Bootstrap configuration (see below) |
 | `~/.cidx-server/data/cidx_server.db` | Users, settings (runtime configuration row), jobs, golden-repo metadata |
-| `~/.cidx-server/groups.db`, `oauth.db`, `refresh_tokens.db`, `scip_audit.db` | Groups and audit log, OAuth clients, refresh tokens, SCIP audit |
+| `~/.cidx-server/groups.db`, `oauth.db`, `refresh_tokens.db` | Groups and audit log, OAuth clients, refresh tokens (the SCIP dependency audit, formerly `scip_audit.db`, is a table of the server database since the `scip` feature's migration 1) |
 | `~/.cidx-server/logs.db` | Application log database (see [Observability](observability.md)) |
 | `~/.cidx-server/.jwt_secret` | JWT signing secret (standalone mode) |
 | `~/.cidx-server/.token_encryption_key` | Key for stored git credentials, CI tokens and LLM lease state (created automatically, mode 0600; cluster nodes share a key in the database instead); back it up with the database |
@@ -172,6 +172,81 @@ The authoritative bootstrap list is `BOOTSTRAP_KEYS` in `src/code_indexer/server
 | `enable_predeactivation_leak_scan`, `orphan_trash_sweep_per_startup_cap` | Startup cleanup controls |
 
 Bootstrap keys are read at startup; restart the service after changing one.
+
+### Feature add-ons (`enabled_features`)
+
+A feature add-on's server side (MCP tools, REST routes, migrations, settings) runs only when the add-on is installed
+AND named in `enabled_features`; its settings that must be known before the database opens go in
+`feature_bootstrap_settings`. X-Ray (`cidx-xray`) and SCIP (`cidx-scip`) are such add-ons, both installed by
+default and in the image: without `"xray"` below the server has no X-Ray tools or routes, and without `"scip"` it has
+no SCIP tools, `/scip` routes or query-page mode and builds no SCIP indexes (`cidx xray` and `cidx scip` still work).
+**Upgrading a server that used SCIP: add `"scip"` to `enabled_features`.**
+
+```json
+{
+  "enabled_features": ["xray", "scip"],
+  "feature_bootstrap_settings": {
+    "xray": {"xray_backend": "delegated"},
+    "scip": {"scip_backend": "delegated-plugin"}
+  }
+}
+```
+
+`xray_backend` is `local` (xray-cli in this pod, the default) or `delegated` (the X-Ray backend plugin, no
+fallback). A `config.json` still carrying a top-level `"xray_backend"` keeps working: it is moved into
+`feature_bootstrap_settings.xray` on load. The same holds for SCIP: a top-level `"scip_backend"` is moved into
+`feature_bootstrap_settings.scip`, and the SCIP query limits stored under `scip_config` into the feature's runtime
+settings ([cidx-scip](../architecture/cidx-scip.md)).
+
+The wiki is an add-on too (`cidx-wiki`, installed by default and in the image). Without `"wiki"` in
+`enabled_features` the server serves no `/wiki` pages, no `wiki_article_analytics` tool and no wiki toggles on the
+repository pages; repository `wiki_enabled` flags and the wiki tables are kept. An upgraded deployment that used the
+wiki must add it, e.g. `"enabled_features": ["xray", "wiki"]`; its settings (`wiki_config`) move into
+`feature_settings.wiki` on load. See [cidx-wiki](../architecture/cidx-wiki.md).
+
+Shared technical memories are an add-on too (`cidx-memory`, installed by default and in the image). Without
+`"memory"` in `enabled_features` the server has no `create_memory` / `edit_memory` / `delete_memory` tools, no
+`/api/v1/memories` routes and no `relevant_memories` in `search_code` responses; the memory files already in
+`cidx-meta/memories` stay, are still indexed with the catalog and are still filtered per caller by the catalog
+doors. An upgraded deployment that uses memories must add it, e.g. `"enabled_features": ["xray", "wiki",
+"memory"]`; its retrieval settings (`memory_retrieval_config`) move into `feature_settings.memory` on load. See
+[cidx-memory](../architecture/cidx-memory.md).
+
+The dependency map is an add-on too (`cidx-depmap`, installed by default and in the image). Without `"depmap"` in
+`enabled_features` the server has no `depmap_*` / `trigger_dependency_analysis` tools, no
+`/admin/dependency-map` page or routes, no scheduled analysis and no fact check of generated repository
+descriptions; the documents in `cidx-meta/dependency-map` and the dependency-map tables stay. An upgraded
+deployment that uses it must add it, e.g. `"enabled_features": ["xray", "wiki", "memory", "depmap"]`; its settings
+(the `dependency_map_*`, `refinement_*`, `dep_map_fact_check_enabled`, `fact_check_timeout_seconds` and
+`dep_map_auto_repair_enabled` fields of `claude_integration_config`) move into `feature_settings.depmap` on load.
+See [cidx-depmap](../architecture/cidx-depmap.md).
+
+### Stateless pods: delegated search and SCIP build
+
+A pod with no golden-repos mount (the EKS StatefulSet) forwards work to the services that own the data. These
+bootstrap keys select it; none has a silent fallback to local files.
+
+| `config.json` key | Value on a stateless pod | Behaviour |
+|---|---|---|
+| `search_backend` | `delegated` | Semantic, FTS and hybrid queries (single- and multi-repo) go to the search backend. **Temporal queries are refused** (`TEMPORAL_SEARCH_NOT_DELEGATED`): the backend carries no temporal parameters. |
+| `feature_bootstrap_settings.scip.scip_backend` (with `"scip"` enabled; a legacy top-level `scip_backend` is moved there) | `delegated-plugin` | SCIP builds run in sandbox-mcp's `scip` run profile, which returns the index bytes; cidx writes `index.scip` under the index root and builds the `.scip.db`. Needs the cidx-content-backend SCIP plugin (`code_indexer.scip_backend` entry point) in the image, `CIDX_SCIP_SANDBOX_MCP_URL` on the cidx pod and `SCIP_RUN_SANDBOX_IMAGE` on sandbox-mcp. |
+
+```json
+{
+  "search_backend": "delegated",
+  "enabled_features": ["scip"],
+  "feature_bootstrap_settings": {"scip": {"scip_backend": "delegated-plugin"}}
+}
+```
+
+`scip_backend: delegated` (sandbox-mcp's `sandbox_scip` writing `index.scip` onto the shared golden volume) and
+`scip_build_stateless` were removed. A pod still set to `delegated` fails at startup with a message naming the
+migration: set `delegated-plugin` as above, or `local`. A leftover `scip_build_stateless` key is ignored.
+
+SCIP queries are not delegated: every pod reads the `index.scip.db` files of the index it serves (checked out by
+`index_store_backend: delegated`), with the caller's repository access applied as on any pod.
+`scip_query_backend` was removed. A `config.json` that sets it to anything but `local` stops startup with a
+message saying to delete it; a leftover `local`, and a leftover `scip_sandbox` block, are ignored.
 
 Every settings save in the Web UI rewrites `config.json` from the bootstrap values the running process loaded at
 its start. A hand edit made after the server started is therefore overwritten by the next save. Edit
@@ -274,6 +349,10 @@ The two maintenance endpoints accept only loopback peers (`require_localhost`). 
 from loopback, so the proxy itself must refuse those paths; see [Maintenance and Jobs](maintenance-and-jobs.md).
 When the proxy publishes a public URL, set `CIDX_ISSUER_URL` to it (see [systemd units](#systemd-units)).
 
+`cidx install-server` writes `host: 0.0.0.0` into the initial `config.json`, so a local `cidx server start` listens
+on every interface. On a laptop set `host` to `127.0.0.1` (before the first start, while it is still a first-boot
+seed; afterwards in the Web UI) unless the server should be reachable from the network.
+
 ## Backups
 
 Stop the service (or use `sqlite3 <db> ".backup <dest>"` per database) for a consistent copy of:
@@ -284,7 +363,29 @@ Stop the service (or use `sqlite3 <db> ".backup <dest>"` per database) for a con
   server never replaces an existing key file, and credentials it cannot decrypt are kept, reported on health
   (DEGRADED) and shown as needing re-entry on the credential pages.
 - `~/.cidx-server/data/cidx_server.db`
-- `~/.cidx-server/groups.db`, `oauth.db`, `refresh_tokens.db`, `scip_audit.db`
+- `~/.cidx-server/groups.db`, `oauth.db`, `refresh_tokens.db`
+
+### Stored-secret key (12.90 and later)
+
+- The upgrade is one-way for stored credentials: 12.89 and earlier cannot read the format 12.90 writes. After a
+  downgrade, stored git credentials and CI tokens show as unconfigured (or `????`); nothing is deleted, and
+  upgrading again restores access.
+- Back up `~/.cidx-server/.token_encryption_key` together with the database.
+- Keep `~/.cidx-server/.encryption_key_salt` until the startup log line `Stored-secret sweep ...` reports
+  `remaining=0` for every table (on every node in a cluster).
+- Startup aborts when the key file exists but cannot be used (not a regular file, not owned by the server user,
+  or corrupt). Wider permissions are reset to 0600 with a warning.
+- A legacy key file the server user cannot read (`.encryption_key_salt`, `.jwt_secret`) is left untouched and
+  skipped with one warning naming the file; startup and reads continue with the other keys. A credential that
+  only that file decrypts is neither marked as needing re-entry nor rewritten: it reads as unavailable and is
+  counted under `errors=N` in the sweep line until the file is readable by the server user, then the next start
+  reads and rewrites it. `errors=N` also counts rows the sweep could not process for any other reason; they are
+  left unchanged and retried at the next start.
+- Solo servers and clusters whose nodes all run 12.90 or later write only the new format. In a cluster that still
+  has an older node, saving a git credential or CI token on a node whose `.encryption_key_salt` is missing or
+  unreadable is refused with an error saying the upgrade is in progress; retry once every node runs 12.90 or
+  later (or make the file readable). Cluster startup does not create `.encryption_key_salt` while `.jwt_secret`
+  is unreadable.
 
 ### Stored-secret key (12.90 and later)
 

@@ -21,8 +21,10 @@ Operator guide: [Fault Injection](../../server/fault-injection.md).
 
 Operator guide: [Memory Retrieval](../../server/memory-retrieval.md).
 
-- A parallel pipeline on semantic and hybrid `search_code` (`src/code_indexer/server/mcp/memory_retrieval_pipeline.py`,
-  `handlers/search/memory_retrieval.py`): query vector, HNSW candidates, score floors, hydration, empty-state nudge.
-- Kill switch: the runtime setting `memory_retrieval_enabled`, read on each request.
+- A parallel pipeline on semantic and hybrid `search_code`, the cidx-memory feature's `relevant_memories` search
+  section (`packages/features/cidx-memory/src/cidx_memory/server/{retrieval,memory_retrieval_pipeline}.py`, see
+  [cidx-memory](../cidx-memory.md)): the core's shared query vector (`handlers/search/query_vector.py`), HNSW
+  candidates, score floors, visibility (`access_projection.visible_memory_ids`), hydration, empty-state nudge.
+- Kill switch: the runtime setting `feature_settings.memory.memory_retrieval_enabled`, read on each request.
 - Memory files are confined to the memories directory with `Path.relative_to()`; memory ids are validated.
 - A candidate that cannot be hydrated is skipped with a WARNING; hydration never raises into the search.
