@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cidx-backend-git"
+version = "0.1.0"
+description = "Local implementation of the code-indexer git seam (in-process git)"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10,<3.13"
+# A backend depends on the SDK only, never on the core (code_indexer).
+dependencies = ["cidx-sdk @ {root:parent:parent:uri}/cidx-sdk"]
+
+# The entry NAME is the mode it implements: git_backend=local. The factory
+# takes the core's git process runner (cidx_sdk.seams.git.GitProcessRunner).
+[project.entry-points."code_indexer.git_backend"]
+local = "cidx_backend_git.local:make_git_backend"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cidx_backend_git"]

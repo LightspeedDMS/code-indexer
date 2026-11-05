@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cidx-sdk"
+dynamic = ["version"]
+description = "Interfaces between the code-indexer core and its add-ons (features and backends)"
+readme = "README.md"
+license = {text = "MIT"}
+# Tracks the core's requires-python (see the root pyproject.toml). The sources
+# also stay parseable under Python 3.9 (no match statements, no runtime
+# PEP 604 unions), so a 3.9 lint or type-check pass never trips on them.
+requires-python = ">=3.10,<3.13"
+# Interfaces only. A runtime dependency here would become a dependency of the
+# core AND of every add-on, so this list stays empty.
+dependencies = []
+
+[tool.hatch.version]
+path = "src/cidx_sdk/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cidx_sdk"]
