@@ -1,0 +1,484 @@
+"""SQLite render cache for wiki articles with stat-based coherence (Story #283)."""
+
+import json
+import logging
+import sqlite3
+import threading
+from dataclasses import dataclass
+from datetime import date, datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Union, cast
+
+from cidx_wiki._platform import server_platform
+
+
+def parse_json_column(raw: object, expected_type: type, field_name: str) -> Any:
+    """A JSON column's value as stored by either backend, decoded and checked
+    against *expected_type* (the core's ``storage.json_column`` rule)."""
+    return server_platform().parse_json_column(raw, expected_type, field_name)
+
+
+logger = logging.getLogger(__name__)
+
+
+def _json_default(obj: object) -> str:
+    """JSON serializer for objects not serializable by default json module."""
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
+_CREATE_WIKI_CACHE_TABLE = """
+    CREATE TABLE IF NOT EXISTS wiki_cache (
+        repo_alias TEXT NOT NULL,
+        article_path TEXT NOT NULL,
+        rendered_html TEXT NOT NULL,
+        title TEXT NOT NULL,
+        file_mtime REAL NOT NULL,
+        file_size INTEGER NOT NULL,
+        rendered_at TEXT NOT NULL,
+        metadata_json TEXT,
+        PRIMARY KEY (repo_alias, article_path)
+    )
+"""
+
+_ALTER_WIKI_CACHE_ADD_METADATA_JSON = """
+    ALTER TABLE wiki_cache ADD COLUMN metadata_json TEXT
+"""
+
+_CREATE_WIKI_SIDEBAR_CACHE_TABLE = """
+    CREATE TABLE IF NOT EXISTS wiki_sidebar_cache (
+        repo_alias TEXT PRIMARY KEY,
+        sidebar_json TEXT NOT NULL,
+        max_mtime REAL NOT NULL,
+        built_at TEXT NOT NULL
+    )
+"""
+
+_CREATE_WIKI_ARTICLE_VIEWS_TABLE = """
+    CREATE TABLE IF NOT EXISTS wiki_article_views (
+        repo_alias TEXT NOT NULL,
+        article_path TEXT NOT NULL,
+        real_views INTEGER DEFAULT 0,
+        first_viewed_at TIMESTAMP,
+        last_viewed_at TIMESTAMP,
+        PRIMARY KEY (repo_alias, article_path)
+    )
+"""
+
+
+@dataclass(frozen=True)
+class FileStamp:
+    """An article's (mtime, size) as the cache validates it, when the file is
+    not on this pod's disk to ``stat()``: the content backend's manifest entry.
+
+    ``mtime`` is computed exactly as ``os.stat().st_mtime`` derives it from the
+    same nanoseconds, so a row cached from a local stat validates against the
+    manifest and vice versa. ``None`` is "unknown": never a cache hit, never
+    stored.
+    """
+
+    mtime: Optional[float]
+    size: int
+
+
+def _stamp_values(file_path: Union[Path, FileStamp]) -> Optional[Tuple[float, int]]:
+    """(mtime, size) to validate/store against; None when they are unknown.
+
+    A ``Path`` is stat()ed -- OSError propagates; a ``FileStamp`` is taken as is.
+    """
+    if isinstance(file_path, FileStamp):
+        if file_path.mtime is None:
+            return None
+        return file_path.mtime, file_path.size
+    stat = file_path.stat()
+    return stat.st_mtime, stat.st_size
+
+
+def _max_mtime_of_md_files(repo_dir: Path) -> float:
+    """Compute max mtime of all .md files under repo_dir, excluding hidden directories."""
+    max_mtime = 0.0
+    for md_file in repo_dir.rglob("*.md"):
+        rel = md_file.relative_to(repo_dir)
+        if any(part.startswith(".") for part in rel.parts[:-1]):
+            continue
+        try:
+            mtime = md_file.stat().st_mtime
+            if mtime > max_mtime:
+                max_mtime = mtime
+        except OSError:
+            pass
+    return max_mtime
+
+
+class WikiCache:
+    """SQLite-backed render cache for wiki articles and sidebars."""
+
+    def __init__(self, db_path: str, storage_backend: Optional[Any] = None) -> None:
+        self._db_path = db_path
+        self._backend = storage_backend
+        self._increment_lock = threading.Lock()
+        # The core's storage backend registry entry ``wiki_cache`` (shared
+        # PostgreSQL in cluster mode) or None: then the server's SQLite file.
+        self._conn_manager = server_platform().sqlite_connection_manager(db_path)
+
+    def ensure_tables(self) -> None:
+        """Create wiki_cache, wiki_sidebar_cache, and wiki_article_views tables if they do not exist.
+
+        Also runs idempotent schema migrations for existing databases (e.g. adding
+        metadata_json column to wiki_cache for Story #289).
+        """
+        # PRAGMA cannot run inside a transaction — execute directly on connection
+        conn = self._conn_manager.get_connection()
+        conn.execute("PRAGMA journal_mode=WAL")
+
+        def _do_schema(c: sqlite3.Connection) -> None:
+            c.execute(_CREATE_WIKI_CACHE_TABLE)
+            c.execute(_CREATE_WIKI_SIDEBAR_CACHE_TABLE)
+            c.execute(_CREATE_WIKI_ARTICLE_VIEWS_TABLE)
+            # Migration: add metadata_json column if it does not exist (Story #289)
+            existing_cols = {
+                r[1] for r in c.execute("PRAGMA table_info(wiki_cache)").fetchall()
+            }
+            if "metadata_json" not in existing_cols:
+                c.execute(_ALTER_WIKI_CACHE_ADD_METADATA_JSON)
+
+        self._conn_manager.execute_atomic(_do_schema)
+
+    def increment_view(self, repo_alias: str, article_path: str) -> None:
+        """Increment view count for an article. Inserts a new row on first view (real_views=1).
+
+        Uses upsert: on conflict increments real_views and updates last_viewed_at.
+        first_viewed_at is only set on initial insert and preserved on updates.
+        Serialized via _increment_lock to prevent concurrent SQLite write contention.
+        Failures are logged as warnings so the page still serves.
+        """
+        with self._increment_lock:
+            now = datetime.utcnow().isoformat()
+            try:
+                if self._backend is not None:
+                    self._backend.increment_view(repo_alias, article_path, now)
+                    return
+
+                def _do_increment(conn: sqlite3.Connection) -> None:
+                    conn.execute("PRAGMA journal_mode=WAL")
+                    conn.execute(
+                        """
+                        INSERT INTO wiki_article_views
+                            (repo_alias, article_path, real_views, first_viewed_at, last_viewed_at)
+                        VALUES (?, ?, 1, ?, ?)
+                        ON CONFLICT(repo_alias, article_path) DO UPDATE SET
+                            real_views = real_views + 1,
+                            last_viewed_at = excluded.last_viewed_at
+                        """,
+                        (repo_alias, article_path, now, now),
+                    )
+
+                self._conn_manager.execute_atomic(_do_increment)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to increment view for %s/%s: %s",
+                    repo_alias,
+                    article_path,
+                    exc,
+                )
+
+    def get_view_count(self, repo_alias: str, article_path: str) -> int:
+        """Return current real_views count for an article, or 0 if no record exists."""
+        if self._backend is not None:
+            return int(self._backend.get_view_count(repo_alias, article_path))
+        conn = self._conn_manager.get_connection()
+        row = conn.execute(
+            "SELECT real_views FROM wiki_article_views WHERE repo_alias=? AND article_path=?",
+            (repo_alias, article_path),
+        ).fetchone()
+        return int(row[0]) if row is not None else 0
+
+    def get_all_view_counts(self, repo_alias: str) -> List[Dict]:
+        """Return all view records for a repo as a list of dicts with article_path and real_views."""
+        if self._backend is not None:
+            return list(self._backend.get_all_view_counts(repo_alias))
+        conn = self._conn_manager.get_connection()
+        rows = conn.execute(
+            "SELECT article_path, real_views, first_viewed_at, last_viewed_at "
+            "FROM wiki_article_views WHERE repo_alias=? ORDER BY real_views DESC",
+            (repo_alias,),
+        ).fetchall()
+        return [
+            {
+                "article_path": r[0],
+                "real_views": r[1],
+                "first_viewed_at": r[2],
+                "last_viewed_at": r[3],
+            }
+            for r in rows
+        ]
+
+    def delete_views_for_repo(self, repo_alias: str) -> None:
+        """Delete all wiki_article_views records for a repo (called on repo removal, AC4)."""
+        if self._backend is not None:
+            self._backend.delete_views_for_repo(repo_alias)
+            return
+
+        def _do_delete(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "DELETE FROM wiki_article_views WHERE repo_alias=?",
+                (repo_alias,),
+            )
+
+        self._conn_manager.execute_atomic(_do_delete)
+
+    def insert_initial_views(
+        self, repo_alias: str, article_path: str, views: int
+    ) -> None:
+        """Insert an initial view count row (from front matter population). Uses INSERT OR IGNORE."""
+        now = datetime.utcnow().isoformat()
+
+        if self._backend is not None:
+            self._backend.insert_initial_views(repo_alias, article_path, views, now)
+            return
+
+        def _do_insert(conn: sqlite3.Connection) -> None:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO wiki_article_views
+                    (repo_alias, article_path, real_views, first_viewed_at, last_viewed_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (repo_alias, article_path, views, now, now),
+            )
+
+        self._conn_manager.execute_atomic(_do_insert)
+
+    def get_article(
+        self,
+        repo_alias: str,
+        article_path: str,
+        file_path: Union[Path, FileStamp],
+    ) -> Optional[Dict]:
+        """Return cached article dict if stat values match, else None.
+
+        ``file_path`` is the local file to stat(), or the ``FileStamp`` of a
+        file read through the content backend (the golden wiki on a pod without
+        the repositories). Result dict contains 'html', 'title', and 'metadata'
+        (dict or None).
+        """
+        try:
+            stamp = _stamp_values(file_path)
+        except OSError:
+            return None
+        if stamp is None:
+            return None
+        current_mtime, current_size = stamp
+        if self._backend is not None:
+            row_dict = self._backend.get_article(repo_alias, article_path)
+            if row_dict is None:
+                return None
+            stored_mtime = row_dict.get("file_mtime")
+            stored_size = row_dict.get("file_size")
+            if stored_mtime != current_mtime or stored_size != current_size:
+                return None
+            metadata: Optional[Dict] = None
+            stored_metadata_json = row_dict.get("metadata_json")
+            if stored_metadata_json:
+                metadata = parse_json_column(
+                    stored_metadata_json, dict, "metadata_json"
+                )
+            return {
+                "html": row_dict["rendered_html"],
+                "title": row_dict["title"],
+                "metadata": metadata,
+            }
+        conn = self._conn_manager.get_connection()
+        row = conn.execute(
+            "SELECT rendered_html, title, file_mtime, file_size, metadata_json "
+            "FROM wiki_cache WHERE repo_alias=? AND article_path=?",
+            (repo_alias, article_path),
+        ).fetchone()
+        if row is None:
+            return None
+        stored_html, stored_title, stored_mtime, stored_size, stored_metadata_json = row
+        if stored_mtime != current_mtime or stored_size != current_size:
+            return None
+        metadata = None
+        if stored_metadata_json:
+            metadata = parse_json_column(stored_metadata_json, dict, "metadata_json")
+        return {"html": stored_html, "title": stored_title, "metadata": metadata}
+
+    def put_article(
+        self,
+        repo_alias: str,
+        article_path: str,
+        html: str,
+        title: str,
+        file_path: Union[Path, FileStamp],
+        *,
+        metadata: Optional[Dict] = None,
+    ) -> None:
+        """Store rendered article with current stat values from os.stat(file_path).
+
+        ``file_path`` may instead be the manifest's ``FileStamp`` (see
+        :meth:`get_article`); a stamp with an unknown mtime stores nothing.
+        Optional metadata kwarg stores front-matter dict as JSON (Story #289).
+        """
+        stamp = _stamp_values(file_path)
+        if stamp is None:
+            return
+        file_mtime, file_size = stamp
+        rendered_at = datetime.utcnow().isoformat()
+        metadata_json_str: Optional[str] = (
+            json.dumps(metadata, default=_json_default)
+            if metadata is not None
+            else None
+        )
+
+        if self._backend is not None:
+            self._backend.put_article(
+                repo_alias,
+                article_path,
+                html,
+                title,
+                file_mtime,
+                file_size,
+                rendered_at,
+                metadata_json_str,
+            )
+            return
+
+        def _do_put(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "INSERT OR REPLACE INTO wiki_cache "
+                "(repo_alias, article_path, rendered_html, title, file_mtime, file_size, rendered_at, metadata_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    repo_alias,
+                    article_path,
+                    html,
+                    title,
+                    file_mtime,
+                    file_size,
+                    rendered_at,
+                    metadata_json_str,
+                ),
+            )
+
+        self._conn_manager.execute_atomic(_do_put)
+
+    # Final (link-rewritten, sanitised) pages are stored in wiki_cache under
+    # this article_path prefix. Servers that cached unsanitised HTML use the
+    # bare article path and never read or write these keys; a relative
+    # article path never starts with "/", so the two key spaces never meet.
+    # invalidate_repo deletes by repo_alias and so clears both.
+    SANITIZED_PAGE_KEY_PREFIX = "/sanitized-page-v1/"
+
+    def get_page(
+        self, repo_alias: str, article_path: str, file_path: Union[Path, FileStamp]
+    ) -> Optional[Dict]:
+        """Return the cached final page ('html', 'title', 'metadata') if the
+        file's stat values (or its manifest ``FileStamp``) still match, else
+        None."""
+        return self.get_article(
+            repo_alias, self.SANITIZED_PAGE_KEY_PREFIX + article_path, file_path
+        )
+
+    def put_page(
+        self,
+        repo_alias: str,
+        article_path: str,
+        html: str,
+        title: str,
+        file_path: Union[Path, FileStamp],
+        *,
+        metadata: Optional[Dict] = None,
+    ) -> None:
+        """Store a final page; ``html`` must already be sanitised."""
+        self.put_article(
+            repo_alias,
+            self.SANITIZED_PAGE_KEY_PREFIX + article_path,
+            html,
+            title,
+            file_path,
+            metadata=metadata,
+        )
+
+    def get_sidebar(self, repo_alias: str, repo_dir: Path) -> Optional[List]:
+        """Return cached sidebar list if a cache row exists, else None.
+
+        Story #304: The filesystem poll (_max_mtime_of_md_files) has been removed
+        from this hot path.  Cache coherence is now maintained via event-driven
+        invalidation (WikiCacheInvalidator) rather than polling on every request.
+        The repo_dir parameter is retained for backward compatibility with callers
+        but is no longer used in this method.
+        """
+        if self._backend is not None:
+            raw = self._backend.get_sidebar(repo_alias)
+            if raw is None:
+                return None
+            return cast(Optional[List], parse_json_column(raw, list, "sidebar_json"))
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        with self._conn_manager.guarded_connection() as conn:
+            row = conn.execute(
+                "SELECT sidebar_json FROM wiki_sidebar_cache WHERE repo_alias=?",
+                (repo_alias,),
+            ).fetchone()
+        if row is None:
+            return None
+        return cast(Optional[List], parse_json_column(row[0], list, "sidebar_json"))
+
+    def put_sidebar(
+        self,
+        repo_alias: str,
+        sidebar_data: List,
+        repo_dir: Path,
+        *,
+        max_mtime: Optional[float] = None,
+    ) -> None:
+        """Store sidebar JSON with current max_mtime of .md files.
+
+        ``max_mtime`` is given when the caller already knows it from the
+        content backend's manifest (the repository is not on this pod); only
+        when it is omitted is ``repo_dir`` walked for it.
+        """
+        if max_mtime is None:
+            max_mtime = _max_mtime_of_md_files(repo_dir)
+        built_at = datetime.utcnow().isoformat()
+
+        if self._backend is not None:
+            self._backend.put_sidebar(
+                repo_alias, json.dumps(sidebar_data), max_mtime, built_at
+            )
+            return
+
+        def _do_put(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "INSERT OR REPLACE INTO wiki_sidebar_cache "
+                "(repo_alias, sidebar_json, max_mtime, built_at) VALUES (?, ?, ?, ?)",
+                (repo_alias, json.dumps(sidebar_data), max_mtime, built_at),
+            )
+
+        self._conn_manager.execute_atomic(_do_put)
+
+    def invalidate_repo(self, repo_alias: str) -> None:
+        """Delete all wiki_cache and wiki_sidebar_cache entries for this repo."""
+        if self._backend is not None:
+            self._backend.invalidate_repo(repo_alias)
+            return
+
+        def _do_invalidate(conn: sqlite3.Connection) -> None:
+            conn.execute("DELETE FROM wiki_cache WHERE repo_alias=?", (repo_alias,))
+            conn.execute(
+                "DELETE FROM wiki_sidebar_cache WHERE repo_alias=?", (repo_alias,)
+            )
+
+        self._conn_manager.execute_atomic(_do_invalidate)
+
+    def invalidate_user_wiki(self, username: str, alias: str) -> None:
+        """Delete all cache entries for a user wiki (Story #291, AC5).
+
+        Cache entries for user wikis use the key ``u:{username}:{alias}`` to
+        isolate them from golden repo cache entries which use just the alias.
+        """
+        cache_key = f"u:{username}:{alias}"
+        self.invalidate_repo(cache_key)

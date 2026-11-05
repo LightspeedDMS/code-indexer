@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cidx-memory"
+dynamic = ["version"]
+description = "Shared technical memories: evidence-backed facts stored in the catalog and offered next to code search -- a code-indexer feature add-on"
+readme = "README.md"
+license = {text = "MIT"}
+# Tracks the core's requires-python (see the root pyproject.toml).
+requires-python = ">=3.10,<3.13"
+# The SDK by path, as the core references it (the name is not ours on public
+# indexes). A feature depends on the SDK and third-party packages only --
+# never on code-indexer; see src/cidx_memory/_platform.py for the one
+# transitional exception and how it goes away.
+dependencies = [
+    "cidx-sdk @ {root:parent:parent:uri}/cidx-sdk",
+    # The REST routes and their request models.
+    "fastapi>=0.116.0",
+    "pydantic>=2.0",
+    # Memory front matter.
+    "pyyaml>=6.0",
+]
+
+[project.entry-points."code_indexer.features"]
+memory = "cidx_memory.feature:make_feature"
+
+[tool.hatch.version]
+path = "src/cidx_memory/_version.py"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cidx_memory"]

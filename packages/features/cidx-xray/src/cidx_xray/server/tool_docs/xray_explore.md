@@ -1,0 +1,546 @@
+---
+name: xray_explore
+category: search
+required_permission: query_repos
+tl_dr: Debug-mode X-Ray search -- same two-phase driver+evaluator as xray_search but enriches every match with a serialised AST tree so you can understand the node structure tree-sitter produces for your code. Evaluator is Rust native code (fn evaluate_node).
+slim_description: "Debug variant of xray_search: regex pattern narrows files, then Rust native evaluator (fn evaluate_node) runs against each file's tree-sitter AST, enriching matches with BFS-serialized ast_debug tree for evaluator development."
+inputSchema:
+  type: object
+  properties:
+    repository_alias:
+      oneOf:
+      - type: string
+      - type: array
+        items:
+          type: string
+      description: 'Repository identifier(s). String for single-repo exploration; array of strings (or a JSON-encoded array string) for multi-repo exploration.'
+    pattern:
+      type: string
+      description: 'Regular expression applied in Phase 1 to file content (search_target=content) or relative file paths (search_target=filename) to identify candidate files.'
+    evaluator_code:
+      type: string
+      description: 'Rust code defining fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>. Mutually exclusive with pattern_name. When omitted, a default acceptor is used. See "Evaluator API" below.'
+    search_target:
+      type: string
+      enum:
+        - content
+        - filename
+      description: 'What pattern applies to: "content" matches file text, "filename" matches relative file paths.'
+    include_patterns:
+      type: array
+      items:
+        type: string
+      description: 'Glob patterns for files to include (e.g. ["*.java", "*.kt"]). Empty list means include all.'
+      default: []
+    exclude_patterns:
+      type: array
+      items:
+        type: string
+      description: 'Glob patterns for files to exclude (e.g. ["*/test/*"]). Empty list means exclude none.'
+      default: []
+    path:
+      type: string
+      description: 'Subdirectory within the repository to restrict the Phase 1 content driver to (relative to repo root). null/omitted means the full repository.'
+    case_sensitive:
+      type: boolean
+      description: 'Case-sensitive matching for the Phase 1 content driver regex. Default true.'
+      default: true
+    context_lines:
+      type: integer
+      description: 'Lines of context before/after each Phase 1 hit. Range 0..10. Default 0.'
+      default: 0
+      minimum: 0
+      maximum: 10
+    multiline:
+      type: boolean
+      description: 'Enable multi-line regex matching in the Phase 1 content driver. Default false.'
+      default: false
+    pcre2:
+      type: boolean
+      description: 'Enable PCRE2 engine for advanced features (lookahead, lookbehind) in the Phase 1 content driver. Requires ripgrep built with PCRE2. Default false.'
+      default: false
+    timeout_seconds:
+      type: integer
+      description: 'Per-job wall-clock timeout in seconds. Range 10..600. Default 120.'
+      minimum: 10
+      maximum: 600
+      default: 120
+    max_debug_nodes:
+      type: integer
+      description: 'Maximum number of AST nodes to include in the ast_debug payload for each match. When the cap is hit a {"type": "...truncated"} sentinel appears in the children list. Range: 1..500. Default: 50.'
+      minimum: 1
+      maximum: 500
+      default: 50
+    max_results:
+      type: integer
+      description: 'Maximum number of candidate files to evaluate. Must be >= 1 when provided.'
+      minimum: 1
+    await_seconds:
+      type: number
+      description: 'Optional server-side polling window in seconds (floats accepted, e.g. 2.5). Range 0.0..45.0. See intro paragraph above for behavior at 0 vs. > 0.'
+      minimum: 0
+      maximum: 45.0
+      default: 0
+    pattern_name:
+      type: string
+      description: "Name of a stored xray evaluator pattern to use (from the cidx-meta pattern library). Mutually exclusive with evaluator_code. See \"Pattern Library\" below."
+    pattern_params:
+      type: object
+      description: 'JSON object of parameter overrides for the resolved pattern. Only valid when pattern_name is provided. Keys must match parameter names declared in the pattern YAML (UPPER_SNAKE_CASE). Values must be compatible with the declared parameter type (usize, i64, f64, bool, or str). Unknown keys return invalid_parameter error; type-incompatible values return invalid_parameter_type error.'
+  required:
+    - repository_alias
+    - pattern
+    - search_target
+outputSchema:
+  type: object
+  properties:
+    job_id:
+      type: string
+      description: 'Single-repo: background job identifier. Poll GET /api/jobs/{job_id} for progress and results.'
+    job_ids:
+      type: array
+      items:
+        type: string
+      description: 'Multi-repo (array repository_alias): one job id per resolved alias.'
+    errors:
+      type: array
+      items:
+        type: object
+      description: 'Multi-repo: per-alias resolution failures.'
+    matches:
+      type: array
+      description: 'Inline match list when await_seconds resolves. Each entry has file_path, language, line_number, line_content, matched_node, ast_debug, plus pattern and snippet from the Rust evaluator findings. For sql, xml, groovy/gradle and vue files, matched_node and ast_debug are replaced by ast_debug_error ("AST dump not supported for this language: ...").'
+      items:
+        type: object
+    file_metadata:
+      type: array
+      description: 'Inline per-file metadata list when await_seconds resolves. One entry per evaluated file. Shape: {file_path}.'
+      items:
+        type: object
+    is_admin:
+      type: boolean
+      description: 'Job-priority opt-in flag present in GET /api/jobs/{job_id} results. Always false for xray_explore and xray_search jobs -- these handlers never request the admin priority lane. This field does NOT reflect whether the submitting user is an administrator; an admin user submitting xray_explore will see is_admin=false.'
+    debug_output:
+      type: array
+      items:
+        type: string
+      description: 'Debug messages emitted by debug_log() calls in the evaluator. Empty list when no debug_log() calls were made (zero overhead). Present in inline results when await_seconds > 0 resolves; also available in polled job results.'
+    error:
+      type: string
+      description: 'Error code when the request is rejected synchronously.'
+    message:
+      type: string
+      description: 'Human-readable description of the error.'
+---
+
+Developer-facing exploration tool for understanding AST node structure.
+
+Use this tool when writing or debugging an `evaluator_code` snippet for `xray_search`. It runs the same two-phase pipeline as `xray_search` but adds an `ast_debug` field to every match showing the complete tree-sitter AST rooted at the matched file's parse root, plus a `matched_node` summary of that root.
+
+For production search workflows use `xray_search` instead -- it is faster because it omits the AST serialisation overhead.
+
+PHASE 1 (driver, regex): the `pattern` regex narrows the file set. For `search_target='content'`, RegexSearchService (ripgrep-backed) walks the repo and records every hit's line number, column, line content, and context lines. For `search_target='filename'`, an inline path walker matches relative file paths. Phase 1 honors `path`, `include_patterns`, `exclude_patterns`, `case_sensitive`, `multiline`, `pcre2`, and `context_lines`.
+
+PHASE 2 (evaluator, AST): for each candidate file, tree-sitter parses the file once, then your `evaluator_code` runs as a Rust native evaluator (compiled to a dynamic library). The evaluator receives the file root AST node as an `OwnedNode` and returns `Vec<EvalFinding>` -- a list of findings, each with a pattern name, line number, and code snippet. The server enriches each finding with `file_path`, `language`, `line_content`, `matched_node`, and `ast_debug`.
+
+Returns `{job_id}` (single repo) or `{job_ids, errors}` (multi-repo) immediately when `await_seconds` is 0 (default); poll `GET /api/jobs/{job_id}` for results. Set `await_seconds > 0` to have the server poll the background job for up to that many seconds and return the inline result if it completes, falling back to `{job_id}` otherwise (inline-wait is capped at up to 45 seconds -- see the `await_seconds` row in the Parameters table below).
+
+## Quick Start
+
+Discover AST node types for Java files -- omit `evaluator_code` to accept all Phase 1 hits and get their full AST structure:
+
+```json
+{
+  "repository_alias": "my-repo-global",
+  "pattern": "prepareStatement",
+  "search_target": "content",
+  "include_patterns": ["*.java"],
+  "max_results": 2,
+  "max_debug_nodes": 30,
+  "await_seconds": 10
+}
+```
+
+Then use the `ast_debug` payload in each match to identify node type names (e.g. `method_invocation`, `try_with_resources_statement`) and write a targeted evaluator for `xray_search`. Use `debug_log()` to trace evaluator logic during development:
+
+```json
+{
+  "repository_alias": "my-repo-global",
+  "pattern": "def ",
+  "search_target": "content",
+  "include_patterns": ["*.py"],
+  "max_results": 3,
+  "max_debug_nodes": 20,
+  "await_seconds": 10,
+  "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n    debug_log(&format!(\"root kind: {}\", node.kind));\n    let funcs = node.descendants_of_kind(\"function_definition\");\n    debug_log(&format!(\"found {} functions\", funcs.len()));\n    funcs.iter().map(|f| EvalFinding {\n        pattern: \"func\".to_string(),\n        line: f.start_line,\n        snippet: truncate_snippet(&f.text(), 80),\n    }).collect()\n}"
+}
+```
+
+Key points:
+- **Evaluator code is Rust**, not Python. Signature: `fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>`.
+- `OwnedNode`, `EvalFinding`, `truncate_snippet`, and `debug_log` are provided automatically.
+- Omit `evaluator_code` to explore AST structure without writing any Rust -- the default evaluator accepts all files.
+- Keep `max_results` (e.g. 5) and `max_debug_nodes` small while iterating -- AST payloads are large.
+
+## Parameters
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| repository_alias | str OR list[str] | yes | -- | Single alias or array (or JSON-encoded array string) for omni multi-repo exploration. |
+| pattern | str | yes | -- | Regular expression applied in Phase 1. (The REST search endpoint `POST /api/xray/search` names this field `driver_regex`.) |
+| evaluator_code | str | no | (default acceptor) | Rust code defining `fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>`. See Evaluator API below. When omitted, default accepts all files for AST exploration. |
+| search_target | "content" or "filename" | yes | -- | "content" -- Phase 1 regex applies to file text. "filename" -- Phase 1 regex applies to relative paths. |
+| include_patterns | list[str] | no | [] | Glob patterns for files to include. `*` matches a single path segment; use `**` for recursive matching. Empty means include all. |
+| exclude_patterns | list[str] | no | [] | Glob patterns for files to exclude. Empty means exclude none. |
+| path | str | no | null | Subdirectory restriction within the repo (relative). |
+| case_sensitive | bool | no | true | Phase 1 content driver case sensitivity. |
+| context_lines | int | no | 0 | Lines of context before/after each Phase 1 hit (0..10). |
+| multiline | bool | no | false | Multi-line regex matching in the content driver. |
+| pcre2 | bool | no | false | PCRE2 engine for the content driver. |
+| timeout_seconds | int | no | 120 | Per-job wall-clock cap (10..600). |
+| max_debug_nodes | int | no | 50 | Maximum AST nodes in the `ast_debug` payload per match (1..500). When the cap is hit a `{"type": "...truncated"}` sentinel appears in the children list. |
+| max_results | int | no | null | Cap on candidate files evaluated. When hit: `partial=true`, `max_files_reached=true`. |
+| await_seconds | float | no | 0 | Server-side inline-wait window (accepts floats, e.g. 2.5). Range 0.0..45.0. Values > 30.0 emit a server warning. Out-of-range or wrong-type values return error code `await_seconds_invalid`. |
+| pattern_name | str | no | null | Name of a stored xray evaluator pattern (from the cidx-meta library). Mutually exclusive with `evaluator_code`. When provided, the server loads and resolves the pattern, applying `pattern_params` overrides. Error `mutually_exclusive_params` if both are provided. |
+| pattern_params | object | no | null | Parameter overrides for the resolved pattern. Only valid when `pattern_name` is provided. Keys must match declared parameter names (UPPER_SNAKE_CASE); values must be type-compatible. |
+
+## Evaluator API
+
+The evaluator API for `xray_explore` is identical to `xray_search`. The evaluator runs ONCE per file (file-as-unit contract).
+
+### Function signature
+
+```rust
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>
+```
+
+The evaluator receives the file's root AST node. The `OwnedNode` and `EvalFinding` types are injected automatically by the compiler preamble -- do not define them in your evaluator code.
+
+- **Input**: `node: &OwnedNode` -- the root node of the file's tree-sitter parse tree. Access the full source text via `node.text()`. Walk descendant nodes via `node.descendants_of_kind(...)`.
+- **Output**: `Vec<EvalFinding>` -- a list of zero or more findings. An empty Vec means the file matched Phase 1 but the evaluator found nothing noteworthy.
+
+### EvalFinding struct
+
+Each finding describes one result from the evaluator:
+
+```rust
+pub struct EvalFinding {
+    pub pattern: String,  // pattern name identifying the finding
+    pub line: usize,      // 1-based line number where the finding occurs
+    pub snippet: String,  // code snippet providing context
+}
+```
+
+The server enriches each finding additionally with `matched_node` and `ast_debug` for `xray_explore`.
+
+### debug_log() function
+
+Use `debug_log(msg: &str)` inside your evaluator to trace execution. Debug messages appear in `debug_output[]` in the result, making it easy to understand why the evaluator produces or skips findings.
+
+```rust
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    debug_log(&format!("evaluating: kind={}, children={}", node.kind, node.children.len()));
+    vec![]
+}
+```
+
+**Limits**: 100 messages max, 10 KB total. Messages past either limit are silently dropped. When no `debug_log()` calls are made, `debug_output` is an empty list (zero overhead).
+
+### OwnedNode reference
+
+| Name | Type | Description |
+|------|------|-------------|
+| `node.kind` | String | tree-sitter node type, e.g. `"function_definition"`, `"call"`, `"if_statement"` |
+| `node.children` | Vec\<OwnedNode\> | all child nodes including anonymous ones (punctuation, keywords) |
+| `node.named_children()` | Vec\<&OwnedNode\> | only named children -- usually what you want |
+| `node.start_byte` | usize | byte offset where the node starts |
+| `node.end_byte` | usize | byte offset where the node ends |
+| `node.start_line` | usize | 1-based line number where the node starts |
+| `node.is_named` | bool | true for named nodes (not anonymous punctuation/keywords) |
+| `node.text()` | &str | raw source text of this node |
+| `node.child_by_kind(kind)` | Option\<&OwnedNode\> | first child whose `kind` matches the given string |
+| `node.has_descendant_of_kind(kind)` | bool | true if any descendant matches `kind` -- use for fast existence checks without allocating |
+| `node.descendants_of_kind(kind)` | Vec\<&OwnedNode\> | DFS pre-order; all descendants whose kind matches (excludes self) |
+
+For the full cookbook of worked evaluator examples and a cross-language node type table covering the 17 mandatory languages (java, kotlin, go, python, typescript, javascript, bash, csharp, html, css, hcl/terraform, yaml, sql, xml, groovy, c, cpp) plus vue (`.vue`, parsed with the HTML grammar), see the corresponding sections in `xray_search`. The same evaluator API and `OwnedNode` surface apply to both tools. Glob pattern semantics for `include_patterns`/`exclude_patterns` (brace groups, any-depth vs. root-anchored segments) are also identical between the two tools -- see `xray_search`'s "Glob Pattern Semantics" section for the full matching rules.
+
+### Globals available in evaluator context
+
+The Rust evaluator receives the file root as its `node` argument (an `OwnedNode`). There are no `root`, `source`, `lang`, `file_path` or `match_positions` globals.
+
+Python-syntax evaluator code is not accepted. When porting an old Python evaluator, note that none of the following carry over: a dict return value `{"matches": [...], "value": <any>}`; Python AST class names (`Call`, `Name`, `Attribute`, `Constant`, `Subscript`, `Compare`, `BoolOp`, `UnaryOp`, `List`, `Tuple`, `Dict`, `Return`, `Expr`); Python builtins (`getattr`, `setattr`, `delattr`, `hasattr`, `__import__`, `eval`, `exec`, `open`, `compile`). Rewrite such code against the `OwnedNode` API described above.
+
+### Rust security whitelist
+
+The server validates evaluator code against a security whitelist before compilation. Forbidden constructs are rejected at validation time with a structured error response.
+
+**Forbidden constructs** (rejected at validation time):
+
+- `unsafe` in any form: `unsafe` blocks, `unsafe fn` (free functions, methods and trait methods), `unsafe impl`, `unsafe trait`, and `unsafe fn()` pointer types
+- Standard library paths outside the allowlist (see Allowed constructs). Every other `std`, `core` or `alloc` path is rejected, in a `use` or in code, e.g. `std::fs`, `std::net`, `std::process`, `std::env`, `std::io`, `std::os`, `std::thread`, `std::sync`, `std::time`, `std::ffi`, `std::path`, `std::ptr`, `std::mem`, `std::alloc`, `std::panic`
+- Renaming a standard-library path (`use std as s`, `use std::{self as s}`, `use std::collections as c`)
+- Raw pointers: `*const`, `*mut`
+- Foreign function interface: `extern` blocks, `extern "C" fn`, `extern "C" fn()` pointer types, `extern crate`
+- Module declarations: `mod`
+- Static declarations: `static` and `static mut` (use `const` instead)
+- Every macro other than `vec!`, `format!` and `matches!`, e.g. `include!`, `include_str!`, `include_bytes!`, `env!`, `option_env!`, `println!`, `eprintln!`, `print!`, `eprint!`, `panic!`, `todo!`, `unimplemented!`, `assert!`, and any `macro_rules!` definition
+- Input limits: source larger than 131072 bytes (UTF-8), or bracket nesting deeper than 64 levels (`{`, `(` and `[` counted together)
+
+**Allowed constructs** (safe Rust subset):
+
+- Variable bindings: `let`, `let mut`, `const`
+- Control flow: `if`/`else`, `for`/`while`/`loop`, `match`, `break`, `continue`, `return`
+- Local function definitions: `fn` (helper functions within the evaluator)
+- String operations: `.to_string()`, `.clone()`, `.contains()`, `.starts_with()`, `.ends_with()`, `.to_uppercase()`, `.to_lowercase()`, `.split()`, `.trim()`, `format!`
+- Vec operations: `Vec::new()`, `vec![]`, `.push()`, `.len()`, `.iter()`, `.is_empty()`
+- Standard library, imported with `use` or named by full path: `std::collections` (`HashMap`, `HashSet`, `BTreeMap`, `BTreeSet`, ...), `std::fmt`, `std::iter`, `std::cmp`, `std::str`, `std::string`, `std::vec`, `std::option`, `std::result`, `std::ops`, `std::convert`, `std::char`, `std::num`, `std::hash`, `std::borrow`, `std::default`, `std::boxed`, `std::rc`, `std::cell`, `std::array`, `std::slice`, `std::marker`, `std::primitive`, `std::error`, `std::any`, `std::f32`, `std::f64`, and the integer modules (`std::i8` to `std::i128`, `std::u8` to `std::u128`, `std::isize`, `std::usize`); the same modules under `core::` where they exist, and `alloc::{vec, string, collections, boxed, rc}`
+- Iterator chains: `.filter()`, `.map()`, `.any()`, `.all()`, `.count()`, `.flat_map()`, `.enumerate()`, `.collect()`
+- Pattern matching, closures, `Option`/`Result` combinators (`.unwrap_or()`, `.map()`, `.and_then()`)
+- Macros: only `format!`, `vec![]` and `matches!`, each written bare (no path prefix); their arguments obey the same rules as other code
+- The `OwnedNode` and `EvalFinding` types (provided by compiler preamble)
+- `debug_log(msg: &str)` -- trace evaluator execution; messages returned in `debug_output[]` (provided by compiler preamble, see "debug_log() function" section)
+- `truncate_snippet(s: &str, max_len: usize) -> String` -- collapse whitespace and truncate to `max_len` bytes on a UTF-8 boundary, appending "..." if truncated (provided by compiler preamble)
+
+### ast_debug Payload
+
+Each match in the polled result includes an `ast_debug` field with a breadth-first serialised AST tree capped at `max_debug_nodes` nodes:
+
+```json
+{
+  "type": "module",
+  "start_byte": 0,
+  "end_byte": 128,
+  "start_point": [0, 0],
+  "end_point": [5, 0],
+  "text_preview": "class Foo:\n    def bar(self)...",
+  "child_count": 1,
+  "children": [
+    {
+      "type": "class_definition",
+      "start_byte": 0,
+      "end_byte": 128,
+      "start_point": [0, 0],
+      "end_point": [4, 20],
+      "text_preview": "class Foo:\n    def bar(self)...",
+      "child_count": 3,
+      "children": [
+        {"type": "...truncated"}
+      ]
+    }
+  ]
+}
+```
+
+Fields per node:
+- `type` -- tree-sitter node type string (e.g. "method_invocation", "identifier")
+- `start_byte` / `end_byte` -- byte offsets into the source file
+- `start_point` / `end_point` -- [row, col] line/column positions (0-indexed)
+- `text_preview` -- first 80 characters of the node's source text (UTF-8)
+- `child_count` -- total direct children in the full tree (may exceed children list size when truncated)
+- `children` -- serialised child nodes; contains `{"type": "...truncated"}` when the `max_debug_nodes` cap is hit
+
+### Evaluator Safety
+
+The sandbox enforces security at two stages:
+1. Rust AST whitelist -- rejects any forbidden construct (unsafe, std::fs/net/process/env/io, raw pointers, extern, forbidden macros) before compilation.
+2. 5-second hard timeout with process termination enforced via the sandbox runtime.
+
+### Polled Result Shape
+
+After polling `GET /api/jobs/{job_id}` to COMPLETED status, `result` contains:
+
+- `matches[]`: list of enriched match dicts. Every entry contains:
+  - `file_path` (str, server-added) -- relative path from the repository root
+  - `language` (str, server-added) -- tree-sitter language name
+  - `line_number` (int, from EvalFinding.line) -- 1-based line number
+  - `line_content` (str, server-derived) -- raw text of `line_number` from the file source
+  - `pattern` (str, from EvalFinding.pattern) -- the pattern name identifying the finding
+  - `snippet` (str, from EvalFinding.snippet) -- code snippet context from the evaluator
+  - `matched_node` (server-added): compact description of the file root node -- `{type, start_byte, end_byte, start_point, end_point}`. Distinct from the `node` evaluator input only in serialisation; both refer to the file root.
+  - `ast_debug` (server-added): full BFS-serialised AST tree rooted at the file root (see "ast_debug Payload" above).
+  - `ast_debug_error` (server-added, instead of `matched_node`/`ast_debug`): present for sql, xml, groovy/gradle and vue files, which are evaluated but have no in-process AST dump -- `"AST dump not supported for this language: 'sql'"`.
+- `file_metadata[]`: per-file metadata entries. One entry per evaluated file. Shape: `{file_path}`.
+- `evaluation_errors[]`: list of per-file failures. Each entry: `{file_path, line_number, error_type, error_message}`. `evaluation_errors` does NOT cause job failure -- status remains COMPLETED.
+- `files_processed` (int): number of candidate files evaluated.
+- `files_total` (int or null): total candidate files found by Phase 1; `null` when Phase 1 was cut
+  (`phase1_truncated: true`), because the true total is then unknown.
+- `phase1_candidate_files` (int): candidate files Phase 1 actually returned.
+- `elapsed_seconds` (float)
+- `partial: true` (only on partial completion)
+- `timeout: true` (only when job-level timeout fired -- takes precedence over `max_files_reached`)
+- `max_files_reached: true` (only when the `max_results` cap fired before timeout)
+- `phase1_truncated: true` and `phase1_truncation_reason` (`"read_limit"` or `"match_cap"`): the
+  Phase 1 content driver was cut before it saw every match; always with `partial: true`. Same
+  contract as `xray_search`.
+- `warnings[]` (only when present): advisory diagnostics, same types as `xray_search`
+  (`zero_match_include_pattern`, `zero_match_probe_failed`, `content_search_read_capped`,
+  `phase1_match_cap_reached`, ...)
+
+### evaluation_errors[] payload examples
+
+`xray_explore` reuses the same pipeline as `xray_search`, so the `evaluation_errors[]` shape is identical:
+
+**EvaluatorTimeout** -- sandbox 5s wall-clock budget exceeded:
+
+```json
+{
+  "file_path": "src/code_indexer/server/services/very_large_module.py",
+  "line_number": 0,
+  "error_type": "EvaluatorTimeout",
+  "error_message": "evaluator exceeded 5s sandbox limit"
+}
+```
+
+**EvaluatorCrash** -- evaluator process died before returning a value. The `error_message` carries the failure detail:
+
+```json
+{
+  "file_path": "src/code_indexer/handlers/edge_case.py",
+  "line_number": 0,
+  "error_type": "EvaluatorCrash",
+  "error_message": "evaluator process exited with non-zero status"
+}
+```
+
+**UnsupportedLanguage** -- Phase 1 selected a candidate whose extension has no tree-sitter grammar:
+
+```json
+{
+  "file_path": "docs/architecture/overview.md",
+  "line_number": 0,
+  "error_type": "UnsupportedLanguage",
+  "error_message": "No grammar for extension '.md'"
+}
+```
+
+When NO candidate file is in a supported language, one extra scan-level entry (`file_path: ""`) names the extensions, so an empty result is not mistaken for "no findings":
+
+```json
+{
+  "file_path": "",
+  "line_number": 0,
+  "error_type": "UnsupportedLanguage",
+  "error_message": "No candidate file is in a language X-Ray supports (2 files, extensions: '.md', '.svelte')"
+}
+```
+
+**UnparsedFiles** -- the engine received files it could not parse (an extension this engine build does not support, an unreadable file, or a parser failure). When NO candidate file parsed, one scan-level entry (`file_path: ""`) carries the count and the search counts as failed:
+
+```json
+{
+  "file_path": "",
+  "line_number": 0,
+  "error_type": "UnparsedFiles",
+  "error_message": "The engine could not parse 3 of 3 files (an extension this engine build does not support, an unreadable file, or a parser failure); results cover only the parsed files"
+}
+```
+
+When only SOME files could not be parsed, the result instead carries `unparsed_files: N` and one `warnings` entry `{"type": "unparsed_files", "count": N, "hint": "..."}`; matches from the parsed files are returned and the search counts as successful.
+
+**ValidationFailed** -- appears in `evaluation_errors[]` only as a defensive fallback. The handler validates `evaluator_code` synchronously BEFORE submitting the job and returns a sync error response with structured fields:
+
+```json
+{
+  "error": "xray_evaluator_validation_failed",
+  "error_code": "forbidden_unsafe",
+  "offending_construct": "unsafe",
+  "offending_line": 3,
+  "message": "forbidden construct 'unsafe' is not allowed in Rust evaluator code"
+}
+```
+
+Structured error fields: `error_code` identifies the category (e.g. `forbidden_unsafe`, `forbidden_import`, `forbidden_raw_pointer`, `forbidden_extern`, `forbidden_mod`, `forbidden_static`, `forbidden_macro`), `offending_construct` names the specific construct (e.g. `unsafe`, `std::fs`, `*const`, `extern`, `mod`, `static`, `include!`), `offending_line` is the 1-based line number in evaluator_code.
+
+Other validation rejection messages name the offending construct and include a description. Examples: `"forbidden construct 'unsafe' is not allowed in Rust evaluator code"`, `"forbidden import 'std::fs' is not allowed in Rust evaluator code"`, `"forbidden raw pointer '*const' is not allowed in Rust evaluator code"`, `"forbidden macro 'println!' is not allowed in Rust evaluator code"`.
+
+**Generic exception types** (e.g. `IOError`, `AttributeError`, `UnicodeDecodeError`) -- emitted by the catch-all when the file cannot be read or parsed. The `error_type` is the exception class name; `error_message` is the error detail string.
+
+### Large Result Paging
+
+`xray_explore` results are typically much larger than `xray_search` results because every match carries an `ast_debug` payload of up to `max_debug_nodes` AST nodes. Truncation kicks in earlier -- keep `max_results` and `max_debug_nodes` small while iterating.
+
+For results larger than the server's single payload character budget (Web UI `payload_max_fetch_size_chars`, default 5000 chars), the polled job result is truncated and the FULL set is stored in PayloadCache as a series of whole-entry pages. The inline budget IS the page budget -- there is no separate, smaller preview threshold. `matches[]`/`evaluation_errors[]` come back inline as many WHOLE leading entries as fit within `payload_max_fetch_size_chars`. **No entry is ever partially cut to fit a page**: an entry that alone exceeds the budget gets its own, necessarily oversized, page in the cache, intact and unmodified. Fields:
+
+- `truncated: true` -- set when the matches+errors JSON exceeded the character budget
+- `has_more: true` -- synonym; set with `truncated`
+- `cache_handle: "<uuid>"` -- opaque handle for paged retrieval
+- `total_pages: <int>` -- number of independently-fetchable cache pages the full content was split across
+- `inline_entry_truncated: true` -- present only in the rare case where the single first entry alone exceeds the budget; it is then adaptively shrunk (string/list fields capped) for THIS inline response ONLY -- the cached copy stays whole and unmodified
+- `matches[]` and `evaluation_errors[]` -- as many whole leading entries as fit the character budget (never a fixed count, never a partially-truncated entry unless `inline_entry_truncated` is set)
+- `fetch_tool_hint` -- names `cidx_fetch_cached_payload` and describes the page format below
+
+To fetch the full content, use the discoverable `cidx_fetch_cached_payload` MCP tool with `cache_handle`, incrementing `page` from 1 through `total_pages` (or until `has_more` is `false`). Each page is stored as its own independent cache row and is returned WHOLE and unsliced regardless of the server's CURRENT `payload_max_fetch_size_chars` setting -- a config change between when a result was produced and when you fetch it cannot corrupt or misalign a page. Each page is an independently parseable JSON object `{"matches": [...], "evaluation_errors": [...]}` holding a whole-entry slice; concatenate every page's `matches`/`evaluation_errors` lists, in page order, to reconstruct the full arrays exactly, in original order.
+
+**Cache degradation and failure**: `cache_unavailable: true` means PayloadCache was down when the result was built -- you still get a bounded, honest inline page 1 (`truncated: true`, `cache_handle: null`), just no further pages to fetch until the cache is back. `success: false, error: "cache_store_failed"` means the cache was reachable but the atomic page-set write itself failed; the job result still carries every non-array metadata field the run already produced, alongside the failure -- only `matches[]`/`evaluation_errors[]` are genuinely undeliverable.
+
+### Examples
+
+**Explore AST structure for Java files calling prepareStatement** (default evaluator accepts every Phase 1 hit):
+```json
+{
+  "repository_alias": "backend-global",
+  "pattern": "prepareStatement",
+  "search_target": "content",
+  "include_patterns": ["*.java"],
+  "max_results": 3,
+  "max_debug_nodes": 30
+}
+```
+
+**Explore first 2 Python test files to understand AST shape** (filename target):
+```json
+{
+  "repository_alias": "backend-global",
+  "pattern": "test_.*\\.py$",
+  "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n    vec![EvalFinding {\n        pattern: \"test_file\".to_string(),\n        line: 1,\n        snippet: node.text().chars().take(80).collect(),\n    }]\n}",
+  "search_target": "filename",
+  "max_results": 2,
+  "max_debug_nodes": 50
+}
+```
+
+**Explore matches with custom evaluator** (compute complexity per function):
+```json
+{
+  "repository_alias": "backend-global",
+  "pattern": "def ",
+  "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n    let mut findings = Vec::new();\n    for f in node.descendants_of_kind(\"function_definition\") {\n        let cx = f.descendants_of_kind(\"if_statement\").len() + f.descendants_of_kind(\"elif_clause\").len();\n        findings.push(EvalFinding {\n            pattern: \"complexity\".to_string(),\n            line: f.start_line,\n            snippet: format!(\"complexity={}\", cx),\n        });\n    }\n    findings\n}",
+  "search_target": "content",
+  "include_patterns": ["*.py"],
+  "max_results": 5,
+  "max_debug_nodes": 20
+}
+```
+
+## Pattern Library
+
+Before writing `evaluator_code` inline, check the pattern library: a pattern for your use case may already exist (see "Discovering Available Patterns" below).
+
+When an evaluator pattern is complex, tuned through iteration, or costly to produce, save it via `store_xray_pattern` for reuse. Stored patterns:
+
+- Are referenced by name via the `pattern_name` parameter (mutually exclusive with `evaluator_code`).
+- Support typed parameters with defaults, overridable per-call via `pattern_params`.
+- Persist in cidx-meta (git-versioned) across sessions and server restarts.
+- Seed patterns `catch-rethrow` and `deep-nesting` are created automatically in `__any__/` scope on first use.
+
+**Recommendation**: If you have spent significant effort developing and testing an evaluator with `xray_explore`, store it rather than discarding it -- especially before ending a session, so the work survives session restart and reaches all users. Future searches (via `xray_explore` or `xray_search`) can reference the pattern by name without reconstructing the evaluator logic.
+
+### Discovering Available Patterns
+
+List stored patterns using standard cidx-meta browsing tools:
+
+- `browse_directory('cidx-meta-global', path='xray-patterns/__any__')` -- cross-repo patterns
+- `browse_directory('cidx-meta-global', path='xray-patterns/{repo-alias}')` -- repo-specific patterns
+- `get_file_content('cidx-meta-global', path='xray-patterns/__any__/{name}.yaml')` -- read pattern source
+
+## Cancellation
+
+Running xray_explore jobs can be cancelled via `cancel_job(job_id)`. XRay jobs receive real process termination (SIGTERM, then SIGKILL after a 2-second grace period) rather than cooperative flag-only cancellation. The job status transitions to `cancelled`. Multi-repo searches return one job_id per repo -- cancel each individually.
+
+## Related
+
+- See `list_global_repos` to see available repositories before calling this tool.
+- See `cancel_job` to cancel a running xray_explore job with process termination.
+- See `xray_search` for the production search variant (no AST debug overhead).
+- See `xray_dump_ast` for a synchronous single-file AST dump (no Phase 1 driver, no evaluator).
+- See `cidx_fetch_cached_payload` to retrieve large truncated results by `cache_handle`.

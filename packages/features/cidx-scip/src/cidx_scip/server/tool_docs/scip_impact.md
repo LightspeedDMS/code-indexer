@@ -1,0 +1,131 @@
+---
+name: scip_impact
+category: scip
+required_permission: query_repos
+tl_dr: '[SCIP] Recursive impact analysis - find symbols and files affected by change.'
+slim_description: "Perform recursive impact analysis to find all symbols and files transitively affected by changing a given symbol using SCIP indexes."
+inputSchema:
+  type: object
+  properties:
+    symbol:
+      type: string
+      description: Symbol name to analyze impact for (e.g., 'UserService', 'authenticate', 'DatabaseManager')
+    depth:
+      type: integer
+      default: 3
+      minimum: 1
+      maximum: 10
+      description: Recursive traversal depth for impact analysis. Default 3. Min 1, max 10 -- values outside this range
+        are REJECTED (success:false, empty affected_symbols/affected_files), not clamped. Higher depth = more complete
+        analysis but slower query.
+    repository_alias:
+      type:
+      - string
+      - 'null'
+      default: null
+      description: Repository alias to filter SCIP search. String for single repo, null/omit for all repos.
+  required:
+  - symbol
+outputSchema:
+  type: object
+  properties:
+    success:
+      type: boolean
+      description: Whether the operation succeeded
+    target_symbol:
+      type: string
+      description: Full SCIP symbol identifier analyzed
+    depth_analyzed:
+      type: integer
+      description: Actual depth analyzed
+    total_affected:
+      type: integer
+      description: Total number of affected symbols
+    truncated:
+      type: boolean
+      description: Whether results were truncated due to size limits
+    affected_symbols:
+      type: array
+      description: List of all symbols affected by changing target symbol
+      items:
+        type: object
+        properties:
+          symbol:
+            type: string
+            description: Full SCIP symbol identifier
+          file_path:
+            type: string
+            description: File path relative to project root
+          line:
+            type: integer
+            description: Line number (1-indexed)
+          column:
+            type: integer
+            description: Column number (0-indexed)
+          depth:
+            type: integer
+            description: Depth level in dependency tree
+          relationship:
+            type: string
+            description: Relationship type (uses, calls, imports, etc.)
+          chain:
+            type: array
+            items:
+              type: string
+            description: Dependency chain from target to this symbol
+        required:
+        - symbol
+        - file_path
+        - line
+        - column
+        - depth
+        - relationship
+        - chain
+    affected_files:
+      type: array
+      description: File-level summary of impact
+      items:
+        type: object
+        properties:
+          path:
+            type: string
+            description: File path relative to project root
+          project:
+            type: string
+            description: Project path
+          affected_symbol_count:
+            type: integer
+            description: Number of affected symbols in file
+          min_depth:
+            type: integer
+            description: Minimum depth of affected symbols
+          max_depth:
+            type: integer
+            description: Maximum depth of affected symbols
+        required:
+        - path
+        - project
+        - affected_symbol_count
+        - min_depth
+        - max_depth
+    error:
+      type: string
+      description: Error message if operation failed
+  required:
+  - success
+  - affected_symbols
+  - affected_files
+---
+
+Analyze the impact of changing a symbol by finding all directly and transitively affected symbols. Returns a dependency tree showing blast radius.
+
+Pass simple symbol names (e.g., 'UserService'). Fuzzy match by default ('User' matches 'UserService', 'UserManager'). Requires SCIP indexes (cidx scip generate).
+
+DEPTH BEHAVIOR: depth=1 shows direct dependents only. depth=2+ shows transitive dependents (what depends on what depends on the symbol). Default depth is a fixed 3 - start with depth=2 for manageable results.
+
+DEPTH VALIDATION: depth outside [1, 10] is rejected, not clamped -- returns {success: false, error: "depth must be between 1 and 10, got N", affected_symbols: [], affected_files: []}.
+
+USE FOR: Pre-change impact analysis, estimating blast radius of refactoring, finding all affected code paths.
+NOT FOR: Finding definition (scip_definition), tracing specific A->B paths (scip_callchain).
+
+EXAMPLE: scip_impact(symbol='DatabaseClient', depth=2) -> {success, target_symbol, depth_analyzed, total_affected, truncated, affected_symbols: [...], affected_files: [...]}

@@ -1,0 +1,9 @@
+<!-- Story #684: Dependency Map dashboard cached result partial -->
+<div id="depmap-job-status">
+    {% if last_failure_message and show_stale_warning %}
+    <div style="background: #fef3cd; border: 1px solid #ffc107; border-radius: 4px; padding: 0.75rem; margin-bottom: 1rem; color: #856404;">
+        Previous analysis failed: {{ last_failure_message }}. Showing cached results from {{ computed_at }}.
+    </div>
+    {% endif %}
+    {{ cached_html | safe }}
+</div>
