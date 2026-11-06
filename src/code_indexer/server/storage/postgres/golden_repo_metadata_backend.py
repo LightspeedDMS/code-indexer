@@ -99,6 +99,7 @@ class GoldenRepoMetadataPostgresBackend(
         created_at: str,
         enable_temporal: bool = False,
         temporal_options: Optional[Dict] = None,
+        workspace_id: Optional[str] = None,
     ) -> None:
         """
         Add a new golden repository.
@@ -111,6 +112,9 @@ class GoldenRepoMetadataPostgresBackend(
             created_at: ISO 8601 timestamp when repository was created.
             enable_temporal: Whether temporal indexing is enabled.
             temporal_options: Optional temporal indexing options.
+            workspace_id: Optional workspace-mcp workspace id (EVO-65021), used by
+                the delegated SCIP indexer to address sandbox-mcp
+                (``sb-{workspace_id}``). ``None`` when not (yet) known.
 
         Raises:
             psycopg.errors.UniqueViolation: If alias already exists.
@@ -125,8 +129,8 @@ class GoldenRepoMetadataPostgresBackend(
                     """
                     INSERT INTO golden_repos_metadata
                         (alias, repo_url, default_branch, clone_path, created_at,
-                         enable_temporal, temporal_options)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)
+                         enable_temporal, temporal_options, workspace_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s)
                     """,
                     (
                         alias,
@@ -136,6 +140,7 @@ class GoldenRepoMetadataPostgresBackend(
                         created_at,
                         enable_temporal,
                         temporal_json,
+                        workspace_id,
                     ),
                 )
             conn.commit()
@@ -158,7 +163,7 @@ class GoldenRepoMetadataPostgresBackend(
                     SELECT alias, repo_url, default_branch, clone_path, created_at,
                            enable_temporal, temporal_options,
                            category_id, category_auto_assigned,
-                           COALESCE(wiki_enabled, FALSE)
+                           COALESCE(wiki_enabled, FALSE), workspace_id
                     FROM golden_repos_metadata
                     WHERE alias = %s
                     """,
@@ -184,7 +189,7 @@ class GoldenRepoMetadataPostgresBackend(
                     """
                     SELECT alias, repo_url, default_branch, clone_path, created_at,
                            enable_temporal, temporal_options,
-                           COALESCE(wiki_enabled, FALSE)
+                           COALESCE(wiki_enabled, FALSE), workspace_id
                     FROM golden_repos_metadata
                     """
                 )
@@ -353,6 +358,31 @@ class GoldenRepoMetadataPostgresBackend(
             )
         return updated
 
+    def update_workspace_id(self, alias: str, workspace_id: Optional[str]) -> bool:
+        """Update the workspace-mcp ``workspace_id`` for a golden repository.
+
+        EVO-65021: persists (or clears, when ``workspace_id`` is None) the
+        workspace-mcp handle used by the delegated SCIP indexer to address
+        sandbox-mcp. Used by the registration capture path and any backfill.
+
+        Returns:
+            True if a record was updated, False if alias not found.
+        """
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE golden_repos_metadata SET workspace_id = %s WHERE alias = %s",
+                    (workspace_id, alias),
+                )
+                updated: bool = cur.rowcount > 0
+            conn.commit()
+
+        if updated:
+            logger.info(
+                "Updated workspace_id=%r for golden repo: %s", workspace_id, alias
+            )
+        return updated
+
     def update_category(
         self, alias: str, category_id: Optional[int], auto_assigned: bool = True
     ) -> bool:
@@ -511,7 +541,7 @@ class GoldenRepoMetadataPostgresBackend(
                     SELECT alias, repo_url, default_branch, clone_path, created_at,
                            enable_temporal, temporal_options,
                            category_id, category_auto_assigned,
-                           COALESCE(wiki_enabled, FALSE)
+                           COALESCE(wiki_enabled, FALSE), workspace_id
                     FROM golden_repos_metadata
                     """
                 )
@@ -1393,7 +1423,7 @@ class GoldenRepoMetadataPostgresBackend(
     @classmethod
     def _row_to_dict_basic(cls, row: tuple) -> Dict[str, Any]:
         """
-        Convert a basic SELECT row (8 columns, no category fields) to dict.
+        Convert a basic SELECT row (9 columns, no category fields) to dict.
 
         Column order:
             0  alias
@@ -1404,6 +1434,7 @@ class GoldenRepoMetadataPostgresBackend(
             5  enable_temporal
             6  temporal_options
             7  wiki_enabled
+            8  workspace_id
         """
         return sanitize_row(
             {
@@ -1415,13 +1446,14 @@ class GoldenRepoMetadataPostgresBackend(
                 "enable_temporal": bool(row[5]),
                 "temporal_options": cls._parse_temporal_options(row[6]),
                 "wiki_enabled": bool(row[7]),
+                "workspace_id": row[8],
             }
         )
 
     @classmethod
     def _row_to_dict_full(cls, row: tuple) -> Dict[str, Any]:
         """
-        Convert a full SELECT row (10 columns, with category fields) to dict.
+        Convert a full SELECT row (11 columns, with category fields) to dict.
 
         Column order:
             0  alias
@@ -1434,6 +1466,7 @@ class GoldenRepoMetadataPostgresBackend(
             7  category_id
             8  category_auto_assigned
             9  wiki_enabled
+            10 workspace_id
         """
         return sanitize_row(
             {
@@ -1447,5 +1480,6 @@ class GoldenRepoMetadataPostgresBackend(
                 "category_id": row[7],
                 "category_auto_assigned": bool(row[8]),
                 "wiki_enabled": bool(row[9]),
+                "workspace_id": row[10],
             }
         )

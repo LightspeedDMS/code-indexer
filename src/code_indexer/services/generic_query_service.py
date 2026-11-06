@@ -2,8 +2,10 @@
 Generic query service that filters results based on current branch context.
 """
 
+import os
+import subprocess
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Sequence
 import logging
 
 from code_indexer.config import Config
@@ -13,16 +15,44 @@ from code_indexer.utils.git_runner import run_git_command
 logger = logging.getLogger(__name__)
 
 
+class BranchContextUnavailableError(RuntimeError):
+    """The git backend could not be reached for the branch filter: an error,
+    never an unfiltered "unknown branch" result."""
+
+
+_UNKNOWN_CONTEXT: Dict[str, Any] = {"branch": "unknown", "commit": "unknown"}
+
+
 class GenericQueryService:
     """Service for performing branch-aware queries on indexed content."""
 
-    def __init__(self, project_dir: Path, config: Optional[Config] = None):
+    def __init__(
+        self,
+        project_dir: Path,
+        config: Optional[Config] = None,
+        git_backend: Optional[Any] = None,
+    ):
         """Initialize the query service.
 
         Args:
             project_dir: The project directory path
             config: Optional configuration object
+            git_backend: the git seam (git-mcp ``git_exec``) for a repository
+                this machine does not hold -- the server's per-member query of
+                a composite on a pod whose member directory holds index state
+                only. Every git question of the branch filter is then asked of
+                it; None keeps local git.
         """
+        self._git_backend = git_backend
+        if git_backend is not None:
+            # String arithmetic only: the directory is index state here, the
+            # repository is at the same path with git-mcp.
+            self.project_dir = Path(os.path.abspath(project_dir))
+            self.config = config
+            self.file_identifier = FileIdentifier(
+                project_dir, config, git_backend=git_backend
+            )
+            return
         # Bug #1582 hardening (Codex dual-review follow-up): resolve to an
         # absolute path. `_is_result_current_branch()` passes
         # `self.project_dir` as the `project_root` argument to the shared
@@ -70,9 +100,9 @@ class GenericQueryService:
         Returns:
             Dictionary with current branch information
         """
+        if self._git_backend is not None:
+            return self._branch_context_through_backend()
         try:
-            import subprocess
-
             # First check if this is actually a git repository using the proper git runner
             check_result = run_git_command(
                 ["git", "rev-parse", "--git-dir"],
@@ -144,6 +174,49 @@ class GenericQueryService:
             logger.debug(f"Unexpected error getting branch context: {e}")
             return {"branch": "unknown", "commit": "unknown", "files": set()}
 
+    def _backend_git(self, args: Sequence[str]) -> "subprocess.CompletedProcess[str]":
+        """``git <args>`` through the git backend: git's exit code returned as a
+        local ``check=False`` run returns it. A failure to reach git at all
+        raises :class:`BranchContextUnavailableError`."""
+        run = getattr(self._git_backend, "run", None)
+        if run is None:
+            raise BranchContextUnavailableError(
+                f"the git backend {type(self._git_backend).__name__} cannot run "
+                "git (no git-mcp git_exec) for the branch filter"
+            )
+        try:
+            result: "subprocess.CompletedProcess[str]" = run(
+                str(self.project_dir), list(args)
+            )
+        except Exception as exc:
+            raise BranchContextUnavailableError(
+                f"git-mcp could not run git {args[0]} for the branch filter of "
+                f"{self.project_dir}: {type(exc).__name__}"
+            ) from exc
+        return result
+
+    def _branch_context_through_backend(self) -> Dict[str, Any]:
+        """``_get_current_branch_context`` through the git backend. Not a
+        repository, or no commit yet: the same "unknown" context as local."""
+        if self._backend_git(["rev-parse", "--is-inside-work-tree"]).returncode != 0:
+            return {**_UNKNOWN_CONTEXT, "files": set()}
+        outputs = []
+        for args in (
+            ["rev-parse", "--abbrev-ref", "HEAD"],
+            ["rev-parse", "HEAD"],
+            ["ls-tree", "-r", "--name-only", "HEAD"],
+        ):
+            result = self._backend_git(args)
+            if result.returncode != 0:
+                return {**_UNKNOWN_CONTEXT, "files": set()}
+            outputs.append(str(result.stdout).strip())
+        branch, commit, listing = outputs
+        return {
+            "branch": branch,
+            "commit": commit,
+            "files": set(listing.split("\n")) if listing else set(),
+        }
+
     def _is_result_current_branch(
         self, result: Dict[str, Any], branch_context: Dict[str, Any]
     ) -> bool:
@@ -197,6 +270,8 @@ class GenericQueryService:
 
             return False
 
+        except BranchContextUnavailableError:
+            raise
         except Exception as e:
             logger.warning(f"Error checking result branch compatibility: {e}")
             # Default to including the result if we can't determine
@@ -211,6 +286,14 @@ class GenericQueryService:
         Returns:
             True if commit is reachable from current HEAD
         """
+        if self._git_backend is not None:
+            # Exit 0: an ancestor. A failure to reach git raises (loud).
+            return (
+                self._backend_git(
+                    ["merge-base", "--is-ancestor", commit_hash, "HEAD"]
+                ).returncode
+                == 0
+            )
         try:
             result = run_git_command(
                 ["git", "merge-base", "--is-ancestor", commit_hash, "HEAD"],

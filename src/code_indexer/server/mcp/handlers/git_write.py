@@ -13,8 +13,9 @@ import asyncio
 import logging
 import subprocess
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from ._git_seam import remote_get_url as _remote_get_url
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.git.git_subprocess_env import (
     ensure_remote_url_without_credentials,
@@ -207,18 +208,10 @@ def _get_pat_credential_for_remote(
         (credential, remote_url, error_msg) tuple.
     """
     from code_indexer.server.services.git_credential_helper import GitCredentialHelper
-    from code_indexer.utils import git_runner
-    from code_indexer.utils.git_runner import run_git_command as _run_git_cmd
 
     remote_url = ""
     try:
-        url_result = _run_git_cmd(
-            ["git", "remote", "get-url", remote],
-            cwd=Path(repo_path),
-            check=True,
-            timeout=git_runner.REMOTE_RESOLVE_TIMEOUT_SECONDS,
-        )
-        remote_url = url_result.stdout.strip()
+        remote_url = _remote_get_url(str(repo_path), remote)
     except subprocess.TimeoutExpired as e:
         message = f"resolving remote '{remote}' timed out after {e.timeout}s"
         logger.warning(message)
@@ -438,17 +431,48 @@ def _confirmation_response(
     return None
 
 
-def _invalidate_wiki_cache(repository_alias: str, operation: str) -> None:
-    """Invalidate wiki cache after a git write operation (best-effort)."""
+def _announce_content_changed(repository_alias: str, operation: str) -> None:
+    """Tell features a git write may have changed any file of the repository
+    (``repository_events``; e.g. the wiki drops its render cache). Never
+    fails the operation."""
     try:
-        from code_indexer.server.wiki.wiki_cache_invalidator import (
-            wiki_cache_invalidator,
+        from code_indexer.server.features.repository_events import (
+            publish_content_changed,
         )
 
-        wiki_cache_invalidator.invalidate_repo(repository_alias)
+        publish_content_changed(repository_alias, None)
     except Exception as e:
-        logger.debug(f"Wiki cache invalidation skipped for {operation}: {e}")
+        logger.debug(f"Repository content event skipped for {operation}: {e}")
 
+
+def _reindex_after_tree_change(
+    result: Any,
+    repository_alias: str,
+    user: User,
+    paths: Optional[List[str]],
+    *,
+    changed: Optional[bool] = None,
+) -> None:
+    """Under a delegated content backend, enqueue the activated copy's
+    reindex after an operation that moved its working tree (no watcher can
+    see it there); the outcome is added to ``result`` as ``reindex``. A no-op
+    under the local backend, where auto-watch re-indexes, and after an
+    operation that left the tree alone (``changed`` overrides the check made
+    on ``result``: a success or a conflicted merge/pull)."""
+    from code_indexer.server.services.activated_write_reindex import (
+        attach_reindex_outcome,
+    )
+
+    attach_reindex_outcome(
+        result, user.username, repository_alias, paths, changed=changed
+    )
+
+
+#: git_stash actions that rewrite the working tree.
+_STASH_TREE_ACTIONS = frozenset({"push", "pop", "apply"})
+
+#: git_stash actions whose failure may leave the tree half-rewritten (conflicts).
+_STASH_CONFLICTING_ACTIONS = frozenset({"pop", "apply"})
 
 _VALID_RESET_MODES = frozenset({"mixed", "soft", "hard"})
 
@@ -500,7 +524,8 @@ def git_merge(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             return write_err
 
         result = git_operations_service.merge_branch(Path(repo_path), source_branch)
-        _invalidate_wiki_cache(repository_alias, "git_merge")
+        _announce_content_changed(repository_alias, "git_merge")
+        _reindex_after_tree_change(result, repository_alias, user, None)
         return _mcp_response(result)
     except GitCommandError as e:
         return _handle_write_error("git_merge", _ERR_MERGE, e)
@@ -720,7 +745,8 @@ def git_branch_switch(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         # "current" in the cached listing. Invalidate immediately rather than
         # waiting out the cache TTL.
         BranchService.invalidate(repo_path)
-        _invalidate_wiki_cache(repository_alias, "git_branch_switch")
+        _announce_content_changed(repository_alias, "git_branch_switch")
+        _reindex_after_tree_change(result, repository_alias, user, None)
         return _mcp_response(result)
     except GitCommandError as e:
         return _handle_write_error("git_branch_switch", _ERR_BRANCH_SWITCH, e)
@@ -802,7 +828,8 @@ def git_checkout_file(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
 
         result = git_operations_service.git_checkout_file(Path(repo_path), file_path)
-        _invalidate_wiki_cache(repository_alias, "git_checkout_file")
+        _announce_content_changed(repository_alias, "git_checkout_file")
+        _reindex_after_tree_change(result, repository_alias, user, [file_path])
         return _mcp_response(result)
     except GitCommandError as e:
         return _handle_write_error("git_checkout_file", _ERR_CHECKOUT_FILE, e)
@@ -835,7 +862,8 @@ def git_merge_abort(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
 
         result = git_operations_service.git_merge_abort(Path(repo_path))
-        _invalidate_wiki_cache(repository_alias, "git_merge_abort")
+        _announce_content_changed(repository_alias, "git_merge_abort")
+        _reindex_after_tree_change(result, repository_alias, user, None)
         return _mcp_response(result)
     except GitCommandError as e:
         return _handle_write_error("git_merge_abort", _ERR_MERGE_ABORT, e)
@@ -877,7 +905,7 @@ def git_mark_resolved(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             return write_err
 
         result = git_operations_service.git_mark_resolved(Path(repo_path), file_path)
-        _invalidate_wiki_cache(repository_alias, "git_mark_resolved")
+        _announce_content_changed(repository_alias, "git_mark_resolved")
         return _mcp_response(result)
     except GitCommandError as e:
         return _handle_write_error("git_mark_resolved", _ERR_MARK_RESOLVED, e)
@@ -937,7 +965,8 @@ def git_reset(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         confirm = _confirmation_response(result, "Hard reset")
         if confirm is not None:
             return confirm
-        _invalidate_wiki_cache(repository_alias, "git_reset")
+        _announce_content_changed(repository_alias, "git_reset")
+        _reindex_after_tree_change(result, repository_alias, user, None)
         return _mcp_response(result)
     except GitArgumentValidationError as e:
         return _mcp_response({"success": False, "error": str(e)})
@@ -978,7 +1007,8 @@ def git_clean(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         confirm = _confirmation_response(result, "Git clean")
         if confirm is not None:
             return confirm
-        _invalidate_wiki_cache(repository_alias, "git_clean")
+        _announce_content_changed(repository_alias, "git_clean")
+        _reindex_after_tree_change(result, repository_alias, user, None)
         return _mcp_response(result)
     except GitArgumentValidationError as e:
         return _mcp_response({"success": False, "error": str(e)})
@@ -1074,7 +1104,8 @@ def git_pull(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             remote=remote,
             branch=branch,
         )
-        _invalidate_wiki_cache(repository_alias, "git_pull")
+        _announce_content_changed(repository_alias, "git_pull")
+        _reindex_after_tree_change(result, repository_alias, user, None)
         return _mcp_response(result)
     except Exception as e:
         return _handle_write_error("git_pull", _ERR_PULL, e)
@@ -1230,7 +1261,10 @@ def git_stash(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 p, index=parsed["index"]
             ),
         }
-        return _mcp_response(dispatch[action]())
+        result = dispatch[action]()
+        if action in _STASH_TREE_ACTIONS:
+            _reindex_after_tree_change(result, parsed["repository_alias"], user, None)
+        return _mcp_response(result)
     except GitCommandError as e:
         logger.error(
             format_error_log(
@@ -1238,14 +1272,19 @@ def git_stash(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 f"git_stash ({action}) failed: {e}",
             )
         )
-        return _mcp_response(
-            {
-                "success": False,
-                "error_type": "GitCommandError",
-                "error": str(e),
-                "stderr": e.stderr,
-            }
-        )
+        failure: Dict[str, Any] = {
+            "success": False,
+            "error_type": "GitCommandError",
+            "error": str(e),
+            "stderr": e.stderr,
+        }
+        if action in _STASH_CONFLICTING_ACTIONS:
+            # A pop/apply that stops on conflicts has already written the
+            # cleanly applied files and the conflict markers.
+            _reindex_after_tree_change(
+                failure, parsed["repository_alias"], user, None, changed=True
+            )
+        return _mcp_response(failure)
     except ValueError as e:
         return _mcp_response({"success": False, "error": str(e)})
     except Exception as e:

@@ -121,6 +121,7 @@
                             <span class="error-text">{{ repo.error_message }}</span>
                         </div>
                         {% endif %}
+                        {% if feature_offered is not defined or feature_offered("wiki") %}{# cidx-wiki loaded #}
                         <div class="detail-item">
                             <label>Wiki:</label>
                             <span>
@@ -141,6 +142,7 @@
                                 {% endif %}
                             </span>
                         </div>
+                        {% endif %}
                     </div>
 
                     <!-- Activated Repository Management Section (Story #160) -->

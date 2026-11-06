@@ -89,6 +89,86 @@ def _get_tool_doc_loader() -> "ToolDocLoader":
     return _singleton_loader
 
 
+def parse_tool_doc(content: str, md_file: Path) -> ToolDoc:
+    """Parse one tool doc (YAML frontmatter plus markdown body).
+
+    *md_file* names the doc's source in errors and ``ToolDoc.source_path``.
+
+    Raises:
+        FrontmatterValidationError: missing or invalid frontmatter, or a
+            required field is absent.
+    """
+    if not content.startswith("---"):
+        raise FrontmatterValidationError(f"Missing frontmatter in {md_file}")
+
+    parts = content.split("---", 2)
+    if len(parts) < 3:
+        raise FrontmatterValidationError(f"Invalid frontmatter format in {md_file}")
+
+    try:
+        frontmatter = yaml.safe_load(parts[1])
+    except yaml.YAMLError as e:
+        raise FrontmatterValidationError(f"Invalid YAML in {md_file}: {e}")
+
+    if frontmatter is None:
+        raise FrontmatterValidationError(f"Empty frontmatter in {md_file}")
+
+    required_fields = ["name", "category", "required_permission", "tl_dr"]
+    for field in required_fields:
+        if field not in frontmatter:
+            raise FrontmatterValidationError(
+                f"Missing required field '{field}' in {md_file}"
+            )
+
+    body = parts[2].lstrip("\n")
+
+    # Story #987: Read slim_description; normalize whitespace-only to None
+    raw_slim = frontmatter.get("slim_description")
+    slim_description: Optional[str] = None
+    if isinstance(raw_slim, str) and raw_slim.strip():
+        slim_description = raw_slim
+
+    return ToolDoc(
+        name=frontmatter["name"],
+        category=frontmatter["category"],
+        required_permission=frontmatter["required_permission"],
+        tl_dr=frontmatter["tl_dr"],
+        description=body,
+        parameters=frontmatter.get("parameters"),
+        inputSchema=frontmatter.get("inputSchema"),
+        outputSchema=frontmatter.get("outputSchema"),
+        requires_config=frontmatter.get("requires_config"),  # Story #185
+        slim_description=slim_description,  # Story #987
+        source_path=md_file,
+    )
+
+
+def tool_definition(doc: ToolDoc) -> Dict[str, Any]:
+    """The TOOL_REGISTRY entry for *doc* (a doc WITH an inputSchema).
+
+    Story #987: the list-view description is ``slim_description``, else the
+    first 500 characters of the body.
+    """
+    description = (
+        doc.slim_description
+        if doc.slim_description is not None
+        else doc.description[:500]
+    )
+    tool_def: Dict[str, Any] = {
+        "name": doc.name,
+        "description": description,
+        "inputSchema": doc.inputSchema,
+        "required_permission": doc.required_permission,
+    }
+    # Include outputSchema if present (for documentation purposes)
+    if doc.outputSchema is not None:
+        tool_def["outputSchema"] = doc.outputSchema
+    # Story #185: Include requires_config for conditional visibility
+    if doc.requires_config is not None:
+        tool_def["requires_config"] = doc.requires_config
+    return tool_def
+
+
 class ToolDocLoader:
     """Loads and caches tool documentation from markdown files."""
 
@@ -180,50 +260,25 @@ class ToolDocLoader:
     def _parse_md_file(self, md_file: Path) -> ToolDoc:
         """Parse a markdown file with YAML frontmatter."""
         content = md_file.read_text(encoding="utf-8")
+        return parse_tool_doc(content, md_file)
 
-        if not content.startswith("---"):
-            raise FrontmatterValidationError(f"Missing frontmatter in {md_file}")
+    def register_doc(self, doc: ToolDoc) -> None:
+        """Add a doc that does not come from ``docs_dir`` (a feature add-on's
+        tool doc, shipped in its wheel). Refuses a name already present."""
+        if not self._loaded:
+            self.load_all_docs()
+        if doc.name in self._cache:
+            raise FrontmatterValidationError(
+                f"Duplicate tool name {doc.name!r}: already documented by "
+                f"{self._cache[doc.name].source_path or '<registered doc>'}"
+            )
+        self._cache[doc.name] = doc
 
-        parts = content.split("---", 2)
-        if len(parts) < 3:
-            raise FrontmatterValidationError(f"Invalid frontmatter format in {md_file}")
-
-        try:
-            frontmatter = yaml.safe_load(parts[1])
-        except yaml.YAMLError as e:
-            raise FrontmatterValidationError(f"Invalid YAML in {md_file}: {e}")
-
-        if frontmatter is None:
-            raise FrontmatterValidationError(f"Empty frontmatter in {md_file}")
-
-        required_fields = ["name", "category", "required_permission", "tl_dr"]
-        for field in required_fields:
-            if field not in frontmatter:
-                raise FrontmatterValidationError(
-                    f"Missing required field '{field}' in {md_file}"
-                )
-
-        body = parts[2].lstrip("\n")
-
-        # Story #987: Read slim_description; normalize whitespace-only to None
-        raw_slim = frontmatter.get("slim_description")
-        slim_description: Optional[str] = None
-        if isinstance(raw_slim, str) and raw_slim.strip():
-            slim_description = raw_slim
-
-        return ToolDoc(
-            name=frontmatter["name"],
-            category=frontmatter["category"],
-            required_permission=frontmatter["required_permission"],
-            tl_dr=frontmatter["tl_dr"],
-            description=body,
-            parameters=frontmatter.get("parameters"),
-            inputSchema=frontmatter.get("inputSchema"),
-            outputSchema=frontmatter.get("outputSchema"),
-            requires_config=frontmatter.get("requires_config"),  # Story #185
-            slim_description=slim_description,  # Story #987
-            source_path=md_file,
-        )
+    def unregister_doc(self, name: str) -> None:
+        """Remove a doc added with :meth:`register_doc` (no-op if absent)."""
+        self._cache.pop(name, None)
+        with _loader_lock:
+            _extended_cache.pop(name, None)
 
     def get_all_docs(self) -> Dict[str, "ToolDoc"]:
         """Return all loaded tool docs as a dict keyed by tool name.
@@ -298,25 +353,7 @@ class ToolDocLoader:
         for name, doc in self._cache.items():
             if doc.inputSchema is None:
                 continue  # Skip tools without inputSchema (like guides)
-            # Story #987: Prefer slim_description for list views; fall back to body[:500]
-            description = (
-                doc.slim_description
-                if doc.slim_description is not None
-                else doc.description[:500]
-            )
-            tool_def = {
-                "name": name,
-                "description": description,
-                "inputSchema": doc.inputSchema,
-                "required_permission": doc.required_permission,
-            }
-            # Include outputSchema if present (for documentation purposes)
-            if doc.outputSchema is not None:
-                tool_def["outputSchema"] = doc.outputSchema
-            # Story #185: Include requires_config for conditional visibility
-            if doc.requires_config is not None:
-                tool_def["requires_config"] = doc.requires_config
-            registry[name] = tool_def
+            registry[name] = tool_definition(doc)
         return registry
 
     def get_tools_by_category(self) -> Dict[str, List[Dict[str, str]]]:

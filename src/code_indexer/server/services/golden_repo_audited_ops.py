@@ -232,6 +232,17 @@ def submit_provider_index_job(
                 repo_path=repo_path,
                 provider_name=provider,
                 clear=action == "recreate",
+                # Pod-pull: reconstruction params for _provider_index_job
+                # (EVO-64545). repo_alias lets the child subprocess tag
+                # embed-stats records (EVO-66105). Upstream's ops-layer
+                # extraction dropped these, which silently broke pod-pull
+                # work-stealing for provider-index jobs in cluster mode.
+                metadata={
+                    "repo_path": repo_path,
+                    "provider_name": provider,
+                    "clear": action == "recreate",
+                    "repo_alias": alias,
+                },
             )
         )
     except Exception:
@@ -457,3 +468,51 @@ def _record_bulk(
         outcome=outcome,
         details=_bulk_details(provider, jobs),
     )
+
+
+# ---------------------------------------------------------------------------
+# Golden catalog / workspace registration sync, run once by an admin (EVO-64616)
+# ---------------------------------------------------------------------------
+
+#: The audit target of a catalog sync request (the whole golden catalog).
+GOLDEN_CATALOG_TARGET = "golden-catalog"
+CATALOG_SYNC_RUN_OPERATION = "golden_catalog_sync_run"
+CATALOG_SYNC_RUN_ALIAS = "__golden_catalog_sync_run__"
+
+
+def request_golden_catalog_sync(
+    manager: Any, *, actor: str, scope: str, dry_run: bool
+) -> str:
+    """Run one catalog and/or workspace sync pass as a background job for
+    *actor*; record ``golden_catalog_sync_requested``. The pass itself is
+    single-flight across the cluster (a pass already running elsewhere makes
+    this one report ``single_flight_skipped``)."""
+    from code_indexer.server.services.catalog_sync_scheduling import run_once
+
+    try:
+        if scope not in ("catalog", "workspaces", "all"):
+            raise ValueError(f"scope must be catalog, workspaces or all, not {scope!r}")
+        job_id = str(
+            manager.background_job_manager.submit_job(
+                operation_type=CATALOG_SYNC_RUN_OPERATION,
+                func=lambda: run_once(manager, scope=scope, dry_run=dry_run),
+                submitter_username=actor,
+                is_admin=True,
+                repo_alias=CATALOG_SYNC_RUN_ALIAS,
+            )
+        )
+    except Exception:
+        record_repo_outcome(
+            actor, "golden_catalog_sync_requested", None, "failure", dry_run=dry_run
+        )
+        raise
+    record_repo_outcome(
+        actor,
+        "golden_catalog_sync_requested",
+        GOLDEN_CATALOG_TARGET,
+        "success",
+        scope=scope,
+        dry_run=dry_run,
+        job_id=job_id,
+    )
+    return job_id

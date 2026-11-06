@@ -159,6 +159,12 @@ class IndexJobClaimLoop:
         job_id = job["job_id"]
         op_type = job.get("operation_type", "")
         metadata = job.get("metadata") or {}
+        # EVO-66105: inject job_id into metadata so executors can thread it
+        # through to build_embedding_stats_child_env for per-job VoyageAI
+        # cost correlation.  The executor signature is (metadata, callback);
+        # adding a key here is the least-invasive way to propagate without
+        # changing every dispatch target's signature.
+        metadata["job_id"] = job_id
         executor = self._dispatch.get(op_type)
 
         if executor is None:
@@ -182,9 +188,16 @@ class IndexJobClaimLoop:
                 op_type,
             )
             result = executor(metadata, self._make_progress_callback(job_id), job_id)
-            self._claimer.complete_job(job_id, result)
+            # Bug #2125: like BackgroundJobManager (Bug #679) and the leader's
+            # DistributedJobWorkerService, a result with partial exactly True
+            # ends the job completed_partial (a pod-pull refresh that
+            # published what it indexed and owes a retry).
+            if isinstance(result, dict) and result.get("partial") is True:
+                self._claimer.complete_job(job_id, result, status="completed_partial")
+            else:
+                self._claimer.complete_job(job_id, result)
             logger.info("IndexJobClaimLoop: completed %s", job_id)
-        except Exception as exc:  # noqa: BLE001 — surface as job failure
+        except Exception as exc:  # any executor failure surfaces as job failure
             logger.error(
                 "IndexJobClaimLoop: job %s (op=%s) failed: %s",
                 job_id,

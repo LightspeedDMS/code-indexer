@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, List, Optional, Tuple
 from code_indexer.global_repos.snapshot_deletion_errors import (
     SnapshotDeleteError,
     SnapshotInUseError,
+    remove_tree_already_gone_ok,
 )
 from code_indexer.server.telemetry.spans import create_span
 
@@ -746,7 +747,6 @@ class VersionedSnapshotManager:
         the backend paths and a hard failure on the fallback path.
         """
         import errno  # noqa: PLC0415
-        import shutil  # noqa: PLC0415
 
         path = Path(version_path)
         if not path.exists():
@@ -758,7 +758,8 @@ class VersionedSnapshotManager:
 
         logger.info("Deleting CoW snapshot at '%s'", version_path)
         try:
-            shutil.rmtree(str(path))
+            # Already gone (another pod's cleanup won the race) is deleted.
+            remove_tree_already_gone_ok(path)
         except OSError as exc:
             errno_name = (
                 errno.errorcode.get(exc.errno, str(exc.errno))

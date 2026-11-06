@@ -16,6 +16,7 @@ Refactoring is tracked separately.
 import logging
 from typing import Any, Dict, Optional
 
+from cidx_sdk.tool_args import coerce_int
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.services.cidx_meta_access.cached_handles import (
@@ -33,7 +34,7 @@ from code_indexer.server.telemetry.correlation_bridge import (
 )
 
 from .. import _utils
-from .._utils import _coerce_int, _get_access_filtering_service, _mcp_response
+from .._utils import _get_access_filtering_service, _mcp_response
 
 logger = logging.getLogger("code_indexer.server.mcp.handlers.search")
 
@@ -53,7 +54,7 @@ def handle_get_cached_content(args: Dict[str, Any], user: User) -> Dict[str, Any
     from code_indexer.server.cache.payload_cache import CacheNotFoundError
 
     handle = args.get("handle")
-    page = max(0, _coerce_int(args.get("page"), 0))
+    page = max(0, coerce_int(args.get("page"), 0))
 
     if not handle:
         return _mcp_response(

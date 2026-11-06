@@ -4,23 +4,75 @@ Git operations service for history exploration.
 Provides operations for browsing git commit history and retrieving
 file contents at specific revisions without requiring temporal indexing.
 Uses run_git_command() from git_runner for all git operations.
+
+Golden repositories on a pod that does not hold them (``content_backend:
+delegated``): the service is built with the server's git seam (git-mcp, see
+:func:`delegated_golden_git_backend`).  All operations -- including blame,
+path-filtered history, diffs, and search -- run through the seam's
+``git_exec`` fallback when no typed operation exists.  Without a backend
+every operation runs local git exactly as before.
 """
 
+import io
 import logging
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Union, cast
+from typing import TYPE_CHECKING, List, Optional, Sequence, Tuple, Union, cast
 
 from code_indexer.utils.git_runner import run_git_command
+from code_indexer.server.services.delegated_refusal import (
+    DelegatedRepositoryUnsupportedError,
+)
 from code_indexer.utils.source_text_decoding import decode_source_text
 from code_indexer.server.services.git_argv_safety import (
     validate_revision,
     validate_revision_range,
 )
 
+if TYPE_CHECKING:
+    from code_indexer.server.storage.shared.git_backend import GitBackend
+
 
 logger = logging.getLogger(__name__)
+
+
+def delegated_golden_git_backend() -> Optional["GitBackend"]:
+    """The git seam for a GOLDEN repository this pod does not hold, else None.
+
+    None when the running server reads repositories locally (and outside a
+    server: CLI, tests), so the service runs local git exactly as before. With
+    ``content_backend: delegated`` the repository is with workspace-mcp/git-mcp:
+    the server's delegated git backend is returned, and a server whose git
+    backend is still local has nothing to run git against -- that REFUSES
+    instead of running git on an empty directory.
+    """
+    from code_indexer.server.startup.content_backend_wiring import (
+        is_content_seam_delegated,
+    )
+
+    if not is_content_seam_delegated():
+        return None
+    from code_indexer.server.startup.git_backend_wiring import (
+        server_delegated_git_backend,
+    )
+
+    backend = server_delegated_git_backend()
+    if backend is None:
+        raise DelegatedRepositoryUnsupportedError(
+            "git history on golden repositories",
+            "git_backend is 'local', so no git-mcp holds the repository",
+        )
+    return backend
+
+
+def decode_like_run_git_command(raw: bytes) -> str:
+    """*raw* git stdout exactly as ``run_git_command(text=True)`` returns it:
+    the locale encoding, strict, universal newlines."""
+    with io.TextIOWrapper(io.BytesIO(raw), encoding="locale") as text:
+        return text.read()
+
 
 # Timeout for git blame on repos with deep history (Bug #1008)
 BLAME_TIMEOUT_SECONDS = 30
@@ -172,6 +224,27 @@ class FileHistoryResult:
     total_count: int
     truncated: bool
     renamed_from: Optional[str]
+    #: How the history was produced (see ``FOLLOW_MODE_*``): a plain
+    #: ``git log -- path``, a ``--follow`` run, or the plain run because the
+    #: ``--follow`` run did not finish within its budget.
+    follow_mode: str = "plain"
+
+
+#: ``git log -- path`` alone: renames not requested, or none to follow.
+FOLLOW_MODE_PLAIN = "plain"
+#: ``git log --follow -- path``: the file was renamed into its current path.
+FOLLOW_MODE_FOLLOW = "follow"
+#: A rename was found but ``--follow`` exceeded its budget: the plain history
+#: (everything since the rename) is returned instead.
+FOLLOW_MODE_PLAIN_FOLLOW_TIMED_OUT = "plain_follow_timed_out"
+
+#: Wall-clock budget for following a rename. The single-commit rename probe
+#: and the ``--follow`` run share it -- one deadline, not one budget each.
+#: ``--follow`` disables git's pathspec-limited history simplification and
+#: diffs every commit for rename detection; on a repository with ~10^5
+#: commits that alone took tens of seconds, so it only runs when a rename is
+#: actually there to follow, and never past this.
+FOLLOW_BUDGET_SECONDS = 15.0
 
 
 @dataclass
@@ -232,27 +305,52 @@ class GitOperationsService:
     # Fields separated by NUL character (\x00) for reliable parsing
     LOG_FORMAT = "%H%x00%h%x00%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI%x00%s%x00%b%x00"
 
-    def __init__(self, repo_path: Path):
+    def __init__(self, repo_path: Path, *, git_backend: Optional["GitBackend"] = None):
         """Initialize GitOperationsService.
 
         Args:
             repo_path: Path to the git repository
+            git_backend: the git seam (git-mcp) for a repository this pod does
+                not hold (:func:`delegated_golden_git_backend`); *repo_path* is
+                then where git-mcp sees it. None runs local git.
 
         Raises:
             ValueError: If the path is not a git repository
         """
         self.repo_path = repo_path
+        self._git_backend = git_backend
         self._verify_git_repository()
 
     def _verify_git_repository(self) -> None:
         """Verify the path is a git repository.
 
+        Through a git backend the repository is not on this disk: the caller
+        resolved it from the golden-repo registry, and git-mcp's own answer
+        (a failed command) reports a path that is not a repository.
+
         Raises:
             ValueError: If not a git repository
         """
+        if self._git_backend is not None:
+            return
         git_dir = self.repo_path / ".git"
         if not git_dir.exists():
             raise ValueError(f"Not a git repository: {self.repo_path}")
+
+    def _backend_log(
+        self,
+        fmt: str,
+        revs: Sequence[str] = (),
+        *,
+        since: Optional[str] = None,
+        max_count: Optional[int] = None,
+    ) -> str:
+        """``git log --format=<fmt>`` through the git backend, decoded as local."""
+        assert self._git_backend is not None
+        raw = self._git_backend.log_raw(
+            str(self.repo_path), fmt, revs, since=since, max_count=max_count
+        )
+        return decode_like_run_git_command(bytes(raw))
 
     def get_log(
         self,
@@ -285,6 +383,22 @@ class GitOperationsService:
         # docstring for the invariant.
         branch = validate_revision_range(branch, self.repo_path, param_name="branch")
 
+        if self._git_backend is not None and not (author or until or path):
+            # git-mcp's typed log takes revisions, --since and a count; a path,
+            # author or --until filter runs the local argv below via git_exec.
+            try:
+                output = self._backend_log(
+                    self.LOG_FORMAT,
+                    [branch] if branch else [],
+                    since=since,
+                    max_count=limit + 1,
+                )
+            except subprocess.CalledProcessError as exc:
+                if not is_revision_miss(exc):
+                    raise
+                return GitLogResult(commits=[], total_count=0, truncated=False)
+            return self._log_result(output, limit)
+
         # Build git log command
         cmd = ["git", "log", f"--format={self.LOG_FORMAT}"]
 
@@ -306,13 +420,16 @@ class GitOperationsService:
             cmd.extend(["--", path])
 
         try:
-            result = run_git_command(cmd, cwd=self.repo_path, check=True)
+            result = self._run_git(cmd, check=True)
             output = result.stdout
         except subprocess.CalledProcessError:
             # Empty repository or no matching commits
             return GitLogResult(commits=[], total_count=0, truncated=False)
 
-        # Parse output
+        return self._log_result(output, limit)
+
+    def _log_result(self, output: str, limit: int) -> GitLogResult:
+        """Parse ``git log`` output fetched with one commit over *limit*."""
         commits = self._parse_log_output(output)
 
         # Check if truncated
@@ -400,6 +517,11 @@ class GitOperationsService:
         assert _validated_commit_hash is not None  # required parameter, never None
         commit_hash = _validated_commit_hash
 
+        if self._git_backend is not None:
+            return self._show_commit_through_backend(
+                commit_hash, include_diff=include_diff, include_stats=include_stats
+            )
+
         # First, resolve the commit hash to full SHA
         try:
             resolve_result = run_git_command(
@@ -446,6 +568,43 @@ class GitOperationsService:
             commit=commit_info,
             stats=stats,
             diff=diff,
+            parents=parents,
+        )
+
+    def _show_commit_through_backend(
+        self, commit_hash: str, *, include_diff: bool, include_stats: bool
+    ) -> CommitDetail:
+        """:meth:`show_commit` through the git backend: the commit and parents.
+
+        Per-file stats (``git show --numstat/--name-status``) and the commit's
+        patch (``git show -p``) have no git-mcp operation: asked for, they
+        refuse before any git runs rather than come back empty.
+        """
+        assert self._git_backend is not None
+        repo = str(self.repo_path)
+        not_found = f"Commit not found: {commit_hash}"
+        try:
+            full_hash = str(self._git_backend.rev_parse(repo, commit_hash)).strip()
+        except subprocess.CalledProcessError as exc:
+            if is_revision_miss(exc):
+                raise ValueError(not_found) from exc
+            raise
+        try:
+            commits = self._parse_log_output(
+                self._backend_log(self.LOG_FORMAT, [full_hash], max_count=1)
+            )
+        except subprocess.CalledProcessError as exc:
+            if is_revision_miss(exc):
+                raise ValueError(not_found) from exc
+            raise
+        if not commits:
+            raise ValueError(f"Commit not found: {commit_hash}")
+        parent_output = str(self._git_backend.rev_parse(repo, f"{full_hash}^@"))
+        parents = [p.strip() for p in parent_output.strip().split("\n") if p.strip()]
+        return CommitDetail(
+            commit=commits[0],
+            stats=self._get_commit_stats(full_hash) if include_stats else None,
+            diff=self._get_commit_diff(full_hash) if include_diff else None,
             parents=parents,
         )
 
@@ -538,10 +697,8 @@ class GitOperationsService:
         status_cmd = ["git", "show", commit_hash, "--name-status", "-M", "--format="]
 
         try:
-            numstat_result = run_git_command(
-                numstat_cmd, cwd=self.repo_path, check=True
-            )
-            status_result = run_git_command(status_cmd, cwd=self.repo_path, check=True)
+            numstat_result = self._run_git(numstat_cmd, check=True)
+            status_result = self._run_git(status_cmd, check=True)
         except subprocess.CalledProcessError as e:
             logger.debug(
                 "_get_commit_stats: git command failed for %s: %s", commit_hash, e
@@ -609,7 +766,7 @@ class GitOperationsService:
         cmd = ["git", "show", commit_hash, "--format=", "-p"]
 
         try:
-            result = run_git_command(cmd, cwd=self.repo_path, check=True)
+            result = self._run_git(cmd, check=True)
             return cast(str, result.stdout)
         except subprocess.CalledProcessError:
             return ""
@@ -643,6 +800,9 @@ class GitOperationsService:
         )
         assert _validated_revision is not None  # required parameter, never None
         revision = _validated_revision
+
+        if self._git_backend is not None:
+            return self._file_at_revision_through_backend(path, revision)
 
         # First resolve the revision to full SHA and verify it exists
         try:
@@ -680,6 +840,43 @@ class GitOperationsService:
             content=content,
             # The blob's real size; re-encoding the decoded text would
             # over-count Latin-1/CP1252 files (Bug #1991).
+            size_bytes=len(raw_content),
+        )
+
+    def _file_at_revision_through_backend(
+        self, path: str, revision: str
+    ) -> FileRevisionResult:
+        """:meth:`get_file_at_revision` through git-mcp: ``rev_parse --verify``
+        then ``show_objects`` -- the same two commands, the same errors."""
+        assert self._git_backend is not None
+        repo = str(self.repo_path)
+        try:
+            resolved_revision = str(
+                self._git_backend.rev_parse(repo, "--verify", f"{revision}^{{commit}}")
+            ).strip()
+        except subprocess.CalledProcessError as exc:
+            if is_revision_miss(exc):
+                raise ValueError(f"Invalid revision: {revision}") from exc
+            raise
+        shown = self._git_backend.show_objects(repo, [(resolved_revision, path)])
+        if len(shown) != 1:
+            raise RuntimeError(
+                f"git backend returned {len(shown)} results for one show_objects spec"
+            )
+        result = shown[0]
+        if result.returncode != 0:
+            stderr = str(result.stderr or "")
+            if "bad revision" in stderr or "unknown revision" in stderr:
+                raise ValueError(f"Invalid revision: {revision}")
+            raise ValueError(f"File not found: {path} at revision {revision}")
+        # Same decoding and size as the local path (Bug #1991): the encoding
+        # fallback indexing uses, and the blob's real size.
+        raw_content = bytes(result.stdout)
+        return FileRevisionResult(
+            path=path,
+            revision=revision,
+            resolved_revision=resolved_revision,
+            content=decode_source_text(raw_content),
             size_bytes=len(raw_content),
         )
 
@@ -723,9 +920,7 @@ class GitOperationsService:
         # Run numstat separately (git ignores numstat when combined with name-status)
         numstat_cmd = ["git", "diff", "--numstat"] + base_args + path_args
         try:
-            numstat_result = run_git_command(
-                numstat_cmd, cwd=self.repo_path, check=True
-            )
+            numstat_result = self._run_git(numstat_cmd, check=True)
             numstat_output = numstat_result.stdout
         except subprocess.CalledProcessError as e:
             logger.debug(f"numstat command returned no output: {e}")
@@ -734,7 +929,7 @@ class GitOperationsService:
         # Run name-status separately
         status_cmd = ["git", "diff", "--name-status"] + base_args + path_args
         try:
-            status_result = run_git_command(status_cmd, cwd=self.repo_path, check=True)
+            status_result = self._run_git(status_cmd, check=True)
             status_output = status_result.stdout
         except subprocess.CalledProcessError as e:
             logger.debug(f"name-status command returned no output: {e}")
@@ -762,7 +957,7 @@ class GitOperationsService:
                 diff_cmd.extend(["--", path])
 
             try:
-                diff_result = run_git_command(diff_cmd, cwd=self.repo_path, check=True)
+                diff_result = self._run_git(diff_cmd, check=True)
                 self._parse_diff_hunks(diff_result.stdout, files_dict)
             except subprocess.CalledProcessError:
                 pass
@@ -1024,7 +1219,6 @@ class GitOperationsService:
             raise ValueError(
                 f"end_line ({end_line}) must be >= start_line ({start_line})"
             )
-
         # revision is a free-form revision expression, and `git blame`
         # itself also accepts a two-dot/three-dot range (restricting the
         # blame to that range, with boundary commits marked `^`); it must
@@ -1051,9 +1245,7 @@ class GitOperationsService:
         cmd.extend(["--", path])
 
         try:
-            result = run_git_command(
-                cmd, cwd=self.repo_path, check=True, timeout=BLAME_TIMEOUT_SECONDS
-            )
+            result = self._run_git(cmd, check=True, timeout=BLAME_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
             error_msg = f"Git blame timed out after {BLAME_TIMEOUT_SECONDS} seconds"
             logger.warning(
@@ -1155,6 +1347,17 @@ class GitOperationsService:
     ) -> FileHistoryResult:
         """Get commit history for a specific file.
 
+        Plain ``git log -- path`` runs first. ``--follow`` is expensive (it
+        diffs every commit for renames) and only changes the answer when the
+        file reached its current path by a rename, so it runs only when
+        ``follow_renames`` is set, the plain history is complete within
+        *limit* (a truncated plain history already holds the newest *limit*
+        commits, which ``--follow`` would return too) and its OLDEST commit
+        renamed the file into *path*. The rename probe and ``--follow``
+        together are bounded by ONE ``FOLLOW_BUDGET_SECONDS`` deadline; past
+        it the plain history is returned.
+        ``follow_mode`` on the result says which one was used.
+
         Args:
             path: Path to file (relative to repo root)
             limit: Maximum commits to return
@@ -1163,22 +1366,8 @@ class GitOperationsService:
         Returns:
             FileHistoryResult with file commit history
         """
-        # Build git log command
-        cmd = [
-            "git",
-            "log",
-            "--format=%H%x00%h%x00%an%x00%aI%x00%s%x00",
-            "--numstat",
-            f"-{limit + 1}",
-        ]
-
-        if follow_renames:
-            cmd.append("--follow")
-
-        cmd.extend(["--", path])
-
         try:
-            result = run_git_command(cmd, cwd=self.repo_path, check=True)
+            plain = self._file_history_commits(path, limit, follow=False)
         except subprocess.CalledProcessError:
             return FileHistoryResult(
                 path=path,
@@ -1188,7 +1377,13 @@ class GitOperationsService:
                 renamed_from=None,
             )
 
-        commits = self._parse_file_history_output(result.stdout)
+        commits, mode, renamed_from = plain, FOLLOW_MODE_PLAIN, None
+        if follow_renames and plain and len(plain) <= limit:
+            # ONE deadline for the rename probe and the --follow run together.
+            deadline = time.monotonic() + FOLLOW_BUDGET_SECONDS
+            renamed_from = self._renamed_into(plain[-1].hash, path, deadline)
+            if renamed_from is not None:
+                commits, mode = self._follow_within_budget(path, limit, plain, deadline)
 
         truncated = len(commits) > limit
         if truncated:
@@ -1199,8 +1394,85 @@ class GitOperationsService:
             commits=commits,
             total_count=len(commits),
             truncated=truncated,
-            renamed_from=None,
+            renamed_from=renamed_from,
+            follow_mode=mode,
         )
+
+    def _file_history_commits(
+        self,
+        path: str,
+        limit: int,
+        *,
+        follow: bool,
+        timeout: Optional[float] = None,
+    ) -> List[FileHistoryCommit]:
+        """Up to ``limit + 1`` commits of ``git log [--follow] -- path``."""
+        cmd = [
+            "git",
+            "log",
+            "--format=%H%x00%h%x00%an%x00%aI%x00%s%x00",
+            "--numstat",
+            f"-{limit + 1}",
+        ]
+        if follow:
+            cmd.append("--follow")
+        cmd.extend(["--", path])
+        result = self._run_git(cmd, check=True, timeout=timeout)
+        return self._parse_file_history_output(result.stdout)
+
+    def _renamed_into(self, commit: str, path: str, deadline: float) -> Optional[str]:
+        """The path *commit* renamed into *path*, or None when it did not.
+
+        One commit's own diff with rename detection, NOT limited to *path*:
+        a pathspec would hide the old name, which is exactly why plain
+        ``git log -- path`` cannot see the rename. Cheap (a single commit),
+        and any failure means "no rename known" -- the plain history stands.
+        """
+        # Only options the golden read-only allowlist permits for ``show``
+        # (git_tools_seam._READ_ONLY_GIT), so the same argv runs through
+        # git-mcp. Without ``-z`` a path git would quote never equals *path*:
+        # that reads as "no rename", the safe answer.
+        cmd = ["git", "show", "--format=", "-M", "--name-status", commit]
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        try:
+            result = self._run_git(cmd, check=True, timeout=remaining)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            return None
+        for line in result.stdout.splitlines():
+            fields = line.split("\t")
+            if len(fields) == 3 and fields[0].startswith("R") and fields[2] == path:
+                return fields[1]
+        return None
+
+    def _follow_within_budget(
+        self,
+        path: str,
+        limit: int,
+        plain: List[FileHistoryCommit],
+        deadline: float,
+    ) -> Tuple[List[FileHistoryCommit], str]:
+        """``--follow`` history by *deadline* (what the rename probe left of
+        ``FOLLOW_BUDGET_SECONDS``), else *plain*."""
+        remaining = deadline - time.monotonic()
+        try:
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(["git", "log", "--follow"], 0)
+            followed = self._file_history_commits(
+                path, limit, follow=True, timeout=remaining
+            )
+        except subprocess.TimeoutExpired:
+            logger.info(
+                "git_file_history: --follow exceeded %.0fs for %s; returning "
+                "the history since the rename",
+                FOLLOW_BUDGET_SECONDS,
+                path,
+            )
+            return plain, FOLLOW_MODE_PLAIN_FOLLOW_TIMED_OUT
+        except subprocess.CalledProcessError:
+            return plain, FOLLOW_MODE_PLAIN
+        return followed, FOLLOW_MODE_FOLLOW
 
     def _parse_file_history_output(self, output: str) -> List[FileHistoryCommit]:
         """Parse git log output for file history.
@@ -1300,7 +1572,7 @@ class GitOperationsService:
             cmd.append(f"--until={until}")
 
         try:
-            result = run_git_command(cmd, cwd=self.repo_path, check=True)
+            result = self._run_git(cmd, check=True)
             output = result.stdout
         except subprocess.CalledProcessError:
             # No matching commits
@@ -1428,7 +1700,7 @@ class GitOperationsService:
             cmd.extend(["--", path])
 
         try:
-            result = run_git_command(cmd, cwd=self.repo_path, check=True)
+            result = self._run_git(cmd, check=True)
             output = result.stdout
         except subprocess.CalledProcessError:
             # No matching commits
@@ -1505,3 +1777,49 @@ class GitOperationsService:
             matches.append(current_match)
 
         return matches
+
+    def _run_git(
+        self, cmd: List[str], *, check: bool, timeout: Optional[float] = None
+    ) -> "subprocess.CompletedProcess[str]":
+        """The one funnel for this service's argv-built git.
+
+        Local: ``run_git_command`` in the repository, exactly as before. Through
+        the git seam: the same argv through git-mcp ``git_exec``, read-only
+        (golden repositories are never modified), decoded as a local run; a
+        backend failure raises instead of reading as git's own exit.
+        """
+        if self._git_backend is None:
+            if timeout is None:
+                local: "subprocess.CompletedProcess[str]" = run_git_command(
+                    cmd, cwd=self.repo_path, check=check
+                )
+                return local
+            timed: "subprocess.CompletedProcess[str]" = run_git_command(
+                cmd, cwd=self.repo_path, check=check, timeout=timeout
+            )
+            return timed
+        from code_indexer.server.services.git_tools_seam import golden_git_reader
+
+        return golden_git_reader(self._git_backend).run(
+            cmd, self.repo_path, check=check, timeout=timeout
+        )
+
+
+def is_revision_miss(exc: subprocess.CalledProcessError) -> bool:
+    """True when *exc* is git saying the revision (or any commit) does not
+    exist -- the only failure the seam may answer as empty or not found."""
+    stderr = exc.stderr
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    return any(marker in str(stderr or "") for marker in _REVISION_MISS_MARKERS)
+
+
+_REVISION_MISS_MARKERS = (
+    "does not have any commits yet",
+    "bad default revision",
+    "unknown revision",
+    "bad revision",
+    "bad object",
+    "invalid object name",
+    "Needed a single revision",
+)

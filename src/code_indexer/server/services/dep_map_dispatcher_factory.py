@@ -5,7 +5,7 @@ Provides build_dep_map_dispatcher(config) as the single source of truth for
 building a CliDispatcher that respects codex_integration_config.codex_weight.
 
 This helper is used by ALL dispatcher builders across the codebase:
-  - dependency_map_service.py (run_graph_repair_dry_run + run_full_analysis)
+  - the dependency-map feature's service (run_graph_repair_dry_run + run_full_analysis)
   - dependency_map_routes.py (_build_repair_executor)
   - dependency_map_analyzer.py (_build_pass1_dispatcher, _build_pass2_dispatcher,
     _build_pass3_dispatcher)

@@ -16,7 +16,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from fastapi import (
     FastAPI,
@@ -56,18 +56,136 @@ from ..managers.composite_file_listing import (
     visible_composite_files,
 )
 from ..services.stats_service import stats_service
-from ..services.file_service import file_service
+from ..services.file_service import ContentSeamSource, file_service
 from ..services.cidx_meta_access.file_doors import (
+    CatalogFileAccess,
     judge_app_request,
     served_file_payload,
 )
 from ..services.file_listing_paths import build_non_composite_path_pattern
-from code_indexer.utils.path_confinement import resolve_confined_path
+from code_indexer.utils.path_confinement import (
+    confine_relative_path,
+    resolve_confined_path,
+)
+from ..services.activated_copy_content import (
+    CopyContentUnavailableError,
+    CopyPathError,
+    decode_text_like_read_text,
+    delegated_copy_source,
+    read_copy_file,
+    visible_files,
+)
 from ..services.search_service import search_service
 from ..app_helpers import _execute_repository_sync, _get_composite_details
 
 # Module-level logger
 logger = logging.getLogger(__name__)
+
+#: What the branches endpoint reports as the current branch of a path that is
+#: not a git repository (unchanged behaviour).
+_NON_GIT_CURRENT_BRANCH = "master"
+
+
+def _current_branch_name(
+    local_topology: GitTopologyService, repo_path: Path, *, golden: bool
+) -> str:
+    """The checked-out branch for the branches endpoint.
+
+    Locally (and for activated repositories) *local_topology* -- the one the
+    branch listing already probed -- answers through local git, a non-git path
+    or a failure reading "master" as before. For a GOLDEN repository under
+    ``content_backend: delegated`` the repository is with git-mcp, so the
+    branch is asked of the git seam at the path it sees the repository at. Only
+    git's explicit "not a git repository" keeps the "master" answer; a failure
+    to read the branch raises -- it is not a branch called "master".
+    """
+    from code_indexer.global_repos.git_operations import (
+        delegated_golden_git_backend,
+    )
+
+    backend = delegated_golden_git_backend() if golden else None
+    if backend is None:
+        return local_topology.get_current_branch() or _NON_GIT_CURRENT_BRANCH
+    from ..startup.content_backend_wiring import golden_repo_content_root
+
+    topology = GitTopologyService(
+        golden_repo_content_root(repo_path, consumer="branch listing"),
+        git_backend=backend,
+    )
+    if not topology.is_git_available():
+        return _NON_GIT_CURRENT_BRANCH
+    branch = topology.get_current_branch()
+    if branch is None:
+        raise RuntimeError(
+            "the git backend could not report the repository's current branch"
+        )
+    return branch
+
+
+#: Extensions /api/repositories/{id} reports as languages of an activated copy.
+_V2_LANGUAGE_MAP = {
+    ".py": "python",
+    ".js": "javascript",
+    ".ts": "typescript",
+    ".java": "java",
+    ".md": "markdown",
+    ".yml": "yaml",
+    ".json": "json",
+}
+
+
+def _copy_file_content_via_seam(
+    source: ContentSeamSource, path: str, access: CatalogFileAccess
+) -> Dict[str, Any]:
+    """``/api/repositories/{id}/files?content=true`` for an activated copy on
+    workspace-mcp: the local branch's answers (404 for a missing or escaping
+    path, 400 for a directory, the same binary sniff and text decoding) from
+    one fetch. A backend failure is a 500, never "not found".
+
+    *access* is judged exactly as the local branch judges it
+    (``served_file_payload``): the path is classified BEFORE the fetch (a
+    denied path is the missing-file 404) and text is served as the caller
+    may see it, ``size`` then being that of the served text."""
+    missing = HTTPException(status_code=404, detail=f"File '{path}' not found")
+    try:
+        rel = confine_relative_path(path)
+        if access.view is not None:
+            access.view.lines_view(path)
+    except (PermissionError, FileNotFoundError):
+        raise missing
+    try:
+        if not rel:
+            raise CopyPathError("not_file", rel)
+        data = read_copy_file(source, rel)
+    except CopyPathError as e:
+        if e.kind == "missing":
+            raise HTTPException(status_code=404, detail=f"File '{path}' not found")
+        raise HTTPException(status_code=400, detail=f"Path '{path}' is not a file")
+    except CopyContentUnavailableError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to read file: {str(e)}",
+        )
+    chunk = data[:8192]
+    is_binary = b"\x00" in chunk
+    if not is_binary:
+        try:
+            chunk.decode("utf-8")
+        except UnicodeDecodeError:
+            is_binary = True
+    if not is_binary:
+        try:
+            text = decode_text_like_read_text(data)
+        except UnicodeDecodeError:
+            text = None
+        if text is not None:
+            try:
+                served = access.served_text(path, text)
+            except FileNotFoundError:
+                raise missing
+            size = len(served.encode("utf-8")) if access.view is not None else len(data)
+            return {"path": path, "is_binary": False, "size": size, "content": served}
+    return {"path": path, "is_binary": True, "size": len(data), "content": None}
 
 
 def register_repos_v2_routes(
@@ -238,7 +356,18 @@ def register_repos_v2_routes(
                         total_size = 0
                         languages = set()
 
-                        if os.path.exists(repo_path):
+                        copy_source = delegated_copy_source(repo_path)
+                        if copy_source is not None:
+                            # Content seam: the copy is on workspace-mcp (its
+                            # index state on this pod); the same files the
+                            # walk below counts. A failure is this route's 500.
+                            for copy_file in visible_files(copy_source, repo_path):
+                                total_size += copy_file.size
+                                total_files += 1
+                                ext = os.path.splitext(copy_file.name)[1].lower()
+                                if ext in _V2_LANGUAGE_MAP:
+                                    languages.add(_V2_LANGUAGE_MAP[ext])
+                        elif os.path.exists(repo_path):
                             for root, dirs, files in os.walk(repo_path):
                                 if ".git" in dirs:
                                     dirs.remove(".git")
@@ -249,17 +378,8 @@ def register_repos_v2_routes(
                                             total_size += os.path.getsize(file_path)
                                             total_files += 1
                                             ext = os.path.splitext(file)[1].lower()
-                                            lang_map = {
-                                                ".py": "python",
-                                                ".js": "javascript",
-                                                ".ts": "typescript",
-                                                ".java": "java",
-                                                ".md": "markdown",
-                                                ".yml": "yaml",
-                                                ".json": "json",
-                                            }
-                                            if ext in lang_map:
-                                                languages.add(lang_map[ext])
+                                            if ext in _V2_LANGUAGE_MAP:
+                                                languages.add(_V2_LANGUAGE_MAP[ext])
                                         except (OSError, IOError):
                                             continue
 
@@ -303,6 +423,8 @@ def register_repos_v2_routes(
 
                         return repository_data
 
+                    except CopyContentUnavailableError:
+                        raise
                     except Exception as e:
                         # If we can't get detailed info, provide basic info
                         repository_data = RepositoryDetailsV2Response(
@@ -341,7 +463,18 @@ def register_repos_v2_routes(
 
                         return repository_data
 
-        except Exception:
+        except CopyContentUnavailableError as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to retrieve repository details: {str(e)}",
+            )
+        except Exception as exc:
+            logger.warning(
+                "get_repository_details_v2: swallowed %s: %s",
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
             # Continue to try golden repositories
             pass
 
@@ -528,6 +661,7 @@ def register_repos_v2_routes(
             # Check if repository exists and user has access (following existing pattern)
             repo_found = False
             repo_path = None
+            is_golden = False
             selected = cleaned_repo_id
 
             # Look for activated repository
@@ -561,11 +695,16 @@ def register_repos_v2_routes(
                 # Also check golden repositories
                 _enforce_golden_access(current_user.username, cleaned_repo_id)
                 try:
-                    repo_details = repository_listing_manager.get_repository_details(
-                        alias=cleaned_repo_id, username=current_user.username
+                    # Only the clone path: the details call would also compute
+                    # the repository's statistics (a content-backend manifest
+                    # under `delegated`) that this endpoint never reports.
+                    repo_path = Path(
+                        repository_listing_manager.get_golden_clone_path(
+                            cleaned_repo_id
+                        )
                     )
                     repo_found = True
-                    repo_path = Path(repo_details["clone_path"])
+                    is_golden = True
                 except RepositoryListingError:
                     pass
 
@@ -595,9 +734,9 @@ def register_repos_v2_routes(
                 # Get branch information
                 branches = branch_service.list_branches(include_remote=include_remote)
 
-                # Get current branch name
-                current_branch_name = (
-                    git_topology_service.get_current_branch() or "master"
+                # Get current branch name (git-mcp for a delegated golden repo)
+                current_branch_name = _current_branch_name(
+                    git_topology_service, repo_path, golden=is_golden
                 )
 
                 return BranchListResponse(
@@ -840,7 +979,9 @@ def register_repos_v2_routes(
             ),
         )
         try:
-            stats_response = stats_service.get_repository_stats(repo_id)
+            stats_response = stats_service.get_repository_stats(
+                repo_id, username=current_user.username
+            )
             return stats_response
         except FileNotFoundError:
             raise HTTPException(
@@ -921,6 +1062,7 @@ def register_repos_v2_routes(
             )
 
             repo = ActivatedRepository.from_dict(repo_dict)
+
             access = judge_app_request(
                 app.state,
                 repo_id,

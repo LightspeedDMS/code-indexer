@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import enum
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, FrozenSet, Iterable, List, Optional, Tuple
 
 from ....utils.path_confinement import has_git_segment
@@ -36,6 +37,37 @@ INDEX_FILE = "_index.md"
 _DEP_MAP_ALLOWED = frozenset({"_dep_types.md", "_analysis_guidelines.md"})
 
 ParticipantsFn = Callable[[str], Optional[FrozenSet[str]]]
+
+
+def catalog_dep_map_dir(catalog_root: Path) -> Path:
+    """The dependency-map directory a projection of the catalog served at
+    *catalog_root* reads (its model, membership and documents).
+
+    Fork seam (docs/content-seam-cidx-meta.md): under a delegated content
+    backend the served catalog directory holds index state only, so the map
+    is read from the pod's read mirror of the shared content, synced now. A
+    sync failure raises -- never an empty map, which would silently change
+    what a restricted caller is shown. Local backend: ``<root>/dependency-map``
+    exactly as upstream. A versioned snapshot path maps to the catalog's base
+    clone first: the shared content lives at the base clone's path.
+    """
+    from code_indexer.server.services.cidx_meta_read_mirror import (
+        synced_read_root,
+    )
+    from code_indexer.server.startup.content_backend_wiring import (
+        golden_repo_content_root,
+        is_content_seam_delegated,
+    )
+
+    root = Path(catalog_root)
+    if is_content_seam_delegated():
+        meta_dir = golden_repo_content_root(root, consumer="Catalog projection")
+        mirror = synced_read_root(meta_dir)
+        if mirror is not None:
+            return mirror / DEP_MAP_DIR
+    return root / DEP_MAP_DIR
+
+
 MemoryFn = Callable[[str], bool]
 
 

@@ -30,7 +30,6 @@ from .remote_query_client import (
     QueryLimitExceededError,
 )
 from .admin_client import AdminAPIClient
-from .scip_client import SCIPAPIClient, SCIPQueryError, SCIPNotFoundError
 from .file_client import FileAPIClient
 from .credential_client import CredentialAPIClient
 
@@ -61,10 +60,6 @@ __all__ = [
     "QueryLimitExceededError",
     # Admin client
     "AdminAPIClient",
-    # SCIP client
-    "SCIPAPIClient",
-    "SCIPQueryError",
-    "SCIPNotFoundError",
     # File client
     "FileAPIClient",
     # Credential client

@@ -14,6 +14,7 @@ Features caching with category-specific TTLs and persistence to SQLite database.
 import asyncio
 import itertools
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -26,6 +27,10 @@ from typing import TYPE_CHECKING, Dict, List, Any, Optional, Sequence, Tuple
 
 import httpx
 
+from code_indexer.server.services.served_index_cache import (
+    active_served_index_cache,
+    reads_served_indexes,
+)
 from code_indexer.server.services.ci_token_manager import (
     CITokenManager,
     GITHUB_TOKEN_PATTERN,
@@ -35,6 +40,8 @@ from code_indexer.server.storage.database_manager import DatabaseConnectionManag
 from code_indexer.server.storage.json_column import parse_json_column
 from code_indexer.storage.hnsw_index_manager import HNSWIndexManager
 from code_indexer.utils.credential_redaction import mask_stored_secret
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from code_indexer.server.storage.protocols import DiagnosticsBackend
@@ -1193,17 +1200,30 @@ class DiagnosticsService:
             # Validate HNSW indexes across all golden repos
             validation_results = self._validate_hnsw_indexes(golden_repos_path)
 
+            # IndexStore (delegated): repositories whose index this pod does
+            # not hold were not checked -- say so, never "none found".
+            not_here = len(validation_results.get("repos_not_on_this_pod", []))
+            elsewhere = (
+                f"; {not_here} registered repositories' indexes are not on this "
+                "pod (checked out on their next query)"
+                if not_here
+                else ""
+            )
+
             # Determine overall status
-            if validation_results["repos_checked"] == 0:
+            if validation_results["repos_checked"] == 0 and not_here:
+                status = DiagnosticStatus.NOT_APPLICABLE
+                message = f"No HNSW index is on this pod to check{elsewhere}"
+            elif validation_results["repos_checked"] == 0:
                 status = DiagnosticStatus.NOT_CONFIGURED
                 message = "No golden repositories found"
             elif len(validation_results["repos_with_issues"]) > 0:
                 # If ANY repo has issues, report ERROR
                 status = DiagnosticStatus.ERROR
-                message = f"Found {len(validation_results['repos_with_issues'])} repositories with HNSW index issues"
+                message = f"Found {len(validation_results['repos_with_issues'])} repositories with HNSW index issues{elsewhere}"
             else:
                 status = DiagnosticStatus.WORKING
-                message = f"All {validation_results['repos_with_healthy_indexes']} repositories have healthy HNSW indexes"
+                message = f"All {validation_results['repos_with_healthy_indexes']} repositories have healthy HNSW indexes{elsewhere}"
 
             return DiagnosticResult(
                 name="Vector Storage",
@@ -1230,6 +1250,7 @@ class DiagnosticsService:
                 details={"error_type": type(e).__name__, "repos_checked": 0},
             )
 
+    @reads_served_indexes
     def _validate_hnsw_indexes(self, golden_repos_path: Path) -> Dict[str, Any]:
         """
         Validate HNSW indexes across all golden repositories.
@@ -1255,6 +1276,7 @@ class DiagnosticsService:
         repos_with_healthy_indexes = 0
         repos_with_issues = []
         index_types_found = set()
+        repos_not_on_this_pod: List[str] = []
 
         # Bug #149 Fix: Query database for registered golden repos instead of scanning filesystem
         try:
@@ -1312,7 +1334,13 @@ class DiagnosticsService:
                             except (ValueError, IndexError):
                                 # Skip malformed version directories (e.g., v_, v_abc)
                                 continue
-                except Exception:
+                except Exception as exc:
+                    logger.warning(
+                        "_validate_hnsw_indexes: swallowed %s: %s",
+                        type(exc).__name__,
+                        exc,
+                        exc_info=True,
+                    )
                     # If scanning fails, fall back to clone_path
                     pass
 
@@ -1321,6 +1349,19 @@ class DiagnosticsService:
                     # Sort by timestamp (highest = latest)
                     version_dirs.sort(key=lambda x: x[1], reverse=True)
                     actual_repo_dir = version_dirs[0][0]
+
+            # IndexStore (delegated): a pod holds only the indexes it served
+            # (served_index_cache). One it does not hold right now is not
+            # unhealthy -- it is checked out on its next query -- and this
+            # sweep must not check ~900 of them out. One it holds is kept
+            # (this method's read scope) until the check is done.
+            served_cache = active_served_index_cache()
+            if served_cache is not None and not served_cache.hold_if_present(
+                actual_repo_dir
+            ):
+                repos_checked -= 1
+                repos_not_on_this_pod.append(repo_name)
+                continue
 
             # Check for .code-indexer/index/ directory
             index_base_path = actual_repo_dir / ".code-indexer" / "index"
@@ -1404,12 +1445,15 @@ class DiagnosticsService:
             if not repo_has_issues:
                 repos_with_healthy_indexes += 1
 
-        return {
+        result: Dict[str, Any] = {
             "repos_checked": repos_checked,
             "repos_with_healthy_indexes": repos_with_healthy_indexes,
             "repos_with_issues": repos_with_issues,
             "index_types_found": sorted(list(index_types_found)),
         }
+        if repos_not_on_this_pod:  # delegated only; absent under the local store
+            result["repos_not_on_this_pod"] = repos_not_on_this_pod
+        return result
 
     def _check_collection_health(
         self, collection_dir: Path, repo_name: str, collection_name: str

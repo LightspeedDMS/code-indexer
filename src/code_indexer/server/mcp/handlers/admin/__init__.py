@@ -7,13 +7,18 @@ modularization (Story #496).
 from __future__ import annotations
 
 import logging
-import threading
-import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, Optional
 
+from cidx_sdk.tool_args import coerce_int
 from code_indexer.server.auth.user_manager import User, UserRole
+from code_indexer.server.services.repo_access_guard import (
+    AccessFilteringServiceUnavailableError,
+    RepoAccessDeniedError,
+    require_repo_access,
+)
+from .._utils import _get_access_filtering_service
+from .._global_clone import bare_alias, published_global_clone_path
 from code_indexer.server.auth import dependencies as dependencies
 from code_indexer.server.auth.login_outcome import complete_login, reject_login
 from code_indexer.server.logging_utils import format_error_log
@@ -24,7 +29,6 @@ from code_indexer.server.telemetry.correlation_bridge import (
 from code_indexer.server.mcp.handlers import _utils
 from code_indexer.server.mcp.handlers._utils import (
     _admin_role_first,
-    _coerce_int,
     _mcp_response,
     _parse_json_string_array,
     _get_golden_repos_dir,
@@ -510,6 +514,34 @@ def trigger_reindex(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
 
+def _served_global_index_path(
+    repo_alias: str, golden_repo_manager: Any, golden_clone: Path
+) -> Path:
+    """Where a published global repo's index status is read.
+
+    Local IndexStore: the golden clone, exactly as before. Under a delegated
+    IndexStore the clone directory on this pod holds only what this pod built
+    or checked out, so the alias target is read with its PUBLISHED version
+    served here (EVO-64616); a failure raises, and an alias without a pointer
+    is not found -- never "not indexed".
+    """
+    from code_indexer.server.startup.index_store_wiring import server_index_store
+
+    if server_index_store().is_local:
+        return golden_clone
+    from code_indexer.global_repos.alias_manager import served_golden_target
+
+    served = served_golden_target(
+        golden_repo_manager.golden_repos_dir, bare_alias(repo_alias)
+    )
+    if not served:
+        raise FileNotFoundError(
+            f"Repository '{repo_alias}' has no alias pointer: its published index "
+            "cannot be served on this pod"
+        )
+    return Path(served)
+
+
 def get_index_status(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Get indexing status for all index types.
 
@@ -558,10 +590,66 @@ def get_index_status(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 _utils.app_module.app.state, "activated_repo_manager", None
             ),
         )
-        status_data = index_manager.get_index_status(
-            repo_alias=repo_alias,
-            username=user.username,
-        )
+        try:
+            status_data = index_manager.get_index_status(
+                repo_alias=repo_alias,
+                username=user.username,
+            )
+        except FileNotFoundError:
+            # A globally-activated repo has no activated-repos/<user>/ directory --
+            # it lives under the golden clone. list_repositories publishes its alias
+            # as "<alias>-global", so without this the published alias reports a
+            # missing activated-repo path that was never going to exist.
+            #
+            # Resolve FIRST, enforce access SECOND. Order matters: an alias that is
+            # not a published global repo must keep reporting "not found" exactly as
+            # before, rather than being answered by the access guard -- otherwise a
+            # genuinely missing repo reports an access problem instead.
+            _grm = _utils.app_module.golden_repo_manager
+            global_clone = published_global_clone_path(repo_alias, _grm)
+            if global_clone is None:
+                raise
+
+            # The activated lookup above is implicitly user-scoped (it resolves under
+            # activated-repos/<user>/); the golden clone is not. Handing it over
+            # without a check would let any caller with repository:read reach a repo
+            # the listing would have filtered out.
+            try:
+                require_repo_access(
+                    _get_access_filtering_service(), user.username, repo_alias
+                )
+            except RepoAccessDeniedError as access_err:
+                return _mcp_response({"success": False, "error": str(access_err)})
+            except AccessFilteringServiceUnavailableError:
+                return _mcp_response(
+                    {
+                        "success": False,
+                        "error": (
+                            "Access filtering unavailable; refusing repository access"
+                        ),
+                    }
+                )
+            status_data = index_manager.get_index_status_for_path(
+                _served_global_index_path(repo_alias, _grm, global_clone),
+                repo_alias=repo_alias,
+                username=user.username,
+            )
+            # EVO-64616: a golden repo's delegated build of a feature-built
+            # index (SCIP) runs elsewhere; its progress and outcome are part of
+            # that index's status (IndexBuilderContribution.annotate_status).
+            from code_indexer.kernel.index_builders import (
+                contributed_index_types,
+                index_builder,
+            )
+
+            for _index_type in contributed_index_types():
+                _builder = index_builder(_index_type)
+                if _builder is not None and _builder.annotate_status is not None:
+                    status_data[_index_type] = dict(
+                        _builder.annotate_status(
+                            repo_alias, status_data.get(_index_type) or {}
+                        )
+                    )
 
         elapsed_ms = int((time.time() - start_time) * 1000)
         logger.info(
@@ -1563,12 +1651,12 @@ def _resolve_audit_log_pagination(args: Dict[str, Any]) -> tuple:
     pathological caller-supplied value producing an unbounded SQL fetch or
     OFFSET (the shared read function clamps the offset once more).
     """
-    limit = _coerce_int(args.get("limit"), DEFAULT_AUDIT_LOG_LIMIT)
+    limit = coerce_int(args.get("limit"), DEFAULT_AUDIT_LOG_LIMIT)
     if limit <= 0:
         limit = DEFAULT_AUDIT_LOG_LIMIT
     elif limit > AUDIT_LOG_MAX_LIMIT:
         limit = AUDIT_LOG_MAX_LIMIT
-    page = _coerce_int(args.get("page"), 1)
+    page = coerce_int(args.get("page"), 1)
     if page < 1:
         page = 1
     elif page > _AUDIT_LOG_MAX_PAGE:
@@ -1782,235 +1870,6 @@ def handle_get_maintenance_status(args: Dict[str, Any], user: User) -> Dict[str,
 
 
 # =============================================================================
-# DEPENDENCY ANALYSIS (Story #195)
-# =============================================================================
-
-
-@_admin_role_first
-def handle_trigger_dependency_analysis(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
-    """
-    Trigger dependency map analysis manually (Story #195).
-
-    Args:
-        args: Tool arguments with optional mode ("full" or "delta")
-        user: The authenticated user making the request
-
-    Returns:
-        MCP response with job_id, mode, and status
-    """
-    from code_indexer.server.services.config_service import get_config_service
-
-    try:
-        # AC4: Default mode is delta
-        mode = args.get("mode", "delta") or "delta"
-
-        # AC8: Validate mode parameter
-        if mode not in ["full", "delta"]:
-            return _mcp_response(  # type: ignore[no-any-return]
-                {
-                    "success": False,
-                    "error": f"Invalid mode '{mode}'. Must be 'full' or 'delta'.",
-                    "job_id": None,
-                }
-            )
-
-        # AC6: Check if feature is enabled
-        _server_config = get_config_service().get_config()
-        _ci_config = (
-            _server_config.claude_integration_config if _server_config else None
-        )
-        if not _ci_config or not getattr(_ci_config, "dependency_map_enabled", False):
-            return _mcp_response(  # type: ignore[no-any-return]
-                {
-                    "success": False,
-                    "error": "Dependency map analysis is disabled",
-                    "job_id": None,
-                }
-            )
-
-        # AC5: Check if analysis is already running
-        dependency_map_service = getattr(
-            _utils.app_module.app.state, "dependency_map_service", None
-        )
-        if not dependency_map_service:
-            return _mcp_response(  # type: ignore[no-any-return]
-                {
-                    "success": False,
-                    "error": "Dependency map service not available",
-                    "job_id": None,
-                }
-            )
-
-        if not dependency_map_service.is_available():
-            # Story #1035 AC6: read active sentinel to surface job_id in error envelope
-            _active_job_id: str = "unknown"
-            _sentinel_dir_pf = (
-                dependency_map_service.get_sentinel_dir()
-                if hasattr(dependency_map_service, "get_sentinel_dir")
-                else None
-            )
-            if _sentinel_dir_pf is not None:
-                from code_indexer.server.services.shared_job_sentinel import (
-                    SharedJobSentinel,
-                )
-                from code_indexer.server.services.dependency_map_service import (
-                    ANALYSIS_STALE_TIMEOUT_SECONDS as _ANALYSIS_STALE_TIMEOUT_SECONDS,
-                )
-
-                _sentinel_pf = SharedJobSentinel(
-                    sentinel_dir=_sentinel_dir_pf,
-                    stale_timeout_seconds=_ANALYSIS_STALE_TIMEOUT_SECONDS,
-                )
-                _active_info = _sentinel_pf.read_active("analysis")
-                if _active_info is not None:
-                    _active_job_id = _active_info.job_id
-            return _mcp_response(  # type: ignore[no-any-return]
-                {
-                    "success": False,
-                    "error": "already in progress",
-                    "job_id": _active_job_id,
-                    "mode": mode,
-                }
-            )
-
-        # AC5 (Story #919): dry-run graph-repair mode — synchronous, no background job
-        dry_run_raw = args.get("dry_run_graph_only", False)
-        if dry_run_raw is not False and not isinstance(dry_run_raw, bool):
-            return _mcp_response(  # type: ignore[no-any-return]
-                {
-                    "success": False,
-                    "error": "dry_run_graph_only must be a boolean",
-                    "job_id": None,
-                }
-            )
-        dry_run_graph_only: bool = bool(dry_run_raw)
-        if dry_run_graph_only:
-            dry_run_report = dependency_map_service.run_graph_repair_dry_run()
-            return _mcp_response(  # type: ignore[no-any-return]
-                {
-                    "success": True,
-                    "job_id": None,
-                    "mode": mode,
-                    "status": "completed",
-                    "message": "Dry-run graph-channel repair report",
-                    "graph_repair_dry_run_report": dry_run_report,
-                }
-            )
-
-        # Generate job ID
-        job_id = f"dep-map-{mode}-{uuid.uuid4().hex[:8]}-{int(datetime.now(timezone.utc).timestamp())}"
-
-        # Story #1035 AC13: synchronous sentinel claim before spawning thread
-        _pre_claimed = False
-        _sentinel_obj = None
-        _sentinel_dir_sc = (
-            dependency_map_service.get_sentinel_dir()
-            if hasattr(dependency_map_service, "get_sentinel_dir")
-            else None
-        )
-        if isinstance(_sentinel_dir_sc, (str, Path)):
-            from code_indexer.server.services.shared_job_sentinel import (
-                SharedJobSentinel as _SharedJobSentinel,
-            )
-            from code_indexer.server.services.dependency_map_service import (
-                ANALYSIS_STALE_TIMEOUT_SECONDS as _ANALYSIS_STALE_TIMEOUT_SECONDS_SC,
-            )
-
-            _sentinel_obj = _SharedJobSentinel(
-                sentinel_dir=_sentinel_dir_sc,
-                stale_timeout_seconds=_ANALYSIS_STALE_TIMEOUT_SECONDS_SC,
-            )
-            _node_id_sc = (
-                dependency_map_service._get_node_id()
-                if hasattr(dependency_map_service, "_get_node_id")
-                else "unknown"
-            )
-            _claim = _sentinel_obj.try_claim("analysis", job_id, _node_id_sc)
-            if not _claim.success:
-                _conflict_job_id = (
-                    _claim.active.job_id if _claim.active is not None else "unknown"
-                )
-                return _mcp_response(  # type: ignore[no-any-return]
-                    {
-                        "success": False,
-                        "error": "already in progress",
-                        "job_id": _conflict_job_id,
-                        "mode": mode,
-                    }
-                )
-            _pre_claimed = True
-
-        # AC2/AC3: Spawn background thread for analysis
-        def run_analysis_job() -> None:
-            """Background job to run dependency map analysis."""
-            from code_indexer.server.services.shared_job_sentinel import (
-                AnalysisAlreadyRunningError as _BgAnalysisAlreadyRunningError,
-            )
-            from code_indexer.server.services.job_tracker import (
-                DuplicateJobError as _BgDuplicateJobError,
-            )
-
-            try:
-                if mode == "full":
-                    dependency_map_service.run_full_analysis(
-                        job_id=job_id, pre_claimed=_pre_claimed
-                    )
-                else:
-                    dependency_map_service.run_delta_analysis(
-                        job_id=job_id, pre_claimed=_pre_claimed
-                    )
-            except (_BgDuplicateJobError, _BgAnalysisAlreadyRunningError) as e:
-                _active_dup_id = (
-                    getattr(e, "existing_job_id", None)
-                    or getattr(e, "active_job_id", None)
-                    or "unknown"
-                )
-                logger.info(
-                    "MCP dep-map trigger rejected: already in progress, job_id=%s",
-                    _active_dup_id,
-                )
-            except Exception as e:
-                logger.error(
-                    format_error_log(
-                        "DEPMAP-TRIGGER-001",
-                        f"Background dependency map analysis failed: {e}",
-                    )
-                )
-
-        # Start background daemon thread
-        thread = threading.Thread(target=run_analysis_job, daemon=True)
-        try:
-            thread.start()
-        except Exception:
-            # N1: release sentinel on thread-spawn failure to avoid leak
-            if _pre_claimed and _sentinel_obj is not None:
-                _sentinel_obj.release("analysis", expected_job_id=job_id)
-            raise
-
-        # AC2/AC3: Return job_id immediately
-        return _mcp_response(  # type: ignore[no-any-return]
-            {
-                "success": True,
-                "job_id": job_id,
-                "mode": mode,
-                "status": "queued",
-                "message": f"Dependency map {mode} analysis started",
-            }
-        )
-
-    except Exception as e:
-        logger.error(
-            format_error_log(
-                "DEPMAP-TRIGGER-002",
-                f"Error triggering dependency map analysis: {e}",
-            )
-        )
-        return _mcp_response({"success": False, "error": str(e), "job_id": None})  # type: ignore[no-any-return]
-
-
-# =============================================================================
 # Story #992: Unified Group Management Dispatchers
 # =============================================================================
 
@@ -2173,5 +2032,4 @@ def _register(registry: dict) -> None:
     # Story #924: enter/exit maintenance MCP tools removed — endpoints
     # are localhost-only and auto-updater driven, not exposed via MCP.
     registry["get_maintenance_status"] = handle_get_maintenance_status
-    registry["trigger_dependency_analysis"] = handle_trigger_dependency_analysis
     registry["get_memory_governor_stats"] = handle_get_memory_governor_stats

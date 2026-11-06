@@ -41,9 +41,6 @@ from code_indexer.services.hnsw_health_service import (
 from code_indexer.services.temporal.temporal_collection_naming import (
     parse_physical_temporal_name,
 )
-from code_indexer.services.temporal.temporal_server_paths import (
-    server_temporal_index_root,
-)
 from code_indexer.storage.shared.chunk_layout import ChunkLayout, resolve_chunk_layout
 from code_indexer.storage.sqlite_chunk_store import chunk_store_has_real_data
 
@@ -275,7 +272,12 @@ def discover_sister_temporal_collections(
     if legacy_index_path is None or str(legacy_index_path) == "":
         raise ValueError("legacy_index_path must not be None or empty")
 
-    temporal_root = server_temporal_index_root(Path(golden_repos_dir), repo_alias)
+    from code_indexer.server.services.temporal_index_store import (
+        served_temporal_index_root,
+    )
+
+    # Delegated IndexStore: this pod holds the recorded temporal version.
+    temporal_root = served_temporal_index_root(Path(golden_repos_dir), repo_alias)
     if not temporal_root.is_dir():
         return []
 

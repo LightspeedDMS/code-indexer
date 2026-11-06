@@ -37,6 +37,10 @@ returned output gets only the caller's redactor, so callers that parse it
 see it unchanged under the identity default.
 """
 
+from cidx_sdk.seams.clone import SHORT_POLL_SECONDS as _CLONE_SHORT_POLL_SECONDS
+from cidx_sdk.seams.clone import (
+    SubprocessCancelledError as _SdkSubprocessCancelledError,
+)
 import logging
 import re
 import subprocess
@@ -69,8 +73,9 @@ _ERROR_TOKEN_PATTERN = re.compile(r"\bERROR\b")
 
 # How often the poll loop checks cancel_check() while waiting for the
 # child to finish. Short enough that a cancel is noticed within a few
-# seconds; this is NOT a wall-clock deadline on the subprocess itself.
-SHORT_POLL_SECONDS = 2.0
+# seconds; this is NOT a wall-clock deadline on the subprocess itself. The
+# clone seam's Protocol defaults to it, so the one value lives in the SDK.
+SHORT_POLL_SECONDS = _CLONE_SHORT_POLL_SECONDS
 
 # How long to wait for the stdout/stderr drain threads to finish after the
 # child has been reaped. Generous but bounded — the pipes are already
@@ -104,8 +109,10 @@ def _redacted(value: Any, args: Any, redact: Redactor) -> Any:
     return _caller_redacted(redact_command_output(value, args), redact)
 
 
-class SubprocessCancelledError(RuntimeError):
-    """Raised when a cancellable subprocess is terminated due to job cancellation."""
+# Raised when a cancellable subprocess is terminated due to job cancellation.
+# It is the clone seam's cancellation error too, so it lives in the SDK and a
+# clone backend raises the same class the core catches.
+SubprocessCancelledError = _SdkSubprocessCancelledError
 
 
 def _drain_stream(

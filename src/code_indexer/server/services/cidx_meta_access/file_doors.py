@@ -51,8 +51,8 @@ from .depmap_projection import MetaProjector, render_line_aligned
 from .history_policy import _may_serve_catalog
 from .membership import ParticipantsReader, request_participants_reader
 from .path_policy import (
-    DEP_MAP_DIR,
     Decision,
+    catalog_dep_map_dir,
     DecisionKind,
     classify,
     may_be_served_unchanged,
@@ -103,13 +103,21 @@ class CatalogFileView:
     may_write: bool = False
     _participants: Optional[ParticipantsReader] = None
     _projector: Optional[MetaProjector] = None
+    _dep_map: Optional[Path] = None
+
+    def _dep_map_dir(self) -> Path:
+        """``catalog_dep_map_dir`` of the served root, resolved once per
+        request (the read mirror under a delegated content backend)."""
+        if self._dep_map is None:
+            self._dep_map = catalog_dep_map_dir(self.root)
+        return self._dep_map
 
     def _meta_projector(self) -> MetaProjector:
         """The request's projector; its model also answers membership."""
         if self._projector is None:
             self._projector = MetaProjector(
                 self.vis,
-                dep_map_dir=self.root / DEP_MAP_DIR,
+                dep_map_dir=self._dep_map_dir(),
                 universe=process_alias_universe(self.registry),
             )
         return self._projector
@@ -117,7 +125,7 @@ class CatalogFileView:
     def _members(self, domain: str) -> Optional[FrozenSet[str]]:
         if self._participants is None:
             self._participants = request_participants_reader(
-                self.root / DEP_MAP_DIR, lambda: self._meta_projector().model()
+                self._dep_map_dir(), lambda: self._meta_projector().model()
             )
         return self._participants(domain)
 

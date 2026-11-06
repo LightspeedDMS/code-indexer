@@ -6,20 +6,13 @@ proper timeout handling and result aggregation.
 
 Includes:
 - Multi-repository semantic/FTS/regex/temporal search
-- Multi-repository SCIP intelligence (definitions, references, dependencies, dependents, callchains)
+(Multi-repository SCIP intelligence is the cidx-scip feature's.)
 """
 
 from .multi_search_config import MultiSearchConfig
 from .multi_result_aggregator import MultiResultAggregator
 from .multi_search_service import MultiSearchService
 from .models import MultiSearchRequest, MultiSearchResponse, MultiSearchMetadata
-from .scip_models import (
-    SCIPMultiRequest,
-    SCIPMultiResponse,
-    SCIPMultiMetadata,
-    SCIPResult,
-)
-from .scip_multi_service import SCIPMultiService
 
 __all__ = [
     "MultiSearchConfig",
@@ -28,9 +21,4 @@ __all__ = [
     "MultiSearchRequest",
     "MultiSearchResponse",
     "MultiSearchMetadata",
-    "SCIPMultiRequest",
-    "SCIPMultiResponse",
-    "SCIPMultiMetadata",
-    "SCIPResult",
-    "SCIPMultiService",
 ]

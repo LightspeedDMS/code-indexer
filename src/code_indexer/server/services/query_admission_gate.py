@@ -64,13 +64,24 @@ class AdmissionDecision:
     retry_after_seconds: Optional[int] = None
 
 
-def check_query_admission() -> AdmissionDecision:
-    """Should this query-path request be admitted now, given current
-    memory pressure?
+def check_query_admission(*, record_denial: bool = True) -> AdmissionDecision:
+    """Should this request be admitted now, given current memory pressure?
 
     See module docstring for the full fail-open contract. Never raises:
     the entire body (including the get_memory_governor() lookup) runs
     under one try/except so ANY unexpected failure fails open.
+
+    Args:
+        record_denial: whether a denial bumps the governor's
+            ``query_admissions_denied`` counter. True for the query-path
+            handlers this gate was written for -- that counter is an
+            operator-facing metric (it is published in
+            ``MemoryGovernor.get_snapshot()``) meaning "live callers we turned
+            away". A BACKGROUND caller consulting the same gate to decide
+            whether to defer is not a turned-away query, and counting it would
+            make a pod under sustained pressure report a rejection storm that
+            no user ever saw. Such callers pass False: same decision, same
+            kill switch, same fail-open contract, no metric pollution.
     """
     try:
         from code_indexer.server.services.memory_governor import (
@@ -95,7 +106,8 @@ def check_query_admission() -> AdmissionDecision:
         if governor.admission_allowed(cfg.job_admission_memory_max_used_pct):
             return AdmissionDecision(allowed=True, retry_after_seconds=None)
 
-        governor.increment_query_admissions_denied()
+        if record_denial:
+            governor.increment_query_admissions_denied()
         retry_after = math.ceil(governor.last_red_min_dwell_seconds)
         return AdmissionDecision(allowed=False, retry_after_seconds=retry_after)
     except Exception as exc:  # noqa: BLE001 -- fail-open contract, see module docstring

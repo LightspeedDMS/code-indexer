@@ -103,6 +103,7 @@ worker already removed (raises, caught here as `orphans_failed`).
 
 import logging
 import os
+import subprocess
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -113,6 +114,7 @@ from code_indexer.server.repositories.golden_repo_manager import (
     GoldenRepoNotFoundError,
 )
 from code_indexer.server.services.job_tracker import DuplicateJobError
+from code_indexer.server.services.metadata_reader import read_current_commit
 
 if TYPE_CHECKING:
     # Type-checking only: the Bug #1523 global-orphan pass annotates its
@@ -166,6 +168,16 @@ class ReconcileResult:
     orphans_failed: List[str] = field(default_factory=list)
     pointers_repaired: List[str] = field(default_factory=list)
     pointers_repair_failed: List[str] = field(default_factory=list)
+    # EVO-66808: healthy repos whose stale global_repos.index_path was repointed
+    # to the actual on-disk clone path (and those whose repair failed).
+    index_paths_repaired: List[str] = field(default_factory=list)
+    index_paths_repair_failed: List[str] = field(default_factory=list)
+    # GAP-4: healthy repos whose on-disk git HEAD has advanced past the
+    # commit SHA recorded in their index metadata -- a stale index invisible
+    # to the scheduler's normal change-detection cycle.
+    stale_indexes_found: List[str] = field(default_factory=list)
+    stale_indexes_refreshed: List[str] = field(default_factory=list)
+    stale_indexes_failed: List[str] = field(default_factory=list)
     # Bug #1523: the REVERSE direction -- a live global-registry entry whose
     # `golden_repos` row is already gone. Distinct from orphans_* above,
     # which track rows whose on-disk clone is absent.
@@ -180,6 +192,27 @@ class ReconcileResult:
     # sweep; 0 otherwise.
     circuit_breaker_consecutive_count: int = 0
     circuit_breaker_confirmed_proceed: bool = False
+    # Content seam: registered repos with no index state on THIS pod while
+    # content_backend='delegated'. The repository is with workspace-mcp, so
+    # that absence is not evidence it is gone -- never treated as orphans.
+    orphans_unconfirmed_delegated: List[str] = field(default_factory=list)
+
+
+def _repositories_delegated(golden_repo_manager: Any) -> bool:
+    """True when the repositories are not on this pod (content seam).
+
+    Either the running server's backend or the manager's own says so. Only a
+    real ``True`` from the manager counts, so a duck-typed stand-in keeps the
+    local behaviour.
+    """
+    from code_indexer.server.startup.content_backend_wiring import (
+        is_content_seam_delegated,
+    )
+
+    if is_content_seam_delegated():
+        return True
+    probe = getattr(golden_repo_manager, "repositories_are_delegated", None)
+    return callable(probe) and probe() is True
 
 
 def _get_breaker_backend(golden_repo_manager: GoldenRepoManager) -> Optional[Any]:
@@ -410,20 +443,28 @@ def _claim_sweep_single_flight(job_tracker: Any, submitter_username: str) -> str
 def reconcile_golden_repo_registry(
     golden_repo_manager: GoldenRepoManager,
     submitter_username: str = DEFAULT_RECONCILE_SUBMITTER,
+    refresh_scheduler: Optional[Any] = None,
 ) -> ReconcileResult:
     """
     Scan the golden_repos registry for rows with no on-disk clone and
     submit their removal; repair healthy global repos with a missing alias
-    pointer. See module docstring for the full safety contract.
+    pointer; detect stale indexes and trigger refreshes. See module
+    docstring for the full safety contract.
 
     Args:
         golden_repo_manager: The shared GoldenRepoManager instance.
         submitter_username: Username recorded on the submitted removal jobs
             and the single-flight coordination job.
+        refresh_scheduler: Optional RefreshScheduler instance. When provided,
+            Pass 4 (GAP-4 index staleness detection) compares each healthy
+            repo's git HEAD against its indexed commit SHA and triggers a
+            refresh for any repo whose index has fallen behind. When None
+            (the default, matching all existing callers), Pass 4 is skipped.
 
     Returns:
         ReconcileResult summarizing orphans found/removed/failed, pointer
-        repairs, the healthy count, and whether the sweep aborted early.
+        repairs, stale indexes detected/refreshed, the healthy count, and
+        whether the sweep aborted early.
     """
     result = ReconcileResult()
 
@@ -442,7 +483,7 @@ def reconcile_golden_repo_registry(
             return result
 
     try:
-        _run_sweep(golden_repo_manager, submitter_username, result)
+        _run_sweep(golden_repo_manager, submitter_username, result, refresh_scheduler)
     except Exception as sweep_error:  # noqa: BLE001 -- sidecar discipline
         logger.error("Bug #1317 reconcile: sweep failed unexpectedly: %s", sweep_error)
         result.aborted = True
@@ -461,6 +502,8 @@ def reconcile_golden_repo_registry(
                 result={
                     "orphans_removed": len(result.orphans_removed),
                     "pointers_repaired": len(result.pointers_repaired),
+                    "index_paths_repaired": len(result.index_paths_repaired),
+                    "stale_indexes_refreshed": len(result.stale_indexes_refreshed),
                 },
             )
         except Exception as complete_error:  # noqa: BLE001
@@ -476,9 +519,11 @@ def _run_sweep(
     golden_repo_manager: GoldenRepoManager,
     submitter_username: str,
     result: ReconcileResult,
+    refresh_scheduler: Optional[Any] = None,
 ) -> None:
     """Core sweep logic: health check -> classify -> circuit-breaker ->
-    remove orphans -> repair missing pointers on healthy repos."""
+    remove orphans -> repair missing pointers on healthy repos ->
+    detect stale indexes (GAP-4)."""
     breaker_backend = _get_breaker_backend(golden_repo_manager)
 
     if not _golden_repos_dir_is_healthy(golden_repo_manager.golden_repos_dir):
@@ -509,6 +554,21 @@ def _run_sweep(
             healthy_rows.append((repo_row, actual_path))
         except GoldenRepoNotFoundError:
             orphan_candidates.append(alias)
+
+    if orphan_candidates and _repositories_delegated(golden_repo_manager):
+        # get_actual_repo_path() looked at THIS pod, which holds only index
+        # state: a miss means "not indexed here", never "repository gone".
+        # No seam can confirm a repository's absence, so nothing is removed.
+        result.orphans_unconfirmed_delegated = list(orphan_candidates)
+        logger.warning(
+            "Bug #1317 reconcile: content_backend='delegated' -- %d registered "
+            "repo(s) have no index state on this pod (%s); the repositories are "
+            "with workspace-mcp, so this is not evidence they are gone. NOT "
+            "treated as registry-orphans.",
+            len(orphan_candidates),
+            ",".join(sorted(orphan_candidates)),
+        )
+        orphan_candidates = []
 
     total = len(repo_rows)
     absent_fraction = (len(orphan_candidates) / total) if total > 0 else 0.0
@@ -609,33 +669,65 @@ def _run_sweep(
                 "start counting from zero again."
             )
 
-    # Pass 3: repair healthy global repos with a missing alias pointer (the
-    # #1315 fallback symptom) -- clone/index intact, registry says global,
-    # only the pointer JSON is gone. Never delete a healthy repo for this;
-    # just re-write the pointer (idempotent).
+    # Pass 3: repair healthy global repos (idempotent; never deletes):
+    #   (a) Bug #1317 / #1315: a MISSING alias pointer -- clone/index intact,
+    #       registry says global, only the pointer JSON is gone. Re-write it.
+    #   (b) EVO-66808: a STALE global_repos.index_path -- an absolute path baked at
+    #       registration under an older data-dir layout (e.g.
+    #       /opt/code-indexer/.cidx-server/data/golden-repos/<name>) that no longer
+    #       exists after the data dir moved (e.g. /data/data/golden-repos/<name>),
+    #       inconsistent with the on-disk codebase_dir. A resolver that trusts it
+    #       lands on a non-existent root (ENOENT / "os error 2"). Repoint it via a
+    #       TARGETED update_index_path (no other registry field disturbed) at the
+    #       actual on-disk clone path. Deliberately CONSERVATIVE: only repair when
+    #       the stored path is absent on disk AND the actual path is a real dir, so
+    #       a valid index_path is never churned.
     from code_indexer.global_repos.alias_manager import AliasManager
+    from code_indexer.global_repos.global_activation import GlobalActivator
 
     aliases_dir = os.path.join(golden_repo_manager.golden_repos_dir, "aliases")
     alias_manager = AliasManager(aliases_dir)
+    # Same shared cluster registry the read/resolve path uses (PostgreSQL in
+    # cluster mode, per-node SQLite in solo mode) -- Bug #1308 deferred resolution.
+    global_registry = GlobalActivator(golden_repo_manager.golden_repos_dir).registry
 
     for repo_row, actual_path in healthy_rows:
         alias = repo_row["alias"]
         global_alias = f"{alias}-global"
+
+        # is_globally_active() constructs a fresh GlobalActivator and reads the
+        # shared registry (SQLite/PostgreSQL), so a transient DB error is possible.
+        # Keep it inside a try -- a read failure for ONE alias must be recorded and
+        # skipped, never propagate out of the loop and abort Pass 3 (both the
+        # #1317 pointer repair and the EVO-66808 index_path repair) for every
+        # remaining healthy repo.
         try:
-            if not golden_repo_manager.is_globally_active(alias):
-                continue
-            if alias_manager.alias_exists(global_alias):
-                continue
-            alias_manager.create_alias(
-                alias_name=global_alias, target_path=actual_path, repo_name=alias
-            )
-            result.pointers_repaired.append(alias)
-            logger.warning(
-                "Bug #1317 reconcile: repaired missing alias pointer for "
-                "globally-active repo '%s' (clone healthy, pointer was "
-                "missing -- #1315 fallback symptom).",
+            globally_active = golden_repo_manager.is_globally_active(alias)
+        except Exception as active_error:  # reconcile safety
+            logger.error(
+                "reconcile: failed to check global-active state for '%s': %s -- "
+                "skipping its Pass-3 repairs this sweep.",
                 alias,
+                active_error,
             )
+            result.pointers_repair_failed.append(alias)
+            continue
+        if not globally_active:
+            continue
+
+        # (a) alias-pointer repair (Bug #1317)
+        try:
+            if not alias_manager.alias_exists(global_alias):
+                alias_manager.create_alias(
+                    alias_name=global_alias, target_path=actual_path, repo_name=alias
+                )
+                result.pointers_repaired.append(alias)
+                logger.warning(
+                    "Bug #1317 reconcile: repaired missing alias pointer for "
+                    "globally-active repo '%s' (clone healthy, pointer was "
+                    "missing -- #1315 fallback symptom).",
+                    alias,
+                )
         except Exception as repair_error:  # noqa: BLE001
             logger.error(
                 "Bug #1317 reconcile: failed to repair alias pointer for '%s': %s",
@@ -644,9 +736,256 @@ def _run_sweep(
             )
             result.pointers_repair_failed.append(alias)
 
+        # (b) stale-index_path repair (EVO-66808)
+        try:
+            repo_info = global_registry.get_global_repo(global_alias)
+            stored_index_path = (repo_info or {}).get("index_path")
+            if (
+                repo_info is not None
+                and stored_index_path
+                and stored_index_path != actual_path
+                and not os.path.exists(stored_index_path)
+                and os.path.isdir(actual_path)
+            ):
+                if global_registry.update_index_path(global_alias, actual_path):
+                    result.index_paths_repaired.append(alias)
+                    logger.warning(
+                        "EVO-66808 reconcile: repointed stale index_path for "
+                        "globally-active repo '%s' (%s -> %s).",
+                        alias,
+                        stored_index_path,
+                        actual_path,
+                    )
+        except Exception as ip_error:  # one repair failure never aborts the reconcile
+            logger.error(
+                "EVO-66808 reconcile: failed to repair index_path for '%s': %s",
+                alias,
+                ip_error,
+            )
+            result.index_paths_repair_failed.append(alias)
+
+    # ------------------------------------------------------------------ #
+    # Pass 4 (GAP-4): detect repos whose on-disk git HEAD has advanced   #
+    # past the commit SHA recorded in the index metadata. A stale index  #
+    # in this state is invisible to the refresh scheduler's normal       #
+    # has_changes() cycle (local HEAD == upstream HEAD after a successful #
+    # pull, so no new changes are detected -- but the index was never    #
+    # rebuilt for that HEAD).                                            #
+    # ------------------------------------------------------------------ #
+    if refresh_scheduler is not None:
+        _reconcile_stale_indexes(
+            refresh_scheduler,
+            golden_repo_manager,
+            healthy_rows,
+            submitter_username,
+            result,
+        )
+
     # Pass 4 (Bug #1523): the REVERSE orphan direction -- global-registry
     # entries whose golden_repos row is already gone.
     _reconcile_global_registry_orphans(golden_repo_manager, repo_rows, result)
+
+
+def _get_clone_git_head(clone_path: str, *, delegated: bool = False) -> Optional[str]:
+    """Return the full git HEAD SHA for an on-disk clone, or None on failure.
+
+    Runs a plain ``git rev-parse HEAD`` with a short timeout. Returns None
+    (never raises) on any error so a single unreadable clone never aborts
+    the entire staleness sweep.
+
+    ``delegated``: the clone is not on this pod, so git-mcp is asked through
+    the git seam (a versioned snapshot maps to its base clone, the checkout a
+    refresh would index). That path RAISES on failure -- the caller logs it
+    per repo -- because "no HEAD" would quietly switch staleness detection off
+    for every repository.
+    """
+    if delegated:
+        return _get_clone_git_head_delegated(clone_path)
+    try:
+        head_result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=clone_path,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:  # best-effort staleness check
+        return None
+    if head_result.returncode != 0:
+        return None
+    sha = head_result.stdout.strip()
+    return sha if sha else None
+
+
+def _get_clone_git_head_delegated(clone_path: str) -> Optional[str]:
+    """HEAD of the clone git-mcp holds for *clone_path* (see _get_clone_git_head)."""
+    from code_indexer.server.startup.content_backend_wiring import (
+        golden_repo_content_root,
+    )
+    from code_indexer.server.startup.git_backend_wiring import (
+        server_delegated_git_backend,
+    )
+
+    backend = server_delegated_git_backend()
+    if backend is None:
+        raise RuntimeError(
+            "GAP-4 staleness check: content_backend='delegated' needs "
+            "git_backend='delegated' -- local git on this pod would read a "
+            "directory that holds no repository"
+        )
+    from code_indexer.services.git_head import is_unborn_head
+
+    root = golden_repo_content_root(clone_path, consumer="GAP-4 staleness check")
+    try:
+        sha = backend.rev_parse(str(root), "HEAD", timeout=10).strip()
+    except subprocess.CalledProcessError as exc:
+        # An empty repository has no commit to compare -- the local path's
+        # failed rev-parse answers None too. Any other failure still raises.
+        if is_unborn_head(exc):
+            return None
+        raise
+    return sha if sha else None
+
+
+def _index_commit_matches_head(recorded_commit: str, actual_head: str) -> bool:
+    """True when the recorded index commit matches the clone's git HEAD.
+
+    Prefix-tolerant comparison: a recorded value that is a valid hex prefix
+    (>= 7 chars) of the actual HEAD is considered the SAME commit. The
+    literal ``"unknown"`` (written by config_fixer / git_detection /
+    file_identifier on a git-state detection failure) is always treated as
+    NOT matching so a reconcile pass records a real SHA.
+    """
+    recorded_lower = recorded_commit.strip().lower()
+
+    if recorded_lower == "unknown":
+        return False
+
+    # Prefix-tolerant: a shorter valid-hex recorded value that is a genuine
+    # prefix of the actual HEAD is the same commit, but only when it meets
+    # git's minimum abbreviation length of 7 characters.
+    is_hex_fragment = len(recorded_lower) >= 7 and all(
+        c in "0123456789abcdef" for c in recorded_lower
+    )
+    if is_hex_fragment and actual_head.lower().startswith(recorded_lower):
+        return True
+
+    return recorded_lower == actual_head.lower()
+
+
+def _reconcile_stale_indexes(
+    refresh_scheduler: Any,
+    golden_repo_manager: GoldenRepoManager,
+    healthy_rows: List[Any],
+    submitter_username: str,
+    result: ReconcileResult,
+) -> None:
+    """Pass 4 (GAP-4): detect repos whose index is stale relative to git HEAD.
+
+    For each healthy, globally-active repo (clone exists, survived Pass 1
+    classification, registered in the global registry), compare the git HEAD
+    of the on-disk clone against the ``current_commit`` SHA stored in the
+    index metadata (``.code-indexer/metadata-voyage-ai.json`` or legacy
+    ``metadata.json``). If they diverge, trigger a refresh via
+    ``RefreshScheduler.trigger_refresh_for_repo(alias)``.
+
+    Guards:
+    - Skipped entirely when ``refresh_scheduler`` is None (caller did not
+      provide one -- e.g. tests, solo CLI paths).
+    - Only globally-active repos are checked -- ``trigger_refresh_for_repo``
+      resolves the alias via ``_resolve_global_alias()``, which raises
+      ``ValueError`` for any alias not in the global registry. This gate
+      mirrors Pass 3's ``is_globally_active()`` check.
+    - A repo with no metadata file (never indexed) is silently skipped --
+      an uninitialized repo is handled by the scheduler's own repair path.
+    - A repo whose git HEAD cannot be read is silently skipped.
+    - Each repo is wrapped in its own try/except so an unexpected error for
+      one alias never propagates to the rest.
+
+    This is a READ-ONLY staleness detection pass: it mutates nothing in the
+    registry or on disk. The only side effect is triggering refresh jobs.
+
+    Disabled under a delegated IndexStore (EVO-64616): the recorded commit is
+    read from the index on THIS pod, which then holds only the versions it
+    served -- so the pass would judge an arbitrary subset, or check every
+    repository out to judge them all. Each repository's scheduled refresh
+    already asks git (git-mcp) whether upstream moved and publishes through
+    the IndexStore when it did.
+    """
+    from code_indexer.server.startup.index_store_wiring import server_index_store
+
+    if not server_index_store().is_local:
+        logger.info(
+            "GAP-4 reconcile: index staleness pass disabled: "
+            "index_store_backend='delegated' -- this pod holds only the indexes "
+            "it served; the scheduled refresh detects upstream changes through "
+            "git-mcp and publishes through the IndexStore"
+        )
+        return
+    delegated = _repositories_delegated(golden_repo_manager)
+    for repo_row, actual_path in healthy_rows:
+        alias = repo_row["alias"]
+        try:
+            # Gate: only globally-active repos can be refreshed.
+            # trigger_refresh_for_repo() resolves the alias via
+            # _resolve_global_alias() which raises ValueError for repos
+            # not in the global registry. Mirror Pass 3's gate.
+            try:
+                globally_active = golden_repo_manager.is_globally_active(alias)
+            except Exception as active_error:  # reconcile safety
+                logger.error(
+                    "GAP-4 reconcile: failed to check global-active state "
+                    "for '%s': %s -- skipping its staleness check.",
+                    alias,
+                    active_error,
+                )
+                result.stale_indexes_failed.append(alias)
+                continue
+            if not globally_active:
+                continue
+
+            recorded_commit = read_current_commit(actual_path)
+            if not recorded_commit:
+                continue
+
+            if delegated:
+                actual_head = _get_clone_git_head(actual_path, delegated=True)
+            else:
+                actual_head = _get_clone_git_head(actual_path)
+            if not actual_head:
+                continue
+
+            if _index_commit_matches_head(recorded_commit, actual_head):
+                continue
+
+            result.stale_indexes_found.append(alias)
+            logger.info(
+                "GAP-4 reconcile: golden repo '%s' index is stale "
+                "(indexed=%s, HEAD=%s) -- triggering refresh.",
+                alias,
+                recorded_commit[:12],
+                actual_head[:12],
+            )
+            try:
+                refresh_scheduler.trigger_refresh_for_repo(
+                    alias, submitter_username=submitter_username
+                )
+                result.stale_indexes_refreshed.append(alias)
+            except Exception as refresh_error:  # recorded as failed; reconcile goes on
+                logger.error(
+                    "GAP-4 reconcile: failed to trigger refresh for "
+                    "stale index on '%s': %s",
+                    alias,
+                    refresh_error,
+                )
+                result.stale_indexes_failed.append(alias)
+        except Exception as staleness_error:  # reconcile safety
+            logger.error(
+                "GAP-4 reconcile: unexpected error checking index "
+                "staleness for '%s': %s",
+                alias,
+                staleness_error,
+            )
 
 
 def _list_global_registry_entries(

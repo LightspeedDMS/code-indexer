@@ -5,6 +5,7 @@ Orchestrates the complete refresh cycle: timer triggers git pull,
 change detection, index creation, alias swap, and cleanup scheduling.
 """
 
+import contextvars
 import json
 import logging
 import os
@@ -29,16 +30,17 @@ from typing import (
 
 from code_indexer.config import ConfigManager
 from .alias_manager import AliasManager
-from .git_error_classifier import GitFetchError
+from .git_error_classifier import GitFetchError, names_missing_remote_ref
 from code_indexer.global_repos.orphaned_repo_error import OrphanedRepoError
+from code_indexer.global_repos.write_mode_markers import WriteModeMarkers
 from code_indexer.server.git.git_subprocess_env import (
-    build_non_interactive_git_env,
     ensure_remote_url_without_credentials,
     remote_url_without_credentials,
 )
 from .cidx_meta_refresh_debouncer import COVERED_SOURCE
 from .git_pull_updater import GitPullUpdater
-from .local_source_manifest import record_source_manifest, source_change_reason
+from .repointed_origin import CloneSource, content_followed_origin, read_clone_source
+from code_indexer.services.git_head import EMPTY_REPOSITORY_REASON
 from .meta_directory_updater import MetaDirectoryUpdater
 from .update_strategy import UpdateStrategy
 from .query_tracker import QueryTracker
@@ -47,14 +49,18 @@ from .snapshot_retention import (
     discover_and_enforce_temporal_retention,
     enforce_snapshot_retention,
 )
-from .refresh_integrity_gate import RefreshIntegrityGateResult
+from .refresh_integrity_gate import (
+    RefreshIntegrityGateResult,
+    count_collection_points,
+)
 from . import refresh_failure_recovery as failure_recovery
 from .refresh_fence import LEASE_LOST, RefreshFence, RefreshOwnershipLostError
 from .shared_operations import DEFAULT_REFRESH_INTERVAL, GlobalRepoOperations
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
+from code_indexer.utils.git_runner import git_cancel_scope
+from code_indexer.utils.git_remote_url import parse_git_remote_url
 from code_indexer.utils.subprocess_diagnostics import (
     format_called_process_error_diagnostic as _format_called_process_error_diagnostic,
-    format_completed_process_diagnostic,
 )
 from code_indexer.server.repositories.golden_repo_manager import (
     _make_hnsw_orphan_event_logger,
@@ -66,20 +72,58 @@ from code_indexer.server.services.cidx_meta_backup import (
     SyncResult,
     detect_default_branch,
 )
+from code_indexer.server.services import cidx_meta_content
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.services.constants import CIDX_META_REPO_GLOBAL
+from code_indexer.server.utils.index_command_layout import (
+    repo_layout_kwargs,
+    server_backend_args,
+)
+from code_indexer.server.startup.content_backend_wiring import (
+    configured_content_backend_name,
+    content_backend_name_or_none,
+)
+from code_indexer.server.startup.git_backend_wiring import configured_git_backend_name
 from code_indexer.server.services.db_outage_throttle import DbOutageThrottle
 from code_indexer.server.services.metadata_reader import (
+    IndexState,
     index_unchanged_since,
     read_index_states,
     RecordedFailures,
     read_recorded_failures,
     snapshot_index_metadata,
 )
+from code_indexer.global_repos.trigram_index_manager import (
+    trigram_index_present,
+    trigram_prefilter_available,
+)
+from cidx_sdk import IndexBuildRequest
+from cidx_sdk.feature import INDEX_BUILD_RUN_LOCALLY
+
+from code_indexer.kernel.index_builders import SCIP_INDEX_TYPE, index_builder
 from code_indexer.global_repos.stale_index_signal import (
+    TRIGRAM_SIGNAL,
     StaleSignal,
     admit_forced_reconcile,
+    chunk_coverage_signal,
+    owed_failures_signal,
     record_forced_reconcile_outcome,
     stale_signal_from_states,
+    trigram_backfill_enabled,
+    trigram_forced_run_pacer,
+    trigram_missing_signal,
+)
+from code_indexer.utils.index_store import (
+    INDEX_STORE_ALIAS_FIELD,
+    INDEX_VERSION_FIELD,
+    IndexStore,
+    index_store_alias,
+)
+from code_indexer.kernel.index_store_seam import local_index_store
+from code_indexer.server.storage.shared.git_backend import (
+    GitBackend,
+    head_branch,
+    local_git_backend,
 )
 from code_indexer.server.storage.shared.nfs_visibility import (
     _configured_visibility_timeout,
@@ -108,6 +152,8 @@ from code_indexer.services.index_failure_exit_codes import (
 # contract would let that early caller permanently disable telemetry.
 from code_indexer.server.telemetry.manager import peek_telemetry_manager
 from code_indexer.server.telemetry.job_metrics import get_job_metrics
+from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
+from code_indexer.server.services.query_admission_gate import check_query_admission
 
 if TYPE_CHECKING:
     from code_indexer.server.repositories.background_jobs import BackgroundJobManager
@@ -116,7 +162,72 @@ if TYPE_CHECKING:
         VersionedSnapshotManager,
     )
 
+from code_indexer.utils.worker_budget import (
+    detect_worker_count,
+    per_process_budget,
+)
+
 logger = logging.getLogger(__name__)
+
+#: POD_PULL operation type for a scheduled golden-repo refresh. Must equal the
+#: literal in ``background_jobs.POD_PULL_OPS`` and the key in lifespan's pod-pull
+#: dispatch -- ``validate_dispatch_covers`` fails startup when the dispatch and
+#: the op set drift, which is why the set carries the literal and everything else
+#: carries this.
+GLOBAL_REPO_REFRESH_OP = "global_repo_refresh"
+
+
+class GlobalAliasNotFoundError(ValueError):
+    """Neither the alias nor its ``-global`` form is in the global registry.
+
+    A ValueError, as before, so existing callers keep catching it; typed so the
+    REST layer can answer 404 instead of a bare 500 (EVO-64616). A golden repo
+    whose registry row exists but whose global activation does not lands here.
+    """
+
+
+def global_repo_refresh_executor(
+    refresh_scheduler: Any,
+    metadata: Dict[str, Any],
+    progress_callback: Optional[Callable[..., Any]] = None,
+) -> Any:
+    """Run ONE claimed ``global_repo_refresh`` row on whichever pod claimed it.
+
+    Goes through :meth:`RefreshScheduler.execute_refresh_for_claimed_job` rather
+    than the submission path: the claim itself already occupies this job's
+    ``idx_active_job_per_repo`` slot, so re-submitting would collide with the
+    caller's own row and fail the refresh with a DuplicateJobError naming its own
+    job id (Bug #1839).
+
+    Raises on a result dict reporting ``success: False``. This is the whole
+    reason the executor exists rather than the method being wired directly:
+    ``IndexJobClaimLoop`` calls ``complete_job(result)`` for ANY non-raising
+    return, and ``_execute_refresh`` can report a real failure -- an
+    integrity-gate refusal, for one -- as ``{"success": False}`` WITHOUT raising.
+    Returned as-is, that row is recorded as a success and the repo quietly stops
+    being refreshed. ``DistributedJobWorkerService`` has guarded this since Story
+    #1586 Finding 2; moving the op to the pod-pull queue must not lose the guard.
+    """
+    alias = metadata["alias_name"]
+    result = refresh_scheduler.execute_refresh_for_claimed_job(
+        alias,
+        force_reset=bool(metadata.get("force_reset", False)),
+        progress_callback=progress_callback,
+        # EVO-66105: IndexJobClaimLoop injects metadata["job_id"] precisely so
+        # executors can thread it through -- the (metadata, callback) signature
+        # leaves no other channel. _execute_refresh carries it into
+        # build_embedding_stats_child_env, which tags each EmbeddingCallRecord.
+        # Dropping it fails nothing and breaks nothing visible: refreshes still
+        # run, and every VoyageAI record for a cluster refresh just gets a NULL
+        # job id, so per-job cost attribution stops silently.
+        job_id=metadata.get("job_id"),
+        submitter_username=str(metadata.get("submitter_username") or "system"),
+    )
+    if isinstance(result, dict) and result.get("success") is False:
+        # Bug #2150: "error" names the cause; "message" is generic.
+        detail = result.get("error") or result.get("message")
+        raise RuntimeError(detail or f"Refresh failed for {alias}")
+    return result
 
 
 def _record_refresh_duration_metric(
@@ -172,11 +283,36 @@ _LOCAL_REPO_REPAIR_QUARANTINE_THRESHOLD = 3
 _MAX_CAUSE_CHAIN_DEPTH = 32
 _RETRY_DETAIL_MAX_CHARS = 500
 
+# Minimum repos to submit per scheduler cycle even when the admission
+# gate denies.  Prevents indefinite staleness under sustained memory
+# pressure: without it, cgroup page-cache memory keeps the governor
+# denying and every repo goes unrefreshed until an operator intervenes.
+# Observed in tools-test: all 944 golden repos stale for 12+ days while
+# the scheduler loop ran every cycle but deferred every batch.
+_REFRESH_PRESSURE_TRICKLE = 1
+
 
 class PublishedRefreshBackupError(RuntimeError):
     """The refresh published a verified snapshot, then its cidx-meta backup
     sync failed. The job still fails (the operator must see the backup
     problem), but the index is current: no refresh retry is owed."""
+
+
+#: EVO-64616: the repointed origins healed by the refresh running in this
+#: context (``_execute_refresh`` opens one count per refresh; None outside).
+_ORIGINS_RESTORED: "contextvars.ContextVar[Optional[List[str]]]" = (
+    contextvars.ContextVar("cidx_refresh_origins_restored", default=None)
+)
+
+#: The refresh-result key counting healed origins (absent when none).
+ORIGINS_RESTORED_KEY = "origins_restored"
+
+
+def _note_origin_restored() -> None:
+    """Count one healed origin in the running refresh's result."""
+    restored = _ORIGINS_RESTORED.get()
+    if restored is not None:
+        restored.append("origin")
 
 
 def _with_run_spend(result: Dict[str, Any], run_spend: object) -> Dict[str, Any]:
@@ -226,8 +362,14 @@ def _partial_publish_warning(
         f"{failures.failed_files} file(s) could not be indexed"
     )
     if retry_due is not None:
+        if failures.unattributed and not failures.retryable_paths:
+            # EVO-64616: counted failures with no recorded path.
+            return (
+                f"{head}; {failures.unattributed} recorded without a path: "
+                f"full reconcile at {retry_due:.0f}"
+            )
         return f"{head}; {failures.retryable_paths} retried at {retry_due:.0f}"
-    if failures.retryable_paths == 0:
+    if failures.retryable_paths == 0 and failures.unattributed == 0:
         return f"{head}; not retried: no recorded failed file still exists"
     return (
         f"{head}; not retried automatically (externally managed, or the "
@@ -264,7 +406,10 @@ _GIT_HEAD_TIMEOUT_SECONDS = 10
 
 
 def has_files_with_extensions(
-    repo_path: str, extensions: set, exclude_dirs: set
+    repo_path: str,
+    extensions: set,
+    exclude_dirs: set,
+    backend: Optional[Any] = None,
 ) -> bool:
     """Return True as soon as a file with a matching extension is found (short-circuit).
 
@@ -275,12 +420,19 @@ def has_files_with_extensions(
         repo_path: Root directory to scan.
         extensions: Set of bare extension names to match (without leading dots, e.g. 'py').
         exclude_dirs: Set of directory names to skip (e.g. {'.git', 'node_modules'}).
+        backend: A NON-local content backend holding the repository (delegated
+            content): the tree is its manifest, not this pod's disk. A listing
+            failure raises -- it is never "no matching files".
 
     Returns:
         True if any file with a matching extension is found, False otherwise.
     """
     if not extensions:
         return False
+    if backend is not None:
+        return _manifest_has_files_with_extensions(
+            backend, repo_path, extensions, exclude_dirs
+        )
     for dirpath, dirnames, filenames in os.walk(repo_path, topdown=True):
         dirnames[:] = [
             d for d in dirnames if d not in exclude_dirs and not d.startswith(".")
@@ -290,6 +442,46 @@ def has_files_with_extensions(
             if ext in extensions:
                 return True
     return False
+
+
+def _manifest_has_files_with_extensions(
+    backend: Any, repo_path: str, extensions: set, exclude_dirs: set
+) -> bool:
+    """``has_files_with_extensions`` over a content backend's manifest: the same
+    pruning (excluded or hidden directories at any depth), short-circuiting.
+
+    Asked unhashed (``hash: false``) when the backend honours it: only names
+    are needed, and hashing is what makes a large repository's manifest slow.
+    """
+    from code_indexer.server.storage.shared.content_backend import (
+        query_manifest_pages,
+    )
+
+    for page in query_manifest_pages(
+        backend, repo_path, prune_dirs=sorted(exclude_dirs), want_hash=False
+    ):
+        for entry in page.entries:
+            *dirs, name = entry.path.split("/")
+            if any(d in exclude_dirs or d.startswith(".") for d in dirs):
+                continue
+            if os.path.splitext(name)[1].lstrip(".") in extensions:
+                return True
+    return False
+
+
+def _delegated_repository_backend(pod_local: bool) -> Optional[Any]:
+    """The content backend holding a golden repo's files, or None when they are
+    on this pod (the local backend, the CLI, or a pod-local ``local://`` repo)."""
+    if pod_local:
+        return None
+    from code_indexer.server.startup.content_backend_wiring import (
+        server_content_backend,
+    )
+
+    backend = server_content_backend()
+    if backend is None or backend.is_local:
+        return None
+    return backend
 
 
 def _read_max_commits_from_temporal_meta(source_path: Path) -> Optional[int]:
@@ -405,6 +597,38 @@ def _read_max_commits_from_fixed_temporal_root(
         return None
 
 
+def _repository_is_elsewhere() -> bool:
+    """True when this pod does not hold the repositories (delegated content).
+
+    Fails toward "elsewhere" when the setting cannot be read: every caller uses
+    it to skip local-disk work, and skipping is the safe side of not knowing.
+    """
+    return content_backend_name_or_none() in (None, "delegated")
+
+
+def _repository_is_delegated() -> bool:
+    """True when the running server's content backend is delegated: the golden
+    repos' clones live with workspace-mcp, not on this pod (False in the CLI)."""
+    from code_indexer.server.startup.content_backend_wiring import (
+        is_content_seam_delegated,
+    )
+
+    return is_content_seam_delegated()
+
+
+def _history_through_git_seam() -> bool:
+    """True when git runs through the git seam (``git_backend='delegated'``).
+
+    Fails toward False when the setting cannot be read: the caller then skips
+    temporal indexing on a pod that may not hold the repository -- the safe side.
+    """
+    try:
+        return configured_git_backend_name() == "delegated"
+    except Exception as exc:  # the server config, whatever its state
+        logger.warning("git_backend setting unreadable (%s)", exc)
+        return False
+
+
 def _build_source_trigram_index(alias_name: str, source_path: str) -> None:
     """Build the trigram index of a golden repo base clone (refresh step 1b).
 
@@ -421,12 +645,58 @@ def _build_source_trigram_index(alias_name: str, source_path: str) -> None:
     try:
         from code_indexer.global_repos.trigram_index_manager import (
             TrigramIndexManager,
+            build_trigram_index_through_backends,
+            delegated_trigram_backends,
             remove_leftover_build_files,
             trigram_index_dir,
+            trigram_prefilter_available,
         )
 
         tri_source_path = Path(source_path)
         tri_dir = trigram_index_dir(tri_source_path)
+        delegated = (
+            delegated_trigram_backends()
+            if content_backend_name_or_none() == "delegated"
+            else None
+        )
+        if delegated is not None:
+            # The repository is with workspace-mcp, and so is ripgrep: list
+            # ripgrep's walk there and fetch only the files whose size/mtime
+            # changed since the index here was built. The index is written to
+            # this repo's index state, which the publish step below carries.
+            from code_indexer.server.startup.content_backend_wiring import (
+                golden_repo_content_root,
+            )
+
+            content_backend, ripgrep_backend = delegated
+            remove_leftover_build_files(tri_dir)
+            stats = build_trigram_index_through_backends(
+                tri_dir,
+                content_backend,
+                ripgrep_backend,
+                golden_repo_content_root(source_path, consumer="Trigram index"),
+            )
+            logger.info(
+                f"Trigram index built for {alias_name} through the content "
+                f"backend ({stats.files} files, {stats.fetched} fetched, "
+                f"{stats.carried} unchanged)"
+            )
+            return
+        if not trigram_prefilter_available():
+            # Delegated content: the files are not on this disk, so a build
+            # would publish an empty index, and one an earlier build left
+            # would steer searches at paths this pod cannot read -- removed,
+            # but ONLY on a confirmed delegated backend. An unreadable setting
+            # skips the build and leaves the (possibly shared) index alone:
+            # not knowing is no reason to delete anything.
+            if content_backend_name_or_none() == "delegated" and tri_dir.exists():
+                shutil.rmtree(tri_dir)
+            logger.info(
+                f"Trigram index skipped for {alias_name}: repository is not on "
+                "this pod and ripgrep is not delegated (regex search will "
+                "full-scan)"
+            )
+            return
         remove_leftover_build_files(tri_dir)
         tri_files = TrigramIndexManager(tri_dir).build(tri_source_path)
         logger.info(f"Trigram index built for {alias_name} ({tri_files} files)")
@@ -502,10 +772,26 @@ def _is_git_repo_url(repo_url: str) -> bool:
     return any(repo_url.startswith(prefix) for prefix in _GIT_URL_PREFIXES)
 
 
+#: ``skipped`` reason of a refresh of a repository with no commit (EVO-64616).
+EMPTY_REPOSITORY_SKIP = "empty_repository"
+
+
+def _empty_repository_skip(alias_name: str) -> Dict[str, Any]:
+    """The refresh result for an empty repository: a skip, not a failure."""
+    logger.info("Refresh of %s skipped: %s", alias_name, EMPTY_REPOSITORY_REASON)
+    return {
+        "success": True,
+        "alias": alias_name,
+        "skipped": EMPTY_REPOSITORY_SKIP,
+        "message": f"Skipped: {EMPTY_REPOSITORY_REASON}",
+    }
+
+
 def _git_pull_updater_for(
     master_path: str,
     repo_url: str,
     cancel_check: Optional[Callable[[], bool]],
+    git_backend: Optional[GitBackend] = None,
 ) -> GitPullUpdater:
     """The updater for one golden refresh of the base clone at
     ``master_path``.
@@ -518,10 +804,23 @@ def _git_pull_updater_for(
     snapshot. A failed rewrite fails the refresh before any network command
     (RuntimeError): a clone that may still store a credential is never
     fetched or pulled. Raises OrphanedRepoError (before any rewrite) when
-    the clone is missing. Runs in the refresh job's thread."""
-    updater = GitPullUpdater(
-        master_path, cancel_check=cancel_check, credentials_url=repo_url
+    the clone is missing. Runs in the refresh job's thread.
+
+    EVO-64678: every git call goes through *git_backend* (the scheduler's
+    seam; the local git backend when None). A backend that owns its credentials
+    (git-mcp) holds the clone and the PAT: nothing is supplied from here and
+    the stored URL is git-mcp's to keep clean, so no local git runs."""
+    backend: GitBackend = (
+        git_backend if git_backend is not None else local_git_backend()
     )
+    updater = GitPullUpdater(
+        master_path,
+        git_backend=backend,
+        cancel_check=cancel_check,
+        credentials_url=repo_url,
+    )
+    if backend.owns_credentials:
+        return updater
     from code_indexer.server.services.git_operations_service import (
         GitCommandError,
     )
@@ -544,10 +843,58 @@ def _git_pull_updater_for(
 # formatter instead of reimplementing this shape per file.
 
 
-# TTL for .write_mode/{alias}.json marker files (Bug #240).
+# TTL for write-mode markers (Bug #240).
 # Markers older than this are treated as orphaned (client disconnected without
 # calling exit_write_mode) and are cleaned up automatically.
 WRITE_MODE_MARKER_TTL_SECONDS = 1800  # 30 minutes
+
+
+#: What ``cidx index`` prints when the source holds no indexable file.
+_NO_FILES_TO_INDEX = "No files found to index"
+
+
+def _is_empty_meta_directory_index(
+    alias_name: str, phase_name: str, output: str
+) -> bool:
+    """True when the semantic index of the cidx-meta directory found no file.
+
+    cidx-meta holds generated repository descriptions; until one is written
+    (a new server, or one whose description generation is unavailable) it is
+    empty, which is a normal state, and golden-repo registration already
+    accepts it. Any other repository with no files is a fault worth failing
+    the refresh for, so this is scoped to cidx-meta's semantic step.
+    """
+    return (
+        alias_name == CIDX_META_REPO_GLOBAL
+        and phase_name == "semantic"
+        and _NO_FILES_TO_INDEX in output
+    )
+
+
+#: Pod-local scratch (under golden-repos) for a delegated integrity baseline.
+INTEGRITY_BASELINE_DIRNAME = ".integrity-baseline"
+
+
+class IntegrityBaseline:
+    """The refresh integrity gate's baseline (``_integrity_baseline``):
+    ``points`` per collection, the index to self-heal from when it is not the
+    current target's, and the scratch to remove after the gate."""
+
+    def __init__(
+        self,
+        points: Dict[str, int],
+        healthy_index_dir: Optional[Path] = None,
+        *,
+        scratch: Optional[Path] = None,
+    ) -> None:
+        self.points = points
+        self.healthy_index_dir = healthy_index_dir
+        self._scratch = scratch
+
+    def close(self) -> None:
+        if self._scratch is not None:
+            shutil.rmtree(self._scratch, ignore_errors=True)
+            self._scratch = None
 
 
 class RefreshScheduler:
@@ -570,8 +917,10 @@ class RefreshScheduler:
         job_tracker: Optional["JobTracker"] = None,
         snapshot_manager: Optional["VersionedSnapshotManager"] = None,
         golden_repo_metadata_backend: Optional[Any] = None,
+        git_backend: Optional[GitBackend] = None,
         alias_lock_db_backed_enabled_getter: Optional[Callable[[], bool]] = None,
         alias_lock_store_resolver: Optional[Callable[[], Any]] = None,
+        index_store: Optional[IndexStore] = None,
         index_spend_alarm: Optional[Any] = None,
     ):
         """
@@ -598,6 +947,10 @@ class RefreshScheduler:
                 golden_repos_metadata table alongside the -global-alias-keyed
                 global_repos table (self.registry) -- the two are structurally separate
                 stores for the same logical repo and can otherwise drift independently.
+            git_backend: EVO-64678 git seam. Defaults to the local git backend (git run
+                locally via utils.git_runner), which reproduces today's behavior;
+                server wiring can inject the configured backend via
+                build_git_backend() at startup.
             alias_lock_db_backed_enabled_getter: Issue #1546 Phase 2 -- optional
                 callable returning the CURRENT value of the operator-controlled
                 rollout flag (AliasLockConfig.db_backed_enabled), forwarded
@@ -612,6 +965,11 @@ class RefreshScheduler:
                 dispatching PostgreSQL/SQLite via is_postgres_storage_mode()).
                 Only ever consulted when alias_lock_db_backed_enabled_getter()
                 returns True.
+            index_store: IndexStore step 2. Defaults to the local mode's store,
+                through the seam resolver (LocalIndexStore: the
+                snapshot is a copy of the built index, as before); under a
+                delegated store each refresh publishes the built index and the
+                snapshot is a checked-out, verified version of it.
             index_spend_alarm: Story #2118 -- optional IndexSpendAlarm
                 (server/services/index_spend_alarm.py) whose gate defers
                 SYSTEM refreshes of an alias with a runaway refresh embedding
@@ -626,6 +984,17 @@ class RefreshScheduler:
         self.background_job_manager = background_job_manager
         self._job_tracker = job_tracker
         self._snapshot_manager = snapshot_manager
+        self._git_backend: GitBackend = (
+            git_backend if git_backend is not None else local_git_backend()
+        )
+        self._index_store: IndexStore = (
+            index_store if index_store is not None else local_index_store()
+        )
+        # cidx-meta under a delegated content backend: the shared content's
+        # fingerprint seen by the refresh in progress, published with the
+        # alias pointer when that refresh swaps it (see _shared_meta_changed).
+        self._pending_meta_fingerprints: Dict[str, str] = {}
+        self._pending_index_publications: Dict[str, Tuple[str, Dict[str, str]]] = {}
         self._alias_lock_db_backed_enabled_getter = alias_lock_db_backed_enabled_getter
         self._alias_lock_store_resolver = alias_lock_store_resolver
         self._index_spend_alarm = index_spend_alarm
@@ -945,6 +1314,190 @@ class RefreshScheduler:
             return unknown("no registered branch recorded")
         return branch
 
+    def golden_repo_is_empty(self, alias_name: str) -> bool:
+        """Whether the golden repo behind *alias_name* (``<name>-global``) is
+        empty -- no commit in its base clone nor upstream -- asked through the
+        scheduler's git seam exactly as a refresh asks it
+        (``GitPullUpdater.is_empty_repository``). False for a repo that is not
+        a remote git repository or whose clone is missing (refresh handles
+        those itself). Git failures raise: they never read as "empty"."""
+        repo_info = self.registry.get_global_repo(alias_name)
+        repo_url = (repo_info or {}).get("repo_url") or ""
+        if not repo_url or repo_url.startswith("local://"):
+            return False
+        master_path = str(self.golden_repos_dir / alias_name.removesuffix("-global"))
+        try:
+            updater = GitPullUpdater(
+                master_path, git_backend=self._git_backend, credentials_url=repo_url
+            )
+        except OrphanedRepoError:
+            return False
+        return updater.is_empty_repository()
+
+    def _ensure_origin_is_registered(
+        self,
+        alias_name: str,
+        master_path: str,
+        repo_url: str,
+        cancel_check: Optional[Callable[[], bool]],
+    ) -> None:
+        """EVO-64616: stop a refresh whose base clone fetches from a
+        repository other than the registered one, before it checks out,
+        fetches or indexes anything.
+
+        A refresh fetches ``origin``, never the registered URL. A writer that
+        shares the clone directory can repoint ``origin`` at a different
+        repository (another one with the same name); the refresh then fails
+        as if the registered branch were gone or could not be checked out --
+        or, when that repository has the branch, silently replaces the
+        alias's content with it. Compared by repository identity (host and
+        path: credentials, transport, ``.git`` and case ignored). A registered
+        URL or origin that is not a remote git URL is not compared, and an
+        unreadable origin is logged and left to the fetch, as before. That
+        includes the ``file://<golden>/<alias>`` URLs the workspace-mcp
+        seeder registers: a local URL names no forge repository to compare
+        with, so such a clone is neither stopped nor healed.
+
+        A different origin is healed when the clone was cloned from the
+        registered repository and its content did not follow the repointed
+        origin (``_repointed_origin_stop_reason``); otherwise the refresh
+        stops with an ERROR naming the case and both credential-free URLs."""
+        registered = parse_git_remote_url(repo_url)
+        if registered is None:
+            return
+        _raise_if_refresh_cancelled(cancel_check, alias_name, "before the origin check")
+        try:
+            with git_cancel_scope(cancel_check):
+                origin_url = self._git_backend.remote_get_url(
+                    master_path, "origin", timeout=10
+                )
+        except Exception as e:
+            if _is_refresh_cancellation(e):
+                raise
+            logger.warning(
+                f"Origin of the base clone of {alias_name} could not be read "
+                f"({type(e).__name__}); not verified against the registered "
+                "repository"
+            )
+            return
+        origin = (
+            parse_git_remote_url(origin_url) if isinstance(origin_url, str) else None
+        )
+        if origin is None or (
+            origin.identity.casefold() == registered.identity.casefold()
+        ):
+            return
+        shown_origin = redact_url_credentials(origin_url)
+        why = self._repointed_origin_stop_reason(
+            alias_name, master_path, repo_url, shown_origin, cancel_check
+        )
+        if why is None:
+            return
+        message = (
+            f"The base clone of {alias_name} fetches from {shown_origin}, not "
+            f"from its registered repository {redact_url_credentials(repo_url)}: "
+            f"its origin was repointed outside cidx, and {why}. Refresh "
+            "stopped before checking out, pulling or indexing; the alias keeps "
+            "serving its current index"
+        )
+        logger.error(message)
+        raise RuntimeError(message)
+
+    def _repointed_origin_stop_reason(
+        self,
+        alias_name: str,
+        master_path: str,
+        repo_url: str,
+        shown_origin: str,
+        cancel_check: Optional[Callable[[], bool]],
+    ) -> Optional[str]:
+        """EVO-64616: heal a base clone whose origin (*shown_origin*,
+        credential-free) was repointed but whose content is still the
+        registered repository's (``repointed_origin``): origin is set back to
+        the credential-free registered URL, one WARNING names the alias and
+        both URLs, the refresh result counts it, and None is returned so the
+        refresh continues. Otherwise the reason the refresh stops, naming the
+        case: clone source unknown, a clone of another repository, content
+        that followed the repointed origin, or a content check that could not
+        run. Every git step goes through the scheduler's git seam; a
+        cancellation is re-raised."""
+        backend = self._git_backend
+        shown_registered = redact_url_credentials(repo_url)
+        _raise_if_refresh_cancelled(cancel_check, alias_name, "before the source read")
+        try:
+            with git_cancel_scope(cancel_check):
+                source = read_clone_source(backend, master_path)
+        except Exception as e:
+            if _is_refresh_cancellation(e):
+                raise
+            source = CloneSource(
+                None, f"reading HEAD's reflog raised {type(e).__name__}"
+            )
+        if source.url is None:
+            return (
+                "where it was cloned from is unknown ("
+                f"{source.unknown_reason}), so whether it holds "
+                f"{shown_registered} cannot be verified. If it does, set its "
+                "origin to the registered URL; otherwise re-clone it or "
+                "re-register the alias"
+            )
+        cloned_from = parse_git_remote_url(source.url)
+        registered = parse_git_remote_url(repo_url)
+        if (
+            cloned_from is None
+            or registered is None
+            or cloned_from.identity.casefold() != registered.identity.casefold()
+        ):
+            return (
+                f"it was cloned from {redact_url_credentials(source.url)}, not "
+                f"from {shown_registered}: it holds another repository. "
+                "Re-clone it or re-register the alias"
+            )
+        _raise_if_refresh_cancelled(
+            cancel_check, alias_name, "before the content check"
+        )
+        try:
+            with git_cancel_scope(cancel_check):
+                followed = content_followed_origin(backend, master_path, repo_url)
+        except Exception as e:
+            if _is_refresh_cancellation(e):
+                raise
+            detail = e if isinstance(e, ValueError) else type(e).__name__
+            return (
+                f"it was cloned from {shown_registered}, but whether its content "
+                f"followed {shown_origin} since could not be determined "
+                f"({redact_url_credentials(str(detail))}). If it did not, set "
+                "its origin to the registered URL; otherwise re-clone it or "
+                "re-register the alias"
+            )
+        if followed:
+            return (
+                f"it was cloned from {shown_registered}, but its content has "
+                f"since followed {shown_origin} (HEAD is on that repository's "
+                f"branch): the clone now holds {shown_origin}. Re-clone it or "
+                "re-register the alias"
+            )
+        _raise_if_refresh_cancelled(cancel_check, alias_name, "before restoring origin")
+        try:
+            clean_url = remote_url_without_credentials(repo_url)
+            with git_cancel_scope(cancel_check):
+                backend.remote_set_url(master_path, "origin", clean_url, timeout=10)
+        except Exception as e:
+            if _is_refresh_cancellation(e):
+                raise
+            return (
+                f"it holds {shown_registered}, but restoring its origin to that "
+                f"URL failed ({type(e).__name__})"
+            )
+        logger.warning(
+            f"The base clone of {alias_name} fetched from {shown_origin}, not "
+            f"from its registered repository; it was cloned from "
+            f"{shown_registered} and its content is still that repository's: "
+            f"origin restored from {shown_origin} to {clean_url}"
+        )
+        _note_origin_restored()
+        return None
+
     def _ensure_registered_branch(
         self,
         alias_name: str,
@@ -962,32 +1515,31 @@ class RefreshScheduler:
         branch read folded into ``_registered_branch``'s single WARNING. A
         registered branch of exactly ``HEAD`` (a repository registered from a
         detached source) has no branch to enforce: nothing is logged, raised
-        or checked out. A cancellation is re-raised as-is."""
-        branch_cmd = ["git", "branch", "--show-current"]
+        or checked out. A cancellation is re-raised as-is.
+
+        EVO-64678: both git steps go through the scheduler's git seam -- run
+        on this pod they find no repository on a mount-less pod (the read
+        used to fail silently and the check did nothing). A detached HEAD
+        reads as "" (``head_branch``), exactly as ``branch --show-current``
+        printed it; cancellation is checked before each step."""
+        branch_cmd = ["git", "symbolic-ref", "--short", "HEAD"]
         current = ""
         read_failure: Optional[str] = None
         read_detail = ""
         read_error: Optional[Exception] = None
+        _raise_if_refresh_cancelled(cancel_check, alias_name, "before the branch check")
         try:
-            branch_result = run_with_cancel(
-                branch_cmd,
-                cancel_check,
-                cwd=master_path,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
+            with git_cancel_scope(cancel_check):
+                current = head_branch(self._git_backend, master_path, timeout=10) or ""
+        except subprocess.CalledProcessError as e:
+            read_error = e
+            read_failure = f"git branch exited {e.returncode}"
+            read_detail = redact_command_output(e.stderr, branch_cmd)
         except Exception as e:
             if _is_refresh_cancellation(e):
                 raise
             read_error = e
             read_failure = type(e).__name__
-        else:
-            if branch_result.returncode != 0:
-                read_failure = f"git branch exited {branch_result.returncode}"
-                read_detail = redact_command_output(branch_result.stderr, branch_cmd)
-            else:
-                current = branch_result.stdout.strip()
         registered = self._registered_branch(
             alias_name, branch_read_failure=read_failure
         )
@@ -1015,15 +1567,20 @@ class RefreshScheduler:
             f"'{registered}', resetting to registered branch"
         )
         checkout_cmd = ["git", "checkout", registered]
+        _raise_if_refresh_cancelled(cancel_check, alias_name, "before the checkout")
         try:
-            checkout_result = run_with_cancel(
-                checkout_cmd,
-                cancel_check,
-                cwd=master_path,
-                capture_output=True,
-                text=True,
-                timeout=30,
+            with git_cancel_scope(cancel_check):
+                self._git_backend.checkout(master_path, registered, timeout=30)
+        except subprocess.CalledProcessError as e:
+            logger.error(
+                f"Failed to reset {alias_name} to {registered}: "
+                f"{redact_command_output(e.stderr, checkout_cmd)}"
             )
+            raise RuntimeError(
+                f"Cannot put the base clone of {alias_name} on its registered "
+                f"branch '{registered}': git checkout failed; refresh stopped "
+                "before pulling or indexing"
+            ) from e
         except Exception as e:
             if _is_refresh_cancellation(e):
                 raise
@@ -1037,16 +1594,6 @@ class RefreshScheduler:
                 f"({type(e).__name__}); refresh stopped before pulling or "
                 "indexing"
             ) from e
-        if checkout_result.returncode != 0:
-            logger.error(
-                f"Failed to reset {alias_name} to {registered}: "
-                f"{redact_command_output(checkout_result.stderr, checkout_cmd)}"
-            )
-            raise RuntimeError(
-                f"Cannot put the base clone of {alias_name} on its registered "
-                f"branch '{registered}': git checkout failed; refresh stopped "
-                "before pulling or indexing"
-            )
 
     def _is_versioned_snapshot(self, path: str) -> bool:
         """Return True when *path* is a versioned snapshot (Bug #1084 Phase A4).
@@ -1233,6 +1780,16 @@ class RefreshScheduler:
             "max_concurrent_refresh_jobs",
             max(1, self.background_job_manager.max_concurrent_jobs // 2),
         )
+        # R4 (docs/background-work-distribution.md): this loop runs once per
+        # uvicorn worker PROCESS, so the configured limit was submitted that many
+        # times over -- 2x per pod, 12x across the tools-* StatefulSet. Refreshes
+        # are the heaviest thing the server does on the NFS mount, which is what
+        # made the oversubscription visible as memory pressure.
+        #
+        # The LIMIT is divided, not the remainder: subtracting active jobs first
+        # would leave a process with its share already full holding a budget of
+        # 1, leaking one slot per cycle forever.
+        refresh_limit = per_process_budget(int(refresh_limit), detect_worker_count())
         active = self._count_active_refresh_jobs()
         return int(max(0, refresh_limit - active))
 
@@ -1342,7 +1899,7 @@ class RefreshScheduler:
                 "access rights are valid.",
                 alias_name,
                 count,
-                error.stderr.strip(),
+                redact_url_credentials(error.stderr).strip(),
                 self.PERMANENT_BACKOFF_CAP_SECONDS,
             )
         else:
@@ -1390,7 +1947,7 @@ class RefreshScheduler:
 
         logger.warning(
             f"Transient fetch failure #{count} for {alias_name} "
-            f"(threshold={self.MAX_TRANSIENT_FAILURES}): {error.stderr}"
+            f"(threshold={self.MAX_TRANSIENT_FAILURES}): {redact_url_credentials(error.stderr)}"
         )
         return False
 
@@ -1486,9 +2043,31 @@ class RefreshScheduler:
 
         self._apply_fetch_backoff(alias_name, error.category, count)
 
+        if names_missing_remote_ref(error.stderr):
+            # EVO-64616: actionable, not a bare git line.
+            raise RuntimeError(
+                f"Fetch failed for {alias_name} (category={error.category}): "
+                f"its registered branch "
+                f"'{self._registered_branch_or_unknown(alias_name)}' no longer "
+                "exists upstream (renamed or deleted default branch?). Move the "
+                "golden repo to the branch upstream uses now with "
+                "change_golden_repo_branch. git: "
+                f"{redact_url_credentials(error.stderr)}"
+            )
         raise RuntimeError(
-            f"Fetch failed for {alias_name} (category={error.category}): {error.stderr}"
+            f"Fetch failed for {alias_name} (category={error.category}): {redact_url_credentials(error.stderr)}"
         )
+
+    def _registered_branch_or_unknown(self, alias_name: str) -> str:
+        """The registered branch for a message, or "unknown"; never raises."""
+        try:
+            meta = self.golden_repo_metadata.get_repo(
+                alias_name.removesuffix("-global")
+            )
+        except Exception:
+            return "unknown"
+        branch = meta.get("default_branch") if isinstance(meta, dict) else None
+        return branch if isinstance(branch, str) and branch else "unknown"
 
     def _attempt_reclone(
         self,
@@ -1526,32 +2105,78 @@ class RefreshScheduler:
         master = Path(master_path)
         temp_clone = master.parent / f".reclone-{master.name}-tmp"
 
+        # On a pod that does not hold the repository, master_path holds only
+        # the index state, and the clone below would land with git-mcp, not
+        # here: the swap would delete the index and then fail to rename a
+        # directory this pod cannot see, orphaning the clone on the shared
+        # volume. Refused, loudly, before anything is cloned or deleted. If the
+        # selection cannot even be read, refuse too: not knowing where the
+        # repository lives is no reason to delete anything.
+        try:
+            content_backend = configured_content_backend_name()
+        except Exception as e:
+            logger.critical(
+                f"Auto re-clone SKIPPED for {alias_name}: could not read the "
+                f"content_backend setting ({type(e).__name__}: {e}); nothing "
+                "was cloned or deleted."
+            )
+            return False
+        if content_backend == "delegated":
+            logger.critical(
+                f"Auto re-clone SKIPPED for {alias_name}: content_backend="
+                "'delegated' -- the repository lives with git-mcp/workspace-mcp, "
+                "and swapping a fresh clone in is not supported from this pod "
+                "yet. Repair the clone on the shared volume; the index here is "
+                "left untouched."
+            )
+            return False
+
         # Clean up any leftover temp dir from a previous failed attempt.
-        if temp_clone.exists():
-            shutil.rmtree(str(temp_clone))
+        try:
+            if temp_clone.exists():
+                shutil.rmtree(str(temp_clone))
+        except OSError as e:
+            logger.critical(
+                f"Auto re-clone SKIPPED for {alias_name}: could not remove the "
+                f"leftover {temp_clone} ({type(e).__name__}: {e})."
+            )
+            return False
 
         try:
-            # Credential-free URL on argv and in the clone's stored origin;
-            # repository credentials are supplied at run time.
-            clone_result = run_with_cancel(
-                [
-                    "git",
-                    "clone",
+            # EVO-64678: routed through the git seam (cancellable: Bug #2012,
+            # git_cancel_scope). retry stays False so a
+            # failed clone is NOT re-attempted -- a retry would hit
+            # "destination path already exists" and report a different error.
+            # The credential-free URL goes on argv and into the clone's stored
+            # origin; the registered credential is supplied at run time (a
+            # backend owning its credentials gets none), and Bug #2012: the
+            # clone is terminated when the job is cancelled. CalledProcessError
+            # is caught after the cancellation so the non-zero-exit log keeps
+            # its bare "<stderr>" shape, distinct from the timeout/OSError
+            # "<Type>: <exc>" shape below.
+            with git_cancel_scope(cancel_check):
+                self._git_backend.clone(
                     remote_url_without_credentials(repo_url),
                     str(temp_clone),
-                ],
-                cancel_check,
-                capture_output=True,
-                text=True,
-                timeout=self.CLONE_TIMEOUT_SECONDS,
-                env=build_non_interactive_git_env(repo_url),
-            )
+                    timeout=self.CLONE_TIMEOUT_SECONDS,
+                    credentials_url=(
+                        None if self._git_backend.owns_credentials else repo_url
+                    ),
+                )
         except SubprocessCancelledError:
             # Bug #2012: the job was cancelled mid-clone -- drop the partial
             # temp clone; the master clone was never touched.
             if temp_clone.exists():
                 shutil.rmtree(str(temp_clone))
             raise
+        except subprocess.CalledProcessError as e:
+            logger.critical(
+                f"Auto re-clone FAILED for {alias_name}: "
+                f"{_format_called_process_error_diagnostic(e)}"
+            )
+            if temp_clone.exists():
+                shutil.rmtree(str(temp_clone))
+            return False
         except (subprocess.TimeoutExpired, OSError) as e:
             logger.critical(
                 f"Auto re-clone FAILED for {alias_name}: {type(e).__name__}: {e}"
@@ -1560,16 +2185,18 @@ class RefreshScheduler:
                 shutil.rmtree(str(temp_clone))
             return False
 
-        if clone_result.returncode != 0:
+        # Clone succeeded -- swap temp into place, but only if the clone is HERE.
+        # A backend that cloned somewhere this pod cannot see would otherwise
+        # have us delete the master (and its index) for nothing.
+        if not temp_clone.is_dir():
             logger.critical(
-                f"Auto re-clone FAILED for {alias_name}: "
-                f"{format_completed_process_diagnostic(clone_result)}"
+                f"Auto re-clone swap SKIPPED for {alias_name}: the clone at "
+                f"{temp_clone} is not visible on this pod; {master} is left "
+                f"untouched. The clone was ORPHANED where the git backend put "
+                f"it -- remove {temp_clone} on that volume by hand."
             )
-            if temp_clone.exists():
-                shutil.rmtree(str(temp_clone))
             return False
 
-        # Clone succeeded — swap temp into place.
         try:
             if master.exists():
                 shutil.rmtree(str(master))
@@ -1606,7 +2233,7 @@ class RefreshScheduler:
             owner_name: Human-readable caller identity recorded in the lock file.
                         Defaults to "refresh_scheduler" for internal scheduler use.
                         Pass the actual service name when calling from other services
-                        (e.g., "dependency_map_service", "langfuse_trace_sync").
+                        (e.g., "langfuse_trace_sync", or a feature's service name).
             ttl_seconds: Bug #1580 follow-up (adversarial review) -- optional
                 explicit lock TTL forwarded to WriteLockManager.acquire().
                 `None` (the default) preserves byte-identical behavior for
@@ -1788,7 +2415,7 @@ class RefreshScheduler:
                 ...
 
             # With explicit caller identity (for non-scheduler callers):
-            with scheduler.write_lock("cidx-meta", owner_name="dependency_map_service"):
+            with scheduler.write_lock("cidx-meta", owner_name="langfuse_trace_sync"):
                 ...
 
         Args:
@@ -1812,30 +2439,131 @@ class RefreshScheduler:
 
     def cleanup_stale_write_mode_markers(self, force: bool = False) -> None:
         """
-        Clean up orphaned .write_mode/{alias}.json marker files (Bug #240).
+        Clean up orphaned write-mode markers (Bug #240).
 
         When an MCP client calls enter_write_mode but disconnects without calling
-        exit_write_mode, the marker file persists indefinitely because there is no
+        exit_write_mode, the marker persists indefinitely because there is no
         session-lifecycle hook to trigger cleanup.
 
-        Markers live on shared storage: a live session of another node or worker
-        survives this process's restart. A marker and its write lock are removed
-        only when the lock has no live holder (lease lapsed, or holder process
-        gone), releasing with the marker's own token.
+        This method is called:
+        - On start() with force=True: removes ALL markers because no MCP sessions
+          survive a server restart (every marker left over is definitively orphaned).
+        - On each _scheduler_loop iteration: removes markers older than
+          WRITE_MODE_MARKER_TTL_SECONDS (30 minutes), preserving fresh markers for
+          active sessions.
+
+        Content seam step 5a: markers are control-plane metadata. In cluster
+        mode they live in the shared registry, where a restarting node's
+        "every marker is orphaned" no longer holds -- the other nodes' sessions
+        survive it -- so force degrades to the TTL rule there.
+
+        For each removed marker the corresponding write lock (owner='mcp_write_mode')
+        is released so the refresh scheduler is not permanently blocked.
 
         Args:
             force: startup: skip only the marker-age filter. Otherwise only
                 markers older than WRITE_MODE_MARKER_TTL_SECONDS are considered.
         """
-        from .write_mode_marker_cleanup import cleanup_write_mode_markers
+        markers = WriteModeMarkers(self.golden_repos_dir)
+        if force and markers.is_shared_across_nodes:
+            logger.info(
+                "Write-mode markers are shared across cluster nodes; startup "
+                "cleanup removes only markers past their TTL"
+            )
+            force = False
 
-        cleanup_write_mode_markers(
-            self.golden_repos_dir / ".write_mode",
-            force=force,
-            ttl_seconds=WRITE_MODE_MARKER_TTL_SECONDS,
-            is_locked=self.is_write_locked,
-            release=self.write_lock_manager.release_if_stale,
-        )
+        for alias in markers.names():
+            try:
+                self._cleanup_single_write_mode_marker(markers, alias, force)
+            except Exception as exc:
+                # Never let a single marker failure crash the scheduler
+                logger.warning(
+                    f"Unexpected error cleaning write mode marker {alias!r}: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+
+    def _cleanup_single_write_mode_marker(
+        self, markers: WriteModeMarkers, alias: str, force: bool
+    ) -> None:
+        """
+        Evaluate and optionally remove a single write mode marker.
+
+        If force=True, the marker is always removed (startup cleanup).
+        If force=False, the marker is removed only when:
+        - it is unreadable (corrupt JSON), OR
+        - the 'entered_at' field is missing, OR
+        - entered_at + WRITE_MODE_MARKER_TTL_SECONDS < now.
+
+        When a marker is removed the corresponding write lock is released.
+        """
+        from datetime import datetime, timezone
+
+        should_remove = force  # Always remove on startup
+        entered_at_str = ""  # H1: initialized here so TOCTOU guard can reference it
+
+        if not should_remove:
+            content = markers.get(alias)
+            if content is None:
+                logger.warning(
+                    f"Unreadable write mode marker {alias!r}, treating as stale"
+                )
+                should_remove = True
+            else:
+                entered_at_str = content.get("entered_at", "")
+                if not entered_at_str:
+                    logger.warning(
+                        f"Write mode marker {alias!r} has no 'entered_at', treating as stale"
+                    )
+                    should_remove = True
+                else:
+                    try:
+                        entered_at = datetime.fromisoformat(entered_at_str)
+                        if entered_at.tzinfo is None:
+                            entered_at = entered_at.replace(tzinfo=timezone.utc)
+                        elapsed = (
+                            datetime.now(timezone.utc) - entered_at
+                        ).total_seconds()
+                        if elapsed > WRITE_MODE_MARKER_TTL_SECONDS:
+                            should_remove = True
+                    except (ValueError, TypeError):
+                        logger.warning(
+                            f"Write mode marker {alias!r} has unparseable "
+                            f"'entered_at' ({entered_at_str!r}), treating as stale"
+                        )
+                        should_remove = True
+
+        if not should_remove:
+            return
+
+        # H1 fix: Re-read marker to check a new session hasn't taken over (TOCTOU guard).
+        # Only applies for non-force cleanups: startup force=True removes everything unconditionally.
+        if not force:
+            current_content = markers.get(alias)
+            if current_content is not None:
+                current_entered_at = current_content.get("entered_at", "")
+                if current_entered_at != entered_at_str:
+                    logger.debug(
+                        f"Write mode marker {alias!r} was refreshed by new session, skipping cleanup"
+                    )
+                    return
+
+        try:
+            markers.remove(alias)
+            logger.info(
+                f"Cleaned up {'orphaned' if not force else 'startup'} write mode marker: "
+                f"{alias!r}"
+            )
+        except Exception as exc:
+            logger.warning(f"Could not delete write mode marker {alias!r}: {exc}")
+            return
+
+        # Release the corresponding write lock so the scheduler is not blocked
+        self.release_write_lock(alias, owner_name="mcp_write_mode")
+        if self.is_write_locked(alias):
+            logger.warning(
+                f"Stale marker removed for {alias!r} but write lock release was refused "
+                f"(owner mismatch). Lock may be held by a different service."
+            )
 
     def _resolve_global_alias(self, alias_name: str) -> str:
         """Resolve bare alias to global alias format.
@@ -1864,7 +2592,9 @@ class RefreshScheduler:
             global_name = f"{alias_name}-global"
             if self.registry.get_global_repo(global_name) is not None:
                 return global_name
-        raise ValueError(f"Repository '{alias_name}' not found in global registry")
+        raise GlobalAliasNotFoundError(
+            f"Repository '{alias_name}' not found in global registry"
+        )
 
     def trigger_refresh_for_repo(
         self,
@@ -1911,6 +2641,7 @@ class RefreshScheduler:
         self,
         alias_name: str,
         progress_callback: Optional[Callable[..., None]] = None,
+        force_reset: bool = False,
         job_id: Optional[str] = None,
         submitter_username: str = "system",
         job_owned: Optional[Callable[[], bool]] = None,
@@ -1955,8 +2686,22 @@ class RefreshScheduler:
                 detail=None) forwarded into _execute_refresh() so progress is
                 visible the same way a normally-submitted refresh job's
                 progress is.
-            job_id: The claimed background job's id, recorded on the
-                embedding_call_stats rows of this refresh (Story #2118).
+            force_reset: Forwarded to _execute_refresh. Was hardcoded False
+                here, which was invisible while the only caller was the leader
+                re-executing a reclaimed row. Once a refresh is claimed by an
+                arbitrary pod it is also how an ADMIN force-reset arrives, and a
+                force-reset degraded to an ordinary refresh does nothing at all:
+                change detection sees an unchanged repo and skips. It travels in
+                the row metadata because the executing pod cannot see the
+                submitting call's arguments.
+            job_id: The claimed row's id, recorded on the embedding_call_stats
+                rows of this refresh (EVO-66113 / Story #2118 per-job cost
+                correlation). Supplied from metadata["job_id"], which
+                IndexJobClaimLoop injects for exactly this purpose; omitting it
+                NULLs the job id on every embedding call record the fleet
+                produces.
+            submitter_username: Story #2118 -- the claimed job's submitter; a
+                SYSTEM job is subject to the volume-alarm deferral.
 
         Returns:
             The same result dict _execute_refresh() returns
@@ -1967,13 +2712,13 @@ class RefreshScheduler:
         """
         global_alias = self._resolve_global_alias(alias_name)
         deferred = self._volume_alarm_deferral_result(
-            global_alias, submitter_username, False
+            global_alias, submitter_username, force_reset
         )
         if deferred is not None:
             return deferred
         return self._execute_refresh(
             global_alias,
-            force_reset=False,
+            force_reset=force_reset,
             progress_callback=progress_callback,
             tracked_by_caller=True,
             job_id=job_id,
@@ -2044,7 +2789,7 @@ class RefreshScheduler:
         self._running = True
         self._stop_event.clear()  # Reset event for new start
 
-        # Bug #240: On startup, ALL .write_mode/ markers are orphaned because no
+        # Bug #240: On startup, ALL write-mode markers are orphaned because no
         # MCP sessions survive a server restart. Force-clean them before the
         # scheduler loop starts so refresh cycles are not blocked.
         # Bug #734: wrap in try/except — if cleanup raises, log the error and
@@ -2152,6 +2897,22 @@ class RefreshScheduler:
                 # Repos still unscheduled (NULL next_refresh) are excluded here —
                 # they were just given future timestamps by _assign_initial_spread.
                 due_repos = self.registry.list_due_repos(limit=refresh_budget, now=now)
+
+                # Yield to serving traffic. Checked once per batch rather than
+                # per repo: the decision is pod-wide, and re-checking mid-batch
+                # would abandon a partially-submitted cycle for no benefit.
+                if due_repos and not self._refresh_admission_allowed():
+                    trickle = min(len(due_repos), _REFRESH_PRESSURE_TRICKLE)
+                    deferred = len(due_repos) - trickle
+                    logger.info(
+                        "Refresh cycle admission denied: pod is shedding load "
+                        "(%d repo(s) due, submitting %d trickle, deferring %d). "
+                        "Deferred repos' next_refresh left unadvanced.",
+                        len(due_repos),
+                        trickle,
+                        deferred,
+                    )
+                    due_repos = due_repos[:trickle]
 
                 for repo in due_repos:
                     if not self._running:
@@ -2310,11 +3071,14 @@ class RefreshScheduler:
         # worker must NOT register a second job for the same pair or it collides
         # with its own parent row and the refresh is marked failed before it
         # starts.
+        # EVO-66113 / Story #2118: BackgroundJobManager._execute_job injects the
+        # assigned job_id into any worker whose signature declares a `job_id`
+        # param, straight from the dequeued (job_id, func, args, kwargs) tuple
+        # -- race-free, so no post-submit mutable holder is needed. It is
+        # recorded on the embedding_call_stats rows of its children.
         # Bug #2012: declaring cancel_check makes BackgroundJobManager inject
         # its DB-backed check (sees a cancel issued on any worker or node),
-        # which stops the indexing subprocesses and skips the publish.
-        # Story #2118: declaring job_id makes BackgroundJobManager inject this
-        # job's id, recorded on the embedding_call_stats rows of its children.
+        # which stops the git and indexing subprocesses and skips the publish.
         def _refresh_worker(progress_callback=None, cancel_check=None, job_id=None):
             # Story #2118: a job queued while the alias was quiet re-checks
             # the volume alarm when it actually starts.
@@ -2332,12 +3096,29 @@ class RefreshScheduler:
                 job_id=job_id,
             )
 
+        # metadata= is what makes the row POD_PULL work-stealable: submit_job
+        # leaves it PENDING with executing_node NULL for any pod with memory
+        # headroom to claim, instead of pinning it to this pod's local pool.
+        # Without it the pod-pull branch falls through SILENTLY -- the op would
+        # be in POD_PULL_OPS, the dispatch entry would exist, and every refresh
+        # would still run wherever it was submitted.
+        #
+        # `func` stays as the local-pool fallback for solo/sqlite mode, which has
+        # no cluster to steal work across. Both routes run the same refresh.
         job_id: str = self.background_job_manager.submit_job(
-            operation_type="global_repo_refresh",
+            operation_type=GLOBAL_REPO_REFRESH_OP,
             func=_refresh_worker,
             submitter_username=submitter_username,
             is_admin=True,
             repo_alias=alias_name,
+            # Story #2118: the submitter travels with the row so the claiming
+            # pod applies the same volume gate (an absent one is gated as
+            # system).
+            metadata={
+                "alias_name": alias_name,
+                "force_reset": bool(force_reset),
+                "submitter_username": submitter_username,
+            },
         )
         logger.info(f"Submitted refresh job {job_id} for {alias_name}")
         return job_id
@@ -2463,15 +3244,25 @@ class RefreshScheduler:
             failure_recovery.settle_skip, self.golden_repo_metadata, alias_name, covered
         )
         try:
-            result = self._execute_refresh_impl(
-                alias_name,
-                force_reset=force_reset,
-                progress_callback=progress_callback,
-                tracked_by_caller=tracked_by_caller,
-                cancel_check=cancel_check,
-                job_id=job_id,
-                job_owned=job_owned,
-            )
+            # Bug #2012: every git command of this refresh -- through the
+            # git seam, whichever step builds it -- runs cancellable.
+            # EVO-64616: a healed repointed origin is counted in the result.
+            restored: List[str] = []
+            restored_token = _ORIGINS_RESTORED.set(restored)
+            try:
+                with git_cancel_scope(cancel_check):
+                    result = self._execute_refresh_impl(
+                        alias_name,
+                        force_reset=force_reset,
+                        progress_callback=progress_callback,
+                        tracked_by_caller=tracked_by_caller,
+                        cancel_check=cancel_check,
+                        job_id=job_id,
+                    )
+            finally:
+                _ORIGINS_RESTORED.reset(restored_token)
+            if restored and isinstance(result, dict):
+                result[ORIGINS_RESTORED_KEY] = len(restored)
             _status = "success" if result.get("success") else "error"
             settle(result)
             return result
@@ -2695,15 +3486,29 @@ class RefreshScheduler:
 
                     # AC6: Reconcile registry with filesystem at START of refresh
                     # This ensures registry flags reflect actual index state before refresh begins
-                    detected_indexes = self._detect_existing_indexes(
-                        Path(current_target), repo_alias=repo_name
+                    # (EVO-64616: under a delegated IndexStore, of the published
+                    # index served here -- never of an absent directory).
+                    start_target = self._start_reconcile_target(
+                        alias_name, current_target
                     )
-                    self._reconcile_registry_with_filesystem(
-                        alias_name, detected_indexes
-                    )
-                    logger.info(
-                        f"Reconciled registry with filesystem at START for {alias_name}: {detected_indexes}"
-                    )
+                    if start_target is None:
+                        logger.info(
+                            "Registry reconcile at START skipped for %s: its "
+                            "current index %s is not on this pod and its alias "
+                            "records no published version to read",
+                            alias_name,
+                            current_target,
+                        )
+                    else:
+                        detected_indexes = self._detect_existing_indexes(
+                            start_target, repo_alias=repo_name
+                        )
+                        self._reconcile_registry_with_filesystem(
+                            alias_name, detected_indexes
+                        )
+                        logger.info(
+                            f"Reconciled registry with filesystem at START for {alias_name}: {detected_indexes}"
+                        )
                     sync_failure: Optional[str] = None
                     # Initialized here so _check_extension_drift can set it before
                     # any early-return exit in the local/git branching below.
@@ -2744,6 +3549,17 @@ class RefreshScheduler:
                         #   "Command 'index' is not available in no configuration found"
                         # These repos are only refreshed via explicit trigger from their writers.
                         code_indexer_dir = Path(source_path) / ".code-indexer"
+                        # EVO-64616: under a delegated IndexStore cidx-meta's
+                        # content is on workspace-mcp and this pod's directory
+                        # holds index state only -- which a pod that did not
+                        # register it never had. Its index state comes from the
+                        # store (or a first `cidx init` here), never from the
+                        # golden-repos volume.
+                        _meta_unready = self._prepare_delegated_cidx_meta(
+                            alias_name, repo_url, repo_name, source_path, cancel_check
+                        )
+                        if _meta_unready is not None:
+                            return _meta_unready
                         if not code_indexer_dir.exists():
                             logger.info(
                                 f"Skipping scheduled refresh for local repo {alias_name}: "
@@ -2881,6 +3697,14 @@ class RefreshScheduler:
                                 _backup_cfg_local is not None
                                 and _backup_cfg_local.enabled
                             ):
+                                sync_failure = self._cidx_meta_backup_refusal(
+                                    alias_name, master_path
+                                )
+                            if (
+                                _backup_cfg_local is not None
+                                and _backup_cfg_local.enabled
+                                and sync_failure is None
+                            ):
                                 _handled_by_backup = True
 
                                 # MED-3: MetaDirectoryUpdater first so description files are
@@ -2952,10 +3776,32 @@ class RefreshScheduler:
                                 force_reconcile = self._check_extension_drift(
                                     source_path, alias_name
                                 )
+                                if not force_reconcile:
+                                    # EVO-64616: recorded failures still owed
+                                    # are re-run even with no new file, bounded
+                                    # like the git path's stale signals.
+                                    _owed = self._owed_failures_signal(
+                                        source_path, alias_name, cancel_check
+                                    )
+                                    forced_signal = (
+                                        _owed
+                                        if admit_forced_reconcile(
+                                            self.golden_repo_metadata,
+                                            alias_name,
+                                            _owed,
+                                        )
+                                        else None
+                                    )
+                                    force_reconcile = forced_signal is not None
                                 if not (force_reconcile or regate or fts_rebuild_due):
                                     logger.info(
                                         f"No changes detected for local repo {alias_name}, skipping refresh"
                                     )
+                                    if sync_failure:
+                                        raise RuntimeError(
+                                            "no changes to index, but backup "
+                                            + sync_failure
+                                        )
                                     return {
                                         "success": True,
                                         "alias": alias_name,
@@ -2992,9 +3838,18 @@ class RefreshScheduler:
 
                         if (
                             is_meta_repo
+                            and backup_cfg is not None
+                            and backup_cfg.enabled
+                        ):
+                            sync_failure = self._cidx_meta_backup_refusal(
+                                alias_name, master_path
+                            )
+                        if (
+                            is_meta_repo
                             and alias_name == "cidx-meta-global"
                             and backup_cfg is not None
                             and backup_cfg.enabled
+                            and sync_failure is None
                         ):
                             # MED-3: Run MetaDirectoryUpdater before sync so description
                             # files are created/removed on disk before CidxMetaBackupSync
@@ -3071,12 +3926,18 @@ class RefreshScheduler:
                                 # no-ops here. #1338: caught by TYPE, never by
                                 # message-substring matching.
                                 try:
+                                    # EVO-64678: thread our backend through, or a
+                                    # delegated RefreshScheduler would silently keep
+                                    # running git locally inside GitPullUpdater.
                                     # Bug #2012: its git calls are cancellable.
                                     # The base clone's origin converges to
                                     # the credential-free URL; credentials
                                     # are supplied at run time.
                                     updater = _git_pull_updater_for(
-                                        master_path, repo_url, cancel_check
+                                        master_path,
+                                        repo_url,
+                                        cancel_check,
+                                        git_backend=self._git_backend,
                                     )
                                 except OrphanedRepoError as orphan_exc:
                                     logger.warning(
@@ -3106,6 +3967,32 @@ class RefreshScheduler:
                             # branch (Bug #469 orphan alias) switches nothing,
                             # warns and continues (a meta-directory repo has
                             # no git branch to verify).
+                            # EVO-64616: an empty repository (no commit here
+                            # or upstream) has no branch to check out, nothing
+                            # to pull and nothing to index -- a clean skip,
+                            # before the branch check would fail it.
+                            # Its fetch (unborn clones only) fails like the
+                            # change check's: classified, backed off, redacted.
+                            # EVO-64616: first of all, the clone must fetch
+                            # from the registered repository (a repointed
+                            # origin is healed when the content is still
+                            # the registered repository's).
+                            if not is_meta_repo:
+                                self._ensure_origin_is_registered(
+                                    alias_name, master_path, repo_url, cancel_check
+                                )
+                            try:
+                                is_empty = updater.is_empty_repository() is True
+                            except GitFetchError as e:
+                                self._handle_fetch_error(
+                                    alias_name,
+                                    repo_url,
+                                    master_path,
+                                    e,
+                                    cancel_check=cancel_check,
+                                )
+                            if is_empty:
+                                return _empty_repository_skip(alias_name)
                             if not is_meta_repo:
                                 self._ensure_registered_branch(
                                     alias_name, master_path, cancel_check
@@ -3129,7 +4016,9 @@ class RefreshScheduler:
                                         # _check_extension_drift can scan the right directory.
                                         source_path = master_path
                                         force_reconcile = self._check_extension_drift(
-                                            source_path, alias_name
+                                            source_path,
+                                            alias_name,
+                                            pod_local=is_meta_repo,
                                         )
                                         if not force_reconcile:
                                             # Bug #1508: has_changes() is a pure git-ref
@@ -3161,6 +4050,22 @@ class RefreshScheduler:
                                                 )
                                                 else None
                                             )
+                                            if (
+                                                forced_signal is not None
+                                                and forced_signal.kind == TRIGRAM_SIGNAL
+                                                and not self._trigram_run_pacer.try_acquire()
+                                            ):
+                                                # A fleet-wide backlog drains
+                                                # gradually. Deferred, not cleared:
+                                                # the stored count must survive or
+                                                # an unbuildable repository would
+                                                # never reach its bound.
+                                                logger.debug(
+                                                    "Trigram build for %s deferred: "
+                                                    "forced runs are paced",
+                                                    alias_name,
+                                                )
+                                                forced_signal = None
                                             force_reconcile = forced_signal is not None
                                         if not (
                                             force_reconcile or regate or fts_rebuild_due
@@ -3168,6 +4073,11 @@ class RefreshScheduler:
                                             logger.info(
                                                 f"No changes detected for {alias_name}, skipping refresh"
                                             )
+                                            if sync_failure:
+                                                raise RuntimeError(
+                                                    "no changes to index, but "
+                                                    "backup " + sync_failure
+                                                )
                                             return {
                                                 "success": True,
                                                 "alias": alias_name,
@@ -3199,7 +4109,9 @@ class RefreshScheduler:
                     # it writes config on the first call and returns None on subsequent calls).
                     if not force_reconcile:
                         force_reconcile = self._check_extension_drift(
-                            source_path, alias_name
+                            source_path,
+                            alias_name,
+                            pod_local=is_local_repo or is_meta_repo,
                         )
 
                     # Bug #1506 third-pass review Item 1: the quarantine
@@ -3245,20 +4157,20 @@ class RefreshScheduler:
                         # Reuses the SAME factory the golden-repo
                         # add/registration path already applies -- never a
                         # second, duplicated copy.
-                        # A reconcile forced only by a commit-drift signal
-                        # (every provider's run completed) that changed
-                        # nothing publishes no snapshot. A status signal
-                        # means the last run never published: its reconcile
-                        # always publishes (StaleSignal.may_skip_unchanged_publish).
-                        _metadata_before = (
-                            snapshot_index_metadata(source_path)
-                            if forced_signal is not None
-                            and forced_signal.may_skip_unchanged_publish
-                            and not regate
-                            else None
+                        # IndexStore step 2: the gate's baseline -- the
+                        # published index's point counts and, where it is not
+                        # at the current target, the index to self-heal from --
+                        # is read BEFORE indexing; its scratch checkout is
+                        # removed whatever happens below.
+                        baseline = self._integrity_baseline(
+                            alias_name, source_path, current_target
                         )
                         # The run's source manifest (before its listing) is
                         # what the published snapshot's change check uses.
+                        from code_indexer.global_repos.local_source_manifest import (
+                            record_source_manifest,
+                        )
+
                         _delta = (
                             record_source_manifest(
                                 source_path, self._published_snapshot(alias_name)
@@ -3267,96 +4179,115 @@ class RefreshScheduler:
                             else None
                         )
                         try:
-                            run_spend = self._index_source(
-                                alias_name=alias_name,
-                                source_path=source_path,
-                                progress_callback=progress_callback,
-                                orphan_event_callback=_make_hnsw_orphan_event_logger(
-                                    alias_name
-                                ),
-                                # ^ why removals reconcile, not --detect-deletions; a git-aware child skips detection => gone file stays (#2194)
-                                force_reconcile=force_reconcile
-                                or (
-                                    _delta is not None
-                                    and (_delta.reconcile or _delta.removed)
-                                ),
-                                cancel_check=cancel_check,
-                                job_id=job_id,
+                            # A reconcile forced only by a commit-drift signal
+                            # (every provider's run completed) that changed
+                            # nothing publishes no snapshot. A status signal
+                            # means the last run never published: its reconcile
+                            # always publishes (StaleSignal.may_skip_unchanged_publish).
+                            _metadata_before = (
+                                snapshot_index_metadata(source_path)
+                                if forced_signal is not None
+                                and forced_signal.may_skip_unchanged_publish
+                                and not regate
+                                else None
                             )
-                        except FatalChunkStoreIndexError as fatal_exc:
-                            # Bug #2022: self-heal under the lock; stay failed.
-                            failure_recovery.self_heal_after_fatal_chunk_store_failure(
-                                metadata=self.golden_repo_metadata,
+                            try:
+                                run_spend = self._index_source(
+                                    alias_name=alias_name,
+                                    source_path=source_path,
+                                    progress_callback=progress_callback,
+                                    orphan_event_callback=_make_hnsw_orphan_event_logger(
+                                        alias_name
+                                    ),
+                                    # A signal forces the run; only some need
+                                    # it to be a reconcile (needs_reconcile).
+                                    force_reconcile=force_reconcile
+                                    and (
+                                        forced_signal is None
+                                        or forced_signal.needs_reconcile
+                                    ),
+                                    cancel_check=cancel_check,
+                                    job_id=job_id,
+                                )
+                            except FatalChunkStoreIndexError as fatal_exc:
+                                # Bug #2022: self-heal under the lock; stay failed.
+                                failure_recovery.self_heal_after_fatal_chunk_store_failure(
+                                    metadata=self.golden_repo_metadata,
+                                    alias_name=alias_name,
+                                    source_path=source_path,
+                                    current_target=current_target,
+                                    error=fatal_exc,
+                                    verify_ownership=self._ownership_check(repo_name),
+                                    healthy_index_dir=baseline.healthy_index_dir,
+                                )
+                                raise
+                            # Bug #2125 (B): the child exits 0 when only SOME
+                            # files fail; its metadata records them. Such a run
+                            # publishes what it indexed, reports itself partial
+                            # and schedules the retry of the recorded files that
+                            # still exist (settle_publish).
+                            recorded_failures = read_recorded_failures(source_path)
+                            if forced_signal is not None:
+                                # Counted only now that the reconcile completed:
+                                # a failed, cancelled or skipped one never
+                                # burns the forced-reconcile budget.
+                                record_forced_reconcile_outcome(
+                                    self.golden_repo_metadata,
+                                    alias_name,
+                                    forced_signal,
+                                    self._stale_index_signal(
+                                        source_path, alias_name, cancel_check
+                                    ),
+                                )
+                            if (
+                                _metadata_before is not None
+                                and recorded_failures.known
+                                and recorded_failures.retryable_paths == 0
+                                and recorded_failures.unattributed == 0
+                                and index_unchanged_since(source_path, _metadata_before)
+                            ):
+                                logger.info(
+                                    "Forced reconcile for %s changed nothing in the "
+                                    "index; no new snapshot published",
+                                    alias_name,
+                                )
+                                return _with_run_spend(
+                                    {
+                                        "success": True,
+                                        "alias": alias_name,
+                                        "message": "No changes detected",
+                                    },
+                                    run_spend,
+                                )
+
+                            # Bug #1506: run-boundary durability-flush +
+                            # integrity gate (still under the write lock
+                            # acquired above). _run_and_publish_integrity_gate
+                            # ALSO calls reset_refresh_integrity_failure() on
+                            # a pass and record_refresh_integrity_failure() on
+                            # a failure internally -- see its docstring; no
+                            # separate reset/record call is needed here.
+                            #
+                            # Bug #2012: cancellation is re-checked at every step
+                            # between the end of indexing and the alias swap
+                            # (after indexing, after the gate, before the
+                            # snapshot, before the swap), so a cancel landing
+                            # anywhere in that window never publishes.
+                            _raise_if_refresh_cancelled(
+                                cancel_check, alias_name, "after indexing"
+                            )
+                            gate_result = self._run_and_publish_integrity_gate(
                                 alias_name=alias_name,
                                 source_path=source_path,
                                 current_target=current_target,
-                                error=fatal_exc,
-                                verify_ownership=self._ownership_check(repo_name),
+                                previous_points=baseline.points,
+                                healthy_index_dir=baseline.healthy_index_dir,
                             )
-                            raise
-                        # Bug #2125 (B): the child exits 0 when only SOME
-                        # files fail; its metadata records them. Such a run
-                        # publishes what it indexed, reports itself partial
-                        # and schedules the retry of the recorded files that
-                        # still exist (settle_publish).
-                        recorded_failures = read_recorded_failures(source_path)
-                        if forced_signal is not None:
-                            # Counted only now that the reconcile completed:
-                            # a failed, cancelled or skipped one never
-                            # burns the forced-reconcile budget.
-                            record_forced_reconcile_outcome(
-                                self.golden_repo_metadata,
-                                alias_name,
-                                forced_signal,
-                                self._stale_index_signal(
-                                    source_path, alias_name, cancel_check
-                                ),
+                            _raise_if_refresh_cancelled(
+                                cancel_check, alias_name, "during the integrity gate"
                             )
-                        if (
-                            _metadata_before is not None
-                            and recorded_failures.known
-                            and recorded_failures.retryable_paths == 0
-                            and index_unchanged_since(source_path, _metadata_before)
-                        ):
-                            logger.info(
-                                "Forced reconcile for %s changed nothing in the "
-                                "index; no new snapshot published",
-                                alias_name,
-                            )
-                            return _with_run_spend(
-                                {
-                                    "success": True,
-                                    "alias": alias_name,
-                                    "message": "No changes detected",
-                                    COVERED_SOURCE: True,
-                                },
-                                run_spend,
-                            )
-
-                        # Bug #1506: run-boundary durability-flush +
-                        # integrity gate (still under the write lock
-                        # acquired above). _run_and_publish_integrity_gate
-                        # ALSO calls reset_refresh_integrity_failure() on
-                        # a pass and record_refresh_integrity_failure() on
-                        # a failure internally -- see its docstring; no
-                        # separate reset/record call is needed here.
-                        #
-                        # Bug #2012: cancellation is re-checked at every step
-                        # between the end of indexing and the alias swap
-                        # (after indexing, after the gate, before the
-                        # snapshot, before the swap), so a cancel landing
-                        # anywhere in that window never publishes.
-                        _raise_if_refresh_cancelled(
-                            cancel_check, alias_name, "after indexing"
-                        )
-                        gate_result = self._run_and_publish_integrity_gate(
-                            alias_name=alias_name,
-                            source_path=source_path,
-                            current_target=current_target,
-                        )
-                        _raise_if_refresh_cancelled(
-                            cancel_check, alias_name, "during the integrity gate"
-                        )
+                        finally:
+                            baseline.close()
                         if not gate_result.passed:
                             detail_summary = "; ".join(
                                 f"{f.collection_dir}: {f.detail}"
@@ -3429,6 +4360,7 @@ class RefreshScheduler:
                             alias_name=alias_name,
                             new_target=new_index_path,
                             old_target=current_target,
+                            **self.published_swap_extra(alias_name, new_index_path),
                         )
                         published = True
 
@@ -3653,7 +4585,7 @@ class RefreshScheduler:
         method's publish sequence is indexing/gating, defeating mutual
         exclusion from the other direction. That defect is now fixed
         (``run_full_analysis``/``run_delta_analysis``/
-        ``run_refinement_cycle`` in ``dependency_map_service.py`` all
+        ``run_refinement_cycle`` of the dependency-map feature's service all
         check their own acquisition result before proceeding); any FUTURE
         writer added to this coordination protocol must do the same.
 
@@ -3848,6 +4780,8 @@ class RefreshScheduler:
         alias_name: str,
         source_path: str,
         current_target: Optional[str],
+        previous_points: Optional[Dict[str, int]] = None,
+        healthy_index_dir: Optional[Path] = None,
     ) -> RefreshIntegrityGateResult:
         """
         Shared Bug #1506 run-boundary durability-flush + integrity gate
@@ -3858,6 +4792,10 @@ class RefreshScheduler:
         repo is quarantined identically regardless of which entry point
         indexed it, and so the underlying gate primitives can never be
         bypassed by a second caller.
+
+        *healthy_index_dir*: the last-known-good index to self-heal from,
+        from ``_integrity_baseline`` (delegated: checked out to scratch);
+        None: today's choice.
 
         Never raises for a data-integrity failure -- returns the
         ``RefreshIntegrityGateResult`` (whose ``.passed`` the caller must
@@ -3872,6 +4810,8 @@ class RefreshScheduler:
             # Bug #2150: a child with nothing to write never opens a missing
             # established store, so the publish gate restores it (#2126).
             restore_missing_stores=True,
+            healthy_index_dir=healthy_index_dir,
+            previous_points=previous_points,
         )
         if not gate_result.passed:
             failure_recovery.record_publish_gate_failure(
@@ -3885,6 +4825,276 @@ class RefreshScheduler:
 
         failure_recovery.reset_integrity_strikes(self.golden_repo_metadata, alias_name)
         return gate_result
+
+    def _published_point_counts(self, current_target: Optional[str]) -> Dict[str, int]:
+        """Per-collection point counts of the index the alias serves now.
+
+        Read BEFORE indexing: when the alias still points at the directory
+        being re-indexed (no snapshot yet), afterwards would be too late.
+        """
+        if not current_target:
+            return {}
+        return count_collection_points(
+            self._index_store.index_root(current_target) / "index"
+        )
+
+    def _integrity_baseline(
+        self, alias_name: str, source_path: str, current_target: Optional[str]
+    ) -> "IntegrityBaseline":
+        """The integrity gate's baseline: the published index's point counts
+        (and, where it is not at the current target, the index to self-heal
+        from). Read BEFORE indexing."""
+        if self._index_store.is_local or not current_target:
+            return IntegrityBaseline(self._published_point_counts(current_target))
+        from code_indexer.server.services.index_materializer import is_served_here
+
+        if is_served_here(self._index_store, current_target):
+            return IntegrityBaseline(self._published_point_counts(current_target))
+        record = self.alias_manager.read_record(alias_name) or {}
+        if (
+            record.get("target_path") == current_target
+            and record.get(INDEX_VERSION_FIELD)
+            and record.get(INDEX_STORE_ALIAS_FIELD)
+        ):
+            self.alias_manager.ensure_served_here(alias_name, current_target)
+            return IntegrityBaseline(self._published_point_counts(current_target))
+        return self._unrecorded_baseline(alias_name, source_path, current_target)
+
+    def _unrecorded_baseline(
+        self, alias_name: str, source_path: str, current_target: str
+    ) -> "IntegrityBaseline":
+        """``_integrity_baseline`` for a target whose pointer records no
+        published version: the store's current version, from scratch."""
+        store_alias = index_store_alias(Path(source_path).name)
+        current_version_as = getattr(self._index_store, "current_version_as", None)
+        checkout_as = getattr(self._index_store, "checkout_as", None)
+        if current_version_as is None or checkout_as is None:
+            raise RuntimeError(
+                f"Cannot judge the refresh of {alias_name}: the IndexStore "
+                f"{type(self._index_store).__name__} cannot read a published version"
+            )
+        version = current_version_as(store_alias)
+        if version is None:
+            if current_target == source_path:
+                logger.info(
+                    "%s: nothing published yet and no index on this pod -- "
+                    "first publish, no previous points to compare",
+                    alias_name,
+                )
+                return IntegrityBaseline({})
+            raise RuntimeError(
+                f"Cannot judge the refresh of {alias_name}: its current target "
+                f"{current_target} is not on this pod and nothing is published "
+                f"for {store_alias}"
+            )
+        scratch = self.golden_repos_dir / INTEGRITY_BASELINE_DIRNAME / store_alias
+        shutil.rmtree(scratch, ignore_errors=True)
+        scratch.mkdir(parents=True)
+        try:
+            root = checkout_as(store_alias, scratch, version)
+        except Exception:
+            shutil.rmtree(scratch, ignore_errors=True)
+            raise
+        index_dir = Path(root) / "index"
+        logger.info(
+            "%s: integrity baseline = published version %s (checked out to %s)",
+            alias_name,
+            version,
+            scratch,
+        )
+        return IntegrityBaseline(
+            count_collection_points(index_dir), index_dir, scratch=scratch
+        )
+
+    def _prepare_delegated_cidx_meta(
+        self,
+        alias_name: str,
+        repo_url: Optional[str],
+        repo_name: str,
+        source_path: str,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Give cidx-meta its index state on this pod before a delegated refresh.
+
+        No-op (None) under the local store and for every repository other
+        than cidx-meta. Under a delegated IndexStore the latest published
+        version is checked out to ``source_path`` (``_seed_incremental_base``,
+        incremental on top of it; a failed checkout raises). With nothing
+        published and nothing here -- the first refresh, on a pod that did
+        not register cidx-meta -- ``cidx init`` creates the index state here
+        so this refresh builds and publishes the first version, instead of
+        skipping as "not initialized" on every pod forever. A failed init is
+        the refresh's result (``success: False``), never a silent skip.
+        """
+        store = getattr(self, "_index_store", None)
+        if store is None or store.is_local:
+            return None
+        from code_indexer.server.utils.index_command_layout import is_cidx_meta_repo
+
+        if not is_cidx_meta_repo(repo_url, repo_name):
+            return None
+        self._seed_incremental_base(alias_name, source_path)
+        if store.index_root(Path(source_path)).exists():
+            return None
+        Path(source_path).mkdir(parents=True, exist_ok=True)
+        ok, detail = self._repair_uninitialized_local_repo(
+            source_path, alias_name, cancel_check=cancel_check
+        )
+        if ok:
+            logger.info(
+                "%s: nothing published and no index state on this pod -- "
+                "initialized it here to build and publish the first version",
+                alias_name,
+            )
+            return None
+        return {
+            "success": False,
+            "alias": alias_name,
+            "message": (
+                "cidx-meta has no published index and its index state could "
+                f"not be initialized on this pod: {detail}"
+            ),
+        }
+
+    def _start_reconcile_target(
+        self, alias_name: str, current_target: str
+    ) -> Optional[Path]:
+        """The directory the START registry reconcile reads index state from.
+
+        Local store: ``current_target``, as before. Under a delegated
+        IndexStore this pod may hold nothing at the target (another pod
+        published it), and reading "no index" there would auto-disable
+        temporal and SCIP: the recorded version is served here first
+        (``ensure_served_here``; a failure raises). A target this pod holds
+        whose alias records no version is read as it is; otherwise None --
+        nothing on this pod or in the store to read, so nothing to reconcile.
+        """
+        store = getattr(self, "_index_store", None)
+        if store is None or store.is_local:
+            return Path(current_target)
+        from code_indexer.server.services.index_materializer import (
+            is_served_here,
+            recorded_index,
+        )
+
+        record = self.alias_manager.read_record(alias_name) or {}
+        if (
+            record.get("target_path") == current_target
+            and recorded_index(record) is not None
+        ):
+            self.alias_manager.ensure_served_here(alias_name, current_target)
+            return Path(current_target)
+        if is_served_here(store, current_target):
+            return Path(current_target)
+        return None
+
+    def _seed_incremental_base(self, alias_name: str, source_path: str) -> None:
+        """Under a delegated IndexStore, make ``source_path`` hold the latest
+        published index before the refresh indexes it, so ``cidx index`` runs
+        incrementally on top of it instead of re-embedding the repository.
+
+        No-op under the local store, when this pod already holds an index
+        there (its own base, kept as it is), or when nothing is published yet
+        (the first build). A ``.code-indexer`` this pod has without an index
+        and without a checkout's in-progress marker is left alone (the
+        checkout would refuse to replace it) -- unless it holds only
+        ``REBUILDABLE_LEFTOVERS``, which the checkout keeps. A failed
+        checkout raises: the refresh fails loudly rather than silently
+        rebuilding from scratch.
+        """
+        store = getattr(self, "_index_store", None)
+        if store is None or store.is_local:
+            return
+        from code_indexer.server.services.index_materializer import (
+            IN_PROGRESS_MARKER,
+            ensure_published_index,
+            holds_only_rebuildable_leftovers,
+            is_served_here,
+        )
+        from code_indexer.utils.index_store import published_index_fields
+
+        source = Path(source_path)
+        if is_served_here(store, source):
+            return
+        root = store.index_root(source)
+        # EVO-64616: an evicted base the backfill sweeps wrote into again
+        # (cooldown markers, SCIP output) holds no index: it is seeded like a
+        # missing one -- the checkout keeps those leftovers.
+        if (
+            root.exists()
+            and not (source / IN_PROGRESS_MARKER).exists()
+            and not holds_only_rebuildable_leftovers(root)
+        ):
+            logger.warning(
+                "%s: %s holds index state without an index; not seeding the "
+                "refresh base from the IndexStore",
+                alias_name,
+                root,
+            )
+            return
+        current_version_as = getattr(store, "current_version_as", None)
+        if current_version_as is None:
+            raise RuntimeError(
+                f"Cannot seed the refresh of {alias_name}: the IndexStore "
+                f"{type(store).__name__} cannot read a published version"
+            )
+        store_alias = index_store_alias(source.name)
+        version = current_version_as(store_alias)
+        if version is None:
+            logger.info(
+                "%s: nothing published yet -- the refresh builds the first index",
+                alias_name,
+            )
+            return
+        logger.info(
+            "%s: refresh base not on this pod -- checking out published "
+            "version %s to %s to build on incrementally",
+            alias_name,
+            version,
+            source,
+        )
+        ensure_published_index(
+            source, published_index_fields(store_alias, version), store=store
+        )
+
+    def _initialize_unconfigured_source(
+        self,
+        alias_name: str,
+        source_path: str,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> None:
+        """Give a source whose ``.code-indexer/`` has no valid
+        ``config.json`` one before it is indexed: the add's ``cidx init``,
+        run by the local repos' Bug #1253 repair
+        (``_repair_uninitialized_local_repo``).
+
+        A source normally has its configuration from its add, or from the
+        published version ``_seed_incremental_base`` checked out. An evicted
+        base the backfill sweeps wrote into again, with nothing published to
+        seed from, has neither, and ``cidx index`` there fails with "no
+        configuration found" on every cycle. A source with no
+        ``.code-indexer/`` at all is left as before. A failed init raises
+        RuntimeError naming the alias."""
+        from code_indexer.utils.index_store import index_root
+
+        code_indexer_dir = index_root(source_path)
+        if not code_indexer_dir.is_dir() or self._is_local_config_valid(
+            code_indexer_dir / "config.json"
+        ):
+            return
+        logger.warning(
+            "%s: %s has no valid index configuration; initializing it before indexing",
+            alias_name,
+            source_path,
+        )
+        ok, detail = self._repair_uninitialized_local_repo(
+            source_path, alias_name, cancel_check=cancel_check
+        )
+        if not ok:
+            raise RuntimeError(
+                f"Cannot index the source of {alias_name}: it has no index "
+                f"configuration and 'cidx init' failed: {detail}"
+            )
 
     def _index_source(
         self,
@@ -3930,6 +5140,15 @@ class RefreshScheduler:
         Raises:
             RuntimeError: If any indexing step fails or times out
         """
+        # EVO-64616: an incremental base this pod no longer holds (evicted by
+        # the served-index cache, or never built here) is checked out from
+        # the IndexStore first, so the refresh embeds only what changed.
+        self._seed_incremental_base(alias_name, source_path)
+        # EVO-64616: nothing published to seed from, and no configuration of
+        # its own: initialized here, or `cidx index` fails the same way on
+        # every cycle.
+        self._initialize_unconfigured_source(alias_name, source_path, cancel_check)
+
         # Step 1: Run cidx index for semantic + FTS (always required)
         # Bug #467: No timeout — let indexing run to completion.
         # Check if previous indexing was interrupted — use --reconcile to recover.
@@ -3950,6 +5169,22 @@ class RefreshScheduler:
                     f"using --reconcile for crash recovery on {alias_name}"
                 )
                 break
+
+        # EVO-64616: failures a provider COUNTED with no recorded path (its
+        # failed_files above its failed_file_paths) are invisible to an
+        # incremental run, which retries recorded paths only -- the stale
+        # count would stay forever. A reconcile compares every file with the
+        # store and re-indexes what is missing, and records the run's own
+        # failures (count and paths) when it completes.
+        if not needs_reconcile:
+            _unattributed = read_recorded_failures(source_path).unattributed
+            if _unattributed:
+                needs_reconcile = True
+                logger.info(
+                    f"{_unattributed} indexing failure(s) of {alias_name} were "
+                    "recorded without a path; using --reconcile to re-index "
+                    "everything missing"
+                )
 
         # Story #1001: OR with force_reconcile from extension-drift detection.
         needs_reconcile = needs_reconcile or force_reconcile
@@ -3976,8 +5211,12 @@ class RefreshScheduler:
         )
         # Story #1488: server states the new-collection layout explicitly
         # (CHUNKS_DB) rather than inheriting the CLI SHARDED_JSON default.
+        _source_info = self.registry.get_global_repo(alias_name)
+        _layout = repo_layout_kwargs(
+            _source_info.get("repo_url") if _source_info else None, alias_name
+        )
         index_command = append_server_layout_args(
-            index_command, attribution=stats_attribution
+            index_command, attribution=stats_attribution, **_layout
         )
 
         # Step 2: Temporal indexing on source (if enabled and not local://)
@@ -4030,6 +5269,25 @@ class RefreshScheduler:
             )
             enable_temporal = False
 
+        if (
+            enable_temporal
+            and _repository_is_elsewhere()
+            and not _history_through_git_seam()
+        ):
+            # With a delegated git backend the temporal child reads the history
+            # through the git seam (git-mcp; the seam flags are stamped by
+            # append_server_layout_args). With LOCAL git on a pod that does not
+            # hold the repository it would fail, and the failure used to fail
+            # the WHOLE refresh. Skipped -- loudly, unlike the local:// case
+            # above, because here it is a lost feature, not an inapplicable one
+            # -- so the semantic and FTS indexes stay fresh.
+            logger.error(
+                f"Skipping temporal indexing for {alias_name}: content_backend="
+                "'delegated' with git_backend='local' -- the history is not on "
+                "this pod; the temporal index is not refreshed"
+            )
+            enable_temporal = False
+
         temporal_command = None
         if enable_temporal:
             # Story #1488: server states the new-collection layout explicitly
@@ -4038,6 +5296,7 @@ class RefreshScheduler:
             temporal_command = append_server_layout_args(
                 ["cidx", "index", "--index-commits", "--progress-json"],
                 attribution=stats_attribution,
+                **_layout,
             )
             logger.info(f"Temporal indexing enabled for {alias_name}")
 
@@ -4131,8 +5390,15 @@ class RefreshScheduler:
                 if _fallback_max is not None:
                     temporal_command.extend(["--max-commits", str(_fallback_max)])
 
-        # Step 3: SCIP indexing on source (if enabled)
+        # Step 3: SCIP indexing on source (if enabled, and an enabled feature
+        # builds SCIP indexes -- the cidx-scip feature's index builder)
         enable_scip = repo_info.get("enable_scip", False) if repo_info else False
+        if enable_scip and index_builder(SCIP_INDEX_TYPE) is None:
+            logger.info(
+                "SCIP indexing skipped for %s: the scip feature is not enabled",
+                alias_name,
+            )
+            enable_scip = False
 
         # Story #482 PATH C: Build ProgressPhaseAllocator for phase-aware progress.
         # Phases: "semantic" (covers cidx index --fts), "temporal" (if enabled),
@@ -4213,7 +5479,10 @@ class RefreshScheduler:
                 error_label=error_label,
             )
             _popen_kwargs["env"] = build_embedding_stats_child_env(
-                get_config_service().get_config(), base_env=env
+                get_config_service().get_config(),
+                base_env=env,
+                golden_repo_alias=alias_name,
+                job_id=job_id,
             )
             # Bug #1388: only pass orphan_event_callback when not None, for
             # the same reason as env above -- several pre-existing tests
@@ -4261,6 +5530,17 @@ class RefreshScheduler:
                     error_msg = (
                         f"run-spend meter defect (exit {e.returncode}): {error_msg}"
                     )
+                if _is_empty_meta_directory_index(
+                    alias_name,
+                    phase_name,
+                    error_msg + "".join(_popen_stdout) + "".join(_popen_stderr),
+                ) and self._meta_content_is_empty(alias_name, source_path):
+                    logger.info(
+                        "%s has no files to index yet (no repository descriptions "
+                        "written); nothing to index this refresh",
+                        alias_name,
+                    )
+                    return
                 logger.error(
                     f"{phase_name} indexing on source failed for {alias_name}: "
                     f"{error_msg}{spend_note}",
@@ -4348,6 +5628,12 @@ class RefreshScheduler:
                 alias_name,
             )
 
+        # This step builds the FTS index too, so record WHICH commit it was built at
+        # under the shared .build_commit convention. Without this the backfill sweep
+        # sees a freshly-built index with a stale (or absent) marker, calls it stale,
+        # and enqueues a rebuild that was never needed -- once per refresh, forever.
+        _record_fts_build_commit(Path(source_path))
+
         # Step 1b: build the trigram index for index-assisted regex search.
         _build_source_trigram_index(alias_name, source_path)
 
@@ -4389,6 +5675,7 @@ class RefreshScheduler:
 
                 _temporal_env.update(resolve_hnsw_sync_epoch_env_var())
 
+            self.serve_temporal_shards(alias_name)
             logger.info(
                 f"Running cidx index (temporal) on source for {alias_name}: {' '.join(temporal_command)}"
             )
@@ -4398,57 +5685,102 @@ class RefreshScheduler:
                 error_label=f"temporal indexing on source for {alias_name}",
                 env=_temporal_env,
             )
+            self.note_temporal_indexed(alias_name)
             logger.info("cidx index (temporal) on source completed successfully")
 
         # Execute Step 3: SCIP indexing (coarse markers, subprocess.run stays — it has no --progress-json)
         if enable_scip:
-            scip_command = ["cidx", "scip", "generate"]
-            logger.info(f"SCIP indexing enabled for {alias_name}")
-            logger.info(
-                f"Running cidx scip generate on source for {alias_name}: {' '.join(scip_command)}"
+            self._run_source_scip(
+                alias_name, source_path, allocator, progress_callback, cancel_check
             )
+        return run_spend
+
+    def _run_source_scip(
+        self,
+        alias_name: str,
+        source_path: str,
+        allocator: Any,
+        progress_callback: Optional[Callable[..., None]],
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> None:
+        """Run the golden-repo SCIP step through the ``scip`` index builder.
+
+        The cidx-scip feature's builder (``Feature.index_builders()``) routes
+        the build: under ``scip_backend='delegated-plugin'`` it is enqueued on
+        the serialized delegated queue (never blocking this index job) and
+        nothing runs here; the builder is fail-soft, so a delegated backend gap
+        leaves the repo at "skipped: No SCIP index available" instead of
+        failing this golden-repo job. Under the default ``local`` backend the
+        builder answers ``run_locally`` and the ``cidx scip generate``
+        subprocess runs here, unchanged (and can still raise, preserving prior
+        behaviour). The caller checked that a builder exists.
+        """
+        builder = index_builder(SCIP_INDEX_TYPE)
+        if builder is None:
+            return
+        # EVO-65365: the -global -> bare alias normalization (CRITICAL-1) is
+        # the builder's (the feature's funnel), shared by every golden
+        # entrypoint.
+        outcome = builder.build(
+            IndexBuildRequest(alias=alias_name, repo_root=str(source_path))
+        )
+        if outcome.status != INDEX_BUILD_RUN_LOCALLY:
+            logger.info("SCIP delegated backend: %s for %s", outcome.status, alias_name)
             if progress_callback is not None:
                 progress_callback(
-                    int(allocator.phase_start("scip")),
+                    int(allocator.phase_end("scip")),
                     phase="scip",
-                    detail="SCIP: generating code intelligence index...",
+                    detail=f"SCIP: {outcome.status}",
                 )
-            try:
-                # Bug #2012: cancellable by the owning job; no timeout
-                # (Bug #1218). A cancel raises SubprocessCancelledError.
-                run_with_cancel(
-                    scip_command,
-                    cancel_check,
-                    cwd=str(source_path),
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                    env=build_cidx_subprocess_env(),
+            return
+
+        scip_command = list(outcome.command)
+        logger.info(f"SCIP indexing enabled for {alias_name}")
+        logger.info(
+            f"Running cidx scip generate on source for {alias_name}: {' '.join(scip_command)}"
+        )
+        if progress_callback is not None:
+            progress_callback(
+                int(allocator.phase_start("scip")),
+                phase="scip",
+                detail="SCIP: generating code intelligence index...",
+            )
+        try:
+            # Bug #2012: cancellable by the owning job; no timeout
+            # (Bug #1218). A cancel raises SubprocessCancelledError.
+            run_with_cancel(
+                scip_command,
+                cancel_check,
+                cwd=str(source_path),
+                capture_output=True,
+                text=True,
+                check=True,
+                env=build_cidx_subprocess_env(),
+            )
+            logger.info("cidx scip generate on source completed successfully")
+            if progress_callback is not None:
+                progress_callback(
+                    int(allocator.phase_end("scip")),
+                    phase="scip",
+                    detail="SCIP: complete",
                 )
-                logger.info("cidx scip generate on source completed successfully")
-                if progress_callback is not None:
-                    progress_callback(
-                        int(allocator.phase_end("scip")),
-                        phase="scip",
-                        detail="SCIP: complete",
-                    )
-            except subprocess.CalledProcessError as e:
-                if e.returncode == -15:  # SIGTERM — server restart interrupted indexing
-                    logger.warning(
-                        f"SCIP indexing on source interrupted by server shutdown for {alias_name}"
-                    )
-                    raise RuntimeError(
-                        f"Indexing interrupted by server shutdown for {alias_name}"
-                    )
-                diagnostic = _format_called_process_error_diagnostic(e)
-                logger.error(
-                    f"SCIP indexing on source failed for {alias_name}: {diagnostic}",
-                    exc_info=True,
+        except subprocess.CalledProcessError as e:
+            if e.returncode == -15:  # SIGTERM — server restart interrupted indexing
+                logger.warning(
+                    f"SCIP indexing on source interrupted by server shutdown for {alias_name}"
                 )
                 raise RuntimeError(
-                    f"SCIP indexing on source failed for {alias_name}: {diagnostic}"
+                    f"Indexing interrupted by server shutdown for {alias_name}"
                 )
-        return run_spend
+            logger.error(
+                f"SCIP indexing on source failed for {alias_name}: "
+                f"{_format_called_process_error_diagnostic(e)}",
+                exc_info=True,
+            )
+            raise RuntimeError(
+                f"SCIP indexing on source failed for {alias_name}: "
+                f"{_format_called_process_error_diagnostic(e)}"
+            )
 
     def _run_subprocess(
         self,
@@ -4520,6 +5852,15 @@ class RefreshScheduler:
 
         repo_name = alias_name.removesuffix("-global")
 
+        if not self._index_store.is_local:
+            return self._snapshot_from_index_store(
+                alias_name,
+                repo_name,
+                source_path,
+                cidx_fix_timeout,
+                cancel_check=cancel_check,
+            )
+
         # versioned_path is set inside the try block by snapshot_manager.create_snapshot().
         # Initialize to None so the cleanup except block can guard against None safely.
         versioned_path: Optional[Path] = None
@@ -4567,17 +5908,18 @@ class RefreshScheduler:
             if git_dir.exists():
                 logger.info("Running git update-index --refresh to fix CoW timestamps")
                 try:
-                    result = self._run_subprocess(
-                        ["git", "update-index", "--refresh"],
-                        cancel_check=cancel_check,
-                        cwd=str(versioned_path),
-                        capture_output=True,
-                        text=True,
-                        timeout=git_update_timeout,
-                        check=False,  # Non-fatal
+                    # EVO-64678: via the git seam. update_index_refresh() runs
+                    # with check=False -- a non-zero exit is normal here -- so
+                    # this stays as tolerant as the raw call it replaces. It
+                    # returns None, so git's stderr is no longer available for
+                    # the previous DEBUG log. Bug #2012: a cancelled job stops
+                    # before it.
+                    _raise_if_refresh_cancelled(
+                        cancel_check, alias_name, "before the snapshot's git refresh"
                     )
-                    if result.returncode != 0:
-                        logger.debug(f"git update-index output: {result.stderr}")
+                    self._git_backend.update_index_refresh(
+                        str(versioned_path), timeout=git_update_timeout
+                    )
                 except subprocess.TimeoutExpired:
                     logger.warning(
                         f"git update-index timed out after {git_update_timeout} seconds"
@@ -4585,61 +5927,33 @@ class RefreshScheduler:
 
                 logger.info("Running git restore . to clean up timestamp changes")
                 try:
-                    result = self._run_subprocess(
-                        ["git", "restore", "."],
-                        cancel_check=cancel_check,
-                        cwd=str(versioned_path),
-                        capture_output=True,
-                        text=True,
-                        timeout=git_restore_timeout,
-                        check=False,  # Non-fatal
+                    # EVO-64678: via the git seam. restore() runs with
+                    # check=True, so CalledProcessError is caught here to keep
+                    # the raw call's non-fatal (check=False) behavior and log
+                    # git's stderr at DEBUG exactly as before. Bug #2012: a
+                    # cancelled job stops before it.
+                    _raise_if_refresh_cancelled(
+                        cancel_check, alias_name, "before the snapshot's git restore"
                     )
-                    if result.returncode != 0:
-                        logger.debug(f"git restore output: {result.stderr}")
+                    self._git_backend.restore(
+                        str(versioned_path), ".", timeout=git_restore_timeout
+                    )
+                except subprocess.CalledProcessError as restore_exc:
+                    logger.debug(
+                        f"git restore output: {redact_url_credentials(restore_exc.stderr)}"
+                    )
                 except subprocess.TimeoutExpired:
                     logger.warning(
                         f"git restore timed out after {git_restore_timeout} seconds"
                     )
 
             # Step 4: Run cidx fix-config --force on CLONE only (never on source)
-            logger.info("Running cidx fix-config --force on clone to update paths")
-            try:
-                self._run_subprocess(
-                    ["cidx", "fix-config", "--force"],
-                    cancel_check=cancel_check,
-                    cwd=str(versioned_path),
-                    capture_output=True,
-                    text=True,
-                    env=build_cidx_subprocess_env(),
-                    timeout=cidx_fix_timeout,
-                    check=True,
-                )
-                logger.info("cidx fix-config on clone completed successfully")
-            except subprocess.CalledProcessError as e:
-                diagnostic = _format_called_process_error_diagnostic(e)
-                logger.error(
-                    f"cidx fix-config failed for {alias_name}: {diagnostic}",
-                    exc_info=True,
-                )
-                raise RuntimeError(
-                    f"cidx fix-config failed for {alias_name}: {diagnostic}"
-                )
-            except subprocess.TimeoutExpired as e:
-                logger.error(
-                    f"cidx fix-config timed out for {alias_name} after {cidx_fix_timeout} seconds: {type(e).__name__}",
-                    exc_info=True,
-                )
-                raise RuntimeError(
-                    f"cidx fix-config timed out for {alias_name} after {cidx_fix_timeout} seconds: {type(e).__name__}"
-                )
+            self._fix_snapshot_config(
+                alias_name, versioned_path, cidx_fix_timeout, cancel_check=cancel_check
+            )
 
             # Step 5: Validate index exists
-            index_dir = versioned_path / ".code-indexer" / "index"
-            if not index_dir.exists():
-                logger.error(f"Index validation failed: {index_dir} does not exist")
-                raise RuntimeError(
-                    "Index validation failed: index directory not created"
-                )
+            self._require_snapshot_index(versioned_path)
 
             logger.info(f"Versioned snapshot created successfully at: {versioned_path}")
             return str(versioned_path)
@@ -4671,6 +5985,170 @@ class RefreshScheduler:
             raise RuntimeError(
                 f"Failed to create snapshot for {alias_name}: {type(e).__name__}: {e}"
             )
+
+    def _fix_config_backend_args(self, alias_name: str) -> List[str]:
+        """The backend args ``cidx fix-config`` on this repository carries.
+
+        Stamped exactly like this repository's ``cidx index`` spawn: on a pod
+        that does not hold the repository, an unstamped fix-config would answer
+        git questions with the pod's own git and overwrite the git state and
+        project id the index run recorded through the backends. Pod-local
+        repositories stay unstamped (``repo_layout_kwargs``).
+        """
+        source_info = self.registry.get_global_repo(alias_name)
+        return server_backend_args(
+            **repo_layout_kwargs(
+                source_info.get("repo_url") if source_info else None, alias_name
+            )
+        )
+
+    def _fix_snapshot_config(
+        self,
+        alias_name: str,
+        versioned_path: Path,
+        timeout: int,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> None:
+        """``cidx fix-config --force`` on a snapshot (never on the source), so
+        its config's paths name the snapshot. Raises RuntimeError on failure;
+        Bug #2012: cancellable by the owning job (SubprocessCancelledError)."""
+        logger.info("Running cidx fix-config --force on clone to update paths")
+        try:
+            self._run_subprocess(
+                [
+                    "cidx",
+                    "fix-config",
+                    "--force",
+                    *self._fix_config_backend_args(alias_name),
+                ],
+                cancel_check=cancel_check,
+                cwd=str(versioned_path),
+                capture_output=True,
+                text=True,
+                env=build_cidx_subprocess_env(),
+                timeout=timeout,
+                check=True,
+            )
+            logger.info("cidx fix-config on clone completed successfully")
+        except subprocess.CalledProcessError as e:
+            diagnostic = _format_called_process_error_diagnostic(e)
+            logger.error(
+                f"cidx fix-config failed for {alias_name}: {diagnostic}",
+                exc_info=True,
+            )
+            raise RuntimeError(f"cidx fix-config failed for {alias_name}: {diagnostic}")
+        except subprocess.TimeoutExpired as e:
+            logger.error(
+                f"cidx fix-config timed out for {alias_name} after {timeout} seconds: {type(e).__name__}",
+                exc_info=True,
+            )
+            raise RuntimeError(
+                f"cidx fix-config timed out for {alias_name} after {timeout} seconds: {type(e).__name__}"
+            )
+
+    def _require_snapshot_index(self, versioned_path: Path) -> None:
+        """Raise unless the snapshot holds an index directory."""
+        index_dir = self._index_store.index_root(versioned_path) / "index"
+        if not index_dir.exists():
+            logger.error(f"Index validation failed: {index_dir} does not exist")
+            raise RuntimeError("Index validation failed: index directory not created")
+
+    def _snapshot_from_index_store(
+        self,
+        alias_name: str,
+        repo_name: str,
+        source_path: str,
+        fix_timeout: int,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> str:
+        """IndexStore step 2: publish the built index, then snapshot a checked-out version.
+
+        Under a delegated store the index built on this pod is scratch and the
+        published version is the source of truth, so the snapshot readers are
+        pointed at is THAT version -- fetched back and digest-verified by the
+        store -- not a copy of the scratch. The snapshot keeps the canonical
+        ``.versioned/<repo>/v_<ts>`` layout, so alias swap, retention and
+        cleanup treat it as any other.
+
+        Raises RuntimeError on any failure, leaving no partial snapshot.
+        """
+        if self._snapshot_manager is None:
+            raise RuntimeError(
+                "RefreshScheduler invoked without snapshot_manager — wiring bug in lifespan.py."
+            )
+        if self._snapshot_manager.uses_flexclone:
+            raise RuntimeError(
+                f"Cannot snapshot {alias_name}: index_store_backend='delegated' "
+                "checks a version out into a directory, which a FlexClone snapshot "
+                "manager cannot hold. Use the local clone backend with it."
+            )
+        try:
+            version = self._index_store.publish(
+                source_path, self._index_store.index_root(source_path)
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to publish the index for {alias_name}: {type(e).__name__}: {e}"
+            ) from e
+        if not version:
+            raise RuntimeError(
+                f"Publishing the index for {alias_name} returned no version"
+            )
+        logger.info(f"Published the index for {alias_name} as version {version}")
+        from code_indexer.server.services.served_index_cache import (
+            active_served_index_cache,
+        )
+
+        served_cache = active_served_index_cache()
+        if served_cache is not None:
+            # The base index was just used: keep its LRU age current (EVO-64616).
+            served_cache.note_used(source_path)
+        try:
+            temporal_fields = self._publish_indexed_temporal(alias_name)
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to publish the temporal shards for {alias_name}: "
+                f"{type(e).__name__}: {e}"
+            ) from e
+
+        versioned_path = self._new_snapshot_path(repo_name)
+        try:
+            versioned_path.mkdir(parents=True)
+            self._index_store.checkout(source_path, versioned_path, version)
+            self._fix_snapshot_config(
+                alias_name, versioned_path, fix_timeout, cancel_check=cancel_check
+            )
+            self._require_snapshot_index(versioned_path)
+        except Exception as e:
+            shutil.rmtree(versioned_path, ignore_errors=True)
+            raise RuntimeError(
+                f"Failed to create snapshot for {alias_name}: {type(e).__name__}: {e}"
+            ) from e
+        from code_indexer.server.services.index_materializer import mark_published_here
+        from code_indexer.utils.index_store import published_index_fields
+
+        fields = published_index_fields(
+            index_store_alias(Path(source_path).name), version
+        )
+        fields.update(temporal_fields)
+        mark_published_here(versioned_path, fields)
+        if getattr(self, "_pending_index_publications", None) is None:
+            self._pending_index_publications = {}
+        self._pending_index_publications[alias_name] = (str(versioned_path), fields)
+        logger.info(
+            f"Versioned snapshot of {alias_name} version {version} at: {versioned_path}"
+        )
+        return str(versioned_path)
+
+    def _new_snapshot_path(self, repo_name: str) -> Path:
+        """A ``v_<unix ts>`` snapshot path for ``repo_name`` that does not exist yet."""
+        assert self._snapshot_manager is not None
+        ts = int(time.time())
+        while True:
+            path = Path(self._snapshot_manager.get_snapshot_path(repo_name, str(ts)))
+            if not path.exists():
+                return path
+            ts += 1
 
     def _create_new_index(self, alias_name: str, source_path: str) -> str:
         """
@@ -4721,14 +6199,20 @@ class RefreshScheduler:
                     f"to index/publish via _create_new_index()"
                 )
 
-            self._index_source(alias_name=alias_name, source_path=source_path)
-
             current_target = self.alias_manager.read_alias(alias_name)
-            gate_result = self._run_and_publish_integrity_gate(
-                alias_name=alias_name,
-                source_path=source_path,
-                current_target=current_target,
-            )
+            baseline = self._integrity_baseline(alias_name, source_path, current_target)
+            try:
+                self._index_source(alias_name=alias_name, source_path=source_path)
+
+                gate_result = self._run_and_publish_integrity_gate(
+                    alias_name=alias_name,
+                    source_path=source_path,
+                    current_target=current_target,
+                    previous_points=baseline.points,
+                    healthy_index_dir=baseline.healthy_index_dir,
+                )
+            finally:
+                baseline.close()
             if not gate_result.passed:
                 detail_summary = "; ".join(
                     f"{f.collection_dir}: {f.detail}" for f in gate_result.failures
@@ -4940,22 +6424,203 @@ class RefreshScheduler:
                 f"{type(reset_exc).__name__}: {reset_exc}"
             )
 
-    def _published_snapshot(self, alias_name: str) -> Optional[str]:
-        """The alias's published target when it is a versioned snapshot
-        (never the newest ``v_*`` directory, which may be unpublished)."""
-        target = self.alias_manager.read_alias(alias_name)
-        return target if target and self._is_versioned_snapshot(target) else None
+    def _shared_cidx_meta(
+        self, alias_name: str, source_path: str
+    ) -> Optional["cidx_meta_content.SharedCidxMeta"]:
+        """cidx-meta's shared content when *alias_name* is cidx-meta and the
+        content backend is delegated, else None (read the local disk)."""
+        if alias_name != CIDX_META_REPO_GLOBAL:
+            return None
+        return cidx_meta_content.shared_cidx_meta(source_path)
+
+    #: The alias-document field holding the fingerprint of the shared
+    #: cidx-meta content the published index was built from.
+    META_FINGERPRINT_FIELD = "content_fingerprint"
+
+    def _shared_meta_changed(
+        self, alias_name: str, shared: "cidx_meta_content.SharedCidxMeta"
+    ) -> bool:
+        """Change detection for cidx-meta's shared content (delegated backend).
+
+        This pod's directory holds index state only; the content is
+        workspace-mcp's. "Changed" is a fingerprint comparison (paths and blob
+        shas of the visible files) against the fingerprint published WITH the
+        alias pointer of the current index -- in the control-plane registry,
+        so every pod, a freshly started one included, compares the same
+        value. No clock is involved anywhere, and deletions count. No
+        published fingerprint (the first index of shared content) is a
+        change: one extra index, never a missed one. A listing failure raises.
+        """
+        entries = cidx_meta_content.visible_entries(shared)
+        fingerprint = cidx_meta_content.content_fingerprint(entries)
+        record = self.alias_manager.read_record(alias_name) or {}
+        published = record.get(self.META_FINGERPRINT_FIELD)
+        has_changes = fingerprint != published
+        if has_changes:
+            self._pending_meta_fingerprints[alias_name] = fingerprint
+        logger.debug(
+            f"shared-content fingerprint check for {alias_name} "
+            f"(published: {'yes' if published else 'none'}) -> changes={has_changes}"
+        )
+        return has_changes
+
+    def published_swap_extra(self, alias_name: str, new_target: str) -> Dict[str, Any]:
+        """The ``swap_alias`` keyword for swapping ``alias_name`` to a snapshot
+        this scheduler just created: the cidx-meta fingerprint (as
+        ``_published_meta_fingerprint``) plus, under a delegated IndexStore,
+        the published index version of ``new_target``. Empty under the
+        local store for any repository but a delegated cidx-meta (today's
+        swap)."""
+        extra: Dict[str, Any] = dict(
+            self._published_meta_fingerprint(alias_name).get("extra", {})
+        )
+        pending = getattr(self, "_pending_index_publications", {})
+        publication = pending.pop(alias_name, None)
+        if publication is not None:
+            published_path, fields = publication
+            if published_path != new_target:
+                raise RuntimeError(
+                    f"Refusing to swap {alias_name} to {new_target}: the index "
+                    f"published by this refresh is at {published_path}"
+                )
+            extra.update(fields)
+        elif not self._index_store.is_local:
+            raise RuntimeError(
+                f"Refusing to swap {alias_name} to {new_target}: no index was "
+                "published for it, so no other pod could serve it"
+            )
+        return {"extra": extra} if extra else {}
+
+    def _published_meta_fingerprint(self, alias_name: str) -> Dict[str, Any]:
+        """The ``swap_alias`` keyword publishing this refresh's cidx-meta
+        fingerprint with the new pointer; empty (today's swap) otherwise."""
+        fingerprint = self._pending_meta_fingerprints.pop(alias_name, None)
+        if fingerprint is None:
+            return {}
+        return {"extra": {self.META_FINGERPRINT_FIELD: fingerprint}}
+
+    def _meta_content_is_empty(self, alias_name: str, source_path: str) -> bool:
+        """Whether an index child's "No files found" for cidx-meta is the truth.
+
+        Locally the child walked this disk, so it is. Under a delegated backend
+        the child asked workspace-mcp; the shared content is listed again here
+        and only a successful, empty listing counts. A listing failure raises
+        -- an unreachable backend is never an empty cidx-meta -- and a listing
+        WITH files means the child saw something else, which must fail loud.
+        """
+        shared = self._shared_cidx_meta(alias_name, source_path)
+        if shared is None:
+            return True
+        if cidx_meta_content.has_visible_files(shared):
+            logger.error(
+                "%s: the index found no files, but the shared cidx-meta at %s "
+                "holds files; failing the refresh",
+                alias_name,
+                source_path,
+            )
+            return False
+        return True
+
+    def _cidx_meta_backup_refusal(
+        self, alias_name: str, master_path: str
+    ) -> Optional[str]:
+        """Why cidx-meta's git backup cannot run this refresh, or None.
+
+        Under a delegated content backend cidx-meta's files are workspace-mcp's
+        and this pod's directory holds index state only; backing it up would
+        push an empty tree over the real backup. The refresh still indexes the
+        shared content, then FAILS with this reason, every cycle, until the
+        backup is disabled.
+        """
+        if alias_name != CIDX_META_REPO_GLOBAL:
+            return None
+        try:
+            cidx_meta_content.refuse_backup_of_shared_content(master_path)
+        except cidx_meta_content.CidxMetaBackupUnsupportedError as exc:
+            logger.error("%s: %s", alias_name, exc)
+            return str(exc)
+        return None
 
     def _has_local_changes(self, source_path: str, alias_name: str) -> bool:
-        """Whether a local (non-git) repository's source differs, by file
-        identity, from what its PUBLISHED snapshot indexed (see
-        ``local_source_manifest``). An unknown baseline is a change."""
-        reason = source_change_reason(self._published_snapshot(alias_name), source_path)
-        if reason is not None:
-            logger.info(f"Local repo {alias_name} changed: {reason}")
-        return reason is not None
+        """
+        Detect changes in a local (non-git) repository using file mtime comparison.
 
-    def _check_extension_drift(self, source_path: str, alias_name: str) -> bool:
+        Compares the maximum mtime of all non-hidden files in source_path against
+        the timestamp embedded in the latest versioned directory name.
+
+        Algorithm:
+        1. Derive repo_name from alias_name (strip "-global")
+        2. Look in .versioned/{repo_name}/ for v_* directories
+        3. If none exist -> return True (first version needed)
+        4. Parse latest version timestamp from directory name
+        5. Walk source_path, skip hidden dirs/files (starting with '.')
+        6. Get max mtime of all non-hidden files
+        7. If no visible files -> return False
+        8. Return max_mtime > latest_version_timestamp
+
+        Args:
+            source_path: Path to the live local repository directory
+            alias_name: Global alias name (e.g., "cidx-meta-global")
+
+        Returns:
+            True if changes detected or first version needed, False otherwise
+        """
+        # cidx-meta's shared content (delegated backend): fingerprints, no
+        # clock and no snapshot listing.
+        shared = self._shared_cidx_meta(alias_name, source_path)
+        if shared is not None:
+            return self._shared_meta_changed(alias_name, shared)
+
+        # Bug #1084 Phase A7 (Defect C): use the discovery API instead of globbing
+        # golden_repos_dir/.versioned. On cow-daemon the snapshots live under the
+        # NFS mount, so the old glob always missed -> always "first version" ->
+        # spurious re-index + snapshot every cycle.
+        latest_timestamp = self._latest_versioned_timestamp(alias_name)
+
+        if latest_timestamp is None:
+            logger.debug(
+                f"No versioned snapshot found for {alias_name} — treating as first version"
+            )
+            return True
+
+        logger.debug(
+            f"Latest versioned snapshot timestamp for {alias_name}: {latest_timestamp}"
+        )
+
+        # Walk source_path, skip hidden dirs and files
+        max_mtime: float = 0.0
+        found_files = False
+
+        for root, dirs, files in os.walk(source_path):
+            # Skip hidden directories in-place (prevents descent into them)
+            dirs[:] = [d for d in dirs if not d.startswith(".")]
+
+            for filename in files:
+                if filename.startswith("."):
+                    continue
+                file_path = os.path.join(root, filename)
+                try:
+                    mtime = os.stat(file_path).st_mtime
+                    found_files = True
+                    if mtime > max_mtime:
+                        max_mtime = mtime
+                except OSError as e:
+                    logger.debug(f"Cannot stat {file_path}: {e}")
+
+        if not found_files:
+            logger.debug(f"No visible files in {source_path} — no changes")
+            return False
+
+        has_changes = max_mtime > latest_timestamp
+        logger.debug(
+            f"mtime check for {alias_name}: max_mtime={max_mtime:.0f} "
+            f"vs latest_version={latest_timestamp} -> changes={has_changes}"
+        )
+        return has_changes
+
+    def _check_extension_drift(
+        self, source_path: str, alias_name: str, *, pod_local: bool = True
+    ) -> bool:
         """Check for extension drift and return True if --reconcile is needed.
 
         Calls sync_repo_extensions_if_drifted() on the config service.  If drift
@@ -4967,9 +6632,20 @@ class RefreshScheduler:
         calls within the same refresh cycle, so calling this helper both before
         an early-return and again at the shared drift-check site is harmless.
 
+        Where the files are listed: cidx-meta's shared content, or -- for a git
+        golden repo (``pod_local=False``) under a delegated content backend --
+        the backend's manifest of the clone (``_delegated_repository_backend``),
+        never this pod's index-state directory, where a walk finds nothing. A
+        listing failure there RAISES (fails the refresh): "could not list" is
+        never "no matching files". The config sync is then undone, so the next
+        refresh sees the same drift. A failure to sync the config is still only
+        logged, as before.
+
         Args:
             source_path: Absolute path to the live repo directory.
             alias_name: Global alias name used only for logging.
+            pod_local: The repo's files are on this pod by design (``local://``
+                repos, meta directories); False for a git golden repo.
 
         Returns:
             True if drift detected and matching files found, False otherwise.
@@ -4977,36 +6653,91 @@ class RefreshScheduler:
         try:
             config_service = get_config_service()
             drift = config_service.sync_repo_extensions_if_drifted(source_path)
-            if drift is not None and (drift.added or drift.removed):
-                drifted_exts = drift.added | drift.removed
-                _exclude = {
-                    ".git",
-                    "node_modules",
-                    "__pycache__",
-                    ".code-indexer",
-                    ".versioned",
-                }
-                if has_files_with_extensions(source_path, drifted_exts, _exclude):
-                    logger.info(
-                        "Extension drift detected (%d added, %d removed) "
-                        "and matching files found for %s -- triggering reconcile",
-                        len(drift.added),
-                        len(drift.removed),
-                        alias_name,
-                    )
-                    return True
-                logger.info(
-                    "Extension drift detected for %s but no matching files "
-                    "found -- using normal incremental index",
-                    alias_name,
-                )
         except Exception as e:
             logger.warning(
                 "Could not sync extensions before index for %s: %s",
                 alias_name,
                 e,
             )
+            return False
+        if drift is None or not (drift.added or drift.removed):
+            return False
+        drifted_exts = drift.added | drift.removed
+        _exclude = {
+            ".git",
+            "node_modules",
+            "__pycache__",
+            ".code-indexer",
+            ".versioned",
+        }
+        shared = self._shared_cidx_meta(alias_name, source_path)
+        try:
+            matched = (
+                cidx_meta_content.has_files_with_extensions(
+                    shared, drifted_exts, _exclude
+                )
+                if shared is not None
+                else has_files_with_extensions(
+                    source_path,
+                    drifted_exts,
+                    _exclude,
+                    backend=_delegated_repository_backend(pod_local),
+                )
+            )
+        except Exception:
+            self._restore_drifted_extensions(config_service, source_path, drift)
+            raise
+        if matched:
+            logger.info(
+                "Extension drift detected (%d added, %d removed) "
+                "and matching files found for %s -- triggering reconcile",
+                len(drift.added),
+                len(drift.removed),
+                alias_name,
+            )
+            return True
+        logger.info(
+            "Extension drift detected for %s but no matching files "
+            "found -- using normal incremental index",
+            alias_name,
+        )
         return False
+
+    def _refresh_admission_allowed(self) -> bool:
+        """Should background refresh work start right now?
+
+        Consults the SAME gate user requests use (`check_query_admission`,
+        called by handlers/git_read.py, repos.py and files.py). Without this
+        the pod has a priority inversion: maintenance keeps spawning
+        `cidx index` subprocesses while the traffic it starves is rejected
+        with `memory_pressure`. Observed on a freshly rolled tools-test pod
+        sitting at 2004m of a 2000m CPU limit, answering xray_search with
+        "retry shortly" and immediately starting another re-index.
+
+        When denied, the caller keeps a minimum trickle
+        (``_REFRESH_PRESSURE_TRICKLE``, currently 1 repo per cycle) so that
+        sustained memory pressure cannot stall all refreshes indefinitely.
+        The remaining repos' ``next_refresh`` is left unadvanced, so they
+        are simply picked up on a later poll once the pod is healthy.
+
+        Fails OPEN. This is a courtesy to serving traffic, not a correctness
+        barrier -- a raising governor must not be able to stop every repo in
+        the fleet from ever refreshing again.
+
+        `record_denial=False`: the governor's `query_admissions_denied` counter
+        is published in get_snapshot() and means "live callers we turned away".
+        A deferred refresh poll is not a turned-away query, and under sustained
+        pressure this loop would bump it every cycle -- making the metric report
+        a rejection storm no user ever experienced.
+        """
+        try:
+            return bool(check_query_admission(record_denial=False).allowed)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug(
+                "Refresh admission check failed (%s); proceeding with refresh",
+                exc,
+            )
+            return True
 
     def _stale_index_signal(
         self,
@@ -5030,12 +6761,77 @@ class RefreshScheduler:
         Every provider's `.code-indexer/metadata-{provider}.json` is read
         (metadata_reader.read_index_states; the legacy bare metadata.json
         only when no provider file exists). HEAD is resolved only when some
-        metadata exists. Nothing is logged here; the caller decides."""
+        metadata exists. With neither condition, recorded failures still owed
+        (an unattributed count, or retryable paths) are an OWED_FAILURES
+        signal, and a completed index not yet checked for files missing some
+        of their chunks a CHUNK_COVERAGE signal (EVO-64616). Nothing is logged
+        here; the caller decides."""
         states = read_index_states(source_path)
         if not states:
             return None
         head = self._working_tree_head(source_path, alias_name, cancel_check)
-        return stale_signal_from_states(states, head, alias_name)
+        signal = stale_signal_from_states(states, head, alias_name)
+        if signal is not None:
+            return signal
+        # EVO-64616: failures the last run recorded and still owes are stale
+        # too -- with no upstream change nothing else ever re-runs them (a
+        # record written before the count-only fix stayed forever).
+        return (
+            owed_failures_signal(read_recorded_failures(source_path), head, alias_name)
+            or chunk_coverage_signal(states, head, alias_name)
+            or self._trigram_signal(source_path, states, head, alias_name)
+        )
+
+    # The TRIGRAM signal's collaborators, on the class so one instance can be given
+    # others (a test of the signal; nothing else replaces them).
+    _trigram_prefilter_available = staticmethod(trigram_prefilter_available)
+    _trigram_index_present = staticmethod(trigram_index_present)
+    _trigram_run_pacer = trigram_forced_run_pacer
+
+    def _trigram_signal(
+        self,
+        source_path: str,
+        states: List[IndexState],
+        head: Optional[str],
+        alias_name: str,
+    ) -> Optional[StaleSignal]:
+        """The TRIGRAM signal: a completed index whose trigram index is missing
+        (never built, or of an older schema) where one can be built. The trigram
+        index is built in the indexing step, which a repository with nothing new
+        upstream never reaches, so without this regex search on it full-scans
+        forever. Not a signal where no trigram index can be built (the build
+        would be skipped and the signal would never clear), or unless the backfill
+        is switched on (``CIDX_TRIGRAM_BACKFILL=1``)."""
+        if not trigram_backfill_enabled():
+            return None
+        if not self._trigram_prefilter_available():
+            return None
+        if self._trigram_index_present(Path(source_path)):
+            return None
+        return trigram_missing_signal(states, head, alias_name)
+
+    def _owed_failures_signal(
+        self,
+        source_path: str,
+        alias_name: str,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> Optional[StaleSignal]:
+        """The OWED_FAILURES signal, else the CHUNK_COVERAGE one (the local://
+        no-change path), keyed with the SAME HEAD ``_stale_index_signal``
+        resolves -- the outcome of a forced reconcile is recorded with that
+        method, so a different HEAD in the key would clear the bound on every
+        run. HEAD is asked only when something is owed."""
+        failures = read_recorded_failures(source_path)
+        states = read_index_states(source_path)
+        if (
+            owed_failures_signal(failures, None, alias_name) is None
+            and chunk_coverage_signal(states, None, alias_name) is None
+        ):
+            return None
+        head = self._working_tree_head(source_path, alias_name, cancel_check)
+        return owed_failures_signal(
+            failures, head, alias_name
+        ) or chunk_coverage_signal(states, head, alias_name)
 
     def _working_tree_head(
         self,
@@ -5045,14 +6841,14 @@ class RefreshScheduler:
     ) -> Optional[str]:
         """The working tree's HEAD commit, or None when git cannot tell."""
         try:
-            head_result = run_with_cancel(
-                ["git", "rev-parse", "HEAD"],
-                cancel_check,
-                cwd=source_path,
-                capture_output=True,
-                text=True,
-                timeout=_GIT_HEAD_TIMEOUT_SECONDS,
-            )
+            # Through the git seam: on a mount-less pod the raw command found
+            # no repository, so this signal never fired there. Bug #2012: a
+            # cancelled job stops here, before the read.
+            _raise_if_refresh_cancelled(cancel_check, alias_name, "before git HEAD")
+            with git_cancel_scope(cancel_check):
+                actual_commit = self._git_backend.rev_parse(
+                    str(source_path), "HEAD", timeout=_GIT_HEAD_TIMEOUT_SECONDS
+                )
         except Exception as e:
             if _is_refresh_cancellation(e):
                 raise  # Bug #2012: a cancelled job, not an unknown HEAD
@@ -5063,9 +6859,7 @@ class RefreshScheduler:
                 e,
             )
             return None
-        if head_result.returncode != 0:
-            return None
-        return head_result.stdout.strip() or None
+        return actual_commit.strip() or None
 
     def _detect_existing_indexes(
         self, repo_path: Path, repo_alias: Optional[str] = None
@@ -5090,7 +6884,9 @@ class RefreshScheduler:
               (Bug #1390: name-match alone is not enough -- see below), OR if
               real temporal data exists at the golden-owned sister location
               (Bug #1461, only checked when repo_alias is provided)
-            - scip: True if SCIP code intelligence indexes exist
+            - scip: True if SCIP code intelligence indexes exist; the key is
+              absent when no enabled feature builds the ``scip`` index type
+              (its registry flag is then left as it is)
         """
         from code_indexer.services.temporal.temporal_collection_naming import (
             is_temporal_collection as _is_temporal,
@@ -5148,15 +6944,16 @@ class RefreshScheduler:
                 repo_alias, semantic_index_dir
             )
 
-        # Check SCIP indexes: delegate to _has_scip_indexes()
-        scip_exists = self._has_scip_indexes(repo_path)
-
-        return {
+        detected = {
             "semantic": semantic_exists,
             "fts": fts_exists,
             "temporal": temporal_exists,
-            "scip": scip_exists,
         }
+        # SCIP indexes: the scip feature's builder knows what one looks like.
+        scip_exists = self._has_scip_indexes(repo_path)
+        if scip_exists is not None:
+            detected["scip"] = scip_exists
+        return detected
 
     def _fixed_root_temporal_data_exists(
         self, repo_alias: str, legacy_index_path: Path
@@ -5198,27 +6995,18 @@ class RefreshScheduler:
             )
             return False
 
-    def _has_scip_indexes(self, repo_path: Path) -> bool:
+    def _has_scip_indexes(self, repo_path: Path) -> Optional[bool]:
         """
-        Check if SCIP code intelligence indexes exist in the repository.
+        Whether the repository holds SCIP code intelligence indexes.
 
-        SCIP indexes are stored in .code-indexer/scip/ with .scip.db files
-        (one per language project).
-
-        Args:
-            repo_path: Path to the repository root
-
-        Returns:
-            True if at least one .scip.db file exists, False otherwise
+        Asked of the ``scip`` index builder (the cidx-scip feature: one
+        ``.scip.db`` per language project, dependency packages' databases not
+        counted). None when no enabled feature builds SCIP indexes.
         """
-        scip_dir = repo_path / ".code-indexer" / "scip"
-
-        if not scip_dir.exists() or not scip_dir.is_dir():
-            return False
-
-        # Check for .scip.db files (converted SQLite indexes)
-        scip_db_files = list(scip_dir.glob("*.scip.db"))
-        return len(scip_db_files) > 0
+        builder = index_builder(SCIP_INDEX_TYPE)
+        if builder is None or builder.index_present is None:
+            return None
+        return bool(builder.index_present(str(repo_path)))
 
     def _restore_master_from_versioned(
         self, alias_name: str, master_path: Path
@@ -5277,7 +7065,12 @@ class RefreshScheduler:
         # Fix .code-indexer/ paths — non-fatal if cidx is not available
         try:
             subprocess.run(
-                ["cidx", "fix-config", "--force"],
+                [
+                    "cidx",
+                    "fix-config",
+                    "--force",
+                    *self._fix_config_backend_args(alias_name),
+                ],
                 cwd=str(master_path),
                 capture_output=True,
                 text=True,
@@ -5323,7 +7116,24 @@ class RefreshScheduler:
         # and broke 10 read paths, the UI, and access filtering. Fixed in v10.7.x.
         description_file = cidx_meta_dir / f"{short_alias}.md"
 
-        if description_file.exists():
+        shared = cidx_meta_content.shared_cidx_meta(cidx_meta_dir)
+        if (
+            shared.exists(description_file)
+            if shared is not None
+            else description_file.exists()
+        ):
+            return False
+
+        refusal = _description_generation_refusal()
+        if refusal is not None:
+            # Generating it means an agent reading master_path, which on this
+            # pod holds index state only: a "success" here would describe an
+            # empty tree. Said once per alias per reconcile, not queued.
+            logger.warning(
+                "Reconciliation: description for %s is missing and was NOT queued: %s",
+                alias_name,
+                refusal,
+            )
             return False
 
         logger.info(
@@ -5385,6 +7195,17 @@ class RefreshScheduler:
             return
 
         logger.info("Starting startup reconciliation of golden repos (Story #236)")
+        # Under a delegated content backend the clones are workspace-mcp's and
+        # this pod's golden-repos/<alias> holds index state only: its absence
+        # here says nothing about the repository, and a reverse clone of a
+        # snapshot into master_path is no repository restore. AC4 is skipped
+        # (never decided by a local "absent"); AC5 still runs.
+        restore_masters = not _repository_is_delegated()
+        if not restore_masters:
+            logger.info(
+                "Reconciliation: content_backend='delegated' -- the golden "
+                "repos' clones are not on this pod; skipping master restore"
+            )
         restored_count = 0
         description_queued_count = 0
 
@@ -5413,7 +7234,7 @@ class RefreshScheduler:
             master_path = self.golden_repos_dir / repo_name
 
             # AC4: Restore missing master via reverse CoW clone
-            if not master_path.exists():
+            if restore_masters and not master_path.exists():
                 # Bug #239: Acquire write lock before restoring to prevent
                 # RefreshScheduler from creating a CoW snapshot of a
                 # partially-restored master directory.
@@ -5537,8 +7358,11 @@ class RefreshScheduler:
         column). Explicitly OUT OF SCOPE for Bug #1406: stays bidirectional,
         completely unchanged.
         """
+        if "scip" not in detected:
+            # No enabled feature builds SCIP indexes: nothing to compare.
+            return
         registry_scip = repo_info.get("enable_scip", False)
-        filesystem_scip = detected.get("scip", False)
+        filesystem_scip = detected["scip"]
 
         if registry_scip != filesystem_scip:
             logger.info(
@@ -5630,3 +7454,98 @@ class RefreshScheduler:
                 f"(Bug #1406), not auto-enabling"
             )
         self._reconcile_scip_flag(global_alias, repo_info, detected)
+
+    @staticmethod
+    def _restore_drifted_extensions(
+        config_service: Any, source_path: str, drift: Any
+    ) -> None:
+        """Put the repo config back on its pre-drift extensions, or log why not
+        (the listing failure being raised is what the refresh reports)."""
+        try:
+            config_service.restore_repo_extensions(source_path, drift)
+        except Exception as exc:
+            logger.error(
+                "Extension drift for %s could not be restored after the file "
+                "listing failed (%s): the next refresh will not reconcile the "
+                "%d added / %d removed extensions; run a reconcile index",
+                source_path,
+                exc,
+                len(drift.added),
+                len(drift.removed),
+            )
+
+    def note_temporal_indexed(self, alias_name: str) -> None:
+        """Record that temporal shards were (re)built for ``alias_name`` in this
+        job: its snapshot publish then publishes them too."""
+        store = getattr(self, "_index_store", None)
+        if store is None or store.is_local:
+            return
+        indexed = getattr(self, "_temporal_indexed", None)
+        if indexed is None:
+            indexed = set()
+            self._temporal_indexed = indexed
+        indexed.add(alias_name)
+
+    def _publish_indexed_temporal(self, alias_name: str) -> Dict[str, str]:
+        """Publish the temporal shards built in this job (delegated store);
+        the alias-document fields, or {} when none were built (the pointer
+        keeps the version it records). Raises on failure."""
+        indexed = getattr(self, "_temporal_indexed", None) or set()
+        if alias_name not in indexed:
+            return {}
+        indexed.discard(alias_name)
+        from code_indexer.server.services.temporal_index_store import (
+            publish_temporal_root,
+        )
+
+        return publish_temporal_root(
+            self.golden_repos_dir,
+            alias_name,
+            store=self._index_store,
+            base_version=None,
+            use_current_base=True,
+        )
+
+    def serve_temporal_shards(self, alias_name: str) -> None:
+        """Under a delegated IndexStore, make this pod hold the alias's
+        recorded temporal shards before temporal indexing builds on them
+        (``temporal_index_store.served_temporal_index_root``). Raises on a
+        store failure; no-op under the local store."""
+        store = getattr(self, "_index_store", None)
+        if store is None or store.is_local:
+            return
+        from code_indexer.server.services.temporal_index_store import (
+            served_temporal_index_root,
+        )
+
+        served_temporal_index_root(self.golden_repos_dir, alias_name, store=store)
+
+
+def _record_fts_build_commit(source_path: Path) -> None:
+    """Record the commit the FTS index was just built at (best-effort).
+
+    ``cidx index`` builds semantic AND FTS in one step here, so this is the second
+    place an FTS index is produced; ``ensure_fts_index`` is the other. Both record
+    through the same helper so the freshness convention has one meaning.
+    """
+    try:
+        from code_indexer.server.services.fts_index_builder import FTS_INDEX_DIRNAME
+        from code_indexer.server.services.index_freshness import record_build_commit
+
+        record_build_commit(
+            source_path / ".code-indexer" / FTS_INDEX_DIRNAME, source_path
+        )
+    except Exception as exc:  # never fail a completed index for this
+        logger.debug("could not record FTS build commit for %s: %s", source_path, exc)
+
+
+def _description_generation_refusal() -> Optional[str]:
+    """Why golden-repo description generation cannot run on this server, or
+    None. The queued work runs through ClaudeCliManager's CliDispatcher, so it
+    runs under a delegated content backend exactly when the configured invoker
+    provisions golden repositories itself (see lifecycle_claude_cli_invoker)."""
+    from code_indexer.global_repos.lifecycle_claude_cli_invoker import (
+        lifecycle_analysis_refusal,
+    )
+
+    return lifecycle_analysis_refusal()

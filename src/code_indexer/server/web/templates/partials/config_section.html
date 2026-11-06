@@ -1064,6 +1064,94 @@ function saveLlmCredsConfig() {
     </article>
 </details>
 
+<!-- Control-Plane Metadata Section (content seam step 5a) -->
+<details class="config-section" id="section-control-plane-metadata">
+    <summary>
+        <h2>Control-Plane Metadata</h2>
+    </summary>
+    <p class="section-description">
+        Golden-repo alias pointers and write-mode markers live in the server's registry
+        (PostgreSQL in cluster mode, SQLite in solo mode) instead of in files on the
+        repository volume. Until the canary is released fleet-wide they are also written to
+        the old files (through an outbox the leader drains; its depth is the
+        <code>cidx_metadata_outbox_depth</code> gauge), so a rollback can read them. Set the read source to
+        <code>files</code> only to roll back: a rolled-back server then reads the
+        dual-written files, and its own writes go to the file first and the registry second.
+    </p>
+    <article>
+        <!-- Display Mode -->
+        <div id="display-control-plane-metadata">
+            <table class="config-table">
+                <tr>
+                    <td class="config-label">Read Source</td>
+                    <td class="config-value">{{ config.control_plane_metadata.metadata_read_source }}</td>
+                    <td class="config-description">Where aliases and write-mode markers are read from (default: registry)</td>
+                </tr>
+                <tr>
+                    <td class="config-label">File Dual-Write</td>
+                    <td class="config-value">{{ 'Yes' if config.control_plane_metadata.metadata_file_dual_write else 'No' }}</td>
+                    <td class="config-description">Also write the old alias/marker files for the rollback window (default: Yes)</td>
+                </tr>
+                <tr>
+                    <td class="config-label">Outbox Sink</td>
+                    <td class="config-value">{{ config.control_plane_metadata.metadata_outbox_sink }}</td>
+                    <td class="config-description">How the outbox sweeper writes the files: auto (default: workspace-mcp when the content backend is delegated, else local-files), workspace-mcp (mount-less fleet, through the content writer) or local-files (this pod's disk)</td>
+                </tr>
+                <tr>
+                    <td class="config-label">Outbox Drain Timeout (s)</td>
+                    <td class="config-value">{{ config.control_plane_metadata.metadata_outbox_drain_timeout_s }}</td>
+                    <td class="config-description">With local-files (or auto resolving to it), how long replay may fail continuously before the leader stops, logs every undrained key, and retries once a minute until it succeeds (default: 600)</td>
+                </tr>
+            </table>
+            <div class="form-actions">
+                <button class="outline small" onclick="toggleEditMode('control-plane-metadata')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-control-plane-metadata" method="post" action="/admin/config/control_plane_metadata" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.control_plane_metadata %}
+            <div class="validation-error">{{ validation_errors.control_plane_metadata }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label for="cpm-metadata-read-source">
+                    Read Source
+                    <select id="cpm-metadata-read-source" name="metadata_read_source">
+                        <option value="registry" {% if config.control_plane_metadata.metadata_read_source == 'registry' %}selected{% endif %}>registry</option>
+                        <option value="files" {% if config.control_plane_metadata.metadata_read_source == 'files' %}selected{% endif %}>files</option>
+                    </select>
+                    <small>registry by default. files is the rollback setting.</small>
+                </label>
+                <label for="cpm-metadata-file-dual-write">
+                    File Dual-Write
+                    <select id="cpm-metadata-file-dual-write" name="metadata_file_dual_write">
+                        <option value="true" {% if config.control_plane_metadata.metadata_file_dual_write %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.control_plane_metadata.metadata_file_dual_write %}selected{% endif %}>No</option>
+                    </select>
+                    <small>Turned off by the release that retires the canary.</small>
+                </label>
+                <label for="cpm-metadata-outbox-sink">
+                    Outbox Sink
+                    <select id="cpm-metadata-outbox-sink" name="metadata_outbox_sink">
+                        <option value="auto" {% if config.control_plane_metadata.metadata_outbox_sink == 'auto' %}selected{% endif %}>auto</option>
+                        <option value="local-files" {% if config.control_plane_metadata.metadata_outbox_sink == 'local-files' %}selected{% endif %}>local-files</option>
+                        <option value="workspace-mcp" {% if config.control_plane_metadata.metadata_outbox_sink == 'workspace-mcp' %}selected{% endif %}>workspace-mcp</option>
+                    </select>
+                    <small>auto follows the content backend. workspace-mcp needs a content writer (delegated content backend): without one the outbox is kept, not drained.</small>
+                </label>
+                <label for="cpm-metadata-outbox-drain-timeout">
+                    Outbox Drain Timeout (s)
+                    <input type="number" id="cpm-metadata-outbox-drain-timeout" name="metadata_outbox_drain_timeout_s" min="1" value="{{ config.control_plane_metadata.metadata_outbox_drain_timeout_s }}">
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('control-plane-metadata')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
 <!-- Temporal Legacy Migration Settings Section (Issue #1548) -->
 <details class="config-section" id="section-temporal-legacy-migration">
     <summary>
@@ -1351,62 +1439,6 @@ function saveLlmCredsConfig() {
             <div class="form-actions">
                 <button type="submit" class="primary">Save</button>
                 <button type="button" class="secondary" onclick="cancelEdit('temporal-indexing')">Cancel</button>
-            </div>
-        </form>
-    </article>
-</details>
-
-<!-- X-Ray Search Settings Section (Story #977) -->
-<details class="config-section" id="section-xray">
-    <summary>
-        <h2>X-Ray Search</h2>
-    </summary>
-    <p class="section-description">
-        Configures the X-Ray precision AST-aware code search engine. The timeout controls
-        the per-job wall-clock cap for each X-Ray search invocation. The worker threads
-        setting controls the ThreadPoolExecutor size used for Phase 2 AST evaluation.
-        Changes take effect immediately for new jobs; no server restart is required.
-    </p>
-    <article>
-        <!-- Display Mode -->
-        <div id="display-xray">
-            <table class="config-table">
-                <tr>
-                    <td class="config-label">Timeout (seconds)</td>
-                    <td class="config-value">{{ config.xray.xray_timeout_seconds }}</td>
-                    <td class="config-description">Per-job wall-clock timeout (default: 120, range 10-600)</td>
-                </tr>
-                <tr>
-                    <td class="config-label">Worker Threads</td>
-                    <td class="config-value">{{ config.xray.xray_worker_threads }}</td>
-                    <td class="config-description">AST evaluation thread pool size (default: 2, range 1-8)</td>
-                </tr>
-            </table>
-            <div class="form-actions">
-                <button class="outline small" onclick="toggleEditMode('xray')">Edit</button>
-            </div>
-        </div>
-        <!-- Edit Mode -->
-        <form id="edit-form-xray" method="post" action="/admin/config/xray" style="display: none;">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            {% if validation_errors.xray %}
-            <div class="validation-error">{{ validation_errors.xray }}</div>
-            {% endif %}
-            <div class="form-grid">
-                <label>
-                    Timeout (seconds)
-                    <input type="number" id="xray-timeout-seconds" name="xray_timeout_seconds" value="{{ config.xray.xray_timeout_seconds }}" min="10" max="600">
-                    <small>Range: 10-600 seconds (default: 120). Per-job wall-clock cap for X-Ray searches.</small>
-                </label>
-                <label>
-                    Worker Threads
-                    <input type="number" id="xray-worker-threads" name="xray_worker_threads" value="{{ config.xray.xray_worker_threads }}" min="1" max="8">
-                    <small>Range: 1-8 threads (default: 2). Size of the ThreadPoolExecutor for AST evaluation.</small>
-                </label>
-            </div>
-            <div class="form-actions">
-                <button type="submit" class="primary">Save</button>
-                <button type="button" class="secondary" onclick="cancelEdit('xray')">Cancel</button>
             </div>
         </form>
     </article>
@@ -2127,6 +2159,11 @@ function saveLlmCredsConfig() {
                         <td class="config-value">{{ 'Enabled' if config.indexing.temporal_all_branches_enabled else 'Disabled' }}</td>
                         <td class="config-note"><small>When disabled (default), golden temporal indexing tracks only the registered branch; all-branches requests are rejected</small></td>
                     </tr>
+                    <tr>
+                        <td class="config-label">Golden Description Generation</td>
+                        <td class="config-value">{{ 'Enabled' if config.indexing.golden_description_generation_enabled else 'Disabled' }}</td>
+                        <td class="config-note"><small>When disabled, golden-repo add skips the description/lifecycle generation (orchestrator seam). Use when that seam is failing so registration keeps up; only omits the generated description, never search/index data</small></td>
+                    </tr>
                 </tbody>
             </table>
             <div class="section-actions">
@@ -2187,6 +2224,15 @@ function saveLlmCredsConfig() {
                     Temporal All-Branches Indexing
                     <small>When disabled (default), golden temporal indexing tracks only the branch registered at golden-repo registration. Enabling later requires no re-index.</small>
                 </label>
+                <label for="indexing-golden-description-generation-enabled">
+                    <!-- EVO-65484: hidden fallback guarantees the key is always submitted
+                         even when unchecked (browsers omit unchecked checkboxes) -- same
+                         pattern as the temporal_all_branches_enabled field above. -->
+                    <input type="hidden" name="golden_description_generation_enabled" value="false">
+                    <input type="checkbox" id="indexing-golden-description-generation-enabled" name="golden_description_generation_enabled" value="true" {% if config.indexing.golden_description_generation_enabled %}checked{% endif %}>
+                    Golden Description Generation
+                    <small>Enabled by default. Disable to skip the synchronous description/lifecycle generation on golden-repo add (the orchestrator -> Claude seam) -- use when that seam is failing so registration throughput is not throttled. Only the generated description is omitted; search/index data is unaffected.</small>
+                </label>
             </div>
             <div class="form-actions">
                 <button type="submit" class="primary">Save</button>
@@ -2197,12 +2243,15 @@ function saveLlmCredsConfig() {
 </details>
 
 
+{# A core setting: stored as scip_config (its historical name) and posted as
+   section "scip". The cidx-scip feature's own settings are in the Feature
+   Settings block (partials/feature_settings.html). #}
 <details class="config-section" id="section-scip">
     <summary>
-        <h2>SCIP Code Intelligence</h2>
+        <h2>Temporal Index Staleness</h2>
     </summary>
     <p class="section-description">
-        Configures SCIP (Semantic Code Intelligence Protocol) for advanced code navigation features like go-to-definition, find-references, and call chain analysis. Indexing timeouts accommodate large codebases while preventing runaway processes. Temporal stale threshold controls when git history indexes are considered outdated and need regeneration.
+        Controls when an activated repository's git history (temporal) index is considered outdated and needs regeneration.
     </p>
     <article>
         <!-- Display Mode -->
@@ -3035,6 +3084,197 @@ function saveLlmCredsConfig() {
 </details>
 
 
+<!-- Trusted mcp-gateway bearer auth (EVO-66121) -->
+<details class="config-section" id="section-trusted_gateway">
+    <summary>
+        <h2>Trusted Gateway (per-user bearer)</h2>
+    </summary>
+    <p class="section-description">
+        Trusts an mcp-gateway as an external RS256 bearer-token issuer. When enabled, cidx validates the per-user RS256 JWTs the gateway forwards (against the gateway JWKS) and JIT-provisions the user via the OIDC path, so cidx enforces its own per-user access (groups / repo_group_access). This is a separate issuer from the SSO Authentication section above. <strong>Changes to this section apply on the next server restart</strong> (the authenticator is built once at startup).
+    </p>
+    <article>
+        <!-- Display Mode -->
+        <div id="display-trusted_gateway">
+            <table class="config-table">
+                <tbody>
+                    <tr>
+                        <td class="config-label">Enabled</td>
+                        <td class="config-value">{{ 'Yes' if config.trusted_gateway.enabled else 'No' }}</td>
+                        <td class="config-note"></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Issuer</td>
+                        <td class="config-value">{{ config.trusted_gateway.issuer or 'Not configured' }}</td>
+                        <td class="config-note">
+                            {% if 'issuer' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">JWKS URI</td>
+                        <td class="config-value">{{ config.trusted_gateway.jwks_uri or 'Not configured' }}</td>
+                        <td class="config-note">
+                            {% if 'jwks_uri' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Audience</td>
+                        <td class="config-value">{{ config.trusted_gateway.audience or 'Not configured' }}</td>
+                        <td class="config-note">
+                            {% if 'audience' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Email Claim</td>
+                        <td class="config-value">{{ config.trusted_gateway.email_claim }}</td>
+                        <td class="config-note"></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Username Claim</td>
+                        <td class="config-value">{{ config.trusted_gateway.username_claim }}</td>
+                        <td class="config-note"></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Groups Claim</td>
+                        <td class="config-value">{{ config.trusted_gateway.groups_claim }}</td>
+                        <td class="config-note"><small>Claim containing user's groups</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Group Mappings</td>
+                        <td class="config-value">
+                            {% if config.trusted_gateway.group_mappings %}
+                                <div style="font-family: monospace; font-size: 0.9em;">
+                                {% for mapping in config.trusted_gateway.group_mappings %}
+                                    {{ mapping.external_group_id }} → {{ mapping.cidx_group }}<br>
+                                {% endfor %}
+                                </div>
+                            {% else %}
+                                None configured
+                            {% endif %}
+                        </td>
+                        <td class="config-note"><small>Maps gateway groups to CIDX groups</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Require Email Verification</td>
+                        <td class="config-value">{{ 'Yes' if config.trusted_gateway.require_email_verification else 'No' }}</td>
+                        <td class="config-note"></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Enable JIT Provisioning</td>
+                        <td class="config-value">{{ 'Yes' if config.trusted_gateway.enable_jit_provisioning else 'No' }}</td>
+                        <td class="config-note"><small>Auto-create users on first request</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Default Role</td>
+                        <td class="config-value">{{ config.trusted_gateway.default_role }}</td>
+                        <td class="config-note"><small>For JIT-provisioned users</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Leeway (seconds)</td>
+                        <td class="config-value">{{ config.trusted_gateway.leeway_seconds }}</td>
+                        <td class="config-note">
+                            {% if 'leeway_seconds' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+            <div class="section-actions">
+                <button class="outline small" onclick="toggleEditMode('trusted_gateway')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-trusted_gateway" method="post" action="/admin/config/trusted_gateway" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.trusted_gateway %}
+            <div class="validation-error">{{ validation_errors.trusted_gateway }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label for="trusted_gateway-enabled">
+                    Enabled
+                    <select id="trusted_gateway-enabled" name="enabled">
+                        <option value="true" {% if config.trusted_gateway.enabled %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.trusted_gateway.enabled %}selected{% endif %}>No</option>
+                    </select>
+                </label>
+                <label for="trusted_gateway-issuer">
+                    Issuer
+                    <input type="text" id="trusted_gateway-issuer" name="issuer" value="{{ config.trusted_gateway.issuer }}" placeholder="https://mcp.test.lightspeedtools.cloud">
+                    <small>Expected <code>iss</code>; also routes the auth dispatch</small>
+                </label>
+                <label for="trusted_gateway-jwks-uri">
+                    JWKS URI
+                    <input type="text" id="trusted_gateway-jwks-uri" name="jwks_uri" value="{{ config.trusted_gateway.jwks_uri }}" placeholder="https://mcp.test.lightspeedtools.cloud/oauth/jwks.json">
+                    <small>Gateway JWKS endpoint (RS256 signing keys)</small>
+                </label>
+                <label for="trusted_gateway-audience">
+                    Audience
+                    <input type="text" id="trusted_gateway-audience" name="audience" value="{{ config.trusted_gateway.audience }}">
+                    <small>Expected <code>aud</code> (this cidx deployment)</small>
+                </label>
+                <label for="trusted_gateway-email-claim">
+                    Email Claim
+                    <input type="text" id="trusted_gateway-email-claim" name="email_claim" value="{{ config.trusted_gateway.email_claim }}">
+                </label>
+                <label for="trusted_gateway-username-claim">
+                    Username Claim
+                    <input type="text" id="trusted_gateway-username-claim" name="username_claim" value="{{ config.trusted_gateway.username_claim }}">
+                    <small>Used ONLY when creating new users via JIT provisioning</small>
+                </label>
+                <label for="trusted_gateway-groups-claim">
+                    Groups Claim
+                    <input type="text" id="trusted_gateway-groups-claim" name="groups_claim" value="{{ config.trusted_gateway.groups_claim }}">
+                    <small>Claim containing user's groups (e.g., "groups", "roles")</small>
+                </label>
+                <label for="trusted_gateway-group-mappings" style="grid-column: 1 / -1;">
+                    Group Mappings (JSON Array)
+                    <textarea id="trusted_gateway-group-mappings" name="group_mappings" rows="6" placeholder='[{"external_group_id": "guid-or-name", "cidx_group": "admins"}]'>{{ config.trusted_gateway.group_mappings | tojson if config.trusted_gateway.group_mappings else '[]' }}</textarea>
+                    <small>Map gateway groups to CIDX groups. Each object: <code>external_group_id</code> (required), <code>cidx_group</code> (required, "admins"/"powerusers"/"users").</small>
+                </label>
+                <label for="trusted_gateway-require-email-verification">
+                    Require Email Verification
+                    <select id="trusted_gateway-require-email-verification" name="require_email_verification">
+                        <option value="true" {% if config.trusted_gateway.require_email_verification %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.trusted_gateway.require_email_verification %}selected{% endif %}>No</option>
+                    </select>
+                </label>
+                <label for="trusted_gateway-enable-jit-provisioning">
+                    Enable JIT Provisioning
+                    <select id="trusted_gateway-enable-jit-provisioning" name="enable_jit_provisioning">
+                        <option value="true" {% if config.trusted_gateway.enable_jit_provisioning %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.trusted_gateway.enable_jit_provisioning %}selected{% endif %}>No</option>
+                    </select>
+                    <small>Auto-create users on first request</small>
+                </label>
+                <label for="trusted_gateway-default-role">
+                    Default Role
+                    <select id="trusted_gateway-default-role" name="default_role">
+                        <option value="normal_user" {% if config.trusted_gateway.default_role == 'normal_user' %}selected{% endif %}>Normal User</option>
+                        <option value="admin" {% if config.trusted_gateway.default_role == 'admin' %}selected{% endif %}>Admin</option>
+                    </select>
+                    <small>Role assigned to JIT-provisioned users</small>
+                </label>
+                <label for="trusted_gateway-leeway-seconds">
+                    Leeway (seconds)
+                    <input type="number" id="trusted_gateway-leeway-seconds" name="leeway_seconds" value="{{ config.trusted_gateway.leeway_seconds }}" min="0">
+                    <small>Clock-skew tolerance for exp/iat</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('trusted_gateway')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
+
 <!-- Password Security Settings Section -->
 <details class="config-section" id="section-password_security">
     <summary>
@@ -3379,7 +3619,7 @@ function saveLlmCredsConfig() {
     </summary>
     <article>
         <p class="section-description">
-            Configures Claude CLI integration settings for repository analysis and research assistant features. Max concurrent processes controls parallelism for description generation jobs. Description refresh interval determines how often repository descriptions are regenerated. Research assistant timeout limits execution time for Claude research sessions. <strong>Note:</strong> The Claude model used for all analysis operations (description generation, dependency map analysis, research assistant) is configured via the <em>Analysis Model</em> setting in the <em>Golden Repository Settings</em> section above.
+            Configures Claude CLI integration settings for repository analysis and research assistant features. Max concurrent processes controls parallelism for description generation jobs. Description refresh interval determines how often repository descriptions are regenerated. Research assistant timeout limits execution time for Claude research sessions. <strong>Note:</strong> The Claude model used for all analysis operations (description generation, research assistant, and analysis run by enabled features) is configured via the <em>Analysis Model</em> setting in the <em>Golden Repository Settings</em> section above.
         </p>
         <!-- Display Mode -->
         <div id="display-claude-integration">
@@ -3409,79 +3649,6 @@ function saveLlmCredsConfig() {
                         <td class="config-label">Research Assistant Timeout (seconds)</td>
                         <td class="config-value">{{ config.claude_cli.research_assistant_timeout_seconds }}</td>
                         <td class="config-note"><small>Timeout for Research Assistant Claude CLI execution (default: 1200 = 20 minutes)</small></td>
-                    </tr>
-                    <!-- Dependency Map Settings -->
-                    <tr><td colspan="3" style="padding-top: 1em;"><strong>Dependency Map</strong></td></tr>
-                    <tr>
-                        <td class="config-label">Dependency Map Enabled</td>
-                        <td class="config-value">{{ 'Yes' if config.claude_cli.dependency_map_enabled else 'No' }}</td>
-                        <td class="config-note">
-                            {% if 'dependency_map_enabled' in restart_required_fields %}
-                            <small class="restart-note">Requires server restart</small>
-                            {% endif %}
-                            <small>Enable cross-repository dependency map generation (default: No)</small>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Refresh Interval (hours)</td>
-                        <td class="config-value">{{ config.claude_cli.dependency_map_interval_hours }}</td>
-                        <td class="config-note"><small>How often to run delta analysis (default: 168 = 1 week)</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Pass Timeout (seconds)</td>
-                        <td class="config-value">{{ config.claude_cli.dependency_map_pass_timeout_seconds }}</td>
-                        <td class="config-note"><small>Timeout per analysis pass (default: 1800 = 30 min, Pass 1/3 use half)</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Pass 1 Max Turns (Synthesis)</td>
-                        <td class="config-value">{{ config.claude_cli.dependency_map_pass1_max_turns }}</td>
-                        <td class="config-note"><small>Max Claude CLI turns for domain clustering (default: 0 = single-shot)</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Pass 2 Max Turns (Per-Domain)</td>
-                        <td class="config-value">{{ config.claude_cli.dependency_map_pass2_max_turns }}</td>
-                        <td class="config-note"><small>Max turns for per-domain source analysis (default: 0 = unlimited)</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Delta Max Turns</td>
-                        <td class="config-value">{{ config.claude_cli.dependency_map_delta_max_turns }}</td>
-                        <td class="config-note"><small>Max turns for incremental delta analysis (default: 0 = unlimited)</small></td>
-                    </tr>
-                    <!-- Refinement Settings (Story #359) -->
-                    <tr><td colspan="3" style="padding-top: 1em;"><strong>Document Refinement</strong></td></tr>
-                    <tr>
-                        <td class="config-label">Refinement Enabled</td>
-                        <td class="config-value">{{ 'Yes' if config.claude_cli.refinement_enabled else 'No' }}</td>
-                        <td class="config-note"><small>Enable scheduled fact-checking of dependency documents (default: No)</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Refinement Interval (hours)</td>
-                        <td class="config-value">{{ config.claude_cli.refinement_interval_hours }}</td>
-                        <td class="config-note"><small>How often to run refinement cycles (default: 24)</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Domains Per Run</td>
-                        <td class="config-value">{{ config.claude_cli.refinement_domains_per_run }}</td>
-                        <td class="config-note"><small>Number of domains to refine per cycle (default: 3)</small></td>
-                    </tr>
-                    <!-- Post-Generation Verification Settings (Story #724) -->
-                    <tr><td colspan="3" style="padding-top: 1em;"><strong>Post-Generation Verification</strong></td></tr>
-                    <tr>
-                        <td class="config-label">Post-generation verification pass (fact-check)</td>
-                        <td class="config-value">{{ 'Yes' if config.claude_cli.dep_map_fact_check_enabled else 'No' }}</td>
-                        <td class="config-note"><small>When enabled, verify dependency maps and descriptions against source code after generation. Adds latency. Default: off.</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Verification timeout (seconds, 60-3600)</td>
-                        <td class="config-value">{{ config.claude_cli.fact_check_timeout_seconds }}</td>
-                        <td class="config-note"><small>Per-invocation timeout for the verification Claude CLI call. Retries once after 30s delay; falls back to original on double timeout. Default: 600.</small></td>
-                    </tr>
-                    <!-- Auto-repair Settings (Story #927) -->
-                    <tr><td colspan="3" style="padding-top: 1em;"><strong>Scheduled Auto-repair</strong></td></tr>
-                    <tr>
-                        <td class="config-label">Auto-repair after scheduled jobs</td>
-                        <td class="config-value">{{ 'Yes' if config.claude_cli.dep_map_auto_repair_enabled else 'No' }}</td>
-                        <td class="config-note"><small>When enabled, scheduled delta and refinement jobs automatically run a repair pass once if anomalies are detected. Anomalies that don't resolve will be retried on the next scheduled cycle. Default: off.</small></td>
                     </tr>
                 </tbody>
             </table>
@@ -3518,81 +3685,6 @@ function saveLlmCredsConfig() {
                     Research Assistant Timeout (seconds)
                     <input type="number" id="claude-research-timeout" name="research_assistant_timeout_seconds" value="{{ config.claude_cli.research_assistant_timeout_seconds }}" min="60" max="7200">
                     <small>Timeout for Research Assistant Claude CLI execution (60-7200, default: 1200 = 20 minutes)</small>
-                </label>
-                <!-- Dependency Map Settings -->
-                <label for="depmap-enabled">
-                    Dependency Map Enabled
-                    <select id="depmap-enabled" name="dependency_map_enabled">
-                        <option value="true" {% if config.claude_cli.dependency_map_enabled %}selected{% endif %}>Yes</option>
-                        <option value="false" {% if not config.claude_cli.dependency_map_enabled %}selected{% endif %}>No</option>
-                    </select>
-                    <small>Enable cross-repository dependency map generation (default: No)</small>
-                </label>
-                <label for="depmap-interval">
-                    Dependency Map Refresh Interval (hours)
-                    <input type="number" id="depmap-interval" name="dependency_map_interval_hours" value="{{ config.claude_cli.dependency_map_interval_hours }}" min="1">
-                    <small>How often to run delta analysis (min: 1, default: 168 = 1 week)</small>
-                </label>
-                <label for="depmap-pass-timeout">
-                    Pass Timeout (seconds)
-                    <input type="number" id="depmap-pass-timeout" name="dependency_map_pass_timeout_seconds" value="{{ config.claude_cli.dependency_map_pass_timeout_seconds }}" min="60">
-                    <small>Timeout per analysis pass (min: 60, default: 1800 = 30 min)</small>
-                </label>
-                <label for="depmap-pass1-turns">
-                    Pass 1 Max Turns (Synthesis)
-                    <input type="number" id="depmap-pass1-turns" name="dependency_map_pass1_max_turns" value="{{ config.claude_cli.dependency_map_pass1_max_turns }}" min="0">
-                    <small>0=single-shot (no tools), &gt;0=agentic mode (min: 0, default: 0)</small>
-                </label>
-                <label for="depmap-pass2-turns">
-                    Pass 2 Max Turns (Per-Domain)
-                    <input type="number" id="depmap-pass2-turns" name="dependency_map_pass2_max_turns" value="{{ config.claude_cli.dependency_map_pass2_max_turns }}" min="0">
-                    <small>0=unlimited (no tool-use cap), &gt;0=bounded agentic mode (min: 0, default: 0)</small>
-                </label>
-                <label for="depmap-delta-turns">
-                    Delta Max Turns
-                    <input type="number" id="depmap-delta-turns" name="dependency_map_delta_max_turns" value="{{ config.claude_cli.dependency_map_delta_max_turns }}" min="0">
-                    <small>0=unlimited (no tool-use cap), &gt;0=bounded agentic mode (min: 0, default: 0)</small>
-                </label>
-                <!-- Refinement Settings (Story #359) -->
-                <label for="refinement-enabled">
-                    Refinement Enabled
-                    <select id="refinement-enabled" name="refinement_enabled">
-                        <option value="true" {% if config.claude_cli.refinement_enabled %}selected{% endif %}>Yes</option>
-                        <option value="false" {% if not config.claude_cli.refinement_enabled %}selected{% endif %}>No</option>
-                    </select>
-                    <small>Enable scheduled fact-checking of dependency documents against source code (default: No)</small>
-                </label>
-                <label for="refinement-interval">
-                    Refinement Interval (hours)
-                    <input type="number" id="refinement-interval" name="refinement_interval_hours" value="{{ config.claude_cli.refinement_interval_hours }}" min="1">
-                    <small>How often to run refinement cycles (default: 24 hours)</small>
-                </label>
-                <label for="refinement-domains-per-run">
-                    Domains Per Run
-                    <input type="number" id="refinement-domains-per-run" name="refinement_domains_per_run" value="{{ config.claude_cli.refinement_domains_per_run }}" min="1" max="50">
-                    <small>Number of domains to refine per cycle (default: 3)</small>
-                </label>
-                <!-- Post-Generation Verification Settings (Story #724) -->
-                <label for="dep-map-fact-check-enabled">
-                    Post-generation verification pass (fact-check)
-                    <select id="dep-map-fact-check-enabled" name="dep_map_fact_check_enabled">
-                        <option value="true" {% if config.claude_cli.dep_map_fact_check_enabled %}selected{% endif %}>Yes</option>
-                        <option value="false" {% if not config.claude_cli.dep_map_fact_check_enabled %}selected{% endif %}>No</option>
-                    </select>
-                    <small>When enabled, verify dependency maps and descriptions against source code after generation. Runs after Pass 2 per-domain, delta merge, description generation, and repair Phase 1. Adds latency. Default: off.</small>
-                </label>
-                <label for="fact-check-timeout">
-                    Verification timeout (seconds, 60-3600)
-                    <input type="number" id="fact-check-timeout" name="fact_check_timeout_seconds" value="{{ config.claude_cli.fact_check_timeout_seconds }}" min="60" max="3600">
-                    <small>Per-invocation timeout for the verification Claude CLI call. Retries once after a 30s delay; falls back to original content on double timeout. Default: 600.</small>
-                </label>
-                <label for="dep-map-auto-repair-enabled">
-                    Auto-repair after scheduled jobs
-                    <select id="dep-map-auto-repair-enabled" name="dep_map_auto_repair_enabled">
-                        <option value="true" {% if config.claude_cli.dep_map_auto_repair_enabled %}selected{% endif %}>Yes</option>
-                        <option value="false" {% if not config.claude_cli.dep_map_auto_repair_enabled %}selected{% endif %}>No</option>
-                    </select>
-                    <small>When enabled, scheduled delta and refinement jobs automatically run a repair pass once if anomalies are detected. Anomalies that don't resolve will be retried on the next scheduled cycle.</small>
                 </label>
             </div>
             <div class="form-actions">
@@ -4459,113 +4551,6 @@ function saveLlmCredsConfig() {
 
 </div>
 
-<!-- ═══════════════════════════════════════════════════════════════ -->
-<!-- GROUP: Wiki -->
-<!-- ═══════════════════════════════════════════════════════════════ -->
-<div class="config-group">
-    <h3 class="config-group-header">Wiki</h3>
-
-<!-- Wiki Configuration Section (Story #323) -->
-<details class="config-section" id="section-wiki">
-    <summary>
-        <h2>Wiki Configuration</h2>
-    </summary>
-    <article>
-        <p class="section-description">
-            Controls which knowledge-base-specific metadata behaviors are active in the wiki. All toggles default to enabled to preserve current behavior. Disable individual toggles to suppress KB-specific fields for generic wikis.
-        </p>
-        <!-- Display Mode -->
-        <div id="display-wiki">
-            <table class="config-table">
-                <tbody>
-                    <tr>
-                        <td class="config-label">Header Block Parsing</td>
-                        <td class="config-value">{{ 'Yes' if config.wiki_config.enable_header_block_parsing else 'No' }}</td>
-                        <td class="config-note"><small>Strip legacy Article Number / Title / Status header blocks from body</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Article Number Field</td>
-                        <td class="config-value">{{ 'Yes' if config.wiki_config.enable_article_number else 'No' }}</td>
-                        <td class="config-note"><small>Show article_number / original_article in metadata panel</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Publication Status Field</td>
-                        <td class="config-value">{{ 'Yes' if config.wiki_config.enable_publication_status else 'No' }}</td>
-                        <td class="config-note"><small>Show publication_status in metadata panel</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Views Seeding</td>
-                        <td class="config-value">{{ 'Yes' if config.wiki_config.enable_views_seeding else 'No' }}</td>
-                        <td class="config-note"><small>Seed view counts from front matter views field; also shows Salesforce Views in panel</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Metadata Display Order</td>
-                        <td class="config-value">{{ config.wiki_config.metadata_display_order if config.wiki_config.metadata_display_order else '(default)' }}</td>
-                        <td class="config-note"><small>Comma-separated list of metadata field keys controlling panel order</small></td>
-                    </tr>
-                </tbody>
-            </table>
-            <div class="section-actions">
-                <button class="outline small" onclick="toggleEditMode('wiki')">Edit</button>
-            </div>
-        </div>
-        <!-- Edit Mode -->
-        <form id="edit-form-wiki" method="post" action="/admin/config/wiki" style="display: none;">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            {% if validation_errors.wiki %}
-            <div class="validation-error">{{ validation_errors.wiki }}</div>
-            {% endif %}
-            <div class="form-grid">
-                <label for="wiki-header-parsing">
-                    Header Block Parsing
-                    <select id="wiki-header-parsing" name="enable_header_block_parsing">
-                        <option value="true" {% if config.wiki_config.enable_header_block_parsing %}selected{% endif %}>Yes</option>
-                        <option value="false" {% if not config.wiki_config.enable_header_block_parsing %}selected{% endif %}>No</option>
-                    </select>
-                    <small>Strip legacy Article Number / Title / Status header blocks from body</small>
-                </label>
-                <label for="wiki-article-number">
-                    Article Number Field
-                    <select id="wiki-article-number" name="enable_article_number">
-                        <option value="true" {% if config.wiki_config.enable_article_number %}selected{% endif %}>Yes</option>
-                        <option value="false" {% if not config.wiki_config.enable_article_number %}selected{% endif %}>No</option>
-                    </select>
-                    <small>Show article_number / original_article in metadata panel</small>
-                </label>
-                <label for="wiki-pub-status">
-                    Publication Status Field
-                    <select id="wiki-pub-status" name="enable_publication_status">
-                        <option value="true" {% if config.wiki_config.enable_publication_status %}selected{% endif %}>Yes</option>
-                        <option value="false" {% if not config.wiki_config.enable_publication_status %}selected{% endif %}>No</option>
-                    </select>
-                    <small>Show publication_status in metadata panel</small>
-                </label>
-                <label for="wiki-views-seeding">
-                    Views Seeding
-                    <select id="wiki-views-seeding" name="enable_views_seeding">
-                        <option value="true" {% if config.wiki_config.enable_views_seeding %}selected{% endif %}>Yes</option>
-                        <option value="false" {% if not config.wiki_config.enable_views_seeding %}selected{% endif %}>No</option>
-                    </select>
-                    <small>Seed view counts from front matter views field; also shows Salesforce Views in panel</small>
-                </label>
-                <label for="wiki-display-order">
-                    Metadata Display Order
-                    <input type="text" id="wiki-display-order" name="metadata_display_order"
-                           value="{{ config.wiki_config.metadata_display_order }}"
-                           placeholder="e.g. author,created,modified,visibility">
-                    <small>Comma-separated list of metadata field keys. Fields not listed appear after listed ones, sorted alphabetically. Leave empty to use default order.</small>
-                </label>
-            </div>
-            <div class="form-actions">
-                <button type="submit" class="primary">Save</button>
-                <button type="button" class="secondary" onclick="cancelEdit('wiki')">Cancel</button>
-            </div>
-        </form>
-    </article>
-</details>
-
-
-</div>
 
 <script>
 // Provider API Keys JavaScript (Story #20)

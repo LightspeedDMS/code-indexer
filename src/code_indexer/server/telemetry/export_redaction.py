@@ -151,3 +151,8 @@ class RedactingLogRecordExporter(LogRecordExporter):
 
     def shutdown(self) -> None:
         self._delegate.shutdown()
+
+    def force_flush(self, timeout_millis: int = 30000) -> bool:
+        """Flush the wrapped exporter. Abstract on LogRecordExporter in
+        current OpenTelemetry SDKs: without it the class cannot be built."""
+        return bool(self._delegate.force_flush(timeout_millis))

@@ -20,8 +20,10 @@ import os
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, Any, Optional, TYPE_CHECKING
+from typing import Callable, Dict, Any, Optional, Protocol, Tuple, TYPE_CHECKING
 
+from code_indexer.global_repos.write_mode_markers import WriteModeMarkers
+from code_indexer.utils.blob_hash import git_blob_hash_bytes
 from code_indexer.utils.file_locking import nfs_safe_fsync, nfs_safe_link_exclusive
 from code_indexer.utils.path_confinement import (
     reject_if_within_git_directory,
@@ -33,10 +35,19 @@ if TYPE_CHECKING:
     from code_indexer.server.repositories.activated_repo_manager import (
         ActivatedRepoManager,
     )
+    from code_indexer.server.services.golden_repo_writer import (
+        Expected,
+        GoldenRepoWriteTarget,
+    )
     from code_indexer.server.services.cidx_meta_access.file_doors import (
         CatalogFileAccess,
     )
     from code_indexer.server.services.xray_pattern_authority import PatternWriter
+
+_UTF8_BOM = b"\xef\xbb\xbf"
+#: Why a content hash may not match, as each tool has always worded it.
+_EDIT_STALE_REASON = "File may have been modified by another process."
+_DELETE_STALE_REASON = "File may have been modified since hash was computed."
 
 logger = logging.getLogger(__name__)
 
@@ -193,7 +204,7 @@ class FileCRUDService:
         Set the golden repos directory for write-mode marker lookup (Story #231).
 
         Called at startup to inject the golden repos path so that write-mode
-        enforcement can check for marker files under .write_mode/.
+        enforcement can find the write-mode markers for that directory.
 
         Args:
             golden_repos_dir: Path to the golden repos root directory
@@ -213,7 +224,8 @@ class FileCRUDService:
 
         Write-exception repos (e.g. cidx-meta-global) require callers to call
         enter_write_mode() before issuing CRUD operations.  This is signalled by
-        a marker file at golden_repos_dir/.write_mode/{alias_without_global}.json.
+        a write-mode marker for {alias_without_global} (control-plane metadata,
+        see global_repos/write_mode_markers.py).
 
         If the repo is NOT a write exception, this check is a no-op.
 
@@ -236,19 +248,16 @@ class FileCRUDService:
                 f"golden_repos_dir not configured. Server may not be fully initialized."
             )
 
-        # Build alias name without -global suffix for marker filename
+        if not WriteModeMarkers(golden_repos_dir).exists(repo_alias):
+            raise PermissionError(
+                f"Repo '{repo_alias}' requires write mode. "
+                f"Call enter_write_mode('{repo_alias}') before performing file operations."
+            )
         alias_without_global = (
             repo_alias[: -len("-global")]
             if repo_alias.endswith("-global")
             else repo_alias
         )
-        marker_file = golden_repos_dir / ".write_mode" / f"{alias_without_global}.json"
-
-        if not marker_file.exists():
-            raise PermissionError(
-                f"Repo '{repo_alias}' requires write mode. "
-                f"Call enter_write_mode('{repo_alias}') before performing file operations."
-            )
         renewer = self._write_mode_lease_renewer
         if renewer is None or not renewer(golden_repos_dir, alias_without_global):
             raise PermissionError(
@@ -320,7 +329,14 @@ class FileCRUDService:
         # get_activated_repo_path() always constructs a path string without checking
         # existence. Even a registered alias could have its directory removed out
         # from under it; deny operations on non-existent paths with the same error.
-        if not repo_path.exists():
+        # Content seam: a copy that is not on this pod (workspace-mcp) has only
+        # the registry gate above; the reader/writer then fail loudly on a copy
+        # missing there (never an empty repository).
+        from code_indexer.server.services.activated_copy_content import (
+            activated_copy_present,
+        )
+
+        if not activated_copy_present(repo_manager, username, repo_alias, repo_path):
             raise not_activated_error
 
         return repo_path
@@ -456,52 +472,16 @@ class FileCRUDService:
         # Resolve repository path (checks write exceptions first - Story #197)
         repo_path = self._resolve_repo_path(repo_alias, username)
         self._refuse_hidden_catalog_path(repo_path, file_path, access_for)
-
-        # Bug #1891: resolve + confine BEFORE any exists()/open() call.
-        # _validate_crud_path() above only rejects literal ".." components
-        # and absolute paths -- it does not catch a symlink already
-        # present inside the repository (e.g. tracked in the underlying
-        # git repo) that points outside the repository root.
         full_path = resolve_confined_path(repo_path, file_path)
-
-        # Bug #1891 (final SECURITY round): a symlink tracked INSIDE the
-        # repository (e.g. "gitlink" -> ".git") is itself confined to
-        # repo_path, so resolve_confined_path() above does not catch it --
-        # the RESOLVED target can still land inside ".git" (e.g.
-        # repo_path/.git/hooks/pre-commit), letting a write-mode user
-        # plant a hook that executes on the server's next `git commit`.
         reject_if_within_git_directory(repo_path, full_path, "create_file")
         reject_if_within_index_directory(repo_path, full_path, "create_file")
         self._refuse_pattern_write(
             repo_alias, repo_path, file_path, full_path, False, pattern_writer
         )
 
-        # Check if file already exists
-        if full_path.exists():
-            raise FileExistsError(f"File already exists: {file_path}")
-
-        # Create parent directories if needed
-        full_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Atomic write
-        try:
-            self._atomic_write_file(full_path, content, exclusive=True)
-        except FileExistsError:
-            raise FileExistsError(f"File already exists: {file_path}") from None
-
-        # Compute hash and metadata
-        content_bytes = content.encode("utf-8")
-        content_hash = self._compute_hash(content_bytes)
-        size_bytes = len(content_bytes)
-        created_at = datetime.now(timezone.utc).isoformat()
-
-        return {
-            "success": True,
-            "file_path": file_path,
-            "content_hash": content_hash,
-            "size_bytes": size_bytes,
-            "created_at": created_at,
-        }
+        # Content seam: a golden repo that is not on this pod is written
+        # through the content writer; one on this pod's disk as it always was.
+        return self._writes_for(repo_alias, repo_path).create(file_path, content)
 
     def edit_file(
         self,
@@ -556,69 +536,17 @@ class FileCRUDService:
         # Resolve repository path (checks write exceptions first - Story #197)
         repo_path = self._resolve_repo_path(repo_alias, username)
         self._refuse_hidden_catalog_path(repo_path, file_path, access_for)
-
-        # Bug #1891: resolve + confine BEFORE any exists()/open() call.
-        # _validate_crud_path() above only rejects literal ".." components
-        # and absolute paths -- it does not catch a symlink already
-        # present inside the repository (e.g. tracked in the underlying
-        # git repo) that points outside the repository root.
         full_path = resolve_confined_path(repo_path, file_path)
-
-        # Bug #1891 (final SECURITY round): see create_file's identical
-        # comment -- a tracked in-repo symlink (e.g. "gitlink" -> ".git")
-        # is confined to repo_path yet still resolves into ".git".
         reject_if_within_git_directory(repo_path, full_path, "edit_file")
         reject_if_within_index_directory(repo_path, full_path, "edit_file")
         self._refuse_pattern_write(
             repo_alias, repo_path, file_path, full_path, True, pattern_writer
         )
 
-        if not full_path.exists():
-            raise FileNotFoundError(f"File not found: {file_path}")
-
-        # Read current content
-        try:
-            with open(full_path, "rb") as f:
-                current_content_bytes = f.read()
-        except Exception as e:
-            raise CRUDOperationError(
-                f"Failed to read file '{file_path}': {str(e)}"
-            ) from e
-
-        # Validate hash (optimistic locking)
-        current_hash = self._compute_hash(current_content_bytes)
-        if current_hash != content_hash:
-            raise HashMismatchError(
-                f"Content hash mismatch for '{file_path}'. "
-                f"Expected {content_hash}, got {current_hash}. "
-                "File may have been modified by another process."
-            )
-
-        # Decode current content
-        # Bug #570: Use utf-8-sig to strip BOM if present; track for write-back
-        has_bom = current_content_bytes[:3] == b"\xef\xbb\xbf"
-        current_content_str = current_content_bytes.decode("utf-8-sig")
-
-        # Perform string replacement
-        new_content, changes_made = self._perform_replacement(
-            current_content_str, old_string, new_string, replace_all, file_path
+        # Content seam (see create_file).
+        return self._writes_for(repo_alias, repo_path).edit(
+            file_path, old_string, new_string, content_hash, replace_all
         )
-
-        # Atomic write (Bug #570: preserve BOM if original had one)
-        self._atomic_write_file(full_path, new_content, has_bom=has_bom)
-
-        # Compute new hash and metadata
-        new_content_bytes = new_content.encode("utf-8")
-        new_hash = self._compute_hash(new_content_bytes)
-        modified_at = datetime.now(timezone.utc).isoformat()
-
-        return {
-            "success": True,
-            "file_path": file_path,
-            "content_hash": new_hash,
-            "modified_at": modified_at,
-            "changes_made": changes_made,
-        }
 
     def delete_file(
         self,
@@ -664,8 +592,98 @@ class FileCRUDService:
         repo_path = self._resolve_repo_path(repo_alias, username)
         self._refuse_hidden_catalog_path(repo_path, file_path, access_for)
 
+        # Content seam (see create_file).
+        return self._writes_for(repo_alias, repo_path).delete(file_path, content_hash)
+
+    # ── repos on this pod's disk ─────────────────────────────────────────
+
+    def _create_on_pod_disk(
+        self, repo_path: Path, file_path: str, content: str
+    ) -> Dict[str, Any]:
+        """create_file for a repository on this pod's disk."""
         # Bug #1891: resolve + confine BEFORE any exists()/open() call.
-        # _validate_crud_path() above only rejects literal ".." components
+        # _validate_crud_path() (run by the caller) only rejects literal ".." components
+        # and absolute paths -- it does not catch a symlink already
+        # present inside the repository (e.g. tracked in the underlying
+        # git repo) that points outside the repository root.
+        full_path = resolve_confined_path(repo_path, file_path)
+
+        # Bug #1891 (final SECURITY round): a symlink tracked INSIDE the
+        # repository (e.g. "gitlink" -> ".git") is itself confined to
+        # repo_path, so resolve_confined_path() above does not catch it --
+        # the RESOLVED target can still land inside ".git" (e.g.
+        # repo_path/.git/hooks/pre-commit), letting a write-mode user
+        # plant a hook that executes on the server's next `git commit`.
+        reject_if_within_git_directory(repo_path, full_path, "create_file")
+        reject_if_within_index_directory(repo_path, full_path, "create_file")
+
+        # Check if file already exists
+        if full_path.exists():
+            raise FileExistsError(f"File already exists: {file_path}")
+
+        # Create parent directories if needed
+        full_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Atomic write
+        self._atomic_write_file(full_path, content)
+
+        return self._created_result(file_path, content)
+
+    def _edit_on_pod_disk(
+        self,
+        repo_path: Path,
+        file_path: str,
+        old_string: str,
+        new_string: str,
+        content_hash: str,
+        replace_all: bool,
+    ) -> Dict[str, Any]:
+        """edit_file for a repository on this pod's disk."""
+        # Bug #1891: resolve + confine BEFORE any exists()/open() call.
+        # _validate_crud_path() (run by the caller) only rejects literal ".." components
+        # and absolute paths -- it does not catch a symlink already
+        # present inside the repository (e.g. tracked in the underlying
+        # git repo) that points outside the repository root.
+        full_path = resolve_confined_path(repo_path, file_path)
+
+        # Bug #1891 (final SECURITY round): see create_file's identical
+        # comment -- a tracked in-repo symlink (e.g. "gitlink" -> ".git")
+        # is confined to repo_path yet still resolves into ".git".
+        reject_if_within_git_directory(repo_path, full_path, "edit_file")
+        reject_if_within_index_directory(repo_path, full_path, "edit_file")
+
+        if not full_path.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        # Read current content
+        try:
+            with open(full_path, "rb") as f:
+                current_content_bytes = f.read()
+        except Exception as e:
+            raise CRUDOperationError(
+                f"Failed to read file '{file_path}': {str(e)}"
+            ) from e
+
+        # Validate hash (optimistic locking)
+        self._verify_hash(
+            current_content_bytes, content_hash, file_path, _EDIT_STALE_REASON
+        )
+
+        new_content, changes_made, has_bom = self._apply_edit(
+            current_content_bytes, old_string, new_string, replace_all, file_path
+        )
+
+        # Atomic write (Bug #570: preserve BOM if original had one)
+        self._atomic_write_file(full_path, new_content, has_bom=has_bom)
+
+        return self._edited_result(file_path, new_content, changes_made)
+
+    def _delete_on_pod_disk(
+        self, repo_path: Path, file_path: str, content_hash: Optional[str]
+    ) -> Dict[str, Any]:
+        """delete_file for a repository on this pod's disk."""
+        # Bug #1891: resolve + confine BEFORE any exists()/open() call.
+        # _validate_crud_path() (run by the caller) only rejects literal ".." components
         # and absolute paths -- it does not catch a symlink already
         # present inside the repository (e.g. tracked in the underlying
         # git repo) that points outside the repository root.
@@ -717,9 +735,6 @@ class FileCRUDService:
         reject_if_within_git_directory(repo_path, lexical_path, "delete_file")
         reject_if_within_index_directory(repo_path, full_path, "delete_file")
         reject_if_within_index_directory(repo_path, lexical_path, "delete_file")
-        self._refuse_pattern_write(
-            repo_alias, repo_path, file_path, full_path, True, pattern_writer
-        )
 
         if not full_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
@@ -734,13 +749,9 @@ class FileCRUDService:
                     f"Failed to read file '{file_path}' for hash validation: {str(e)}"
                 ) from e
 
-            current_hash = self._compute_hash(current_content_bytes)
-            if current_hash != content_hash:
-                raise HashMismatchError(
-                    f"Content hash mismatch for '{file_path}'. "
-                    f"Expected {content_hash}, got {current_hash}. "
-                    "File may have been modified since hash was computed."
-                )
+            self._verify_hash(
+                current_content_bytes, content_hash, file_path, _DELETE_STALE_REASON
+            )
 
         # Delete file (the symlink/file node the caller named -- see the
         # lexical_path comment above)
@@ -751,9 +762,160 @@ class FileCRUDService:
                 f"Failed to delete file '{file_path}': {str(e)}"
             ) from e
 
-        deleted_at = datetime.now(timezone.utc).isoformat()
+        return self._deleted_result(file_path)
 
-        return {"success": True, "file_path": file_path, "deleted_at": deleted_at}
+    # ── repos behind the content seam ────────────────────────────────────
+
+    def _writes_for(self, repo_alias: str, repo_path: Path) -> "_RepositoryWrites":
+        """How this service writes *repo_path*: decided once, by the content
+        seam's implementation (see :meth:`_golden_write_target`)."""
+        target = self._golden_write_target(repo_alias, repo_path)
+        if target is None:
+            return _PodDiskWrites(self, repo_path)
+        return _WriterWrites(self, target)
+
+    def _golden_write_target(
+        self, repo_alias: str, repo_path: Path
+    ) -> Optional["GoldenRepoWriteTarget"]:
+        """Where a repo is written when it is not on this pod, or None to write
+        the local disk -- always None under the local content backend.
+
+        Both kinds of repo this service writes go through the content writer
+        under a delegated backend: a write-exception (golden) repo, and a
+        user's activated copy, which lives on workspace-mcp at its path.
+        """
+        from code_indexer.server.services.golden_repo_writer import (
+            golden_repo_write_target,
+        )
+
+        return golden_repo_write_target(repo_path)
+
+    def _create_through_writer(
+        self, target: "GoldenRepoWriteTarget", file_path: str, content: str
+    ) -> Dict[str, Any]:
+        """create_file behind the seam: "must not exist" is the writer's CAS."""
+        rel = target.confine(file_path)
+        data = self._encode_for_write(target.absolute(rel), content, has_bom=False)
+        target.put(rel, data, None, file_path=file_path, operation="create_file")
+        return self._created_result(file_path, content)
+
+    def _edit_through_writer(
+        self,
+        target: "GoldenRepoWriteTarget",
+        file_path: str,
+        old_string: str,
+        new_string: str,
+        content_hash: str,
+        replace_all: bool,
+    ) -> Dict[str, Any]:
+        """edit_file behind the seam: the write is conditional on the blob read."""
+        rel = target.confine(file_path)
+        current = target.read(rel, file_path)
+        self._verify_hash(current, content_hash, file_path, _EDIT_STALE_REASON)
+        new_content, changes_made, has_bom = self._apply_edit(
+            current, old_string, new_string, replace_all, file_path
+        )
+        data = self._encode_for_write(
+            target.absolute(rel), new_content, has_bom=has_bom
+        )
+        target.put(
+            rel,
+            data,
+            git_blob_hash_bytes(current),
+            file_path=file_path,
+            operation="edit_file",
+        )
+        return self._edited_result(file_path, new_content, changes_made)
+
+    def _delete_through_writer(
+        self,
+        target: "GoldenRepoWriteTarget",
+        file_path: str,
+        content_hash: Optional[str],
+    ) -> Dict[str, Any]:
+        """delete_file behind the seam: conditional exactly when a hash is given."""
+        from code_indexer.server.services.golden_repo_writer import UNCONDITIONAL
+
+        rel = target.confine(file_path)
+        expected: "Expected" = UNCONDITIONAL
+        if content_hash is not None:
+            current = target.read(rel, file_path)
+            self._verify_hash(current, content_hash, file_path, _DELETE_STALE_REASON)
+            expected = git_blob_hash_bytes(current)
+        if not target.delete(
+            rel, expected, file_path=file_path, operation="delete_file"
+        ):
+            raise FileNotFoundError(f"File not found: {file_path}")
+        return self._deleted_result(file_path)
+
+    # ── shared by the local and seam paths ─────────────────────────────────
+
+    def _verify_hash(
+        self, current: bytes, content_hash: str, file_path: str, reason: str
+    ) -> None:
+        """Optimistic locking: HashMismatchError unless *current* is *content_hash*."""
+        current_hash = self._compute_hash(current)
+        if current_hash != content_hash:
+            raise HashMismatchError(
+                f"Content hash mismatch for '{file_path}'. "
+                f"Expected {content_hash}, got {current_hash}. "
+                f"{reason}"
+            )
+
+    def _apply_edit(
+        self,
+        current: bytes,
+        old_string: str,
+        new_string: str,
+        replace_all: bool,
+        file_path: str,
+    ) -> Tuple[str, int, bool]:
+        """(new_content, changes_made, has_bom) for an edit of *current*."""
+        # Bug #570: Use utf-8-sig to strip BOM if present; track for write-back
+        has_bom = current[:3] == _UTF8_BOM
+        current_content_str = current.decode("utf-8-sig")
+        new_content, changes_made = self._perform_replacement(
+            current_content_str, old_string, new_string, replace_all, file_path
+        )
+        return new_content, changes_made, has_bom
+
+    def _encode_for_write(self, full_path: str, content: str, has_bom: bool) -> bytes:
+        """The bytes ``_atomic_write_file`` would put on disk for *content*."""
+        try:
+            data = content.encode("utf-8")
+        except UnicodeEncodeError as e:
+            raise CRUDOperationError(
+                f"Failed to write file '{full_path}': {str(e)}"
+            ) from e
+        return _UTF8_BOM + data if has_bom else data
+
+    def _created_result(self, file_path: str, content: str) -> Dict[str, Any]:
+        content_bytes = content.encode("utf-8")
+        return {
+            "success": True,
+            "file_path": file_path,
+            "content_hash": self._compute_hash(content_bytes),
+            "size_bytes": len(content_bytes),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def _edited_result(
+        self, file_path: str, new_content: str, changes_made: int
+    ) -> Dict[str, Any]:
+        return {
+            "success": True,
+            "file_path": file_path,
+            "content_hash": self._compute_hash(new_content.encode("utf-8")),
+            "modified_at": datetime.now(timezone.utc).isoformat(),
+            "changes_made": changes_made,
+        }
+
+    def _deleted_result(self, file_path: str) -> Dict[str, Any]:
+        return {
+            "success": True,
+            "file_path": file_path,
+            "deleted_at": datetime.now(timezone.utc).isoformat(),
+        }
 
     def _validate_crud_path(self, file_path: str, operation: str) -> None:
         """
@@ -924,6 +1086,88 @@ class FileCRUDService:
             changes_made = 1
 
         return new_content, changes_made
+
+
+class _RepositoryWrites(Protocol):
+    """One repository's file writes as :class:`FileCRUDService` performs them."""
+
+    def create(self, file_path: str, content: str) -> Dict[str, Any]: ...
+
+    def edit(
+        self,
+        file_path: str,
+        old_string: str,
+        new_string: str,
+        content_hash: str,
+        replace_all: bool,
+    ) -> Dict[str, Any]: ...
+
+    def delete(self, file_path: str, content_hash: Optional[str]) -> Dict[str, Any]: ...
+
+
+class _PodDiskWrites:
+    """A repository whose content implementation is this pod's disk: today's
+    writes (confinement that resolves links, BOM-preserving atomic writes)."""
+
+    def __init__(self, service: FileCRUDService, repo_path: Path) -> None:
+        self._service = service
+        self._repo_path = repo_path
+
+    def create(self, file_path: str, content: str) -> Dict[str, Any]:
+        return self._service._create_on_pod_disk(self._repo_path, file_path, content)
+
+    def edit(
+        self,
+        file_path: str,
+        old_string: str,
+        new_string: str,
+        content_hash: str,
+        replace_all: bool,
+    ) -> Dict[str, Any]:
+        return self._service._edit_on_pod_disk(
+            self._repo_path,
+            file_path,
+            old_string,
+            new_string,
+            content_hash,
+            replace_all,
+        )
+
+    def delete(self, file_path: str, content_hash: Optional[str]) -> Dict[str, Any]:
+        return self._service._delete_on_pod_disk(
+            self._repo_path, file_path, content_hash
+        )
+
+
+class _WriterWrites:
+    """A repository read through a content source and written by the writer
+    that writes where it reads (``content_writer_for``)."""
+
+    def __init__(
+        self, service: FileCRUDService, target: "GoldenRepoWriteTarget"
+    ) -> None:
+        self._service = service
+        self._target = target
+
+    def create(self, file_path: str, content: str) -> Dict[str, Any]:
+        return self._service._create_through_writer(self._target, file_path, content)
+
+    def edit(
+        self,
+        file_path: str,
+        old_string: str,
+        new_string: str,
+        content_hash: str,
+        replace_all: bool,
+    ) -> Dict[str, Any]:
+        return self._service._edit_through_writer(
+            self._target, file_path, old_string, new_string, content_hash, replace_all
+        )
+
+    def delete(self, file_path: str, content_hash: Optional[str]) -> Dict[str, Any]:
+        return self._service._delete_through_writer(
+            self._target, file_path, content_hash
+        )
 
 
 # Global service instance

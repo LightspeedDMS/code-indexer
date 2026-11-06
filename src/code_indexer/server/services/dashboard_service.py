@@ -28,16 +28,28 @@ logger = logging.getLogger(__name__)
 # fallback path previously had no exclusion mechanism at all -- "mirror
 # xray_search" alone would have left it unfixed). "temporal_query" is the
 # Story #1400 async-hybrid temporal job type.
+# Feature job types (X-Ray's searches) are declared by the feature
+# (JobTypeContribution.hidden_from_dashboard, SDK 0.5) and added by
+# _dashboard_hidden_operation_types.
 _DASHBOARD_HIDDEN_OPERATION_TYPES = [
-    "xray_search",
-    "xray_explore",
-    "xray_search_batch",
     "temporal_query",
     # SIEM delivery submits one short tick job per busy loop cycle
     # (SiemDeliveryScheduler.OPERATION_TYPE); its state is on the SIEM
     # stats surfaces, not in the recent-jobs panel.
     "siem_delivery_tick",
 ]
+
+
+def _dashboard_hidden_operation_types() -> list:
+    """The core's hidden operation types plus those enabled features hide."""
+    from code_indexer.server.features.dispatch_policy import (
+        feature_dashboard_hidden_operation_types,
+    )
+
+    return _DASHBOARD_HIDDEN_OPERATION_TYPES + sorted(
+        feature_dashboard_hidden_operation_types()
+    )
+
 
 # Period thresholds for label formatting (in seconds)
 _PERIOD_1H = 3600
@@ -513,7 +525,7 @@ class DashboardService:
                 recent_jobs_data = job_tracker.get_recent_jobs(
                     limit=20,
                     time_filter=time_filter,
-                    exclude_operation_types=_DASHBOARD_HIDDEN_OPERATION_TYPES,
+                    exclude_operation_types=_dashboard_hidden_operation_types(),
                 )
             else:
                 # Story #541 AC5/AC6: Use time-filtered recent jobs with limit of 20
@@ -524,7 +536,7 @@ class DashboardService:
                 recent_jobs_data = job_manager.get_recent_jobs_with_filter(
                     time_filter=time_filter,
                     limit=20,
-                    exclude_operation_types=_DASHBOARD_HIDDEN_OPERATION_TYPES,
+                    exclude_operation_types=_dashboard_hidden_operation_types(),
                 )
 
             recent = []

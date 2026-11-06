@@ -1,9 +1,8 @@
 """
 Admin operations route handlers extracted from inline_routes.py.
 
-Part of the inline_routes.py modularization effort. Contains 12 route handlers:
-- POST /api/admin/scip-cleanup-workspaces
-- GET /api/admin/scip-cleanup-status
+Part of the inline_routes.py modularization effort. Contains 10 route handlers
+(the SCIP workspace-cleanup routes moved into the cidx-scip feature):
 - GET /api/admin/golden-repos
 - POST /api/admin/golden-repos
 - POST /api/admin/golden-repos/{alias}/refresh
@@ -21,6 +20,8 @@ Zero behavior change: same paths, methods, response models, and handler logic.
 import logging
 from typing import Dict, Any, Literal, Optional
 
+import re
+
 from fastapi import (
     FastAPI,
     HTTPException,
@@ -28,6 +29,7 @@ from fastapi import (
     Depends,
     Response,
     Request,
+    Header,
     Body,
     Query,
 )
@@ -48,11 +50,16 @@ from ..models.jobs import (
     IndexInfo,
     IndexStatusResponse,
     JobResponse,
+    JobStatusResponse,
     JobCleanupResponse,
 )
 
 from ..auth import dependencies
-from ..repositories.golden_repo_manager import GoldenRepoError, GitOperationError
+from ..repositories.golden_repo_manager import (
+    GoldenRepoAlreadyExistsError,
+    GoldenRepoError,
+    GitOperationError,
+)
 from ..repositories.activated_repo_manager import ActivatedRepoError
 from ..repositories.background_jobs import DuplicateJobError
 from ..logging_utils import format_error_log
@@ -63,17 +70,31 @@ from ..services.golden_repo_audited_ops import (
     submit_provider_scoped_index_job,
 )
 
-# Constants used by route handlers
-GOLDEN_REPO_ADD_OPERATION = "add_golden_repo"
-GOLDEN_REPO_REFRESH_OPERATION = "refresh_golden_repo"
-JOB_STATUS_PENDING = "pending"
-JOB_STATUS_RUNNING = "running"
-
 # Issue #1160: Default export file retention when config is unavailable.
 _DEFAULT_EXPORT_RETENTION_DAYS: int = 30
 
 # Module-level logger
 logger = logging.getLogger(__name__)
+
+# EVO-65484: the seeder and workspace-mcp both authenticate as the cidx ``admin``
+# user, so every golden-repo job is stamped "submitted by admin" -- useless for
+# telling apart the golden seeder vs the workspace-mcp server vs a real operator.
+# A caller may send an ``X-Cidx-Caller`` header (e.g. "seeder", "workspace-mcp");
+# when it matches this strict allowlist pattern it is used as the job's submitter
+# LABEL only -- authorization is unchanged (still gated on the authenticated admin
+# user via get_current_admin_user). Anything malformed/absent falls back to the
+# authenticated username, so this can never widen access or inject into a log line.
+# fullmatch (not $) so a trailing newline cannot sneak into the label.
+_CIDX_CALLER_RE = re.compile(r"[a-z][a-z0-9-]{0,31}")
+
+
+def _resolve_job_submitter(
+    caller_header: Optional[str], authenticated_username: str
+) -> str:
+    """Return the job submitter label: a sanitized ``X-Cidx-Caller`` or the auth user."""
+    if caller_header and _CIDX_CALLER_RE.fullmatch(caller_header):
+        return caller_header
+    return authenticated_username
 
 
 class ExportFiltersRequest(BaseModel):
@@ -95,6 +116,74 @@ class ExportFiltersRequest(BaseModel):
     correlation_id: Optional[str] = Field(None, max_length=CORRELATION_ID_MAX_CHARS)
 
 
+def _refresh_submission_error(alias: str, exc: Exception) -> HTTPException:
+    """The HTTP answer, logged with its cause, for a failed refresh submission.
+
+    EVO-64616: every failure used to become a 500 whose cause reached only the
+    response body, so the server log showed a bare ``HTTP 500``. A refresh
+    already queued or running is 409; an alias with no global activation is
+    404; maintenance mode is 503; anything else stays 500 and is logged with
+    its traceback. Aliases and exception messages only -- never request data.
+    """
+    from code_indexer.global_repos.refresh_scheduler import GlobalAliasNotFoundError
+    from code_indexer.server.jobs.exceptions import MaintenanceModeError
+
+    if isinstance(exc, DuplicateJobError):
+        logger.info(
+            "refresh_golden_repo: alias=%s already has a refresh queued or "
+            "running (job %s); 409",
+            alias,
+            exc.existing_job_id,
+        )
+        return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+    if isinstance(exc, GlobalAliasNotFoundError):
+        logger.warning(
+            "refresh_golden_repo: alias=%s is registered but not globally "
+            "activated; 404: %s",
+            alias,
+            exc,
+        )
+        return HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Golden repository '{alias}' has no global activation: {exc}",
+        )
+    if isinstance(exc, MaintenanceModeError):
+        logger.info("refresh_golden_repo: alias=%s refused in maintenance mode", alias)
+        return HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+            headers={"Retry-After": str(exc.retry_after_seconds)},
+        )
+    logger.exception(
+        "refresh_golden_repo: failed to submit refresh job for alias=%s", alias
+    )
+    return HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail=f"Failed to submit refresh job: {exc}",
+    )
+
+
+class GoldenCatalogSyncRequest(BaseModel):
+    """Body of POST /api/admin/golden-catalog/sync (EVO-64616)."""
+
+    dry_run: bool = True
+    scope: Literal["catalog", "workspaces", "all"] = "all"
+
+
+class RenameGoldenRepoRequest(BaseModel):
+    """Body of POST /api/admin/golden-repos/{alias}/rename (EVO-64616)."""
+
+    new_alias: str = Field(..., min_length=1, max_length=128)
+    repo_url: Optional[str] = Field(
+        default=None,
+        description="Correct the registered URL to what the clone holds",
+    )
+    branch: Optional[str] = Field(
+        default=None,
+        description="Correct the registered branch to what the clone holds",
+    )
+
+
 def register_admin_ops_routes(
     app: FastAPI,
     *,
@@ -102,7 +191,6 @@ def register_admin_ops_routes(
     user_manager,
     golden_repo_manager,
     background_job_manager,
-    workspace_cleanup_service,
     config_service,
     server_config,
     data_dir: str,
@@ -120,94 +208,11 @@ def register_admin_ops_routes(
         user_manager: UserManager instance
         golden_repo_manager: GoldenRepoManager instance
         background_job_manager: BackgroundJobManager instance
-        workspace_cleanup_service: WorkspaceCleanupService instance
         config_service: ConfigService instance
         server_config: ServerConfig instance
         data_dir: Server data directory path
         job_tracker: JobTracker instance
     """
-
-    @app.post("/api/admin/scip-cleanup-workspaces")
-    def scip_cleanup_workspaces(
-        current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
-    ):
-        """
-        Manually trigger SCIP workspace cleanup (Story #647 - AC4).
-
-        Triggers immediate cleanup of expired SCIP self-healing workspaces using
-        WorkspaceCleanupService. Returns cleanup summary with counts and space reclaimed.
-
-        Args:
-            current_user: Current authenticated admin user
-
-        Returns:
-            Cleanup summary with deleted_count, preserved_count, space_freed_mb, errors
-
-        Raises:
-            HTTPException: If cleanup service unavailable or cleanup fails
-        """
-        try:
-            result = workspace_cleanup_service.cleanup_workspaces()
-
-            # Convert space from bytes to MB
-            space_freed_mb = result.space_reclaimed_bytes / (1024 * 1024)
-
-            return {
-                "deleted_count": result.workspaces_deleted,
-                "preserved_count": result.workspaces_preserved,
-                "space_freed_mb": round(space_freed_mb, 2),
-                "errors": result.errors,
-            }
-
-        except Exception as e:
-            logger.error(
-                format_error_log(
-                    "APP-GENERAL-030",
-                    f"SCIP workspace cleanup failed: {e}",
-                ),
-                exc_info=True,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Workspace cleanup failed: {str(e)}",
-            )
-
-    @app.get("/api/admin/scip-cleanup-status")
-    def get_scip_cleanup_status(
-        current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
-    ):
-        """
-        Get SCIP workspace cleanup status (Story #647 - AC5).
-
-        Returns current cleanup status including last cleanup time, workspace count,
-        oldest workspace age, and total workspace size.
-
-        Args:
-            current_user: Current authenticated admin user
-
-        Returns:
-            Status dictionary with last_cleanup_time, workspace_count,
-            oldest_workspace_age, total_size_mb
-
-        Raises:
-            HTTPException: If cleanup service unavailable or status retrieval fails
-        """
-        try:
-            status_info = workspace_cleanup_service.get_cleanup_status()
-            return status_info
-
-        except Exception as e:
-            logger.error(
-                format_error_log(
-                    "APP-GENERAL-031",
-                    f"Failed to get SCIP cleanup status: {e}",
-                ),
-                exc_info=True,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to get cleanup status: {str(e)}",
-            )
 
     @app.get("/api/admin/golden-repos")
     def list_golden_repos(
@@ -281,6 +286,7 @@ def register_admin_ops_routes(
     def add_golden_repo(
         repo_data: AddGoldenRepoRequest,
         current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
+        x_cidx_caller: Optional[str] = Header(default=None, alias="X-Cidx-Caller"),
     ):
         """
         Add a golden repository (admin only) - async operation.
@@ -333,6 +339,13 @@ def register_admin_ops_routes(
                 "enable_temporal": repo_data.enable_temporal,
             }
 
+            # EVO-65021 (seam #3): capture the workspace-mcp workspace_id supplied
+            # by the (in-place/provisioning) caller so it is persisted on the
+            # golden-repo metadata for the delegated SCIP backend. Omitted when
+            # None so the manager's default (no retention) is unchanged.
+            if repo_data.workspace_id is not None:
+                func_kwargs["workspace_id"] = repo_data.workspace_id
+
             # Add temporal_options if provided
             if repo_data.temporal_options:
                 func_kwargs["temporal_options"] = (
@@ -340,7 +353,9 @@ def register_admin_ops_routes(
                 )
 
             job_id = golden_repo_manager.add_golden_repo(
-                submitter_username=current_user.username,
+                submitter_username=_resolve_job_submitter(
+                    x_cidx_caller, current_user.username
+                ),
                 **func_kwargs,  # type: ignore[arg-type]
             )
             return JobResponse(
@@ -348,11 +363,39 @@ def register_admin_ops_routes(
                 message=f"Golden repository '{repo_data.alias}' addition started",
             )
 
+        except DuplicateJobError as e:
+            # EVO-69818: a duplicate in-flight job is a conflict, not a server
+            # error -- same mapping as add_golden_repo_index.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(e),
+            ) from e
+        except GoldenRepoAlreadyExistsError as e:
+            # EVO-64616: re-registering an existing alias is a conflict the
+            # caller can act on (an idempotent seeder counts it as done), not
+            # a server error. Logged at INFO without the traceback.
+            logger.info(
+                "add_golden_repo: alias=%s is already registered (409)",
+                repo_data.alias,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(e),
+            ) from e
         except Exception as e:
+            # EVO-64608: surface the swallowed cause. Without this the exception's
+            # detail goes ONLY into the 500 response body (never into cidx logs), so a
+            # high registration-failure rate is undiagnosable (hard evidence: ~315
+            # unlogged registration 500s / 3h on the multipod). logger.exception logs
+            # the full traceback at ERROR; `from e` chains the cause.
+            logger.exception(
+                "add_golden_repo: failed to submit registration job for alias=%s",
+                repo_data.alias,
+            )
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to submit job: {str(e)}",
-            )
+            ) from e
 
     @app.post(
         "/api/admin/golden-repos/{alias}/refresh",
@@ -410,10 +453,7 @@ def register_admin_ops_routes(
         except HTTPException:
             raise
         except Exception as e:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to submit refresh job: {str(e)}",
-            )
+            raise _refresh_submission_error(alias, e) from e
 
     @app.post(
         "/api/admin/golden-repos/{alias}/indexes",
@@ -454,8 +494,13 @@ def register_admin_ops_routes(
         # Get list of index types to process
         index_types = request.get_index_types()
 
-        # Validate all index types first before submitting any jobs
-        valid_index_types = ["semantic", "fts", "temporal", "scip"]
+        # Validate all index types first before submitting any jobs: the
+        # core's, plus the types an enabled feature builds (SCIP).
+        from code_indexer.kernel.index_builders import contributed_index_types
+
+        valid_index_types = ["semantic", "fts", "temporal"] + list(
+            contributed_index_types()
+        )
         invalid_types = [t for t in index_types if t not in valid_index_types]
         if invalid_types:
             raise HTTPException(
@@ -872,43 +917,9 @@ def register_admin_ops_routes(
             HTTPException: 404 if repository not found, 503 if services unavailable, 500 for other errors
         """
         try:
-            # Cancel any active background jobs for this repository
-            try:
-                if background_job_manager:
-                    # Get jobs related to this golden repository
-                    active_jobs = (
-                        background_job_manager.get_jobs_by_operation_and_params(
-                            operation_types=[
-                                GOLDEN_REPO_ADD_OPERATION,
-                                GOLDEN_REPO_REFRESH_OPERATION,
-                                "global_repo_refresh",
-                            ],
-                            params_filter={"alias": alias},
-                        )
-                    )
-
-                    # Cancel active jobs gracefully
-                    for job in active_jobs:
-                        if job.get("status") in [
-                            JOB_STATUS_PENDING,
-                            JOB_STATUS_RUNNING,
-                        ]:
-                            cancel_result = background_job_manager.cancel_job(
-                                job["job_id"], current_user.username, is_admin=True
-                            )
-                            if cancel_result["success"]:
-                                logging.info(
-                                    f"Cancelled background job {job['job_id']} for repository {alias}"
-                                )
-                            else:
-                                logging.warning(
-                                    f"Failed to cancel job {job['job_id']}: {cancel_result['message']}"
-                                )
-            except Exception as job_error:
-                # Job cancellation failure shouldn't prevent deletion, but log it
-                logging.warning(
-                    f"Job cancellation failed during repository deletion: {job_error}"
-                )
+            # GAP-5: Job cancellation is now handled inside
+            # GoldenRepoManager.remove_golden_repo() so both REST and MCP
+            # surfaces get the same pre-flight cleanup automatically.
 
             # Perform repository deletion with proper error handling; the job
             # and its audit row name the authenticated caller.
@@ -970,6 +981,84 @@ def register_admin_ops_routes(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=detail_message,
             )
+
+    @app.post(
+        "/api/admin/golden-repos/{alias}/rename",
+        status_code=202,
+        dependencies=[Depends(dependencies.require_elevation())],
+    )
+    def rename_golden_repo(
+        alias: str,
+        request: RenameGoldenRepoRequest,
+        current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
+    ) -> Dict[str, Any]:
+        """Rename a golden repository's alias (admin only; EVO-64616).
+
+        Moves the clone, the published index, the ``-global`` pointer, the
+        registry rows and every reference to the alias, without re-cloning
+        or re-embedding. ``repo_url``/``branch`` correct a mis-registered
+        row; they must match what the clone holds (origin and HEAD), or the
+        request is refused. Asynchronous: poll the returned ``job_id``
+        (``GET /api/jobs/{job_id}``, MCP ``get_job_details``).
+
+        Errors: 400 invalid alias / URL or branch not matching the clone,
+        404 unknown alias, 409 new alias taken or the alias busy (refresh,
+        add, removal, branch change, write mode), 503 maintenance mode.
+        """
+        from code_indexer.server.jobs.exceptions import MaintenanceModeError
+        from code_indexer.server.services.golden_repo_rename import RenameError
+
+        try:
+            job_id = golden_repo_manager.rename_golden_repo(
+                alias,
+                request.new_alias,
+                repo_url=request.repo_url,
+                branch=request.branch,
+                submitter_username=current_user.username,
+            )
+        except RenameError as e:
+            raise HTTPException(status_code=e.status, detail=str(e))
+        except MaintenanceModeError as e:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e)
+            )
+        except DuplicateJobError as e:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+        return {
+            "job_id": job_id,
+            "alias": alias,
+            "new_alias": request.new_alias,
+            "message": f"Rename of '{alias}' to '{request.new_alias}' started",
+        }
+
+    @app.post(
+        "/api/admin/golden-catalog/sync",
+        status_code=202,
+        dependencies=[Depends(dependencies.require_elevation())],
+    )
+    def sync_golden_catalog(
+        request: GoldenCatalogSyncRequest,
+        current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
+    ) -> Dict[str, Any]:
+        """Run the golden catalog sync and/or the workspace registration sync
+        once (admin only; EVO-64616). ``dry_run`` (the default) reports the
+        planned adds, renames, heals and (workspace) deregistrations and
+        changes nothing. Asynchronous: poll ``job_id``; its result is the
+        plan and what was applied."""
+        from code_indexer.server.services.golden_repo_audited_ops import (
+            request_golden_catalog_sync,
+        )
+
+        try:
+            job_id = request_golden_catalog_sync(
+                golden_repo_manager,
+                actor=current_user.username,
+                scope=request.scope,
+                dry_run=request.dry_run,
+            )
+        except DuplicateJobError as e:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+        return {"job_id": job_id, "scope": request.scope, "dry_run": request.dry_run}
 
     # -------------------------------------------------------------------------
     # Issue #1160: Query Analytics Export endpoints
@@ -1278,3 +1367,40 @@ def register_admin_ops_routes(
             return {"enabled": False, "band": None, "active": False}
         snapshot: Dict[str, Any] = gov.get_snapshot()
         return snapshot
+
+    # EVO-64609: back-compat admin alias for GET /api/jobs/{job_id}. Multiple clients
+    # (the golden-repo-seeder and agent-orchestrator workers) poll job status at
+    # /api/admin/jobs/{id} -- a path that no longer exists post-multipod -> route-not
+    # -found 404, which a client can misread as a job failure. Delegate to the same
+    # background_job_manager.get_job_status, which already falls back to the shared
+    # persistent store (Story #267), so it resolves cross-pod. Registered LAST so the
+    # specific /api/admin/jobs/stats + /cleanup routes match first.
+    @app.get("/api/admin/jobs/{job_id}", response_model=JobStatusResponse)
+    def get_admin_job_status(
+        job_id: str,
+        current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
+    ):
+        job_status = background_job_manager.get_job_status(
+            job_id,
+            current_user.username,
+            is_admin=True,
+        )
+        if not job_status:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Job not found: {job_id}",
+            )
+        return JobStatusResponse(
+            job_id=job_status["job_id"],
+            operation_type=job_status["operation_type"],
+            status=job_status["status"],
+            created_at=job_status["created_at"],
+            started_at=job_status["started_at"],
+            completed_at=job_status["completed_at"],
+            progress=job_status["progress"],
+            result=job_status["result"],
+            error=job_status["error"],
+            username=job_status["username"],
+            current_phase=job_status.get("current_phase"),
+            phase_detail=job_status.get("phase_detail"),
+        )

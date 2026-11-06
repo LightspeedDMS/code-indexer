@@ -47,78 +47,72 @@ trying to avoid.
 from __future__ import annotations
 
 import logging
-import os
 import sys
-from importlib import import_module
 from importlib.metadata import entry_points
-from typing import Any, Callable, List, Optional, cast
+from pathlib import Path
+from typing import Any, Callable, Dict, Optional, Union, cast
+
+from cidx_sdk.entry_points import CLI_INVOKER_ENTRY_POINT_GROUP
+from cidx_sdk.seams.cli_invoker import (
+    REPOSITORY_SOURCE,
+    RESOLVES_GOLDEN_REPOSITORIES as RESOLVES_GOLDEN_REPOSITORIES,
+)
+from cidx_sdk.seams.errors import CliInvokerPluginError as CliInvokerPluginError
+from cidx_sdk.seams.resolver import SeamResolver
+from cidx_sdk.seams.selection import DELEGATED_MODE
+
+from code_indexer.kernel.seam_resolution import module_entry_point_source
 
 logger = logging.getLogger(__name__)
 
 ENV_VAR = "CIDX_CLI_INVOKER"
-ENTRY_POINT_GROUP = "code_indexer.cli_invoker"
+ENTRY_POINT_GROUP = CLI_INVOKER_ENTRY_POINT_GROUP
+#: Kept importable: tests patch ``entry_points`` here to control resolution.
+__all__ = ["ENTRY_POINT_GROUP", "ENV_VAR", "entry_points", "sys"]
 
 # (analysis_model, soft_timeout_seconds) -> IntelligenceCliInvoker
 InvokerFactory = Callable[[str, Optional[int]], Any]
 
-
-class CliInvokerPluginError(RuntimeError):
-    """A plugin was configured but could not be loaded or is not callable."""
-
-
+#: Kept for callers that compared against it; resolution state is the
+#: resolver's own cache.
 _NO_PLUGIN = object()
-_cached: object = None
+
+# The shared seam resolver (``cidx_sdk.seams``), delegated mode only: with no
+# plugin installed the built-in ClaudeInvoker is used.
+_resolver = SeamResolver(
+    seam="cli_invoker",
+    env_var=ENV_VAR,
+    error_type=CliInvokerPluginError,
+    display_name="CLI invoker",
+    entry_point_source=module_entry_point_source(__name__),
+)
 
 
-def _load_from_path(spec: str) -> InvokerFactory:
-    if ":" not in spec:
-        raise CliInvokerPluginError(
-            f"{ENV_VAR}={spec!r} is not in 'package.module:factory' form"
-        )
-    module_name, _, attr = spec.partition(":")
-    try:
-        module = import_module(module_name)
-    except ImportError as exc:
-        raise CliInvokerPluginError(
-            f"{ENV_VAR}={spec!r}: cannot import module {module_name!r}: {exc}"
-        ) from exc
-    factory = getattr(module, attr, None)
-    if factory is None:
-        raise CliInvokerPluginError(
-            f"{ENV_VAR}={spec!r}: module {module_name!r} has no attribute {attr!r}"
-        )
-    if not callable(factory):
-        raise CliInvokerPluginError(f"{ENV_VAR}={spec!r}: {attr!r} is not callable")
-    return cast(InvokerFactory, factory)
+class _CoreRepositorySource:
+    """The core's answer to "where is the repository behind this ``cwd``"
+    (``cidx_sdk.seams.cli_invoker.GoldenRepositorySource``), for delegates.
+
+    Both questions are answered by the content seam's wiring, looked up at
+    CALL time so a test patching ``content_backend_wiring`` still reaches it.
+    Imported lazily: resolving the CLI invoker seam must not import the
+    server's startup wiring.
+    """
+
+    def holds_repositories(self) -> bool:
+        from code_indexer.server.startup import content_backend_wiring
+
+        return not content_backend_wiring.is_content_seam_delegated()
+
+    def golden_repository(self, cwd: Union[str, Path]) -> Optional[Dict[str, str]]:
+        from code_indexer.server.startup import content_backend_wiring
+
+        return content_backend_wiring.golden_repo_source(cwd)
 
 
-def _load_from_entry_points() -> Optional[InvokerFactory]:
-    # importlib.metadata.entry_points() only accepts the `group=` keyword
-    # starting in Python 3.10 (SelectableGroups). On 3.9 the function takes NO
-    # parameters at all and returns a plain dict of group -> List[EntryPoint];
-    # `.get(group, [])` is the pre-3.10 equivalent lookup. This repo's CI
-    # matrix still targets 3.9, so both call shapes must be supported.
-    candidates: List[Any]
-    if sys.version_info >= (3, 10):
-        candidates = list(entry_points(group=ENTRY_POINT_GROUP))
-    else:
-        candidates = list(entry_points().get(ENTRY_POINT_GROUP, []))
-    selected = next(iter(candidates), None)
-    if selected is None:
-        return None
-    try:
-        factory = selected.load()
-    except Exception as exc:  # noqa: BLE001 - surfaced as a config error
-        raise CliInvokerPluginError(
-            f"entry point {selected.name!r} in group {ENTRY_POINT_GROUP!r} "
-            f"failed to load: {exc}"
-        ) from exc
-    if not callable(factory):
-        raise CliInvokerPluginError(
-            f"entry point {selected.name!r} in group {ENTRY_POINT_GROUP!r} "
-            "did not resolve to a callable"
-        )
-    return cast(InvokerFactory, factory)
+# Process wiring, set once and identical on every node: any process that can
+# resolve a CLI invoker delegate has imported this module, so the delegate
+# finds the core's repository source without importing the core.
+REPOSITORY_SOURCE.install(_CoreRepositorySource())
 
 
 def get_invoker_factory() -> Optional[InvokerFactory]:
@@ -128,28 +122,68 @@ def get_invoker_factory() -> Optional[InvokerFactory]:
         CliInvokerPluginError: a plugin was configured but is unusable. Raised
             rather than silently falling back to the CLI -- see module docstring.
     """
-    global _cached
-    if _cached is not None:
-        return None if _cached is _NO_PLUGIN else cast(InvokerFactory, _cached)
+    return cast(Optional[InvokerFactory], _resolver.find_factory(DELEGATED_MODE))
 
-    spec = os.environ.get(ENV_VAR, "").strip()
-    factory: Optional[InvokerFactory]
-    if spec:
-        factory = _load_from_path(spec)
-        logger.info("CLI invoker plugin loaded from %s=%s", ENV_VAR, spec)
-    else:
-        factory = _load_from_entry_points()
-        if factory is not None:
-            logger.info(
-                "CLI invoker plugin loaded from entry-point group %r",
-                ENTRY_POINT_GROUP,
-            )
 
-    _cached = factory if factory is not None else _NO_PLUGIN
-    return factory
+# RESOLVES_GOLDEN_REPOSITORIES (from the SDK): the module attribute a plugin
+# sets to True when its invoker provisions the golden repository ITSELF (from
+# cidx's registry, see content_backend_wiring.golden_repo_source) and never
+# reads the ``cwd`` it is handed -- so it can analyze a repository this pod
+# does not hold.
+
+
+def invoker_resolves_golden_repositories() -> bool:
+    """Whether the configured invoker provisions golden repositories itself.
+
+    False for the built-in ClaudeInvoker (it reads ``cwd`` on this pod) and for
+    a plugin that does not declare :data:`RESOLVES_GOLDEN_REPOSITORIES`.
+    """
+    factory = get_invoker_factory()
+    if factory is None:
+        return False
+    module = sys.modules.get(getattr(factory, "__module__", "") or "")
+    return getattr(module, RESOLVES_GOLDEN_REPOSITORIES, False) is True
+
+
+#: The ``content_backend`` value under which repositories are not on this pod.
+_DELEGATED_CONTENT_BACKEND = "delegated"
+
+
+def require_invoker_for_delegated_content(
+    content_backend: str, *, description_generation_enabled: bool
+) -> None:
+    """Refuse to start a delegated-content server that has no CLI invoker plugin.
+
+    Under ``content_backend=delegated`` the repositories are not on this pod,
+    so the built-in ClaudeInvoker -- a local ``claude`` subprocess reading
+    ``cwd`` here -- cannot analyze any of them. Without a plugin every golden
+    repo add would fail its description generation one by one, at ERROR, for
+    as long as the server runs (EVO-64616). Called once at startup so the
+    misconfiguration fails once, loudly, naming the fix. A local content
+    backend (the default) never resolves the plugin here, so its startup is
+    unchanged. Neither does a deployment with description generation turned
+    off (``golden_description_generation_enabled=false``): nothing would use
+    the plugin, and the opt-out must stay a working rollback lever.
+
+    Raises:
+        CliInvokerPluginError: delegated content and no plugin configured, or a
+            configured plugin that cannot be loaded (see get_invoker_factory).
+    """
+    if content_backend != _DELEGATED_CONTENT_BACKEND:
+        return
+    if not description_generation_enabled:
+        return
+    if get_invoker_factory() is None:
+        raise CliInvokerPluginError(
+            "content_backend='delegated' but no CLI invoker plugin is "
+            "configured: the repositories are not on this pod, so the local "
+            "claude CLI cannot generate their descriptions. Install a plugin "
+            f"on the {ENTRY_POINT_GROUP!r} entry point (the image ships "
+            "cidx-orchestrator-invoker) or set "
+            f"{ENV_VAR}='package.module:factory'."
+        )
 
 
 def reset_cache() -> None:
     """Clear the resolved plugin. For tests."""
-    global _cached
-    _cached = None
+    _resolver.reset_cache()

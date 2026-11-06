@@ -199,7 +199,8 @@ class DatabaseSchema:
             created_at TEXT NOT NULL,
             enable_temporal INTEGER NOT NULL DEFAULT 0,
             temporal_options TEXT,
-            wiki_enabled INTEGER DEFAULT 0
+            wiki_enabled INTEGER DEFAULT 0,
+            workspace_id TEXT
         )
     """
 
@@ -434,6 +435,73 @@ class DatabaseSchema:
             last_full_pass_completed_at TEXT,
             total_orphans_repaired_lifetime INTEGER NOT NULL DEFAULT 0,
             updated_at TEXT
+        )
+    """
+
+    # Content seam step 5a: control-plane metadata (golden-repo alias pointers
+    # and write-mode markers) lives in the registry, not in per-pod files
+    # under golden-repos/aliases/ and golden-repos/.write_mode/. One row per
+    # key; payload is the JSON document the file used to hold. Mirrors
+    # PostgreSQL migration 054.
+    CREATE_GOLDEN_REPO_ALIASES_TABLE = """
+        CREATE TABLE IF NOT EXISTS golden_repo_aliases (
+            name TEXT PRIMARY KEY,
+            payload TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """
+
+    CREATE_WRITE_MODE_MARKERS_TABLE = """
+        CREATE TABLE IF NOT EXISTS write_mode_markers (
+            name TEXT PRIMARY KEY,
+            payload TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """
+
+    # When each control-plane metadata key was last deleted, so the startup
+    # import never resurrects a key from a stale file. Mirrors migration 054.
+    CREATE_CONTROL_PLANE_METADATA_TOMBSTONES_TABLE = """
+        CREATE TABLE IF NOT EXISTS control_plane_metadata_tombstones (
+            kind TEXT NOT NULL,
+            name TEXT NOT NULL,
+            deleted_at TEXT NOT NULL,
+            PRIMARY KEY (kind, name)
+        )
+    """
+
+    # Content seam step 5a: the dual-write outbox. A row names a KEY (kind +
+    # name), never a payload -- the sweeper replays the registry's CURRENT
+    # value. claim_token/claimed_until are the SQLite claim (a lease, since
+    # SQLite has no row locks and solo mode may run several worker processes);
+    # PostgreSQL claims with FOR UPDATE SKIP LOCKED instead. Mirrors
+    # PostgreSQL migration 055.
+    CREATE_METADATA_OUTBOX_TABLE = """
+        CREATE TABLE IF NOT EXISTS metadata_outbox (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind TEXT NOT NULL,
+            name TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            claim_token TEXT,
+            claimed_until REAL
+        )
+    """
+
+    CREATE_IDX_METADATA_OUTBOX_KEY = """
+        CREATE INDEX IF NOT EXISTS idx_metadata_outbox_key
+        ON metadata_outbox (kind, name, id)
+    """
+
+    # Singleton (id=1): the drain clock and the stop flag, shared by every
+    # process so an abandon on one node stops the leader's sweeper.
+    CREATE_METADATA_OUTBOX_STATE_TABLE = """
+        CREATE TABLE IF NOT EXISTS metadata_outbox_state (
+            id INTEGER PRIMARY KEY,
+            drain_started_epoch REAL,
+            drain_sink TEXT,
+            stopped_at TEXT,
+            stopped_reason TEXT,
+            stopped_sink TEXT
         )
     """
 
@@ -857,6 +925,13 @@ class DatabaseSchema:
             conn.execute(self.CREATE_DEPENDENCY_MAP_TRACKING_TABLE)
             # Story #1360 (Epic #1333 S3): HNSW orphan repair fleet sweep state
             conn.execute(self.CREATE_HNSW_ORPHAN_SWEEP_STATE_TABLE)
+            # Content seam step 5a: control-plane metadata in the registry
+            conn.execute(self.CREATE_GOLDEN_REPO_ALIASES_TABLE)
+            conn.execute(self.CREATE_WRITE_MODE_MARKERS_TABLE)
+            conn.execute(self.CREATE_CONTROL_PLANE_METADATA_TOMBSTONES_TABLE)
+            conn.execute(self.CREATE_METADATA_OUTBOX_TABLE)
+            conn.execute(self.CREATE_IDX_METADATA_OUTBOX_KEY)
+            conn.execute(self.CREATE_METADATA_OUTBOX_STATE_TABLE)
             # Story #283: Wiki render cache tables
             conn.execute(self.CREATE_WIKI_CACHE_TABLE)
             conn.execute(self.CREATE_WIKI_SIDEBAR_CACHE_TABLE)
@@ -930,6 +1005,8 @@ class DatabaseSchema:
             self._migrate_performance_indexes(conn)
             # Story #280/#283: Wiki feature migrations
             self._migrate_golden_repos_metadata_wiki(conn)
+            # EVO-65021: workspace-mcp workspace_id retention for golden repos
+            self._migrate_golden_repos_metadata_workspace_id(conn)
             self._migrate_wiki_cache_tables(conn)
             # Story #287 / Bug #1340: wiki_article_views must exist at
             # startup, not only after the first wiki HTTP route hit.
@@ -1397,6 +1474,33 @@ class DatabaseSchema:
             conn.commit()
             logger.info(
                 f"Wiki migration applied to golden_repos_metadata: {migrations_applied}"
+            )
+
+    def _migrate_golden_repos_metadata_workspace_id(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        """Migrate golden_repos_metadata for workspace_id retention (EVO-65021).
+
+        Adds the nullable ``workspace_id`` column so a golden repo can carry the
+        workspace-mcp ``workspace_id`` that the delegated SCIP indexer must hand
+        to sandbox-mcp (``sb-{workspace_id}``). Existing rows keep ``NULL`` until
+        the id is captured at (re-)registration or backfilled.
+        Safe to run multiple times - only adds the column when missing.
+        """
+        existing_columns = {
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info(golden_repos_metadata)"
+            ).fetchall()
+        }
+        if "workspace_id" not in existing_columns:
+            conn.execute(
+                "ALTER TABLE golden_repos_metadata ADD COLUMN workspace_id TEXT"
+            )
+            conn.commit()
+            logger.info(
+                "EVO-65021 migration applied to golden_repos_metadata: added "
+                "workspace_id"
             )
 
     def _migrate_wiki_cache_tables(self, conn: sqlite3.Connection) -> None:

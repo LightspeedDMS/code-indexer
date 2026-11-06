@@ -5,6 +5,7 @@ Provides thread pool management for calculating embeddings in parallel while kee
 file I/O, chunking, and Filesystem operations in the main thread.
 """
 
+import contextvars
 import logging
 import threading
 import time
@@ -303,7 +304,15 @@ class VectorCalculationManager:
         # Submit to thread pool
         if not self.executor:
             raise RuntimeError("Thread pool not started")
-        future = self.executor.submit(self._calculate_vector, task)
+        # EVO-66113: plain ThreadPoolExecutor.submit() does NOT propagate
+        # ContextVars into the worker thread (mirrors the
+        # semantic_query_manager.py precedent for _search_event_ctx) --
+        # without copy_context().run(), the embed-stats fallback tags set
+        # by set_process_embed_stats_tags() in the main thread would never
+        # be visible to _record_call() inside the worker, leaving
+        # golden_repo_alias/job_id/node_id NULL for this concurrent path.
+        _stats_ctx = contextvars.copy_context()
+        future = self.executor.submit(_stats_ctx.run, self._calculate_vector, task)
 
         # Update stats
         with self.stats_lock:
@@ -440,7 +449,11 @@ class VectorCalculationManager:
         # Submit to thread pool
         if not self.executor:
             raise RuntimeError("Thread pool not started")
-        future = self.executor.submit(self._calculate_vector, task)
+        # EVO-66113: see submit_chunk() for why copy_context().run() is
+        # required here -- plain executor.submit() would drop the
+        # embed-stats fallback ContextVars set in the main thread.
+        _stats_ctx = contextvars.copy_context()
+        future = self.executor.submit(_stats_ctx.run, self._calculate_vector, task)
 
         # Update stats
         with self.stats_lock:

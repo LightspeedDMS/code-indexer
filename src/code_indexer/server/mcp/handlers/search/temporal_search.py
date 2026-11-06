@@ -13,6 +13,8 @@ preserved intentionally to avoid behavioral changes during extraction.
 Refactoring is tracked separately.
 """
 
+from cidx_sdk.tool_args import coerce_int
+from code_indexer.server.services.served_index_cache import reads_served_indexes
 from typing import Any, Dict, Optional, Tuple
 
 from code_indexer.server.auth.user_manager import User, UserRole
@@ -30,7 +32,6 @@ from code_indexer.server.services.temporal_live_dispatch import (
 
 from .. import _utils
 from .._utils import (
-    _coerce_int,
     _get_access_filtering_service,
     _get_query_tracker,
     _mcp_response,
@@ -80,6 +81,7 @@ def _resolve_temporal_repo_path(
     return str(repo_path), None
 
 
+@reads_served_indexes
 def _execute_temporal_via_live_dispatch(
     params: Dict[str, Any],
     user: User,
@@ -113,7 +115,7 @@ def _execute_temporal_via_live_dispatch(
         TEMPORAL_RESPONSE_RESERVE_SECONDS,
     )
 
-    requested_limit = _coerce_int(params.get("limit"), _DEFAULT_SEARCH_LIMIT)
+    requested_limit = coerce_int(params.get("limit"), _DEFAULT_SEARCH_LIMIT)
     fusion_fetch_limit = compute_temporal_fusion_fetch_limit(
         requested_limit=requested_limit,
         rerank_query=params.get("rerank_query"),

@@ -4,7 +4,7 @@ Domain module for search handlers. Part of the handlers package
 modularization (Story #496).
 
 Issue #1935: this module was a single 2,498-line flat file. It is now a
-package with one module per domain seam (_shared, omni, memory_retrieval,
+package with one module per domain seam (_shared, omni, query_vector,
 repo_search, temporal_search, code_search, regex_search, cached_content).
 This ``__init__.py`` is a pure compatibility facade: every submodule
 imports its real dependencies directly and calls them by bare local name;
@@ -100,18 +100,10 @@ from code_indexer.server.services.search_embed_event_emit import (
     emit_embed_event as emit_embed_event,
 )
 from code_indexer.server.mcp import reranking as _mcp_reranking  # noqa: F401
-from code_indexer.server.mcp.memory_retrieval_pipeline import (
-    MemoryRetrievalPipeline as MemoryRetrievalPipeline,
-    MemoryRetrievalPipelineConfig as MemoryRetrievalPipelineConfig,
-    _build_empty_nudge_entry as _build_empty_nudge_entry,
-    _hydrate_memory_bodies as _hydrate_memory_bodies,
-)
 from .._utils import (
     CapBreach as CapBreach,
     cap_breach_response as cap_breach_response,
     _mcp_response as _mcp_response,
-    _coerce_int as _coerce_int,
-    _coerce_float as _coerce_float,
     _parse_json_string_array as _parse_json_string_array,
     _apply_payload_truncation as _apply_payload_truncation,
     _apply_fts_payload_truncation as _apply_fts_payload_truncation,
@@ -143,10 +135,8 @@ from ._shared import (
     _DEFAULT_REGEX_CONTEXT_LINES as _DEFAULT_REGEX_CONTEXT_LINES,
     _MAX_REGEX_MAX_RESULTS as _MAX_REGEX_MAX_RESULTS,
     _MAX_REGEX_CONTEXT_LINES as _MAX_REGEX_CONTEXT_LINES,
-    _CIDX_META_DIR_NAME as _CIDX_META_DIR_NAME,
     _QUERY_LOG_TRUNCATION_LIMIT as _QUERY_LOG_TRUNCATION_LIMIT,
     _OMNI_LOG_MAX_ALIASES_SHOWN as _OMNI_LOG_MAX_ALIASES_SHOWN,
-    _MEMORY_SEMANTIC_MODES as _MEMORY_SEMANTIC_MODES,
     _get_search_event_writer as _get_search_event_writer,
     _get_legacy as _get_legacy,
     _load_category_map as _load_category_map,
@@ -165,11 +155,9 @@ from .omni import (
     _aggregate_results as _aggregate_results,
     _omni_search_code as _omni_search_code,
 )
-from .memory_retrieval import (
+from .query_vector import (
     _configured_embedding_timeout_seconds as _configured_embedding_timeout_seconds,
-    _compute_memory_query_vector as _compute_memory_query_vector,
     _compute_shared_query_vector as _compute_shared_query_vector,
-    _run_memory_retrieval as _run_memory_retrieval,
 )
 from .repo_search import (
     _repo_lookup_error as _repo_lookup_error,

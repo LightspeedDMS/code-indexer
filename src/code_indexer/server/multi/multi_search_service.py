@@ -12,6 +12,7 @@ Implements:
 - AC7: Actionable Error Messages (timeout recommendations)
 """
 
+from code_indexer.server.services.served_index_cache import reads_served_indexes
 import contextvars
 import logging
 import subprocess
@@ -39,8 +40,27 @@ from ..query.filtered_search import (
     filtered_semantic_search,
 )
 from code_indexer.server.logging_utils import format_error_log, public_error_message
+from code_indexer.server.startup.search_backend_wiring import (
+    TEMPORAL_NOT_DELEGATED_MESSAGE,
+    active_search_backend,
+)
+from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
 
 logger = logging.getLogger(__name__)
+
+
+def _has_requested_extension(
+    file_path: str, file_extensions: Optional[List[str]]
+) -> bool:
+    """#2047 ``file_extensions`` for a delegated result: the backend carries no
+    such filter, so the one extension rule is applied to what comes back."""
+    from code_indexer.services.extension_filter import (
+        normalize_extensions,
+        path_matches_extensions,
+    )
+
+    extensions = normalize_extensions(file_extensions)
+    return extensions is None or path_matches_extensions(file_path, extensions)
 
 
 def _extension_deadline_of(request: MultiSearchRequest) -> Optional[float]:
@@ -423,6 +443,13 @@ class MultiSearchService:
         """
         search_type = request.search_type
 
+        # Search delegation seam: under search_backend='delegated' no index is
+        # read here. Semantic and FTS go to the backend; temporal is refused
+        # (the backend carries no temporal parameters).
+        search_backend = active_search_backend()
+        if search_backend is not None:
+            return self._search_delegated_sync(search_backend, repo_id, request)
+
         if search_type == "semantic":
             return self._search_semantic_sync(repo_id, request)
         elif search_type == "fts":
@@ -434,6 +461,49 @@ class MultiSearchService:
 
             raise SearchRequestError(f"Unsupported search type: {search_type}")
 
+    def _search_delegated_sync(
+        self, search_backend: Any, repo_id: str, request: MultiSearchRequest
+    ) -> List[Dict[str, Any]]:
+        """Run one repository's semantic/FTS search on the delegated backend.
+
+        Raises:
+            SearchRequestError: a temporal search (no delegated route) or an
+                unsupported search type -- the caller's own request, so its
+                text reaches the client (search_error_policy).
+        """
+        from ..query.semantic_query_manager import SearchRequestError
+
+        if request.search_type == "temporal":
+            logger.error(TEMPORAL_NOT_DELEGATED_MESSAGE)
+            raise SearchRequestError(TEMPORAL_NOT_DELEGATED_MESSAGE)
+        if request.search_type not in ("semantic", "fts"):
+            raise SearchRequestError(f"Unsupported search type: {request.search_type}")
+        raw_results = search_backend.search(
+            repository_alias=repo_id,
+            query_text=request.query,
+            search_mode=request.search_type,
+            limit=self.per_repo_limit(request),
+            min_score=request.min_score,
+            language=request.language,
+            exclude_language=request.exclude_language,
+            path_filter=request.path_filter,
+            exclude_path=request.exclude_path,
+            accuracy=request.accuracy or "balanced",
+        )
+        return [
+            {
+                "file_path": r.get("file_path", ""),
+                "line_start": r.get("line_number", 0),
+                "line_end": r.get("line_number", 0),
+                "score": r.get("similarity_score", 0.0),
+                "content": r.get("code_snippet", ""),
+                "language": r.get("language", ""),
+            }
+            for r in raw_results
+            if _has_requested_extension(r.get("file_path", ""), request.file_extensions)
+        ]
+
+    @reads_served_indexes
     def _search_semantic_sync(
         self, repo_id: str, request: MultiSearchRequest
     ) -> List[Dict[str, Any]]:
@@ -575,6 +645,7 @@ class MultiSearchService:
             )
             raise
 
+    @reads_served_indexes
     def _search_fts_sync(
         self, repo_id: str, request: MultiSearchRequest
     ) -> List[Dict[str, Any]]:
@@ -613,6 +684,7 @@ class MultiSearchService:
             )
             raise
 
+    @reads_served_indexes
     def _search_temporal_sync(
         self, repo_id: str, request: MultiSearchRequest
     ) -> List[Dict[str, Any]]:
@@ -674,7 +746,6 @@ class MultiSearchService:
             # the store is what actually performs the search.
             from ...services.temporal.temporal_server_paths import (
                 resolve_golden_repo_coordinates,
-                server_temporal_index_root,
             )
 
             # Prefer deriving golden_repos_dir STRUCTURALLY from the repo path
@@ -689,7 +760,10 @@ class MultiSearchService:
                 if _coordinates is not None
                 else PathLib(_get_golden_repos_dir())
             )
-            index_dir = server_temporal_index_root(_golden_repos_dir, repo_id)
+            # Delegated IndexStore: this pod holds the recorded temporal version.
+            from ..services.temporal_index_store import served_temporal_index_root
+
+            index_dir = served_temporal_index_root(_golden_repos_dir, repo_id)
             id_index_cache = None
             if self.hnsw_index_cache is not None:
                 from ...server.cache.id_index_cache import get_global_id_index_cache
@@ -760,6 +834,7 @@ class MultiSearchService:
             )
             raise
 
+    @reads_served_indexes
     def _search_single_repo_subprocess(
         self, repo_id: str, request: MultiSearchRequest
     ) -> List[Dict[str, Any]]:
@@ -818,7 +893,7 @@ class MultiSearchService:
 
             if process.returncode != 0:
                 raise RuntimeError(
-                    f"Subprocess failed with exit code {process.returncode}: {process.stderr}"
+                    f"Subprocess failed with exit code {process.returncode}: {redact_url_credentials(process.stderr)}"
                 )
 
             # Parse results from subprocess stdout
