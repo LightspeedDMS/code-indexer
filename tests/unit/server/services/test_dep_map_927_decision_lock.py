@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from code_indexer.server.services.dependency_map_service import DependencyMapService
+from cidx_depmap.server.dependency_map_service import DependencyMapService
 
 _BARRIER_TIMEOUT_SECONDS = 5
 _THREAD_JOIN_TIMEOUT_SECONDS = 10

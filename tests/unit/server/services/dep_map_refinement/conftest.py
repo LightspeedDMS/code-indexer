@@ -5,10 +5,11 @@ Provides common domain content, config builders, and service factories
 used across the refinement test suite.
 """
 
+from tests.unit.server._depmap_feature import depmap_claude_config
 from pathlib import Path
 from unittest.mock import Mock
 
-from code_indexer.server.services.dependency_map_service import DependencyMapService
+from cidx_depmap.server.dependency_map_service import DependencyMapService
 from code_indexer.server.utils.config_manager import ClaudeIntegrationConfig
 
 
@@ -83,7 +84,7 @@ def make_config(
     dependency_map_delta_max_turns: int = 30,
 ) -> ClaudeIntegrationConfig:
     """Build ClaudeIntegrationConfig with refinement fields."""
-    return ClaudeIntegrationConfig(
+    return depmap_claude_config(
         dependency_map_enabled=True,
         dependency_map_interval_hours=24,
         dependency_map_pass_timeout_seconds=dependency_map_pass_timeout_seconds,

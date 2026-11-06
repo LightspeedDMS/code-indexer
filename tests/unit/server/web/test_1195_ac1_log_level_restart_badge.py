@@ -13,7 +13,17 @@ from pathlib import Path
 from types import SimpleNamespace
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
-_ROUTES_PATH = _REPO_ROOT / "src" / "code_indexer" / "server" / "web" / "routes.py"
+# RESTART_REQUIRED_FIELDS lives in web/pages/config_values.py since web/routes.py
+# was split.
+_ROUTES_PATH = (
+    _REPO_ROOT
+    / "src"
+    / "code_indexer"
+    / "server"
+    / "web"
+    / "pages"
+    / "config_values.py"
+)
 _TEMPLATE_PATH = (
     _REPO_ROOT
     / "src"

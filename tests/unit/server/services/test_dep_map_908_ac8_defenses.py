@@ -157,7 +157,7 @@ def test_anomaly_file_used_directly_for_normal_case(tmp_path):
         AnomalyEntry,
         AnomalyType,
     )
-    from code_indexer.server.services.dep_map_repair_phase37 import (
+    from cidx_depmap.server.dep_map_repair_phase37 import (
         RepairJournal,
         _repair_one_self_loop,
     )
@@ -216,13 +216,13 @@ def test_unexpected_exception_propagates_at_phase37_helpers(tmp_path):
     import pytest
     from unittest.mock import patch
 
-    from code_indexer.server.services.dep_map_repair_phase37 import atomic_write_text
+    from cidx_depmap.server.dep_map_repair_phase37 import atomic_write_text
 
     target = tmp_path / "target.md"
     errors: List[str] = []
 
     with patch(
-        "code_indexer.server.services.dep_map_repair_phase37.os.replace",
+        "cidx_depmap.server.dep_map_repair_phase37.os.replace",
         side_effect=RuntimeError("unexpected internal error"),
     ):
         with pytest.raises(RuntimeError, match="unexpected internal error"):

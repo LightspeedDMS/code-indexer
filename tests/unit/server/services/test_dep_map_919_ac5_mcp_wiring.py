@@ -27,7 +27,8 @@ import json
 from typing import Any, Dict, cast
 from unittest.mock import MagicMock, patch
 
-from code_indexer.server.mcp.handlers.admin import handle_trigger_dependency_analysis
+from cidx_depmap.server.mcp.trigger import handle_trigger_dependency_analysis
+from tests.unit.server._depmap_feature import depmap_service_installed
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +104,7 @@ def _assert_success_payload(payload: Dict[str, Any]) -> None:
 
 
 def _call_handler(args: Dict[str, Any]) -> Dict[str, Any]:
-    """Invoke handle_trigger_dependency_analysis with stubbed app state."""
+    """Invoke handle_trigger_dependency_analysis with a stub running service."""
     stub_service = _StubDepMapService()
 
     with (
@@ -111,10 +112,7 @@ def _call_handler(args: Dict[str, Any]) -> Dict[str, Any]:
             "code_indexer.server.services.config_service.get_config_service",
             return_value=MagicMock(get_config=lambda: _build_server_config()),
         ),
-        patch(
-            "code_indexer.server.mcp.handlers._utils.app_module.app.state",
-            dependency_map_service=stub_service,
-        ),
+        depmap_service_installed(stub_service),
     ):
         # cast: handler is typed Dict[str, Any] but MagicMock context makes return Any.
         return cast(

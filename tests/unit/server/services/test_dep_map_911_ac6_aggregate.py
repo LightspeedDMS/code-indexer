@@ -73,7 +73,7 @@ def test_aggregate_both_source_files_rewritten(aggregate_setup):
 
 def test_aggregate_target_gets_two_incoming_rows(aggregate_setup):
     """Target file receives one mirror row per aggregate example."""
-    from code_indexer.server.services.dep_map_repair_garbage_domain import (
+    from cidx_depmap.server.dep_map_repair_garbage_domain import (
         find_existing_incoming_row,
     )
 

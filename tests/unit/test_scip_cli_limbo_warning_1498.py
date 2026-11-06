@@ -8,9 +8,9 @@ a symbol that genuinely has zero references/definitions, producing a false
 negative for users.
 
 These tests drive the REAL CLI commands (`scip_references`/`scip_definition`
-from `code_indexer.cli_scip`) via Click's CliRunner against a REAL, on-disk
+from `cidx_scip.cli`) via Click's CliRunner against a REAL, on-disk
 `GenerationStatus`/`ProjectStatus` (via the real `StatusTracker.save()`/
-`.load()` round trip from `code_indexer.scip.status`) -- not a bare Mock --
+`.load()` round trip from `cidx_scip.status`) -- not a bare Mock --
 so the status object driving the gate is faithful to production behavior.
 Only `SCIPQueryEngine` (the expensive SQLite query engine) is mocked to
 return an empty result list, matching the established pattern in
@@ -22,7 +22,7 @@ from unittest.mock import Mock, patch
 import click.testing
 import pytest
 
-from code_indexer.scip.status import (
+from cidx_scip.status import (
     GenerationStatus,
     OverallStatus,
     ProjectStatus,
@@ -132,12 +132,12 @@ class TestReferencesIncompletenessWarning:
             projects=_limbo_projects_3_of_6_failed(),
         )
 
-        with patch("code_indexer.scip.query.SCIPQueryEngine") as mock_engine_cls:
+        with patch("cidx_scip.query.SCIPQueryEngine") as mock_engine_cls:
             mock_engine = Mock()
             mock_engine.find_references.return_value = []
             mock_engine_cls.return_value = mock_engine
 
-            from code_indexer.cli_scip import scip_references
+            from cidx_scip.cli import scip_references
 
             runner = click.testing.CliRunner()
             result = runner.invoke(scip_references, ["register_child_process"])
@@ -162,12 +162,12 @@ class TestReferencesIncompletenessWarning:
             projects=_complete_success_projects(),
         )
 
-        with patch("code_indexer.scip.query.SCIPQueryEngine") as mock_engine_cls:
+        with patch("cidx_scip.query.SCIPQueryEngine") as mock_engine_cls:
             mock_engine = Mock()
             mock_engine.find_references.return_value = []
             mock_engine_cls.return_value = mock_engine
 
-            from code_indexer.cli_scip import scip_references
+            from cidx_scip.cli import scip_references
 
             runner = click.testing.CliRunner()
             result = runner.invoke(scip_references, ["totally_unused_symbol"])
@@ -192,12 +192,12 @@ class TestDefinitionIncompletenessWarning:
             projects=_limbo_projects_3_of_6_failed(),
         )
 
-        with patch("code_indexer.scip.query.SCIPQueryEngine") as mock_engine_cls:
+        with patch("cidx_scip.query.SCIPQueryEngine") as mock_engine_cls:
             mock_engine = Mock()
             mock_engine.find_definition.return_value = []
             mock_engine_cls.return_value = mock_engine
 
-            from code_indexer.cli_scip import scip_definition
+            from cidx_scip.cli import scip_definition
 
             runner = click.testing.CliRunner()
             result = runner.invoke(scip_definition, ["register_child_process"])
@@ -220,12 +220,12 @@ class TestDefinitionIncompletenessWarning:
             projects=_complete_success_projects(),
         )
 
-        with patch("code_indexer.scip.query.SCIPQueryEngine") as mock_engine_cls:
+        with patch("cidx_scip.query.SCIPQueryEngine") as mock_engine_cls:
             mock_engine = Mock()
             mock_engine.find_definition.return_value = []
             mock_engine_cls.return_value = mock_engine
 
-            from code_indexer.cli_scip import scip_definition
+            from cidx_scip.cli import scip_definition
 
             runner = click.testing.CliRunner()
             result = runner.invoke(scip_definition, ["totally_unused_symbol"])

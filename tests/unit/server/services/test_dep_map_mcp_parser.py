@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 import pytest
 
 if TYPE_CHECKING:
-    from code_indexer.server.services.dep_map_mcp_parser import DepMapMCPParser
+    from cidx_depmap.server.dep_map_mcp_parser import DepMapMCPParser
 
 
 # ---------------------------------------------------------------------------
@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 
 def _make_parser(path: Path) -> "DepMapMCPParser":  # type: ignore[name-defined]
-    from code_indexer.server.services.dep_map_mcp_parser import DepMapMCPParser
+    from cidx_depmap.server.dep_map_mcp_parser import DepMapMCPParser
 
     return DepMapMCPParser(path)
 
@@ -1065,7 +1065,7 @@ class TestGetStaleDomains:
         """Freeze _current_utc_now to 2026-04-20 UTC for deterministic days_stale."""
         from datetime import datetime, timezone
 
-        import code_indexer.server.services.dep_map_mcp_parser as mod
+        import cidx_depmap.server.dep_map_mcp_parser as mod
 
         monkeypatch.setattr(
             mod, "_current_utc_now", lambda: datetime(2026, 4, 20, tzinfo=timezone.utc)
@@ -1162,7 +1162,7 @@ class TestGetStaleDomains:
         """days_stale is computed from the injectable _current_utc_now — clock control works."""
         from datetime import datetime, timezone
 
-        import code_indexer.server.services.dep_map_mcp_parser as mod
+        import cidx_depmap.server.dep_map_mcp_parser as mod
 
         d = dep_map_root / "dependency-map"
         domains = [{"name": "dom-clock", "description": "d", "participating_repos": []}]

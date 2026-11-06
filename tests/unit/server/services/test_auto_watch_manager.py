@@ -201,3 +201,48 @@ class TestAutoWatchManagerTimeout:
 
         assert result["status"] == "error"
         assert "not running" in result["message"].lower()
+
+
+class TestAutoWatchUnderADelegatedContentBackend:
+    """Content seam: with content_backend=delegated the repository is not on the
+    pod (workspace-mcp serves it), so there is nothing to put an inotify watch on.
+    Starting one would watch an empty dir, or a mount about to be removed, and
+    never see a change -- a silent failure rather than a refused one."""
+
+    def test_no_watch_is_started_when_delegated(self, tmp_path):
+        _write_real_config(tmp_path)
+        manager = AutoWatchManager()
+        with (
+            patch(
+                "code_indexer.server.services.auto_watch_manager.configured_content_backend_name",
+                return_value="delegated",
+            ),
+            patch(
+                "code_indexer.server.services.auto_watch_manager.DaemonWatchManager"
+            ) as daemon_cls,
+        ):
+            result = manager.start_watch(str(tmp_path))
+
+        assert result["status"] == "disabled"
+        assert "delegated" in result["message"]
+        daemon_cls.assert_not_called()
+        assert not manager.is_watching(str(tmp_path))
+
+    def test_a_local_backend_still_watches(self, tmp_path):
+        """The gate is on the backend, not on watching in general."""
+        _write_real_config(tmp_path)
+        manager = AutoWatchManager()
+        with (
+            patch(
+                "code_indexer.server.services.auto_watch_manager.configured_content_backend_name",
+                return_value="local",
+            ),
+            patch(
+                "code_indexer.server.services.auto_watch_manager.DaemonWatchManager"
+            ) as daemon_cls,
+        ):
+            daemon_cls.return_value.start_watch.return_value = {"status": "success"}
+            result = manager.start_watch(str(tmp_path))
+
+        assert result["status"] == "success"
+        daemon_cls.assert_called_once()

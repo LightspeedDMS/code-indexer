@@ -11,8 +11,9 @@ import logging
 
 from unittest.mock import MagicMock
 
-from code_indexer.server.utils.config_manager import ClaudeIntegrationConfig
-from code_indexer.server.web.dependency_map_routes import _build_domain_analyzer
+from tests.unit.server._depmap_feature import depmap_claude_config
+
+from cidx_depmap.server.web.routes import _build_domain_analyzer
 
 
 class TestRepairAnalyzerHonorsPass2MaxTurns:
@@ -20,7 +21,7 @@ class TestRepairAnalyzerHonorsPass2MaxTurns:
 
     def _make_dep_map_service(self, max_turns: int):
         """Return a fake dep_map_service whose _config_manager returns a known max_turns."""
-        ci_config = ClaudeIntegrationConfig(dependency_map_pass2_max_turns=max_turns)
+        ci_config = depmap_claude_config(dependency_map_pass2_max_turns=max_turns)
 
         config_manager = MagicMock()
         config_manager.get_claude_integration_config.return_value = ci_config

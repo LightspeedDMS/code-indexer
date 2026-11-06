@@ -36,7 +36,8 @@ collaborators are stood in; the SUT (cli.py's flag threading) runs for real.
 from __future__ import annotations
 
 import contextlib
-from typing import List
+import os
+from typing import List, Sequence
 from unittest.mock import MagicMock, patch
 
 from code_indexer.config import CohereConfig, VoyageAIConfig
@@ -98,11 +99,34 @@ def _make_indexer() -> MagicMock:
 
 
 @contextlib.contextmanager
+def _in_project(tmp_path):
+    """Run the command from inside the fixture project.
+
+    `cidx index` is guarded by require_mode("local"), which finds the project
+    from the CWD -- so without this the suite passes only when pytest happens
+    to be launched from an initialised checkout, and fails everywhere else.
+    Mode detection reads config.json directly (ConfigManager is patched only
+    in cli), so the marker it looks for is written here too.
+    """
+    config_json = tmp_path / ".code-indexer" / "config.json"
+    config_json.parent.mkdir(exist_ok=True)
+    if not config_json.exists():
+        config_json.write_text("{}")
+    previous = os.getcwd()
+    os.chdir(tmp_path)
+    try:
+        yield
+    finally:
+        os.chdir(previous)
+
+
+@contextlib.contextmanager
 def _index_test_env(
     tmp_path,
     loaded_configs: List[MagicMock],
     mock_indexer,
     mock_index_via_daemon,
+    providers: Sequence[str] = ("voyage-ai",),
 ):
     """Yields a CliRunner. `loaded_configs` accumulates EVERY config object
     `config_manager.load()` hands back across the whole command invocation,
@@ -115,10 +139,12 @@ def _index_test_env(
 
     def _load_side_effect() -> MagicMock:
         cfg = _make_config(str(tmp_path))
+        cfg.get_embedding_providers = lambda: list(providers)
         loaded_configs.append(cfg)
         return cfg
 
     with (
+        _in_project(tmp_path),
         patch(
             "code_indexer.cli.EmbeddingProviderFactory.resolve_api_key",
             return_value="key-123",
@@ -289,6 +315,7 @@ def _index_commits_test_env(tmp_path, loaded_configs: List[MagicMock]):
     mock_vs_instance.base_path = tmp_path / ".code-indexer" / "index"
 
     with (
+        _in_project(tmp_path),
         patch("code_indexer.cli.ConfigManager") as mock_cm,
         patch(
             _MIGRATE_TEMPORAL_PATH, return_value=MigrationResult.COMPLETED
@@ -376,3 +403,107 @@ class TestServerManagedProviderSettingsIndexCommitsFlag:
             temporal_config.voyage_ai.api_endpoint == _REPO_CONFIGURED_VOYAGE_ENDPOINT
         )
         assert temporal_config.cohere.api_endpoint == _REPO_CONFIGURED_COHERE_ENDPOINT
+
+
+# ---------------------------------------------------------------------------
+# --content-backend: the server's content-seam selection, stamped alongside
+# --server-managed-provider-settings by append_server_layout_args. The child
+# builds the backend from the name and hands it to every SmartIndexer it
+# constructs; without that the delegated seam is configured but never used.
+# ---------------------------------------------------------------------------
+
+
+class TestContentBackendFlag:
+    _SERVER_ARGS = ["index", "--server-managed-provider-settings"]
+
+    def _invoke(
+        self,
+        tmp_path,
+        extra_args: List[str],
+        build_backend,
+        providers: Sequence[str] = ("voyage-ai",),
+    ):
+        loaded_configs: List[MagicMock] = []
+        mock_indexer = _make_indexer()
+        with _index_test_env(
+            tmp_path,
+            loaded_configs,
+            mock_indexer,
+            MagicMock(return_value=0),
+            providers=providers,
+        ) as runner:
+            with (
+                patch(
+                    "code_indexer.services.smart_indexer.SmartIndexer",
+                    return_value=mock_indexer,
+                ) as smart_indexer_cls,
+                patch(
+                    "code_indexer.cli._build_index_content_backend",
+                    side_effect=build_backend,
+                ) as builder,
+            ):
+                from code_indexer.cli import cli
+
+                result = runner.invoke(cli, [*self._SERVER_ARGS, *extra_args])
+        return result, smart_indexer_cls, builder, mock_indexer
+
+    def test_delegated_reaches_the_indexer(self, tmp_path) -> None:
+        backend = MagicMock(is_local=False)
+        result, smart_indexer_cls, builder, _ = self._invoke(
+            tmp_path, ["--content-backend=delegated"], lambda name: backend
+        )
+
+        assert result.exit_code == 0, result.output
+        builder.assert_called_once_with("delegated")
+        assert smart_indexer_cls.call_args.kwargs["content_backend"] is backend
+
+    def test_every_provider_indexer_gets_the_same_backend(self, tmp_path) -> None:
+        """A second embedding provider runs its own SmartIndexer over the same
+        repo; it must read through the same seam, built once."""
+        backend = MagicMock(is_local=False)
+        result, smart_indexer_cls, builder, _ = self._invoke(
+            tmp_path,
+            ["--content-backend=delegated"],
+            lambda name: backend,
+            providers=("voyage-ai", "cohere"),
+        )
+
+        assert result.exit_code == 0, result.output
+        assert smart_indexer_cls.call_count == 2, result.output
+        assert all(
+            call.kwargs["content_backend"] is backend
+            for call in smart_indexer_cls.call_args_list
+        )
+        builder.assert_called_once_with("delegated")
+
+    def test_default_builds_nothing_and_passes_none(self, tmp_path) -> None:
+        """Standalone CLI and local servers: no backend object, no plugin."""
+        result, smart_indexer_cls, builder, _ = self._invoke(
+            tmp_path, [], lambda name: MagicMock()
+        )
+
+        assert result.exit_code == 0, result.output
+        builder.assert_not_called()
+        assert smart_indexer_cls.call_args.kwargs["content_backend"] is None
+
+    def test_delegated_with_no_plugin_fails_before_indexing(self, tmp_path) -> None:
+        """Never a silent read of the disk -- the run must not proceed."""
+
+        def no_plugin(name: str):
+            raise RuntimeError("content_backend='delegated' selected but no backend")
+
+        result, _, _, mock_indexer = self._invoke(
+            tmp_path, ["--content-backend=delegated"], no_plugin
+        )
+
+        assert result.exit_code != 0
+        mock_indexer.smart_index.assert_not_called()
+
+    def test_an_unknown_value_is_rejected_by_the_cli(self, tmp_path) -> None:
+        result, _, builder, mock_indexer = self._invoke(
+            tmp_path, ["--content-backend=remote"], lambda name: MagicMock()
+        )
+
+        assert result.exit_code == 2
+        builder.assert_not_called()
+        mock_indexer.smart_index.assert_not_called()

@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from code_indexer.server.services.dep_map_parser_hygiene import AnomalyEntry
-    from code_indexer.server.services.dep_map_repair_executor import (
+    from cidx_depmap.server.dep_map_repair_executor import (
         DepMapRepairExecutor,
     )
 

@@ -282,8 +282,15 @@ class TestActivatedRepoIndexManagerInitGuard:
         fake_result.stderr = ""
 
         # Bug #1218: _run_subprocess_with_telemetry no longer takes a timeout param.
+        # EVO-66105: the production call passes golden_repo_alias so the child
+        # subprocess can tag its embedding-stats records. Without it here the
+        # fake raises TypeError, which the method's broad `except` swallows into
+        # an error dict -- the call then looks like it never happened.
         def _capture_run(
-            args: List[str], repo_path: str, cancel_check: Any = None
+            args: List[str],
+            repo_path: str,
+            cancel_check: Any = None,
+            golden_repo_alias: Any = None,
         ) -> MagicMock:
             captured_calls.append(args)
             return fake_result
@@ -316,8 +323,15 @@ class TestActivatedRepoIndexManagerInitGuard:
         fake_result.stderr = ""
 
         # Bug #1218: _run_subprocess_with_telemetry no longer takes a timeout param.
+        # EVO-66105: the production call passes golden_repo_alias so the child
+        # subprocess can tag its embedding-stats records. Without it here the
+        # fake raises TypeError, which the method's broad `except` swallows into
+        # an error dict -- the call then looks like it never happened.
         def _capture_run(
-            args: List[str], repo_path: str, cancel_check: Any = None
+            args: List[str],
+            repo_path: str,
+            cancel_check: Any = None,
+            golden_repo_alias: Any = None,
         ) -> MagicMock:
             captured_calls.append(args)
             return fake_result

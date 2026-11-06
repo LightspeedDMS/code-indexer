@@ -19,7 +19,7 @@ import uuid
 from ...conftest import get_local_tmp_dir
 from code_indexer.config import Config
 from code_indexer.services.high_throughput_processor import HighThroughputProcessor
-from ..services.test_vector_calculation_manager import MockEmbeddingProvider
+from ..services.test_submit_task_compatibility import MockEmbeddingProvider
 
 
 class TestEnhancedProgressReporting:

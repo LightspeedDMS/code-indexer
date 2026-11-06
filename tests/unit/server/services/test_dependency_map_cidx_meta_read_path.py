@@ -28,7 +28,7 @@ from unittest.mock import Mock
 
 def _make_service(golden_repos_dir: str, get_actual_repo_path_side_effect=None):
     """Build a DependencyMapService with a real golden_repos_manager mock."""
-    from code_indexer.server.services.dependency_map_service import DependencyMapService
+    from cidx_depmap.server.dependency_map_service import DependencyMapService
 
     manager = Mock()
     manager.golden_repos_dir = golden_repos_dir
@@ -49,7 +49,7 @@ def _make_service(golden_repos_dir: str, get_actual_repo_path_side_effect=None):
 
 def _make_domain_service(dep_map_svc):
     """Build a DependencyMapDomainService from a DependencyMapService."""
-    from code_indexer.server.services.dependency_map_domain_service import (
+    from cidx_depmap.server.dependency_map_domain_service import (
         DependencyMapDomainService,
     )
 

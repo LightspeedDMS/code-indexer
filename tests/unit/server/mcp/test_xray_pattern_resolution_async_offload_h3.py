@@ -70,7 +70,7 @@ async def test_xray_search_pattern_resolution_runs_on_the_dedicated_xray_executo
     """`_resolve_evaluator_code` must be invoked on a worker thread from the
     SPECIFIC dedicated `xray_executor`, never directly on the event loop
     thread (nor on some other, non-dedicated executor)."""
-    from code_indexer.server.mcp.handlers.xray import handle_xray_search
+    from cidx_xray.server.mcp.xray import handle_xray_search
     from code_indexer.server.mcp.handlers._utils import _mcp_response
 
     main_thread_name = threading.current_thread().name
@@ -96,11 +96,11 @@ async def test_xray_search_pattern_resolution_runs_on_the_dedicated_xray_executo
     try:
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray._infra._resolve_evaluator_code",
+                "cidx_xray.server.mcp.xray._infra._resolve_evaluator_code",
                 side_effect=_fake_resolve_evaluator_code,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray._infra._get_xray_executor",
+                "cidx_xray.server.mcp.xray._infra._get_xray_executor",
                 return_value=real_executor,
             ),
         ):
@@ -126,8 +126,8 @@ async def test_ensure_seed_patterns_and_pattern_resolution_run_off_the_event_loo
     Forces the module-level `_seeds_ensured` latch back to False so the
     seed-write path is genuinely exercised.
     """
-    from code_indexer.server.mcp.handlers.xray import handle_xray_search
-    from code_indexer.server.services.xray_pattern_service import XrayPatternService
+    from cidx_xray.server.mcp.xray import handle_xray_search
+    from cidx_xray.server.pattern_service import XrayPatternService
 
     main_thread_name = threading.current_thread().name
     captured: Dict[str, str] = {}
@@ -169,12 +169,12 @@ async def test_ensure_seed_patterns_and_pattern_resolution_run_off_the_event_loo
                 _fake_resolve_and_prepare_pattern,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray._infra._get_xray_executor",
+                "cidx_xray.server.mcp.xray._infra._get_xray_executor",
                 return_value=real_executor,
             ),
-            patch("code_indexer.server.mcp.handlers.xray._infra._seeds_ensured", False),
+            patch("cidx_xray.server.mcp.xray._infra._seeds_ensured", False),
             patch(
-                "code_indexer.server.mcp.handlers.xray._infra._get_cidx_meta_path",
+                "cidx_xray.server.mcp.xray._infra._get_cidx_meta_path",
                 return_value=Path("/tmp/fake-cidx-meta-for-offload-test"),
             ),
         ):

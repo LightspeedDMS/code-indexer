@@ -77,7 +77,7 @@ class _DefinitionService:
 
 
 def _get_definition(rec: Recorder, service: _DefinitionService) -> Dict[str, Any]:
-    from code_indexer.server.routers import scip_queries
+    from cidx_scip.server import routes as scip_queries
 
     with patch.object(scip_queries, "_get_scip_query_service", lambda r: service):
         result: Dict[str, Any] = scip_queries.get_definition(
@@ -118,8 +118,8 @@ class TestScipRestRecordingNeverBreaksTheRequest:
         )
 
     def test_multi_definition_runs_and_records_its_endpoint(self, rec):
-        from code_indexer.server.multi.scip_models import SCIPMultiRequest
-        from code_indexer.server.routes import scip_multi_routes
+        from cidx_scip.server.multi_models import SCIPMultiRequest
+        from cidx_scip.server import multi_routes as scip_multi_routes
 
         service = _MultiService()
         with patch.object(scip_multi_routes, "get_scip_multi_service", lambda: service):
@@ -151,7 +151,7 @@ class _MultiService:
 
     def __getattr__(self, operation: str) -> Any:
         def _run(_request: Any) -> Any:
-            from code_indexer.server.multi.scip_models import (
+            from cidx_scip.server.multi_models import (
                 SCIPMultiMetadata,
                 SCIPMultiResponse,
             )
@@ -182,14 +182,14 @@ class TestScipMultiToolIdentifiers:
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
 
-        from code_indexer.server.auth.dependencies import get_current_user
-        from code_indexer.server.routes import scip_multi_routes
+        from cidx_scip.server.route_auth import current_caller
+        from cidx_scip.server import multi_routes as scip_multi_routes
 
         app = FastAPI()
         app.include_router(scip_multi_routes.router)
         app.state.search_event_log_writer = rec.writer
         app.state.access_filtering_service = _state(rec).access_filtering_service
-        app.dependency_overrides[get_current_user] = lambda: make_user("carol")
+        app.dependency_overrides[current_caller] = lambda: make_user("carol")
         body: Dict[str, Any] = {"symbol": "Calculator", "repositories": ["first-repo"]}
         if path == "callchain":
             body.update(symbol="", from_symbol="Calculator", to_symbol="add")

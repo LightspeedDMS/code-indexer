@@ -29,14 +29,14 @@ async def _capture_engine_kwargs(params: Dict[str, Any]) -> Dict[str, Any]:
     user = _make_user(UserRole.NORMAL_USER)
     captured: Dict[str, Any] = {}
     with patch(
-        "code_indexer.server.mcp.handlers.xray._search._resolve_repo_path",
+        "cidx_xray.server.mcp.xray._search._resolve_repo_path",
         return_value="/some/path",
     ):
         with _xray_single_repo_env() as (_bjm, _jt, _exec, mock_loop):
             await _import_handler()(params, user)
             job_fn = mock_loop.run_in_executor.call_args[0][1]
             with patch(
-                "code_indexer.xray.search_engine.XRaySearchEngine.run",
+                "cidx_xray.search_engine.XRaySearchEngine.run",
                 side_effect=lambda **kw: captured.update(kw)
                 or {
                     "matches": [],
@@ -70,7 +70,7 @@ class TestXraySearchHandlerRenamedParams:
             "search_target": "content",
         }
         with patch(
-            "code_indexer.server.mcp.handlers.xray._search._resolve_repo_path",
+            "cidx_xray.server.mcp.xray._search._resolve_repo_path",
             return_value="/some/path",
         ):
             with _xray_single_repo_env():
@@ -120,7 +120,7 @@ class TestXraySearchHandlerMaxResults:
         user = _make_user(UserRole.NORMAL_USER)
         params = {**VALID_PARAMS, "max_results": 10}
         with patch(
-            "code_indexer.server.mcp.handlers.xray._search._resolve_repo_path",
+            "cidx_xray.server.mcp.xray._search._resolve_repo_path",
             return_value="/some/path",
         ):
             with _xray_single_repo_env():

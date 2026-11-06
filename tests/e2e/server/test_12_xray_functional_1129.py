@@ -382,8 +382,24 @@ class TestAC1TwoPhasePipelineFindings:
 class TestAC2AstDumpAndExplore:
     """AC2: xray_dump_ast and xray_explore exercise the tree-sitter AST layer.
 
-    These tools use the Python tree-sitter path (no Rust compilation) so they
-    run even when xray-cli is absent.  No require_xray_cli() gate.
+    The two tools do NOT have the same toolchain requirement, despite both
+    being "AST" tools:
+
+      - ``xray_dump_ast`` really is pure Python tree-sitter: it parses one
+        named file and serialises the tree. No evaluator, no Rust, no
+        subprocess -- it runs with xray-cli absent, hence no gate on its test.
+
+      - ``xray_explore`` is ``xray_search`` plus AST-debug enrichment. The
+        enrichment is Python tree-sitter, but it only ever decorates matches
+        that Phase 2 already produced, and Phase 2 is the native xray-cli
+        evaluator with no Python fallback. With no binary there are no
+        matches to decorate, so ``test_explore_returns_ast_debug``'s
+        ``len(matches) >= 1`` cannot hold and the test is gated below.
+
+    This docstring previously claimed BOTH tools "use the Python tree-sitter
+    path ... so they run even when xray-cli is absent", which was true of
+    dump_ast only. The explore test was therefore ungated and failed on any
+    machine without a built binary -- noise that trains readers to ignore it.
     """
 
     def test_dump_ast_language_and_root(
@@ -448,6 +464,13 @@ class TestAC2AstDumpAndExplore:
           - result["matches"] is non-empty.
           - matches[0]["ast_debug"]["type"] == "module".
         """
+        # Gated like every other Phase-2 test in this suite: explore's matches
+        # come from the native evaluator, so `len(matches) >= 1` below is
+        # unsatisfiable without the binary (see the class docstring). Skips
+        # locally, hard-fails under CIDX_E2E_REQUIRE_ALL -- so CI still proves
+        # it, and a toolchain-less checkout reports "skipped", not "broken".
+        require_xray_cli()
+
         client, alias = seeded_indexed_client
 
         resp = call_mcp_tool(

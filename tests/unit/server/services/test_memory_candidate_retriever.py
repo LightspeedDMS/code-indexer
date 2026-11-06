@@ -30,7 +30,7 @@ def _make_retriever(store_path: str = "/fake/cidx-meta"):
     that logging behaviour is predictable (the sentinel is per-process but
     tests run in the same process).
     """
-    from code_indexer.server.services.memory_candidate_retriever import (
+    from cidx_memory.server.memory_candidate_retriever import (
         MemoryCandidateRetriever,
     )
 
@@ -57,7 +57,7 @@ class TestMemoryCandidateRetriever:
         user_id = "user-1"
 
         with patch(
-            "code_indexer.server.services.memory_candidate_retriever"
+            "cidx_memory.server.memory_candidate_retriever"
             ".FilesystemVectorStore.search",
             return_value=[],
         ):
@@ -93,7 +93,7 @@ class TestMemoryCandidateRetriever:
         ]
 
         with patch(
-            "code_indexer.server.services.memory_candidate_retriever"
+            "cidx_memory.server.memory_candidate_retriever"
             ".FilesystemVectorStore.search",
             return_value=fake_results,
         ):
@@ -119,7 +119,7 @@ class TestMemoryCandidateRetriever:
 
         # Both calls return [] (simulating missing collection/index)
         with patch(
-            "code_indexer.server.services.memory_candidate_retriever"
+            "cidx_memory.server.memory_candidate_retriever"
             ".FilesystemVectorStore.search",
             return_value=[],
         ):
@@ -182,7 +182,7 @@ class TestMemoryCandidateRetriever:
         ]
 
         with patch(
-            "code_indexer.server.services.memory_candidate_retriever"
+            "cidx_memory.server.memory_candidate_retriever"
             ".FilesystemVectorStore.search",
             return_value=fake_results,
         ):

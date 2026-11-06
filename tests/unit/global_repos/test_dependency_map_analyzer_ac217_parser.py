@@ -75,7 +75,7 @@ No verified cross-domain dependencies.
 
 
 def _import_analyzer():
-    from code_indexer.global_repos.dependency_map_analyzer import DependencyMapAnalyzer
+    from cidx_depmap.server.dependency_map_analyzer import DependencyMapAnalyzer
 
     return DependencyMapAnalyzer
 

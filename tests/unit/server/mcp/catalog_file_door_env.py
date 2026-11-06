@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, cast
 from unittest.mock import patch
 
 from code_indexer.server.auth.user_manager import User, UserRole
@@ -118,7 +118,7 @@ class CatalogFileDoorEnv:
         golden_activity = GoldenActivity([ALPHA, "cidx-meta"])
         self.activations = Activations(golden_activity)
         self.file_service = FileListingService()
-        self.file_service.activated_repo_manager = self.activations  # type: ignore[assignment]
+        self.file_service.activated_repo_manager = cast(Any, self.activations)
         self.state = SimpleNamespace(
             golden_repos_dir=str(self.golden_root),
             backend_registry=SimpleNamespace(global_repos=self.fx.registry),

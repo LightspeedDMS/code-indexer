@@ -2,11 +2,11 @@
 
 from pathlib import Path
 from unittest.mock import Mock, patch
-from code_indexer.scip.indexers.base import IndexerResult, IndexerStatus
-from code_indexer.scip.indexers.java import JavaIndexer
-from code_indexer.scip.indexers.typescript import TypeScriptIndexer
-from code_indexer.scip.indexers.python import PythonIndexer
-from code_indexer.scip.indexers.go import GoIndexer
+from cidx_scip.indexers.base import IndexerResult, IndexerStatus
+from cidx_scip.indexers.java import JavaIndexer
+from cidx_scip.indexers.typescript import TypeScriptIndexer
+from cidx_scip.indexers.python import PythonIndexer
+from cidx_scip.indexers.go import GoIndexer
 
 
 class TestSCIPIndexerBase:
@@ -44,7 +44,7 @@ class TestSCIPIndexerBase:
 class TestJavaIndexer:
     """Test Java/scip-java indexer."""
 
-    @patch("code_indexer.scip.indexers.java.shutil.move")
+    @patch("cidx_scip.indexers.java.shutil.move")
     @patch("subprocess.run")
     def test_java_maven_indexing_success(self, mock_run, mock_move, tmp_path):
         """Test successful Maven project indexing."""
@@ -74,7 +74,7 @@ class TestJavaIndexer:
         args = mock_run.call_args[0][0]
         assert "cs" in args  # coursier
 
-    @patch("code_indexer.scip.indexers.java.shutil.move")
+    @patch("cidx_scip.indexers.java.shutil.move")
     @patch("subprocess.run")
     def test_java_gradle_indexing_success(self, mock_run, mock_move, tmp_path):
         """Test successful Gradle project indexing."""
@@ -124,7 +124,7 @@ class TestJavaIndexer:
 class TestTypeScriptIndexer:
     """Test TypeScript/scip-typescript indexer."""
 
-    @patch("code_indexer.scip.indexers.typescript.shutil.move")
+    @patch("cidx_scip.indexers.typescript.shutil.move")
     @patch("subprocess.run")
     def test_typescript_indexing_success(self, mock_run, mock_move, tmp_path):
         """Test successful TypeScript project indexing."""
@@ -157,7 +157,7 @@ class TestTypeScriptIndexer:
 class TestPythonIndexer:
     """Test Python/scip-python indexer."""
 
-    @patch("code_indexer.scip.indexers.python.shutil.move")
+    @patch("cidx_scip.indexers.python.shutil.move")
     @patch("subprocess.run")
     def test_python_indexing_success(self, mock_run, mock_move, tmp_path):
         """Test successful Python project indexing."""
@@ -189,7 +189,7 @@ class TestPythonIndexer:
 class TestCSharpIndexer:
     """Test C#/scip-dotnet indexer."""
 
-    @patch("code_indexer.scip.indexers.csharp.shutil.move")
+    @patch("cidx_scip.indexers.csharp.shutil.move")
     @patch("subprocess.run")
     def test_csharp_solution_indexing_success(self, mock_run, mock_move, tmp_path):
         """Test successful C# solution project indexing."""
@@ -207,7 +207,7 @@ class TestCSharpIndexer:
         mock_run.return_value = Mock(returncode=0, stdout="Indexed", stderr="")
 
         # Act
-        from code_indexer.scip.indexers.csharp import CSharpIndexer
+        from cidx_scip.indexers.csharp import CSharpIndexer
 
         indexer = CSharpIndexer()
         result = indexer.generate(project_dir, output_dir, "solution")
@@ -221,7 +221,7 @@ class TestCSharpIndexer:
         assert "scip-dotnet" in args
         assert "index" in args
 
-    @patch("code_indexer.scip.indexers.csharp.shutil.move")
+    @patch("cidx_scip.indexers.csharp.shutil.move")
     @patch("subprocess.run")
     def test_csharp_project_indexing_success(self, mock_run, mock_move, tmp_path):
         """Test successful C# project file indexing."""
@@ -241,7 +241,7 @@ class TestCSharpIndexer:
         mock_run.return_value = Mock(returncode=0, stdout="Indexed", stderr="")
 
         # Act
-        from code_indexer.scip.indexers.csharp import CSharpIndexer
+        from cidx_scip.indexers.csharp import CSharpIndexer
 
         indexer = CSharpIndexer()
         result = indexer.generate(project_dir, output_dir, "project")
@@ -271,7 +271,7 @@ class TestCSharpIndexer:
         )
 
         # Act
-        from code_indexer.scip.indexers.csharp import CSharpIndexer
+        from cidx_scip.indexers.csharp import CSharpIndexer
 
         indexer = CSharpIndexer()
         result = indexer.generate(project_dir, output_dir, "solution")
@@ -290,7 +290,7 @@ class TestCSharpIndexer:
         output_dir = tmp_path / ".code-indexer" / "scip" / "dotnet-app"
 
         # Act
-        from code_indexer.scip.indexers.csharp import CSharpIndexer
+        from cidx_scip.indexers.csharp import CSharpIndexer
 
         indexer = CSharpIndexer()
         result = indexer.generate(project_dir, output_dir, "solution")
@@ -300,14 +300,14 @@ class TestCSharpIndexer:
         assert result.exit_code == -1
         assert "No .sln file found" in result.stderr
 
-    @patch("code_indexer.scip.indexers.csharp.shutil.which")
+    @patch("cidx_scip.indexers.csharp.shutil.which")
     def test_csharp_indexer_is_available_true(self, mock_which):
         """Test scip-dotnet availability when installed."""
         # Arrange
         mock_which.return_value = "/usr/local/bin/scip-dotnet"
 
         # Act
-        from code_indexer.scip.indexers.csharp import CSharpIndexer
+        from cidx_scip.indexers.csharp import CSharpIndexer
 
         indexer = CSharpIndexer()
         result = indexer.is_available()
@@ -316,14 +316,14 @@ class TestCSharpIndexer:
         assert result is True
         mock_which.assert_called_once_with("scip-dotnet")
 
-    @patch("code_indexer.scip.indexers.csharp.shutil.which")
+    @patch("cidx_scip.indexers.csharp.shutil.which")
     def test_csharp_indexer_is_available_false(self, mock_which):
         """Test scip-dotnet availability when not installed."""
         # Arrange
         mock_which.return_value = None
 
         # Act
-        from code_indexer.scip.indexers.csharp import CSharpIndexer
+        from cidx_scip.indexers.csharp import CSharpIndexer
 
         indexer = CSharpIndexer()
         result = indexer.is_available()
@@ -339,7 +339,7 @@ class TestCSharpIndexer:
         mock_run.return_value = Mock(returncode=0, stdout="1.0.0\n", stderr="")
 
         # Act
-        from code_indexer.scip.indexers.csharp import CSharpIndexer
+        from cidx_scip.indexers.csharp import CSharpIndexer
 
         indexer = CSharpIndexer()
         version = indexer.get_version()
@@ -352,7 +352,7 @@ class TestCSharpIndexer:
 class TestGoIndexer:
     """Test Go/scip-go indexer."""
 
-    @patch("code_indexer.scip.indexers.go.shutil.move")
+    @patch("cidx_scip.indexers.go.shutil.move")
     @patch("subprocess.run")
     def test_go_indexing_success(self, mock_run, mock_move, tmp_path):
         """Test successful Go module project indexing."""
@@ -403,7 +403,7 @@ class TestGoIndexer:
         assert result.exit_code == 1
         assert "build failed" in result.stderr
 
-    @patch("code_indexer.scip.indexers.go.shutil.which")
+    @patch("cidx_scip.indexers.go.shutil.which")
     def test_go_indexer_is_available_true(self, mock_which):
         """Test scip-go availability when installed."""
         # Arrange
@@ -417,7 +417,7 @@ class TestGoIndexer:
         assert result is True
         mock_which.assert_called_once_with("scip-go")
 
-    @patch("code_indexer.scip.indexers.go.shutil.which")
+    @patch("cidx_scip.indexers.go.shutil.which")
     def test_go_indexer_is_available_false(self, mock_which):
         """Test scip-go availability when not installed."""
         # Arrange

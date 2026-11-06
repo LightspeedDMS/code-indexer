@@ -26,7 +26,10 @@ from fastapi import status
 from fastapi.testclient import TestClient
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
-_ROUTES_PATH = _REPO_ROOT / "src" / "code_indexer" / "server" / "web" / "routes.py"
+# update_config_section lives in web/pages/config.py since web/routes.py was split.
+_ROUTES_PATH = (
+    _REPO_ROOT / "src" / "code_indexer" / "server" / "web" / "pages" / "config.py"
+)
 
 _TOKEN_USERNAME_BYTES = 8
 _TEST_TIMEOUT = 60

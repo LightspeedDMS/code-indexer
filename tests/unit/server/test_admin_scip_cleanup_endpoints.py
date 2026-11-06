@@ -6,7 +6,14 @@ Tests admin API endpoints for workspace cleanup:
 - AC5: GET /api/admin/scip-cleanup-status - Cleanup status visibility
 
 TDD Approach: Tests written FIRST, endpoints implemented to pass tests.
+
+Since modular phase 4d the routes are the cidx-scip feature's admin router
+(``routers()``, permission ``manage_users``) and the service is the one the
+feature's ``on_startup`` installs (``runtime.WORKSPACE_CLEANUP``); the core
+mounts the router behind its own authentication, as here.
 """
+
+from typing import Iterator
 
 import pytest
 from fastapi.testclient import TestClient
@@ -15,7 +22,30 @@ from datetime import datetime, timezone
 
 from code_indexer.server.app import create_app
 from code_indexer.server.auth.user_manager import User, UserRole
-from code_indexer.server.services.workspace_cleanup_service import CleanupResult
+from cidx_scip.server import runtime
+from cidx_scip.server.workspace_cleanup import CleanupResult, WorkspaceCleanupService
+from tests.unit.server._scip_feature import mount_scip_routes
+
+
+def _scip_client(tmp_path) -> Iterator[TestClient]:
+    """The app with the scip feature's routers mounted and its cleanup
+    service installed, as a server with "scip" enabled has them."""
+    app = mount_scip_routes(create_app())
+    runtime.WORKSPACE_CLEANUP.install(
+        WorkspaceCleanupService(
+            job_manager=None, workspace_root=str(tmp_path), retention_days=7
+        )
+    )
+    try:
+        yield TestClient(app)
+    finally:
+        runtime.WORKSPACE_CLEANUP.uninstall()
+
+
+def _cleanup_service() -> WorkspaceCleanupService:
+    service = runtime.WORKSPACE_CLEANUP.get()
+    assert service is not None
+    return service
 
 
 @pytest.mark.e2e
@@ -23,10 +53,9 @@ class TestSCIPCleanupWorkspacesEndpointAC4:
     """AC4: Manual Cleanup Trigger endpoint tests."""
 
     @pytest.fixture
-    def client(self):
+    def client(self, tmp_path):
         """Create FastAPI test client."""
-        app = create_app()
-        return TestClient(app)
+        yield from _scip_client(tmp_path)
 
     @patch("code_indexer.server.auth.dependencies.jwt_manager")
     @patch("code_indexer.server.auth.dependencies.user_manager")
@@ -38,15 +67,9 @@ class TestSCIPCleanupWorkspacesEndpointAC4:
         When POST /api/admin/scip-cleanup-workspaces is called
         Then it should return 200 with cleanup summary
 
-        Bug #1705: the route handler (inline_admin_ops.py) closes over the
-        real WorkspaceCleanupService INSTANCE captured at app-wiring time
-        (create_app() -> startup/app_wiring.py), not the bare
-        code_indexer.server.app.workspace_cleanup_service module global --
-        that global exists for backward compatibility only and is never
-        read by the route handler, so patching it is a no-op. The route's
-        closure and app.state.workspace_cleanup_service share the SAME
-        object identity (app_wiring.py assigns both from one local var),
-        so patch.object() against that shared instance reaches the route.
+        Bug #1705: the route handler reads the WorkspaceCleanupService
+        INSTANCE the feature installed (runtime.WORKSPACE_CLEANUP), so
+        patch.object() against that instance reaches the route.
         """
         # Setup authentication for admin
         mock_jwt_manager.validate_token.return_value = {
@@ -77,7 +100,7 @@ class TestSCIPCleanupWorkspacesEndpointAC4:
 
         headers = {"Authorization": "Bearer admin.jwt.token"}
         with patch.object(
-            client.app.state.workspace_cleanup_service,
+            _cleanup_service(),
             "cleanup_workspaces",
             return_value=cleanup_result,
         ) as mock_cleanup_workspaces:
@@ -113,7 +136,7 @@ class TestSCIPCleanupWorkspacesEndpointAC4:
         When POST /api/admin/scip-cleanup-workspaces is called
         Then it should return 200 with error details in response
         """
-        # Bug #1705: patch the shared service instance, not the stale app.py global.
+        # Bug #1705: patch the shared service instance the route reads.
         mock_jwt_manager.validate_token.return_value = {
             "username": "admin",
             "role": "admin",
@@ -140,7 +163,7 @@ class TestSCIPCleanupWorkspacesEndpointAC4:
             duration_seconds=1.5,
         )
 
-        svc = client.app.state.workspace_cleanup_service
+        svc = _cleanup_service()
         headers = {"Authorization": "Bearer admin.jwt.token"}
         with patch.object(svc, "cleanup_workspaces", return_value=cleanup_result):
             response = client.post(
@@ -203,10 +226,9 @@ class TestSCIPCleanupStatusEndpointAC5:
     """AC5: Cleanup Status Visibility endpoint tests."""
 
     @pytest.fixture
-    def client(self):
+    def client(self, tmp_path):
         """Create FastAPI test client."""
-        app = create_app()
-        return TestClient(app)
+        yield from _scip_client(tmp_path)
 
     @patch("code_indexer.server.auth.dependencies.jwt_manager")
     @patch("code_indexer.server.auth.dependencies.user_manager")
@@ -218,7 +240,7 @@ class TestSCIPCleanupStatusEndpointAC5:
         When GET /api/admin/scip-cleanup-status is called
         Then it should return 200 with cleanup status
         """
-        # Bug #1705: patch the shared service instance, not the stale app.py global.
+        # Bug #1705: patch the shared service instance the route reads.
         mock_jwt_manager.validate_token.return_value = {
             "username": "admin",
             "role": "admin",
@@ -242,7 +264,7 @@ class TestSCIPCleanupStatusEndpointAC5:
             "total_size_mb": 150.25,
         }
 
-        svc = client.app.state.workspace_cleanup_service
+        svc = _cleanup_service()
         headers = {"Authorization": "Bearer admin.jwt.token"}
         with patch.object(
             svc, "get_cleanup_status", return_value=status_result
@@ -277,7 +299,7 @@ class TestSCIPCleanupStatusEndpointAC5:
         When GET /api/admin/scip-cleanup-status is called
         Then last_cleanup_time should be null
         """
-        # Bug #1705: patch the shared service instance, not the stale app.py global.
+        # Bug #1705: patch the shared service instance the route reads.
         mock_jwt_manager.validate_token.return_value = {
             "username": "admin",
             "role": "admin",
@@ -301,7 +323,7 @@ class TestSCIPCleanupStatusEndpointAC5:
             "total_size_mb": 50.0,
         }
         headers = {"Authorization": "Bearer admin.jwt.token"}
-        svc = client.app.state.workspace_cleanup_service
+        svc = _cleanup_service()
         with patch.object(svc, "get_cleanup_status", return_value=status_result):
             response = client.get("/api/admin/scip-cleanup-status", headers=headers)
 

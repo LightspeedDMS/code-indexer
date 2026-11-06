@@ -31,7 +31,10 @@ _REPO_ROOT = Path(__file__).resolve().parents[4]
 _CONFIG_SERVICE_PATH = (
     _REPO_ROOT / "src" / "code_indexer" / "server" / "services" / "config_service.py"
 )
-_ROUTES_PATH = _REPO_ROOT / "src" / "code_indexer" / "server" / "web" / "routes.py"
+# restart_server lives in web/pages/restart.py since web/routes.py was split.
+_ROUTES_PATH = (
+    _REPO_ROOT / "src" / "code_indexer" / "server" / "web" / "pages" / "restart.py"
+)
 
 # ---------------------------------------------------------------------------
 # Helpers

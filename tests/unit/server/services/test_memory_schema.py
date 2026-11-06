@@ -21,7 +21,7 @@ referenced_repo names the alias of the owning repository.
 
 import pytest
 
-from code_indexer.server.services.memory_schema import (
+from cidx_memory.server.memory_schema import (
     MemorySchemaValidationError,
     validate_create_payload,
     validate_edit_payload,

@@ -21,7 +21,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from code_indexer.server.services.dependency_map_service import (
+from cidx_depmap.server.dependency_map_service import (
     AnalysisAlreadyRunningError,
     DependencyMapService,
 )

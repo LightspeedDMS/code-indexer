@@ -27,6 +27,10 @@ from code_indexer.server.services.embedding_stats_attribution import (
     StatsAttribution,
 )
 from code_indexer.server.utils.index_command_layout import append_server_layout_args
+from code_indexer.services.chunk_coverage import (
+    CHUNK_COVERAGE_KEY,
+    CHUNK_COVERAGE_VERSION,
+)
 
 COLLECTION_NAME = "voyage-code-3"
 VECTOR_DIM = 1024
@@ -124,6 +128,8 @@ def write_metadata_marker(repo_dir: Path, marker: str) -> None:
                 "failed_files": 0,
                 "branch_commit_watermarks": {"master": head},
                 "fixture_marker": marker,
+                # Written by a cidx that routes every chunk to the text index.
+                CHUNK_COVERAGE_KEY: CHUNK_COVERAGE_VERSION,
             }
         )
     )

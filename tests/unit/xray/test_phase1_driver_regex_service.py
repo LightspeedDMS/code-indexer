@@ -45,7 +45,7 @@ def _make_search_result(matches):
 def search_engine(tmp_path):
     """XRaySearchEngine instance; skip if tree-sitter extras not installed."""
     pytest.importorskip("tree_sitter_languages", reason="xray extras not installed")
-    from code_indexer.xray.search_engine import XRaySearchEngine
+    from cidx_xray.search_engine import XRaySearchEngine
 
     return XRaySearchEngine()
 
@@ -64,7 +64,7 @@ class TestPhase1DriverUsesRegexSearchService:
         )
         fake_result = _make_search_result([fake_match])
 
-        with patch("code_indexer.xray.search_engine.RegexSearchService") as MockService:
+        with patch("cidx_xray.search_engine.RegexSearchService") as MockService:
             instance = MockService.return_value
             instance.search = AsyncMock(return_value=fake_result)
 
@@ -87,7 +87,7 @@ class TestPhase1DriverUsesRegexSearchService:
         fake_match = _make_regex_match("b.py", line_number=1)
         fake_result = _make_search_result([fake_match])
 
-        with patch("code_indexer.xray.search_engine.RegexSearchService") as MockService:
+        with patch("cidx_xray.search_engine.RegexSearchService") as MockService:
             instance = MockService.return_value
             instance.search = AsyncMock(return_value=fake_result)
 
@@ -106,7 +106,7 @@ class TestPhase1DriverEmptyResults:
         """When RegexSearchService returns no matches, candidate list is empty."""
         fake_result = _make_search_result([])
 
-        with patch("code_indexer.xray.search_engine.RegexSearchService") as MockService:
+        with patch("cidx_xray.search_engine.RegexSearchService") as MockService:
             instance = MockService.return_value
             instance.search = AsyncMock(return_value=fake_result)
 
@@ -131,7 +131,7 @@ class TestPhase1DriverDeduplication:
         ]
         fake_result = _make_search_result(fake_matches)
 
-        with patch("code_indexer.xray.search_engine.RegexSearchService") as MockService:
+        with patch("cidx_xray.search_engine.RegexSearchService") as MockService:
             instance = MockService.return_value
             instance.search = AsyncMock(return_value=fake_result)
 
@@ -159,7 +159,7 @@ class TestPhase1PositionsForIssue983:
         )
         fake_result = _make_search_result([fake_match])
 
-        with patch("code_indexer.xray.search_engine.RegexSearchService") as MockService:
+        with patch("cidx_xray.search_engine.RegexSearchService") as MockService:
             instance = MockService.return_value
             instance.search = AsyncMock(return_value=fake_result)
 
@@ -189,7 +189,7 @@ class TestAsyncToSyncHelper:
 
     def test_async_in_sync_works_outside_event_loop(self, search_engine):
         """_run_async_in_sync can be called from synchronous context."""
-        from code_indexer.xray.search_engine import _run_async_in_sync
+        from cidx_xray.search_engine import _run_async_in_sync
 
         async def _coro():
             return 42
@@ -199,7 +199,7 @@ class TestAsyncToSyncHelper:
 
     def test_async_in_sync_works_inside_event_loop(self, search_engine):
         """_run_async_in_sync does not raise RuntimeError when called within asyncio.run."""
-        from code_indexer.xray.search_engine import _run_async_in_sync
+        from cidx_xray.search_engine import _run_async_in_sync
 
         async def _coro():
             return 99
@@ -221,7 +221,7 @@ class TestPhase1FilenameTargetRetainsInlineBehavior:
         """RegexSearchService must NOT be called when search_target='filename'."""
         (tmp_path / "password_utils.py").write_text("def foo(): pass\n")
 
-        with patch("code_indexer.xray.search_engine.RegexSearchService") as MockService:
+        with patch("cidx_xray.search_engine.RegexSearchService") as MockService:
             candidates = search_engine._run_phase1_driver(
                 tmp_path, "password", "filename", [], []
             )

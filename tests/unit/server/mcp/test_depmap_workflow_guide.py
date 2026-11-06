@@ -15,6 +15,9 @@ Tests:
   each has a "See also" section referencing dependency_analysis_workflow
 """
 
+import pytest as _pytest
+
+from tests.unit.server._depmap_feature import depmap_tools_installed
 import re
 from pathlib import Path
 from typing import List
@@ -29,6 +32,12 @@ TOOL_DOCS_DIR = (
     / "server"
     / "mcp"
     / "tool_docs"
+)
+
+#: The depmap_* tool docs ship in the cidx-depmap feature (modular phase 4g).
+DEPMAP_TOOL_DOCS_DIR = (
+    Path(__file__).parent.parent.parent.parent.parent
+    / "packages/features/cidx-depmap/src/cidx_depmap/server/tool_docs"
 )
 
 DEPMAP_TOOL_DOCS = [
@@ -162,7 +171,7 @@ def test_workflow_guide_no_emojis(guide_file: Path) -> None:
 @pytest.mark.parametrize("doc_path", DEPMAP_TOOL_DOCS)
 def test_all_depmap_tool_docs_link_to_workflow_guide(doc_path: str) -> None:
     """Each depmap_* tool doc must contain a 'See also' section referencing the guide."""
-    md_file = TOOL_DOCS_DIR / doc_path
+    md_file = DEPMAP_TOOL_DOCS_DIR / Path(doc_path).name
     assert md_file.exists(), f"depmap tool doc not found: {md_file}"
 
     content = md_file.read_text(encoding="utf-8")
@@ -178,3 +187,11 @@ def test_all_depmap_tool_docs_link_to_workflow_guide(doc_path: str) -> None:
         f"{doc_path}: 'dependency_analysis_workflow' not referenced. "
         "Add a link to guides/dependency_analysis_workflow.md under 'See also'."
     )
+
+
+@_pytest.fixture(autouse=True)
+def _depmap_tools():
+    """The dependency map's MCP tools are the cidx-depmap feature's (modular
+    phase 4g): registered as on a server with "depmap" enabled."""
+    with depmap_tools_installed():
+        yield

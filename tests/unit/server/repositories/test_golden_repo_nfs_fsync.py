@@ -40,6 +40,12 @@ def _make_manager():
     resource_config = MagicMock()
     resource_config.git_pull_timeout = _FAKE_GIT_TIMEOUT
     manager.resource_config = resource_config
+    # EVO-64678: __init__ is bypassed here, so wire the git seam explicitly.
+    # LocalGitBackend still reaches subprocess.run (via git_runner), so the
+    # -c core.fsync=none assertions below are unchanged.
+    from code_indexer.server.storage.shared.git_backend import local_git_backend
+
+    manager._git_backend = local_git_backend()
     return manager
 
 
@@ -121,7 +127,13 @@ def test_fetch_includes_fsync_none_flag():
 
     with patch(
         "subprocess.run",
-        side_effect=[_make_ok_result(), _make_ok_result(stdout=branch_stdout)],
+        # EVO-64616: target-branch fetch, branch -r, then the plain fetch
+        # probing the clone's refspec.
+        side_effect=[
+            _make_ok_result(),
+            _make_ok_result(stdout=branch_stdout),
+            _make_ok_result(),
+        ],
     ) as mock_run:
         manager._cb_git_fetch_and_validate(
             base_clone_path=_FAKE_BASE_CLONE_PATH,
@@ -130,9 +142,11 @@ def test_fetch_includes_fsync_none_flag():
             credentials_url=None,
         )
 
-    # First subprocess.run call is git fetch; second is git branch -r (read-only)
-    fetch_cmd = mock_run.call_args_list[0][0][0]
-    _assert_fsync_flag_before_subcommand(fetch_cmd, _FETCH_CMD)
+    # First and third subprocess.run calls are git fetch; second is git
+    # branch -r (read-only).
+    for index in (0, 2):
+        fetch_cmd = mock_run.call_args_list[index][0][0]
+        _assert_fsync_flag_before_subcommand(fetch_cmd, _FETCH_CMD)
 
 
 def test_pull_includes_fsync_none_flag():

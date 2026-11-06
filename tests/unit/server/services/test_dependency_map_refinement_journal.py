@@ -74,7 +74,7 @@ def _make_service(
     - Mock _refresh_scheduler
     - Mock refine_or_create_domain returning changed=False by default
     """
-    from code_indexer.server.services.dependency_map_service import DependencyMapService
+    from cidx_depmap.server.dependency_map_service import DependencyMapService
 
     # --- file system setup ---
     dep_map_read_dir = tmp_path / "dependency-map"

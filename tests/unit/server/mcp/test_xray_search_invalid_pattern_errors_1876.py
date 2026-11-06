@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from code_indexer.server.mcp.handlers.xray import _validate_xray_search_patterns
+from cidx_xray.server.mcp.xray import _validate_xray_search_patterns
 
 
 @pytest.mark.parametrize(

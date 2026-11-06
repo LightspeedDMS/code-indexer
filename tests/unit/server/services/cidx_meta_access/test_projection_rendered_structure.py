@@ -14,7 +14,7 @@ import re
 from pathlib import Path
 from typing import List, Optional
 
-import markdown  # type: ignore[import-untyped]
+import markdown
 import pytest
 
 from code_indexer.server.services.cidx_meta_access import (

@@ -6,7 +6,7 @@ regex_search.md``) documents ``max_results``'s ``inputSchema`` as
 ``minimum: 1, maximum: 1000``. But ``_execute_regex_search_impl`` in
 ``search.py`` only ever clamped the LOWER bound:
 
-    max_results = max(1, _coerce_int(args.get("max_results"), _DEFAULT_REGEX_MAX_RESULTS))
+    max_results = max(1, coerce_int(args.get("max_results"), _DEFAULT_REGEX_MAX_RESULTS))
 
 There is no corresponding upper clamp. A caller requesting an absurdly
 large ``max_results`` (e.g. 1_000_000) is passed straight through to

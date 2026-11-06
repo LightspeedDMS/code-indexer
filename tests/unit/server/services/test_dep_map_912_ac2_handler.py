@@ -37,11 +37,11 @@ from typing import List
 
 import pytest
 
-from code_indexer.server.services.dep_map_repair_bidirectional import (
+from cidx_depmap.server.dep_map_repair_bidirectional import (
     audit_one_bidirectional_mismatch,
     backfill_target_mirror_row,
 )
-from code_indexer.server.services.dep_map_repair_phase37 import RepairJournal
+from cidx_depmap.server.dep_map_repair_phase37 import RepairJournal
 
 
 # ---------------------------------------------------------------------------

@@ -232,8 +232,12 @@ class TestBug730ScipGenerateHasTimeout:
 
     def test_bug_730_scip_generate_has_no_timeout(self):
         """
-        _index_source() source must NOT have a 'timeout' keyword argument on the
-        subprocess.run(scip_command, ...) call (Bug #1218).
+        The SCIP ``subprocess.run(scip_command, ...)`` call must NOT have a
+        'timeout' keyword argument (Bug #1218).
+
+        EVO-65021 (s05) extracted the local SCIP subprocess out of
+        ``_index_source`` into ``_run_source_scip`` (the local fallback of the
+        single delegated funnel), so this guard now inspects that method.
 
         Overarching SCIP timeouts caused large-repo indexing to be killed
         mid-flight, producing a partial/corrupt index.  The only legitimate
@@ -242,7 +246,7 @@ class TestBug730ScipGenerateHasTimeout:
         # Bug #2012: the SCIP subprocess runs via run_with_cancel(scip_command,
         # ...) -- plain subprocess.run without a job, cancellable under one.
         scip_calls = _find_scip_command_calls(
-            inspect.getsource(RefreshScheduler._index_source)
+            inspect.getsource(RefreshScheduler._run_source_scip)
         )
         assert len(scip_calls) == 1, "expected one scip_command invocation"
         for scip_call in scip_calls:

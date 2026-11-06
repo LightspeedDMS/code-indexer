@@ -5,6 +5,8 @@ Following batched TDD approach approved for Story #479.
 """
 
 import pytest
+
+from tests.unit.server._xray_feature import xray_tools_installed
 from unittest.mock import patch, Mock
 from code_indexer.server.mcp.protocol import (
     validate_jsonrpc_request,
@@ -525,7 +527,9 @@ class TestInternalErrorLogging:
     real permission check, real handler) -- mirroring the existing
     test_valid_call_returns_stub_success / test_call_without_arguments
     pattern in this file -- and mock only genuine external collaborators,
-    never handle_tools_call/handle_tools_list themselves.
+    never handle_tools_call/handle_tools_list themselves. xray_search is the
+    cidx-xray feature's tool (phase 4c): installed as an "xray"-enabled app
+    has it.
     """
 
     @pytest.mark.asyncio
@@ -559,6 +563,7 @@ class TestInternalErrorLogging:
         }
 
         with (
+            xray_tools_installed(),
             patch.object(real_app_module, "golden_repo_manager", None),
             patch.object(
                 real_app_module.app.state,
@@ -619,6 +624,7 @@ class TestInternalErrorLogging:
         }
 
         with (
+            xray_tools_installed(),
             patch.object(real_app_module, "golden_repo_manager", None),
             patch.object(
                 real_app_module.app.state,

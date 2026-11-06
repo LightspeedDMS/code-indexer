@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 import math
 from pathlib import Path
 from typing import Any, List, Tuple, cast
@@ -60,16 +61,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+# The dependency map's handlers are the cidx-depmap feature's (modular phase 4g).
+from cidx_depmap.server.mcp import handlers as depmap
 from code_indexer.server.mcp.handlers import (
-    depmap,
     files,
     git_read,
     repos,
-    scip,
     search,
-    xray,
-    xray_batch,
 )
+from cidx_scip.server.mcp import scip
+from cidx_xray.server.mcp import xray, xray_batch
 from code_indexer.server.mcp.handlers import _utils as _handlers_utils
 from code_indexer.server.services import config_service as cfg_service_module
 from code_indexer.server.services import memory_governor as mg
@@ -98,16 +99,14 @@ _HANDLERS: List[Tuple[Any, str]] = [
     (repos, "get_all_repositories_status"),
 ]
 
-# The 3 handlers whose real body (once the gate lets execution through)
+# The handler whose real body (once the gate lets execution through)
 # dereferences an attribute that is genuinely absent under empty
 # params/None user in this unit-test environment (verified via direct
-# invocation): search_code -> user.username; both depmap handlers ->
-# app.state.dependency_map_service. All 12 others return an error envelope
-# instead of raising.
+# invocation): search_code -> user.username. All 14 others return an error
+# envelope instead of raising (the depmap handlers: no running
+# dependency-map service, so "dep_map_path not found").
 _HANDLERS_THAT_RAISE_ATTRIBUTE_ERROR_WHEN_ALLOWED = {
     ("search", "search_code"),
-    ("depmap", "depmap_get_cross_domain_graph_handler"),
-    ("depmap", "depmap_get_hub_domains_handler"),
 }
 
 
@@ -169,6 +168,30 @@ async def _invoke(module: Any, name: str, params: dict, user: Any) -> dict:
     if asyncio.iscoroutine(result):
         result = await result
     return cast(dict, result)
+
+
+@pytest.fixture(autouse=True)
+def _no_lazy_app_construction(monkeypatch):
+    """Hermetic stand-ins for the lazy app singleton's attributes these tests
+    patch (``app.state.*``, ``activated_repo_manager``).
+
+    ``code_indexer.server.app`` builds the whole server on first access to
+    any lazy attribute (PEP 562 ``__getattr__``, Bug #1693). ``patch.object``
+    reads the original value first, so in a run where no earlier test had
+    built the app, the build ran here -- against this module's stub config
+    service -- and failed. Writing the stand-ins straight into the module
+    dict never calls ``__getattr__``; monkeypatch restores whatever was there.
+    """
+    from starlette.datastructures import State
+
+    module_dict = vars(_handlers_utils.app_module)
+    monkeypatch.setitem(module_dict, "app", SimpleNamespace(state=State()))
+    # No activated repos and no golden-repo manager: aliases resolve through
+    # the golden path each test patches (as a freshly started server would).
+    arm = MagicMock()
+    arm.user_has_activated_repo.return_value = False
+    monkeypatch.setitem(module_dict, "activated_repo_manager", arm)
+    monkeypatch.setitem(module_dict, "golden_repo_manager", None)
 
 
 @pytest.fixture(autouse=True)
@@ -496,9 +519,10 @@ class TestCollaboratorNotCalledOnDeniedProvesRealGateOrdering:
         mock_access_service = MagicMock()
         mock_access_service.is_admin_user.return_value = True
         with (
-            patch(
-                "code_indexer.server.mcp.handlers.repos._resolve_golden_repo_path",
-                return_value=_FAKE_REPO_PATH,
+            # xray_batch resolves through its own registry-backed
+            # _resolve_repo_path (Bug #1315), no longer repos._resolve_golden_repo_path.
+            patch.object(
+                xray_batch, "_resolve_repo_path", return_value=_FAKE_REPO_PATH
             ),
             patch.object(
                 xray_batch, "_get_background_job_manager", return_value=mock_bjm

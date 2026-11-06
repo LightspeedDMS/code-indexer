@@ -12,8 +12,10 @@ from typing import Any, Generator, List
 from unittest.mock import MagicMock
 
 
+# The SCIP handlers left the core with the cidx-scip feature (modular phase
+# 4d); they bind their helpers from the feature, so no core write forwards
+# into them.
 _ALL_DOMAIN_SUBMODULES = [
-    "code_indexer.server.mcp.handlers.scip",
     "code_indexer.server.mcp.handlers.guides",
     "code_indexer.server.mcp.handlers.ssh_keys",
     "code_indexer.server.mcp.handlers.pull_requests",

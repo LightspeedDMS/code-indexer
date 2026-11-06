@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
-from code_indexer.server.wiki.wiki_cache import WikiCache
+from cidx_wiki.server.wiki_cache import WikiCache
 
 
 @pytest.fixture
@@ -44,9 +44,7 @@ class TestGetSidebarNoPoll:
         sidebar_data = [{"title": "Page", "path": "page"}]
         cache.put_sidebar("my-repo", sidebar_data, repo_dir)
 
-        with patch(
-            "code_indexer.server.wiki.wiki_cache._max_mtime_of_md_files"
-        ) as mock_mtime:
+        with patch("cidx_wiki.server.wiki_cache._max_mtime_of_md_files") as mock_mtime:
             result = cache.get_sidebar("my-repo", repo_dir)
 
         # Must NOT have called _max_mtime_of_md_files on the cache hit path

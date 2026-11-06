@@ -22,12 +22,14 @@ def _read_js() -> str:
     """
     js_path = (
         Path(__file__).parent.parent.parent.parent.parent
+        / "packages"
+        / "features"
+        / "cidx-depmap"
         / "src"
-        / "code_indexer"
+        / "cidx_depmap"
         / "server"
         / "web"
         / "static"
-        / "js"
         / "dependency_map.js"
     )
     return js_path.read_text()

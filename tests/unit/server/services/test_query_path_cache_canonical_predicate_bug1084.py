@@ -87,6 +87,7 @@ class TestSingleSourceDelegation:
         ``.versioned`` decision left in query_path_cache (AC #7 single source).
         """
         import code_indexer.server.services.query_path_cache as qpc
+        import code_indexer.utils.snapshot_paths as snapshot_paths
 
         calls = []
 
@@ -94,7 +95,9 @@ class TestSingleSourceDelegation:
             calls.append((path, mount_point))
             return True
 
-        monkeypatch.setattr(qpc, "_canonical_is_versioned_snapshot", fake_canon)
+        # The cache predicate lives beside the canonical one (both pure path
+        # rules); query_path_cache re-exports it.
+        monkeypatch.setattr(snapshot_paths, "is_versioned_snapshot", fake_canon)
 
         # Even a base-clone path returns True now, because the decision is
         # delegated to our patched canonical predicate.

@@ -170,7 +170,9 @@ def test_changed_and_new_documents_are_each_sent_exactly_once(
 
     assert proc.returncode == 0, proc.stderr[-3000:]
     assert fake_provider.ledger.run_multimodal_key_counts("delta") == expected
-    assert _run_spend(proc.stdout)["inputs_sent"] == 2
+    # Each document's image chunk is sent once multimodally and once as text
+    # (EVO-64616: every chunk's text is in the text index).
+    assert _run_spend(proc.stdout)["inputs_sent"] == 4
 
 
 def test_changed_image_under_unchanged_text_is_sent_once(

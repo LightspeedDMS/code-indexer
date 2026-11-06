@@ -8,11 +8,12 @@ Regression guard against two corruption bugs:
 Both paths must use IndexRegenerator.regenerate() for correct output.
 """
 
+from tests.unit.server._depmap_feature import depmap_claude_config
 import json
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from code_indexer.server.services.dependency_map_service import DependencyMapService
+from cidx_depmap.server.dependency_map_service import DependencyMapService
 from code_indexer.server.utils.config_manager import ClaudeIntegrationConfig
 
 
@@ -68,7 +69,7 @@ def _make_config(
     refinement_enabled: bool = True,
     refinement_domains_per_run: int = 1,
 ) -> ClaudeIntegrationConfig:
-    return ClaudeIntegrationConfig(
+    return depmap_claude_config(
         dependency_map_enabled=True,
         dependency_map_interval_hours=24,
         dependency_map_pass_timeout_seconds=300,
@@ -161,7 +162,7 @@ class TestRefinementPathUsesIndexRegenerator:
             regenerate_calls.append(output_dir)
 
         with patch(
-            "code_indexer.server.services.dep_map_index_regenerator.IndexRegenerator.regenerate",
+            "cidx_depmap.server.dep_map_index_regenerator.IndexRegenerator.regenerate",
             side_effect=fake_regenerate,
         ):
             service.run_refinement_cycle()
@@ -214,7 +215,7 @@ class TestDeltaPathRegeneratesIndexMd:
             patch.object(service, "_finalize_delta_tracking"),
             patch.object(service, "_get_activated_repos", return_value=changed_repos),
             patch(
-                "code_indexer.server.services.dep_map_index_regenerator.IndexRegenerator.regenerate",
+                "cidx_depmap.server.dep_map_index_regenerator.IndexRegenerator.regenerate",
                 side_effect=fake_regenerate,
             ),
         ):
@@ -240,7 +241,7 @@ class TestIndexRegeneratorProducesCorrectContent:
         Then _index.md has non-zero repos_analyzed_count, populated repos_analyzed,
         and non-empty Repo-to-Domain Matrix rows.
         """
-        from code_indexer.server.services.dep_map_index_regenerator import (
+        from cidx_depmap.server.dep_map_index_regenerator import (
             IndexRegenerator,
         )
 

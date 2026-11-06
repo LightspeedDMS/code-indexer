@@ -9,9 +9,9 @@ try:
 except ImportError:
     import sqlite3
 
-from code_indexer.scip.database.builder import SCIPDatabaseBuilder
-from code_indexer.scip.database.schema import DatabaseManager
-from code_indexer.scip.protobuf import scip_pb2
+from cidx_scip.database.builder import SCIPDatabaseBuilder
+from cidx_scip.database.schema import DatabaseManager
+from cidx_scip.protobuf import scip_pb2
 
 
 class TestSchemaCreation:
@@ -154,7 +154,7 @@ class TestSymbolExtraction:
 
         # Create database with schema
         scip_file = tmp_path / "test.scip"
-        from code_indexer.scip.database.schema import DatabaseManager
+        from cidx_scip.database.schema import DatabaseManager
 
         manager = DatabaseManager(scip_file)
         manager.create_schema()
@@ -324,7 +324,7 @@ class TestCallGraphGeneration:
         """
         scip_file = self._create_proximity_test_scip(tmp_path)
 
-        from code_indexer.scip.database.schema import DatabaseManager
+        from cidx_scip.database.schema import DatabaseManager
 
         manager = DatabaseManager(scip_file)
         manager.create_schema()
@@ -409,7 +409,7 @@ class TestCallGraphGeneration:
         with open(scip_file, "wb") as f:
             f.write(index.SerializeToString())
 
-        from code_indexer.scip.database.schema import DatabaseManager
+        from cidx_scip.database.schema import DatabaseManager
 
         manager = DatabaseManager(scip_file)
         manager.create_schema()
@@ -492,7 +492,7 @@ class TestCallGraphGeneration:
         with open(scip_file, "wb") as f:
             f.write(index.SerializeToString())
 
-        from code_indexer.scip.database.schema import DatabaseManager
+        from cidx_scip.database.schema import DatabaseManager
 
         manager = DatabaseManager(scip_file)
         manager.create_schema()
@@ -709,7 +709,7 @@ class TestComputeEnclosingRanges:
         scip_file = tmp_path / "test.scip"
         with open(scip_file, "wb") as f:
             f.write(index.SerializeToString())
-        from code_indexer.scip.database.schema import DatabaseManager
+        from cidx_scip.database.schema import DatabaseManager
 
         manager = DatabaseManager(scip_file)
         manager.create_schema()
@@ -784,7 +784,7 @@ class TestComputeEnclosingRanges:
             f.write(index.SerializeToString())
 
         # Build database
-        from code_indexer.scip.database.schema import DatabaseManager
+        from cidx_scip.database.schema import DatabaseManager
 
         manager = DatabaseManager(scip_file)
         manager.create_schema()
@@ -875,7 +875,7 @@ class TestComputeEnclosingRanges:
             f.write(index.SerializeToString())
 
         # Build database
-        from code_indexer.scip.database.schema import DatabaseManager
+        from cidx_scip.database.schema import DatabaseManager
 
         manager = DatabaseManager(scip_file)
         manager.create_schema()
@@ -939,7 +939,7 @@ class TestComputeEnclosingRanges:
         with open(scip_file, "wb") as f:
             f.write(index.SerializeToString())
 
-        from code_indexer.scip.database.schema import DatabaseManager
+        from cidx_scip.database.schema import DatabaseManager
 
         manager = DatabaseManager(scip_file)
         manager.create_schema()
@@ -1024,7 +1024,7 @@ class TestComputeEnclosingRanges:
             f.write(index.SerializeToString())
 
         # Build database
-        from code_indexer.scip.database.schema import DatabaseManager
+        from cidx_scip.database.schema import DatabaseManager
 
         manager = DatabaseManager(scip_file)
         manager.create_schema()

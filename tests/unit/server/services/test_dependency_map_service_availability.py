@@ -14,7 +14,7 @@ class TestIsAvailable:
 
     def test_returns_true_when_lock_available(self):
         """Test is_available returns True when no analysis is running."""
-        from code_indexer.server.services.dependency_map_service import (
+        from cidx_depmap.server.dependency_map_service import (
             DependencyMapService,
         )
 
@@ -31,7 +31,7 @@ class TestIsAvailable:
 
     def test_returns_false_when_lock_held(self):
         """Test is_available returns False when analysis is running."""
-        from code_indexer.server.services.dependency_map_service import (
+        from cidx_depmap.server.dependency_map_service import (
             DependencyMapService,
         )
 
@@ -55,7 +55,7 @@ class TestIsAvailable:
 
     def test_does_not_block_when_lock_held(self):
         """Test is_available returns immediately even when lock is held."""
-        from code_indexer.server.services.dependency_map_service import (
+        from cidx_depmap.server.dependency_map_service import (
             DependencyMapService,
         )
 
@@ -84,7 +84,7 @@ class TestIsAvailable:
 
     def test_does_not_hold_lock_after_checking(self):
         """Test is_available releases lock immediately after checking."""
-        from code_indexer.server.services.dependency_map_service import (
+        from cidx_depmap.server.dependency_map_service import (
             DependencyMapService,
         )
 
@@ -109,7 +109,7 @@ class TestIsAvailable:
 
     def test_concurrent_calls_do_not_interfere(self):
         """Test multiple is_available calls work correctly."""
-        from code_indexer.server.services.dependency_map_service import (
+        from cidx_depmap.server.dependency_map_service import (
             DependencyMapService,
         )
 

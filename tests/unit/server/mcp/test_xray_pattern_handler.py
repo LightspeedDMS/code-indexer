@@ -127,42 +127,46 @@ def _xray_single_repo_env(
     with (
         patch("code_indexer.server.mcp.handlers._utils.app_module", mock_app),
         patch(
-            "code_indexer.server.mcp.handlers.xray._search._resolve_repo_path",
+            "cidx_xray.server.mcp.xray._search._resolve_repo_path",
             return_value=repo_path,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
+            "cidx_xray.server.mcp.xray._explore._resolve_repo_path",
             return_value=repo_path,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._search._get_background_job_manager",
+            "cidx_xray.server.mcp.xray._search._get_background_job_manager",
             return_value=mock_bjm,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._explore._get_background_job_manager",
+            "cidx_xray.server.mcp.xray._explore._get_background_job_manager",
             return_value=mock_bjm,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._search._get_job_tracker",
+            "cidx_xray.server.mcp.xray._search._get_job_tracker",
             return_value=mock_jt,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._explore._get_job_tracker",
+            "cidx_xray.server.mcp.xray._explore._get_job_tracker",
             return_value=mock_jt,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._search._get_xray_executor",
+            "cidx_xray.server.mcp.xray._search._get_xray_executor",
             return_value=mock_exec,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._explore._get_xray_executor",
+            "cidx_xray.server.mcp.xray._infra._get_xray_executor",
             return_value=mock_exec,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._search.validate_rust_evaluator"
+            "cidx_xray.server.mcp.xray._explore._get_xray_executor",
+            return_value=mock_exec,
+        ),
+        patch(
+            "cidx_xray.server.mcp.xray._search.validate_rust_evaluator"
         ) as mock_validate,
         patch(
-            "code_indexer.server.mcp.handlers.xray._explore.validate_rust_evaluator"
+            "cidx_xray.server.mcp.xray._explore.validate_rust_evaluator"
         ) as mock_validate_explore,
         patch("asyncio.get_running_loop", return_value=loop_instance),
     ):
@@ -181,7 +185,7 @@ class TestHandleStoreXrayPattern:
 
     def test_unauthenticated_returns_auth_required(self, tmp_path: Path) -> None:
         """Auth: unauthenticated user returns auth_required."""
-        from code_indexer.server.mcp.handlers.xray import handle_store_xray_pattern
+        from cidx_xray.server.mcp.xray import handle_store_xray_pattern
 
         result = handle_store_xray_pattern(
             {
@@ -195,13 +199,13 @@ class TestHandleStoreXrayPattern:
 
     def test_missing_scope_returns_error(self, tmp_path: Path) -> None:
         """Validation: missing scope parameter returns error."""
-        from code_indexer.server.mcp.handlers.xray import handle_store_xray_pattern
+        from cidx_xray.server.mcp.xray import handle_store_xray_pattern
 
         user = _make_user()
         cidx_meta = _make_cidx_meta(tmp_path)
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._store_pattern._get_cidx_meta_path",
+            "cidx_xray.server.mcp.xray._store_pattern._get_cidx_meta_path",
             return_value=cidx_meta,
         ):
             result = handle_store_xray_pattern(
@@ -213,13 +217,13 @@ class TestHandleStoreXrayPattern:
 
     def test_missing_pattern_yaml_returns_error(self, tmp_path: Path) -> None:
         """Validation: missing pattern_yaml parameter returns error."""
-        from code_indexer.server.mcp.handlers.xray import handle_store_xray_pattern
+        from cidx_xray.server.mcp.xray import handle_store_xray_pattern
 
         user = _make_user()
         cidx_meta = _make_cidx_meta(tmp_path)
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._store_pattern._get_cidx_meta_path",
+            "cidx_xray.server.mcp.xray._store_pattern._get_cidx_meta_path",
             return_value=cidx_meta,
         ):
             result = handle_store_xray_pattern(
@@ -231,14 +235,14 @@ class TestHandleStoreXrayPattern:
 
     def test_valid_pattern_returns_success(self, tmp_path: Path) -> None:
         """Happy path: valid pattern stored returns success."""
-        from code_indexer.server.mcp.handlers.xray import handle_store_xray_pattern
-        from code_indexer.server.services.xray_pattern_service import XrayPatternService
+        from cidx_xray.server.mcp.xray import handle_store_xray_pattern
+        from cidx_xray.server.pattern_service import XrayPatternService
 
         user = _make_user(UserRole.POWER_USER)
         cidx_meta = _make_cidx_meta(tmp_path)
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._store_pattern._get_cidx_meta_path",
+            "cidx_xray.server.mcp.xray._store_pattern._get_cidx_meta_path",
             return_value=cidx_meta,
         ):
             # Also mock git commit on service instances
@@ -262,8 +266,8 @@ class TestHandleStoreXrayPattern:
 
     def test_overwrite_false_prevents_duplicate(self, tmp_path: Path) -> None:
         """AC4: overwrite=false (default) prevents duplicate stores."""
-        from code_indexer.server.mcp.handlers.xray import handle_store_xray_pattern
-        from code_indexer.server.services.xray_pattern_service import XrayPatternService
+        from cidx_xray.server.mcp.xray import handle_store_xray_pattern
+        from cidx_xray.server.pattern_service import XrayPatternService
 
         user = _make_user(UserRole.POWER_USER)
         cidx_meta = _make_cidx_meta(tmp_path)
@@ -275,7 +279,7 @@ class TestHandleStoreXrayPattern:
             self._git_commit = MagicMock()  # type: ignore[method-assign]
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._store_pattern._get_cidx_meta_path",
+            "cidx_xray.server.mcp.xray._store_pattern._get_cidx_meta_path",
             return_value=cidx_meta,
         ):
             with patch.object(XrayPatternService, "__init__", patched_init):
@@ -315,7 +319,7 @@ class TestXraySearchPatternName:
         self, tmp_path: Path
     ) -> None:
         """AC5: Both pattern_name and evaluator_code provided returns mutually_exclusive_params."""
-        from code_indexer.server.mcp.handlers.xray import handle_xray_search
+        from cidx_xray.server.mcp.xray import handle_xray_search
 
         user = _make_user()
         mock_bjm = self._make_mock_bjm()
@@ -323,11 +327,11 @@ class TestXraySearchPatternName:
         mock_app.background_job_manager = mock_bjm
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._utils.app_module",
+            "code_indexer.server.mcp.handlers._utils.app_module",
             mock_app,
         ):
             with patch(
-                "code_indexer.server.mcp.handlers.xray._search._resolve_repo_path",
+                "cidx_xray.server.mcp.xray._search._resolve_repo_path",
                 return_value="/some/path",
             ):
                 result = await handle_xray_search(
@@ -346,8 +350,8 @@ class TestXraySearchPatternName:
 
     async def test_pattern_name_loads_stored_pattern(self, tmp_path: Path) -> None:
         """AC5: pattern_name (without evaluator_code) loads pattern and submits job."""
-        from code_indexer.server.mcp.handlers.xray import handle_xray_search
-        from code_indexer.server.services.xray_pattern_service import XrayPatternService
+        from cidx_xray.server.mcp.xray import handle_xray_search
+        from cidx_xray.server.pattern_service import XrayPatternService
 
         user = _make_user()
         cidx_meta = _make_cidx_meta(tmp_path)
@@ -370,7 +374,7 @@ class TestXraySearchPatternName:
                 mock_loop,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray._infra._get_cidx_meta_path",
+                "cidx_xray.server.mcp.xray._infra._get_cidx_meta_path",
                 return_value=cidx_meta,
             ),
         ):
@@ -390,7 +394,7 @@ class TestXraySearchPatternName:
 
     async def test_pattern_name_not_found_returns_error(self, tmp_path: Path) -> None:
         """AC5: pattern_name that doesn't exist returns pattern_not_found error."""
-        from code_indexer.server.mcp.handlers.xray import handle_xray_search
+        from cidx_xray.server.mcp.xray import handle_xray_search
 
         user = _make_user()
         cidx_meta = _make_cidx_meta(tmp_path)
@@ -403,7 +407,7 @@ class TestXraySearchPatternName:
                 mock_loop,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray._infra._get_cidx_meta_path",
+                "cidx_xray.server.mcp.xray._infra._get_cidx_meta_path",
                 return_value=cidx_meta,
             ),
         ):
@@ -424,8 +428,8 @@ class TestXraySearchPatternName:
         self, tmp_path: Path
     ) -> None:
         """AC8: pattern_params overrides are passed to resolved pattern."""
-        from code_indexer.server.mcp.handlers.xray import handle_xray_search
-        from code_indexer.server.services.xray_pattern_service import XrayPatternService
+        from cidx_xray.server.mcp.xray import handle_xray_search
+        from cidx_xray.server.pattern_service import XrayPatternService
 
         user = _make_user()
         cidx_meta = _make_cidx_meta(tmp_path)
@@ -448,7 +452,7 @@ class TestXraySearchPatternName:
                 mock_loop,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray._infra._get_cidx_meta_path",
+                "cidx_xray.server.mcp.xray._infra._get_cidx_meta_path",
                 return_value=cidx_meta,
             ),
         ):
@@ -479,7 +483,7 @@ class TestXrayExplorePatternName:
         self, tmp_path: Path
     ) -> None:
         """AC5: Both pattern_name and evaluator_code in xray_explore returns error."""
-        from code_indexer.server.mcp.handlers.xray import handle_xray_explore
+        from cidx_xray.server.mcp.xray import handle_xray_explore
 
         user = _make_user()
         mock_bjm = MagicMock()
@@ -488,11 +492,11 @@ class TestXrayExplorePatternName:
         mock_app.background_job_manager = mock_bjm
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._utils.app_module",
+            "code_indexer.server.mcp.handlers._utils.app_module",
             mock_app,
         ):
             with patch(
-                "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
+                "cidx_xray.server.mcp.xray._explore._resolve_repo_path",
                 return_value="/some/path",
             ):
                 result = await handle_xray_explore(
@@ -513,8 +517,8 @@ class TestXrayExplorePatternName:
         self, tmp_path: Path
     ) -> None:
         """AC5: pattern_name in xray_explore loads pattern and submits job."""
-        from code_indexer.server.mcp.handlers.xray import handle_xray_explore
-        from code_indexer.server.services.xray_pattern_service import XrayPatternService
+        from cidx_xray.server.mcp.xray import handle_xray_explore
+        from cidx_xray.server.pattern_service import XrayPatternService
 
         user = _make_user()
         cidx_meta = _make_cidx_meta(tmp_path)
@@ -536,7 +540,7 @@ class TestXrayExplorePatternName:
                 mock_loop,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray._infra._get_cidx_meta_path",
+                "cidx_xray.server.mcp.xray._infra._get_cidx_meta_path",
                 return_value=cidx_meta,
             ),
         ):

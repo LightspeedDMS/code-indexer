@@ -12,7 +12,7 @@ not AUTHORIAL (not rewriting from scratch).
 
 def _make_analyzer(tmp_path):
     """Build a minimal DependencyMapAnalyzer for prompt testing."""
-    from code_indexer.global_repos.dependency_map_analyzer import DependencyMapAnalyzer
+    from cidx_depmap.server.dependency_map_analyzer import DependencyMapAnalyzer
 
     return DependencyMapAnalyzer(
         golden_repos_root=tmp_path,

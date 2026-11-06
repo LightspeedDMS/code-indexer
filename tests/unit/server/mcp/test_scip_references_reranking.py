@@ -12,11 +12,13 @@ Story #659, Epic #649.
 """
 
 import json
+from typing import Iterator
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from code_indexer.server.mcp.tools import TOOL_REGISTRY
+from tests.unit.server._scip_feature import scip_tools_installed
 
 
 # ---------------------------------------------------------------------------
@@ -86,13 +88,18 @@ def _default_rerank_meta(used=False, provider=None, time_ms=0):
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def scip_tools() -> Iterator[None]:
+    """The scip feature's tools in TOOL_REGISTRY, as with "scip" enabled."""
+    with scip_tools_installed():
+        yield
+
+
 @pytest.fixture
 def scip_svc_mock():
     """Patch _get_scip_query_service for all handler tests."""
     refs = [_make_reference()]
-    with patch(
-        "code_indexer.server.mcp.handlers._legacy._get_scip_query_service"
-    ) as mock_factory:
+    with patch("cidx_scip.server.mcp.scip._get_scip_query_service") as mock_factory:
         mock_svc = MagicMock()
         mock_svc.find_references.return_value = refs
         mock_factory.return_value = mock_svc
@@ -104,11 +111,9 @@ def scip_svc_with_rerank_mock():
     """Patch _get_scip_query_service and get_config_service (rerank enabled)."""
     refs = [_make_reference()]
     with (
+        patch("cidx_scip.server.mcp.scip._get_scip_query_service") as mock_factory,
         patch(
-            "code_indexer.server.mcp.handlers._legacy._get_scip_query_service"
-        ) as mock_factory,
-        patch(
-            "code_indexer.server.mcp.handlers._legacy.get_config_service",
+            "cidx_scip.server.mcp.scip.get_config_service",
             return_value=_make_config_service_with_rerank(),
         ),
     ):
@@ -174,7 +179,7 @@ class TestScipReferencesNoRerankOverhead:
 
     def test_no_rerank_query_skips_reranking(self, scip_svc_mock):
         """When rerank_query=None, _apply_reranking_sync must not be invoked."""
-        from code_indexer.server.mcp.handlers._legacy import scip_references
+        from cidx_scip.server.mcp.scip import scip_references
 
         with patch(
             "code_indexer.server.mcp.reranking._apply_reranking_sync"
@@ -189,7 +194,7 @@ class TestScipReferencesNoRerankOverhead:
 
     def test_empty_rerank_query_skips_reranking(self, scip_svc_mock):
         """When rerank_query='', _apply_reranking_sync must not be invoked."""
-        from code_indexer.server.mcp.handlers._legacy import scip_references
+        from cidx_scip.server.mcp.scip import scip_references
 
         with patch(
             "code_indexer.server.mcp.reranking._apply_reranking_sync"
@@ -205,15 +210,13 @@ class TestScipReferencesNoRerankOverhead:
 
     def test_no_rerank_query_returns_identical_results(self):
         """Without rerank_query, results match current behavior (original order)."""
-        from code_indexer.server.mcp.handlers._legacy import scip_references
+        from cidx_scip.server.mcp.scip import scip_references
 
         refs = [
             _make_reference(context="first import"),
             _make_reference(context="second call"),
         ]
-        with patch(
-            "code_indexer.server.mcp.handlers._legacy._get_scip_query_service"
-        ) as mock_factory:
+        with patch("cidx_scip.server.mcp.scip._get_scip_query_service") as mock_factory:
             mock_svc = MagicMock()
             mock_svc.find_references.return_value = refs
             mock_factory.return_value = mock_svc
@@ -240,7 +243,7 @@ class TestScipReferencesRerankingWiring:
 
     def test_rerank_called_with_context_extractor(self, scip_svc_with_rerank_mock):
         """When rerank_query is set, _apply_reranking_sync is invoked with context extractor."""
-        from code_indexer.server.mcp.handlers._legacy import scip_references
+        from cidx_scip.server.mcp.scip import scip_references
 
         ref = _make_reference(context="result = UserService.authenticate(token)")
         scip_svc_with_rerank_mock.find_references.return_value = [ref]
@@ -287,7 +290,7 @@ class TestScipReferencesRerankingWiring:
 
     def test_rerank_requested_limit_matches_user_limit(self, scip_svc_with_rerank_mock):
         """requested_limit passed to _apply_reranking_sync matches user-specified limit."""
-        from code_indexer.server.mcp.handlers._legacy import scip_references
+        from cidx_scip.server.mcp.scip import scip_references
 
         ref = _make_reference()
         scip_svc_with_rerank_mock.find_references.return_value = [ref]
@@ -319,7 +322,7 @@ class TestScipReferencesOverfetch:
         self, scip_svc_with_rerank_mock
     ):
         """find_references receives limit=min(requested*5, 200) when rerank_query set."""
-        from code_indexer.server.mcp.handlers._legacy import scip_references
+        from cidx_scip.server.mcp.scip import scip_references
 
         with patch(
             "code_indexer.server.mcp.reranking._apply_reranking_sync",
@@ -339,7 +342,7 @@ class TestScipReferencesOverfetch:
 
     def test_overfetch_capped_at_200(self, scip_svc_with_rerank_mock):
         """Overfetch limit is capped at 200 even for large requested limits."""
-        from code_indexer.server.mcp.handlers._legacy import scip_references
+        from cidx_scip.server.mcp.scip import scip_references
 
         with patch(
             "code_indexer.server.mcp.reranking._apply_reranking_sync",
@@ -359,7 +362,7 @@ class TestScipReferencesOverfetch:
 
     def test_no_overfetch_without_rerank_query(self, scip_svc_mock):
         """Without rerank_query, find_references receives the plain requested limit."""
-        from code_indexer.server.mcp.handlers._legacy import scip_references
+        from cidx_scip.server.mcp.scip import scip_references
 
         args = {
             "symbol": "UserService",
@@ -383,16 +386,14 @@ class TestScipReferencesQueryMetadata:
 
     def _run_with_rerank_meta(self, rerank_meta: dict) -> dict:
         """Run scip_references with patched reranking; return parsed payload."""
-        from code_indexer.server.mcp.handlers._legacy import scip_references
+        from cidx_scip.server.mcp.scip import scip_references
 
         ref = _make_reference()
 
         with (
+            patch("cidx_scip.server.mcp.scip._get_scip_query_service") as mock_factory,
             patch(
-                "code_indexer.server.mcp.handlers._legacy._get_scip_query_service"
-            ) as mock_factory,
-            patch(
-                "code_indexer.server.mcp.handlers._legacy.get_config_service",
+                "cidx_scip.server.mcp.scip.get_config_service",
                 return_value=_make_config_service_with_rerank(),
             ),
             patch(
@@ -464,13 +465,11 @@ class TestScipReferencesQueryMetadata:
 
     def test_no_rerank_query_includes_query_metadata_with_used_false(self):
         """Without rerank_query, response still includes query_metadata with reranker_used=False."""
-        from code_indexer.server.mcp.handlers._legacy import scip_references
+        from cidx_scip.server.mcp.scip import scip_references
 
         ref = _make_reference()
 
-        with patch(
-            "code_indexer.server.mcp.handlers._legacy._get_scip_query_service"
-        ) as mock_factory:
+        with patch("cidx_scip.server.mcp.scip._get_scip_query_service") as mock_factory:
             mock_svc = MagicMock()
             mock_svc.find_references.return_value = [ref]
             mock_factory.return_value = mock_svc
@@ -497,7 +496,7 @@ class TestScipReferencesProviderFallback:
 
     def test_cohere_fallback_reflected_in_metadata(self, scip_svc_with_rerank_mock):
         """When Voyage fails and Cohere is used, metadata shows cohere as provider."""
-        from code_indexer.server.mcp.handlers._legacy import scip_references
+        from cidx_scip.server.mcp.scip import scip_references
 
         ref = _make_reference()
         scip_svc_with_rerank_mock.find_references.return_value = [ref]

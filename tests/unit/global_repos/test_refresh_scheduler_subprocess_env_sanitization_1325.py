@@ -40,6 +40,7 @@ from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
 from code_indexer.global_repos.query_tracker import QueryTracker
 from code_indexer.global_repos.cleanup_manager import CleanupManager
 from code_indexer.config import ConfigManager
+from tests.unit.server._scip_feature import scip_pipeline_installed
 
 _RELATIVE_PYTHONPATH = "./src"
 
@@ -195,7 +196,9 @@ class TestIndexSourceScipGenerateSanitizesPythonPath:
         expected_abs = os.path.abspath(_RELATIVE_PYTHONPATH)
 
         run_calls: list = []
+        # SCIP is the cidx-scip feature's index type (modular phase 4d).
         with (
+            scip_pipeline_installed(),
             patch(
                 "code_indexer.services.progress_subprocess_runner.run_with_popen_progress",
                 side_effect=_capture_popen([]),
@@ -258,6 +261,8 @@ class TestCreateSnapshotFixConfigSanitizesPythonPath:
             query_tracker=query_tracker,
             cleanup_manager=cleanup_manager,
             snapshot_manager=mock_snapshot_manager,
+            # fix-config is stamped from the repo's registry entry; none here.
+            registry=Mock(get_global_repo=Mock(return_value=None)),
         )
 
     def test_fix_config_receives_absolutized_pythonpath(
@@ -365,6 +370,8 @@ class TestRestoreMasterFromVersionedSanitizesPythonPath:
             query_tracker=query_tracker,
             cleanup_manager=cleanup_manager,
             snapshot_manager=mock_snapshot_manager,
+            # fix-config is stamped from the repo's registry entry; none here.
+            registry=Mock(get_global_repo=Mock(return_value=None)),
         )
 
     def test_fix_config_receives_absolutized_pythonpath(

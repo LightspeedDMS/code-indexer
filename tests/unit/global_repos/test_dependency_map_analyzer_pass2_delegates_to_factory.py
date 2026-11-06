@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Iterator, Tuple
 from unittest.mock import MagicMock, patch
 
 if TYPE_CHECKING:
-    from code_indexer.global_repos.dependency_map_analyzer import DependencyMapAnalyzer
+    from cidx_depmap.server.dependency_map_analyzer import DependencyMapAnalyzer
 
 
 # ---------------------------------------------------------------------------
@@ -43,7 +43,7 @@ def _build_analyzer_with_mocks(
 
     Yields (analyzer, mock_factory, mock_dispatcher).
     """
-    from code_indexer.global_repos.dependency_map_analyzer import DependencyMapAnalyzer
+    from cidx_depmap.server.dependency_map_analyzer import DependencyMapAnalyzer
     from code_indexer.server.utils.config_manager import CodexIntegrationConfig
 
     codex_cfg = CodexIntegrationConfig(
@@ -59,10 +59,10 @@ def _build_analyzer_with_mocks(
 
     with (
         patch(
-            "code_indexer.global_repos.dependency_map_analyzer.get_config_service"
+            "cidx_depmap.server.dependency_map_analyzer.get_config_service"
         ) as mock_get_cfg,
         patch(
-            "code_indexer.global_repos.dependency_map_analyzer.build_dep_map_dispatcher",
+            "cidx_depmap.server.dependency_map_analyzer.build_dep_map_dispatcher",
             return_value=mock_dispatcher,
         ) as mock_factory,
     ):

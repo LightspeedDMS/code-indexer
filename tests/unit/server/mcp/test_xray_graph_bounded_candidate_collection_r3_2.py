@@ -25,7 +25,7 @@ import inspect
 from pathlib import Path
 from unittest.mock import patch
 
-from code_indexer.server.mcp.handlers.xray_graph import _collect_graph_candidate_files
+from cidx_xray.server.mcp.xray_graph import _collect_graph_candidate_files
 from code_indexer.services.path_pattern_matcher import PathSelector
 
 _TOTAL_FILES = 10
@@ -119,7 +119,7 @@ async def test_pipeline_ors_collection_truncation_into_final_result(
     boundary (`RustNativeBackend.run_graph_analysis`)."""
     from unittest.mock import patch as _patch
 
-    from code_indexer.server.mcp.handlers.xray_graph import (
+    from cidx_xray.server.mcp.xray_graph import (
         _run_analyze_graph_pipeline,
     )
 
@@ -141,11 +141,11 @@ async def test_pipeline_ors_collection_truncation_into_final_result(
 
     with (
         _patch(
-            "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_and_files",
+            "cidx_xray.server.mcp.xray_graph._resolve_repo_and_files",
             return_value=(repo_root, ["A.java"], True, 0, 0, [], None),
         ),
         _patch(
-            "code_indexer.xray.rust_backend.RustNativeBackend.run_graph_analysis",
+            "cidx_xray.rust_backend.RustNativeBackend.run_graph_analysis",
             return_value=backend_result,
         ),
     ):

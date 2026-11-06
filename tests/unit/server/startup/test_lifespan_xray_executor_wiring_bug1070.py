@@ -1,88 +1,48 @@
-"""Bug #1070 regression guard: lifespan must wire a dedicated xray_executor.
+"""Bug #1070 regression guard: X-Ray compute runs on a dedicated executor.
 
-Bug #1070: handle_xray_search and handle_xray_explore submit to BackgroundJobManager's
-5-worker pool, causing starvation and 504s. The fix requires:
-1. A dedicated ThreadPoolExecutor for xray (xray_max_concurrent_jobs = 20 workers).
-2. lifespan.py creates it and injects it via set_xray_executor() so the handlers
-   dispatch xray compute there instead of the shared BJM pool.
+Bug #1070: handle_xray_search and handle_xray_explore submitted to
+BackgroundJobManager's 5-worker pool, causing starvation and 504s. The fix: a
+dedicated ThreadPoolExecutor sized by ``xray_max_concurrent_jobs`` (20),
+installed where the handlers read it, shut down on exit.
 
-Source-text checks (exact patterns):
-- "_xray_executor = ThreadPoolExecutor(" — executor creation
-- "xray_max_concurrent_jobs" — config field drives max_workers
-- "set_xray_executor(_xray_executor)" — injection call
-- "_xray_executor.shutdown(" — graceful shutdown on exit
-
-All tests MUST fail before the Bug #1070 fix and pass after.
+Since modular plan phase 4c the cidx-xray feature's on_startup builds it
+(``cidx_xray/server/lifecycle.py``), not the core's lifespan; its size comes
+from the core's background-jobs config through the server platform. The
+executable proof is tests/unit/xray/test_xray_feature_lifecycle.py; these
+source guards pin the pieces.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
-
-# Named constant: distance from this test file to the repository root.
-# Path: tests/unit/server/startup/ -> tests/unit/server/ -> tests/unit/ -> tests/ -> repo root
-_PARENTS_TO_REPO_ROOT = 4
-
-_REPO_ROOT = Path(__file__).resolve().parents[_PARENTS_TO_REPO_ROOT]
-_LIFESPAN_PATH = (
-    _REPO_ROOT / "src" / "code_indexer" / "server" / "startup" / "lifespan.py"
-)
+import inspect
 
 
-def _source() -> str:
-    return _LIFESPAN_PATH.read_text()
+def test_the_feature_startup_builds_and_installs_the_executor() -> None:
+    from cidx_xray.server import lifecycle
+
+    source = inspect.getsource(lifecycle)
+    assert "platform.xray_executor_pool_size()" in source
+    assert "executor = ThreadPoolExecutor(" in source
+    assert "runtime.EXECUTOR.install(executor)" in source
 
 
-class TestLifespanXrayExecutorWiringSource:
-    """Source-text guard: lifespan.py must create and inject a dedicated xray_executor."""
+def test_the_executor_is_shut_down_when_the_feature_stops() -> None:
+    from cidx_xray.server import lifecycle
 
-    def test_xray_executor_creation_statement_present(self):
-        """lifespan.py must contain '_xray_executor = ThreadPoolExecutor('.
+    source = inspect.getsource(lifecycle._shutdown_executor)
+    assert "executor.shutdown(" in source
+    assert "runtime.EXECUTOR.uninstall()" in source
 
-        Fails before fix (no dedicated xray executor); passes after.
-        """
-        source = _source()
 
-        assert "_xray_executor = ThreadPoolExecutor(" in source, (
-            "Bug #1070: lifespan.py does not contain "
-            "'_xray_executor = ThreadPoolExecutor('.\n"
-            "Add: _xray_executor = ThreadPoolExecutor(max_workers=xray_max_concurrent_jobs)"
-        )
+def test_the_pool_is_sized_by_xray_max_concurrent_jobs() -> None:
+    from code_indexer.server.feature_platform import ServerPlatform
+    from code_indexer.server.utils.config_manager import BackgroundJobsConfig
 
-    def test_xray_max_concurrent_jobs_config_field_referenced(self):
-        """lifespan.py must reference 'xray_max_concurrent_jobs' to size the executor.
+    expected = BackgroundJobsConfig().xray_max_concurrent_jobs
+    assert ServerPlatform().xray_executor_pool_size() == expected == 20
 
-        Fails before fix; passes after.
-        """
-        source = _source()
 
-        assert "xray_max_concurrent_jobs" in source, (
-            "Bug #1070: lifespan.py does not reference 'xray_max_concurrent_jobs'.\n"
-            "The max_workers must be driven by BackgroundJobsConfig.xray_max_concurrent_jobs."
-        )
+def test_the_core_lifespan_builds_no_xray_executor() -> None:
+    from code_indexer.server.startup import lifespan
 
-    def test_set_xray_executor_injection_call_present(self):
-        """lifespan.py must call 'set_xray_executor(_xray_executor)' exactly.
-
-        Fails before fix; passes after.
-        """
-        source = _source()
-
-        assert "set_xray_executor(_xray_executor)" in source, (
-            "Bug #1070: lifespan.py does not call 'set_xray_executor(_xray_executor)'.\n"
-            "Add:\n"
-            "  from code_indexer.server.mcp.handlers.xray import set_xray_executor\n"
-            "  set_xray_executor(_xray_executor)"
-        )
-
-    def test_xray_executor_shutdown_call_present(self):
-        """lifespan.py must call '_xray_executor.shutdown(' on server shutdown.
-
-        Fails before fix; passes after.
-        """
-        source = _source()
-
-        assert "_xray_executor.shutdown(" in source, (
-            "Bug #1070: lifespan.py does not call '_xray_executor.shutdown('.\n"
-            "Add _xray_executor.shutdown(wait=False) near _mcp_executor.shutdown."
-        )
+    assert "_xray_executor" not in inspect.getsource(lifespan)

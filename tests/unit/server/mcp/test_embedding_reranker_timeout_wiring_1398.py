@@ -18,7 +18,7 @@ from code_indexer.server.services.config_service import (
 
 # Isolation hardening (Issue #1687, superseding the original #1398
 # hardening): every code path this file exercises -- search.py's
-# _compute_memory_query_vector / _compute_shared_query_vector, and
+# _compute_shared_query_vector, and
 # reranking.py's _attempt_provider_rerank -- calls
 # search_service._get_http_client_factory(), which does
 # `from ..app import app as _app`: a genuine attribute access on
@@ -63,41 +63,10 @@ def isolated_config_service(tmp_path):
 
 
 class TestEmbeddingProviderTimeoutReachesVoyageAIClient:
-    """_compute_memory_query_vector / _compute_shared_query_vector construct
+    """_compute_shared_query_vector constructs
     VoyageAIClient(VoyageAIConfig()) for the server-side query-embedding
     path. Proves the configured embedding_provider_timeout_seconds value
     actually reaches the VoyageAIConfig passed into the client constructor."""
-
-    def test_compute_memory_query_vector_passes_configured_timeout(
-        self, isolated_config_service
-    ) -> None:
-        isolated_config_service.update_setting(
-            "search_timeouts", "embedding_provider_timeout_seconds", 77
-        )
-
-        from code_indexer.server.mcp.handlers.search import (
-            _compute_memory_query_vector,
-        )
-
-        with (
-            patch("code_indexer.services.voyage_ai.VoyageAIClient") as MockClient,
-            patch(
-                "code_indexer.server.services.governed_call.coalesced_query_embedding"
-            ) as mock_embed,
-        ):
-            mock_embed.return_value = (
-                [0.1, 0.2],
-                MagicMock(key_found=False, cache_mode="live", provider_latency_ms=1.0),
-            )
-            _compute_memory_query_vector("hello world")
-
-        MockClient.assert_called_once()
-        constructed_config = MockClient.call_args[0][0]
-        assert constructed_config.timeout == 77, (
-            f"Expected VoyageAIConfig.timeout=77 (configured value), got "
-            f"{constructed_config.timeout} -- embedding_provider_timeout_seconds "
-            f"is not reaching the constructed client"
-        )
 
     def test_compute_shared_query_vector_passes_configured_timeout(
         self, isolated_config_service
@@ -135,7 +104,7 @@ class TestEmbeddingProviderTimeoutReachesVoyageAIClient:
     ) -> None:
         """Byte-identical default (30s) preserves pre-#1398 behavior."""
         from code_indexer.server.mcp.handlers.search import (
-            _compute_memory_query_vector,
+            _compute_shared_query_vector,
         )
 
         with (
@@ -143,12 +112,16 @@ class TestEmbeddingProviderTimeoutReachesVoyageAIClient:
             patch(
                 "code_indexer.server.services.governed_call.coalesced_query_embedding"
             ) as mock_embed,
+            patch(
+                "code_indexer.server.services.coalescer_registry._digest_for_provider",
+                return_value="fallback-no-config",
+            ),
         ):
             mock_embed.return_value = (
                 [0.1],
                 MagicMock(key_found=False, cache_mode="live", provider_latency_ms=1.0),
             )
-            _compute_memory_query_vector("q")
+            _compute_shared_query_vector("q")
 
         constructed_config = MockClient.call_args[0][0]
         assert constructed_config.timeout == 30
@@ -158,14 +131,13 @@ class TestConfiguredEmbeddingTimeoutDefensiveAgainstMinimalConfigDoubles:
     """Regression: many existing unit tests (e.g.
     test_no_embedding_cache_shortcut_1108.py) stub get_config_service() with
     a minimal hand-built fake config object exposing ONLY the attributes the
-    code under test is documented to need (e.g. just memory_retrieval_config)
+    code under test is documented to need (e.g. just rerank_config)
     -- NOT a real ServerConfig, so it has no search_timeouts_config attribute
     AT ALL (not even None). _configured_embedding_timeout_seconds() must use
     getattr() defensively (matching _configured_reranker_timeout_seconds's
     existing pattern in reranking.py) rather than direct attribute access,
     or it raises AttributeError on every such fake -- silently caught by the
-    broad except-Exception in _compute_memory_query_vector /
-    _compute_shared_query_vector, which then skips the embedding call
+    broad except-Exception in _compute_shared_query_vector, which then skips the embedding call
     entirely and breaks unrelated tests asserting the embedding WAS called.
     """
 

@@ -144,7 +144,6 @@ def _make_minimal_app(export_svc, bgm, monkeypatch) -> FastAPI:
         user_manager=stub,
         golden_repo_manager=stub,
         background_job_manager=bgm,
-        workspace_cleanup_service=stub,
         config_service=stub,
         server_config=stub,
         data_dir="/tmp",

@@ -554,3 +554,36 @@ class TestCompositeActivationIntegration:
         assert set(repo_metadata["discovered_repos"]) == {"click", "hello-world-test"}
 
         # All three issues fixed: activation, listing, and query routing work correctly
+
+
+class TestCompositeActivationJobClaim:
+    """Two concurrent activations of the same composite must not both run:
+    the second would pass the job's "already exists" check and its rollback
+    would delete the first one's in-progress composite. submit_job's atomic
+    (operation_type, repo_alias) claim prevents that -- but only for a
+    non-None repo_alias, so the default alias is resolved before submission.
+    """
+
+    def _manager(self, tmp_path: Path) -> "tuple[ActivatedRepoManager, MagicMock]":
+        jobs = MagicMock()
+        jobs.submit_job.return_value = "job-1"
+        manager = ActivatedRepoManager(
+            data_dir=str(tmp_path),
+            golden_repo_manager=MagicMock(),
+            background_job_manager=jobs,
+            clone_backend=LocalCloneBackend(),
+        )
+        return manager, jobs
+
+    def test_default_alias_is_the_claimed_repo_alias(self, tmp_path: Path) -> None:
+        manager, jobs = self._manager(tmp_path)
+        assert manager._activate_composite_repository("alice", ["b", "a"]) == "job-1"
+        kwargs = jobs.submit_job.call_args.kwargs
+        assert kwargs["repo_alias"] == "b_a"
+        assert kwargs["user_alias"] == "b_a"
+
+    def test_explicit_alias_is_claimed_unchanged(self, tmp_path: Path) -> None:
+        manager, jobs = self._manager(tmp_path)
+        manager._activate_composite_repository("alice", ["b", "a"], "combo")
+        kwargs = jobs.submit_job.call_args.kwargs
+        assert (kwargs["repo_alias"], kwargs["user_alias"]) == ("combo", "combo")

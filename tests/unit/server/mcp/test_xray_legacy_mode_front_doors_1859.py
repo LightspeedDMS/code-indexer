@@ -16,7 +16,7 @@ import pytest
 import yaml
 from fastapi import HTTPException
 
-from code_indexer.server.routes.xray_routes import (
+from cidx_xray.server.routes import (
     XRaySearchRequest,
     _resolve_evaluator_code_or_raise,
 )
@@ -74,10 +74,10 @@ def test_rest_resolver_rejects_real_graph_pattern_with_pattern_mode_mismatch(
 
     with (
         patch(
-            "code_indexer.server.mcp.handlers.xray._infra._get_cidx_meta_path",
+            "cidx_xray.server.mcp.xray._infra._get_cidx_meta_path",
             return_value=cidx_meta,
         ),
-        patch("code_indexer.server.mcp.handlers.xray._infra._seeds_ensured", True),
+        patch("cidx_xray.server.mcp.xray._infra._seeds_ensured", True),
     ):
         with pytest.raises(HTTPException) as exc_info:
             _resolve_evaluator_code_or_raise(body)
@@ -98,7 +98,7 @@ def test_batch_resolver_rejects_real_graph_pattern_with_pattern_mode_mismatch(
     proving `resolve_batch_evaluator` now routes through the shared
     resolver's mode gate instead of bypassing it.
     """
-    from code_indexer.server.mcp.handlers.xray_batch import resolve_batch_evaluator
+    from cidx_xray.server.mcp.xray_batch import resolve_batch_evaluator
 
     cidx_meta = tmp_path / "cidx-meta"
     _write_graph_pattern(cidx_meta, name="graph-only")

@@ -16,10 +16,10 @@ AC8: SCIP Index Availability Handling
 
 import pytest
 from unittest.mock import patch
-from code_indexer.server.multi.scip_models import (
+from cidx_scip.server.multi_models import (
     SCIPMultiRequest,
 )
-from code_indexer.scip.query.primitives import QueryResult
+from cidx_scip.query.primitives import QueryResult
 
 
 class TestSCIPMultiServiceDefinition:
@@ -28,7 +28,7 @@ class TestSCIPMultiServiceDefinition:
     @pytest.mark.asyncio
     async def test_definition_across_multiple_repos(self):
         """Find definition across multiple repositories."""
-        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+        from cidx_scip.server.multi_service import SCIPMultiService
 
         service = SCIPMultiService()
         request = SCIPMultiRequest(
@@ -63,7 +63,7 @@ class TestSCIPMultiServiceDefinition:
     @pytest.mark.asyncio
     async def test_definition_no_scip_index(self):
         """Handle repos without SCIP indexes gracefully."""
-        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+        from cidx_scip.server.multi_service import SCIPMultiService
 
         service = SCIPMultiService()
         request = SCIPMultiRequest(
@@ -99,7 +99,7 @@ class TestSCIPMultiServiceReferences:
     @pytest.mark.asyncio
     async def test_references_across_multiple_repos(self):
         """Find references across multiple repositories."""
-        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+        from cidx_scip.server.multi_service import SCIPMultiService
 
         service = SCIPMultiService()
         request = SCIPMultiRequest(
@@ -147,7 +147,7 @@ class TestSCIPMultiServiceDependencies:
     @pytest.mark.asyncio
     async def test_dependencies_across_multiple_repos(self):
         """Find dependencies across multiple repositories."""
-        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+        from cidx_scip.server.multi_service import SCIPMultiService
 
         service = SCIPMultiService()
         request = SCIPMultiRequest(
@@ -199,7 +199,7 @@ class TestSCIPMultiServiceDependencies:
         BEFORE SCIPQueryEngine is ever constructed or called, mirroring
         _execute_callchain's established guard pattern exactly."""
         from unittest.mock import MagicMock
-        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+        from cidx_scip.server.multi_service import SCIPMultiService
 
         service = SCIPMultiService()
         request = SCIPMultiRequest(
@@ -214,7 +214,7 @@ class TestSCIPMultiServiceDependencies:
             return_value=tmp_path / "index.scip.db",
         ):
             with patch(
-                "code_indexer.server.multi.scip_multi_service.SCIPQueryEngine",
+                "cidx_scip.server.multi_service.SCIPQueryEngine",
                 return_value=mock_engine,
             ) as mock_engine_cls:
                 with pytest.raises(ValueError, match="Depth must be between 1 and 10"):
@@ -227,7 +227,7 @@ class TestSCIPMultiServiceDependencies:
         """End-to-end through dependencies()/_execute_parallel_operation: an
         invalid max_depth must surface as a per-repo error entry, not a
         silent 200 success."""
-        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+        from cidx_scip.server.multi_service import SCIPMultiService
 
         service = SCIPMultiService()
         request = SCIPMultiRequest(
@@ -253,7 +253,7 @@ class TestSCIPMultiServiceDependencies:
         """Valid boundary depths (1 and 10) must still reach the engine
         unchanged -- the new guard must not reject in-range values."""
         from unittest.mock import MagicMock
-        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+        from cidx_scip.server.multi_service import SCIPMultiService
 
         service = SCIPMultiService()
         request = SCIPMultiRequest(
@@ -269,7 +269,7 @@ class TestSCIPMultiServiceDependencies:
             return_value=tmp_path / "index.scip.db",
         ):
             with patch(
-                "code_indexer.server.multi.scip_multi_service.SCIPQueryEngine",
+                "cidx_scip.server.multi_service.SCIPQueryEngine",
                 return_value=mock_engine,
             ):
                 result = service._get_dependencies_in_repo("repo1", request)
@@ -286,7 +286,7 @@ class TestSCIPMultiServiceDependents:
     @pytest.mark.asyncio
     async def test_dependents_across_multiple_repos(self):
         """Find dependents across multiple repositories."""
-        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+        from cidx_scip.server.multi_service import SCIPMultiService
 
         service = SCIPMultiService()
         request = SCIPMultiRequest(
@@ -338,7 +338,7 @@ class TestSCIPMultiServiceDependents:
         BEFORE SCIPQueryEngine is ever constructed or called, mirroring
         _execute_callchain's established guard pattern exactly."""
         from unittest.mock import MagicMock
-        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+        from cidx_scip.server.multi_service import SCIPMultiService
 
         service = SCIPMultiService()
         request = SCIPMultiRequest(
@@ -353,7 +353,7 @@ class TestSCIPMultiServiceDependents:
             return_value=tmp_path / "index.scip.db",
         ):
             with patch(
-                "code_indexer.server.multi.scip_multi_service.SCIPQueryEngine",
+                "cidx_scip.server.multi_service.SCIPQueryEngine",
                 return_value=mock_engine,
             ) as mock_engine_cls:
                 with pytest.raises(ValueError, match="Depth must be between 1 and 10"):
@@ -366,7 +366,7 @@ class TestSCIPMultiServiceDependents:
         """End-to-end through dependents()/_execute_parallel_operation: an
         invalid max_depth must surface as a per-repo error entry, not a
         silent 200 success."""
-        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+        from cidx_scip.server.multi_service import SCIPMultiService
 
         service = SCIPMultiService()
         request = SCIPMultiRequest(
@@ -392,7 +392,7 @@ class TestSCIPMultiServiceDependents:
         """Valid boundary depths (1 and 10) must still reach the engine
         unchanged -- the new guard must not reject in-range values."""
         from unittest.mock import MagicMock
-        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+        from cidx_scip.server.multi_service import SCIPMultiService
 
         service = SCIPMultiService()
         request = SCIPMultiRequest(
@@ -408,7 +408,7 @@ class TestSCIPMultiServiceDependents:
             return_value=tmp_path / "index.scip.db",
         ):
             with patch(
-                "code_indexer.server.multi.scip_multi_service.SCIPQueryEngine",
+                "cidx_scip.server.multi_service.SCIPQueryEngine",
                 return_value=mock_engine,
             ):
                 result = service._get_dependents_in_repo("repo1", request)
@@ -425,7 +425,7 @@ class TestSCIPMultiServiceCallChain:
     @pytest.mark.asyncio
     async def test_callchain_per_repository_no_stitching(self):
         """Trace call chains per repository without cross-repo stitching."""
-        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+        from cidx_scip.server.multi_service import SCIPMultiService
 
         service = SCIPMultiService()
         request = SCIPMultiRequest(
@@ -496,7 +496,7 @@ class TestSCIPMultiServiceCallChain:
         FastAPI Query(le=3) -> HTTP 422). _trace_callchain_in_repo must
         now raise ValueError for an explicit out-of-range max_depth
         rather than silently rewriting it."""
-        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+        from cidx_scip.server.multi_service import SCIPMultiService
 
         service = SCIPMultiService()
         request = SCIPMultiRequest(
@@ -517,7 +517,7 @@ class TestSCIPMultiServiceCallChain:
         """End-to-end through callchain()/_execute_parallel_operation: an
         invalid max_depth must surface as a per-repo error entry, not a
         silent 200 success with a rewritten depth."""
-        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+        from cidx_scip.server.multi_service import SCIPMultiService
 
         service = SCIPMultiService()
         request = SCIPMultiRequest(
@@ -555,7 +555,7 @@ class TestSCIPMultiServiceCallChainTimeout:
         self, tmp_path
     ):
         from unittest.mock import patch, MagicMock
-        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+        from cidx_scip.server.multi_service import SCIPMultiService
 
         service = SCIPMultiService()
         request = SCIPMultiRequest(
@@ -581,7 +581,7 @@ class TestSCIPMultiServiceCallChainTimeout:
             service, "_get_scip_file_for_repo", return_value=tmp_path / "index.scip"
         ):
             with patch(
-                "code_indexer.server.multi.scip_multi_service.SCIPQueryEngine",
+                "cidx_scip.server.multi_service.SCIPQueryEngine",
                 return_value=mock_engine,
             ):
                 response = service.callchain(request)
@@ -601,7 +601,7 @@ class TestSCIPMultiServiceTimeout:
     @pytest.mark.asyncio
     async def test_timeout_parameter_accepted(self):
         """Service accepts timeout parameter and processes multiple repos."""
-        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+        from cidx_scip.server.multi_service import SCIPMultiService
 
         # Verify service accepts custom timeout
         service = SCIPMultiService(query_timeout_seconds=1)
@@ -637,7 +637,7 @@ class TestSCIPMultiServiceResultAggregation:
     @pytest.mark.asyncio
     async def test_results_grouped_by_repository(self):
         """Results are grouped by repository with proper attribution."""
-        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+        from cidx_scip.server.multi_service import SCIPMultiService
 
         service = SCIPMultiService()
         request = SCIPMultiRequest(
@@ -697,7 +697,7 @@ class TestSCIPMultiServicePartialFailure:
     @pytest.mark.asyncio
     async def test_partial_failure_continues_other_repos(self):
         """Continue with other repos when one fails."""
-        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+        from cidx_scip.server.multi_service import SCIPMultiService
 
         service = SCIPMultiService()
         request = SCIPMultiRequest(
@@ -730,3 +730,62 @@ class TestSCIPMultiServicePartialFailure:
             assert "repo3" in response.results
             assert "repo_error" in response.errors
             assert "Database connection failed" in response.errors["repo_error"]
+
+
+class TestSCIPMultiServiceLiveGoldenFallback:
+    """EVO-65021: the delegated golden SCIP build is ASYNC and lands index.scip.db in the
+    LIVE golden dir, while the ``-global`` alias resolves to a versioned snapshot forked
+    before the scip completed. ``_get_scip_file_for_repo`` must fall back to the live DB
+    when the snapshot lacks it, but still prefer the snapshot DB when present."""
+
+    @staticmethod
+    def _service():
+        from cidx_scip.server.multi_service import SCIPMultiService
+
+        return SCIPMultiService()
+
+    @staticmethod
+    def _resolve(service, snapshot_path, golden_dir, repo_id):
+        with (
+            patch.object(
+                service, "_get_repository_path", return_value=str(snapshot_path)
+            ),
+            patch(
+                "cidx_scip.server.multi_service._get_golden_repos_dir",
+                return_value=str(golden_dir),
+            ),
+        ):
+            return service._get_scip_file_for_repo(repo_id)
+
+    def test_falls_back_to_live_golden_db_when_snapshot_lacks_scip(self, tmp_path):
+        golden = tmp_path / "golden-repos"
+        snapshot = golden / ".versioned" / "ssh-mcp-2" / "v_1"  # alias target: no scip
+        (snapshot / ".code-indexer" / "scip").mkdir(parents=True)
+        live_db = golden / "ssh-mcp-2" / ".code-indexer" / "scip" / "index.scip.db"
+        live_db.parent.mkdir(parents=True)
+        live_db.write_bytes(b"\x00")  # the delegated build's DB lands here
+
+        result = self._resolve(self._service(), snapshot, golden, "ssh-mcp-2-global")
+        assert result == live_db
+
+    def test_prefers_snapshot_db_when_present(self, tmp_path):
+        golden = tmp_path / "golden-repos"
+        snapshot = golden / ".versioned" / "ssh-mcp-2" / "v_1"
+        snap_db = snapshot / ".code-indexer" / "scip" / "index.scip.db"
+        snap_db.parent.mkdir(parents=True)
+        snap_db.write_bytes(b"\x00")
+        # A live DB also exists; it must NOT be chosen over the consistent snapshot DB.
+        live_db = golden / "ssh-mcp-2" / ".code-indexer" / "scip" / "index.scip.db"
+        live_db.parent.mkdir(parents=True)
+        live_db.write_bytes(b"\x01")
+
+        result = self._resolve(self._service(), snapshot, golden, "ssh-mcp-2-global")
+        assert result == snap_db
+
+    def test_returns_none_when_neither_snapshot_nor_live_has_scip(self, tmp_path):
+        golden = tmp_path / "golden-repos"
+        snapshot = golden / ".versioned" / "ssh-mcp-2" / "v_1"
+        (snapshot / ".code-indexer" / "scip").mkdir(parents=True)
+
+        result = self._resolve(self._service(), snapshot, golden, "ssh-mcp-2-global")
+        assert result is None

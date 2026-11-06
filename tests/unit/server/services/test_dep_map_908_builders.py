@@ -31,11 +31,11 @@ def make_executor(
     if journal_callback is not None and not callable(journal_callback):
         raise TypeError("journal_callback must be None or callable")
 
-    from code_indexer.server.services.dep_map_health_detector import (
+    from cidx_depmap.server.dep_map_health_detector import (
         DepMapHealthDetector,
     )
-    from code_indexer.server.services.dep_map_index_regenerator import IndexRegenerator
-    from code_indexer.server.services.dep_map_repair_executor import (
+    from cidx_depmap.server.dep_map_index_regenerator import IndexRegenerator
+    from cidx_depmap.server.dep_map_repair_executor import (
         DepMapRepairExecutor,
     )
 
@@ -58,7 +58,7 @@ def make_repair_journal(journal_path: Path):
         raise TypeError(
             f"journal_path must be a pathlib.Path, got {type(journal_path).__name__}"
         )
-    from code_indexer.server.services.dep_map_repair_executor import RepairJournal
+    from cidx_depmap.server.dep_map_repair_executor import RepairJournal
 
     return RepairJournal(journal_path=journal_path)
 

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, Iterator
+from typing import Any, Dict, Iterator, cast
 from unittest.mock import patch
 
 import pytest
@@ -66,7 +66,7 @@ def client(env: CatalogFileDoorEnv) -> Iterator[Dict[str, Any]]:
     app.state.access_filtering_service = AccessFilteringService(
         env.fx.group_manager,
         memories_dir=env.fx.root / "memories",
-        activated_repo_manager=env.activations,  # type: ignore[arg-type]
+        activated_repo_manager=cast(Any, env.activations),
     )
     common = dict(
         activated_repo_manager=env.activations,
@@ -80,7 +80,7 @@ def client(env: CatalogFileDoorEnv) -> Iterator[Dict[str, Any]]:
     app.dependency_overrides[get_current_user] = lambda: current["user"]
     app.dependency_overrides[get_current_user_hybrid] = lambda: current["user"]
     previous = file_service._activated_repo_manager_lazy
-    file_service.activated_repo_manager = env.activations  # type: ignore[assignment]
+    file_service.activated_repo_manager = cast(Any, env.activations)
     service = app.state.access_filtering_service
     try:
         # The description route reads its access service off the app module.

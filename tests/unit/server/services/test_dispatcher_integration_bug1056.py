@@ -90,7 +90,7 @@ def test_depmap_pass2_loop_sleeps_with_jitter_after_first_iteration() -> None:
     After the import is present, verify the N-1 call pattern using the
     imported symbol directly.
     """
-    import code_indexer.server.services.dependency_map_service as dms_module
+    import cidx_depmap.server.dependency_map_service as dms_module
 
     from code_indexer.server.services.jittered_dispatcher import (
         DEFAULT_DEPMAP_DISPATCH_JITTER_SECONDS,
@@ -113,7 +113,7 @@ def test_depmap_pass2_loop_sleeps_with_jitter_after_first_iteration() -> None:
     ]
     sleep_mock = MagicMock()
     with patch(
-        "code_indexer.server.services.dependency_map_service.sleep_with_jitter",
+        "cidx_depmap.server.dependency_map_service.sleep_with_jitter",
         sleep_mock,
     ):
         for domain_idx, _domain in enumerate(domain_list):
@@ -144,7 +144,7 @@ def test_phase37_anomaly_loop_sleeps_with_jitter_after_first_iteration() -> None
     After the import is present, verify the N-1 call pattern using the
     imported symbol directly.
     """
-    import code_indexer.server.services.dep_map_repair_executor as repair_module
+    import cidx_depmap.server.dep_map_repair_executor as repair_module
 
     from code_indexer.server.services.jittered_dispatcher import (
         DEFAULT_PHASE37_DISPATCH_JITTER_SECONDS,
@@ -163,7 +163,7 @@ def test_phase37_anomaly_loop_sleeps_with_jitter_after_first_iteration() -> None
     broken_domains = ["dom-1", "dom-2", "dom-3"]
     sleep_mock = MagicMock()
     with patch(
-        "code_indexer.server.services.dep_map_repair_executor.sleep_with_jitter",
+        "cidx_depmap.server.dep_map_repair_executor.sleep_with_jitter",
         sleep_mock,
     ):
         for anomaly_idx, _anomaly in enumerate(broken_domains):

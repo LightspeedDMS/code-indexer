@@ -46,23 +46,23 @@ def _xray_single_repo_env(
     with (
         patch("code_indexer.server.mcp.handlers._utils.app_module", mock_app),
         patch(
-            "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
+            "cidx_xray.server.mcp.xray._explore._resolve_repo_path",
             return_value="/fake/repo/path",
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._explore._get_background_job_manager",
+            "cidx_xray.server.mcp.xray._explore._get_background_job_manager",
             return_value=mock_bjm,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._explore._get_job_tracker",
+            "cidx_xray.server.mcp.xray._explore._get_job_tracker",
             return_value=mock_jt,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._explore._get_xray_executor",
+            "cidx_xray.server.mcp.xray._explore._get_xray_executor",
             return_value=mock_exec,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._explore.validate_rust_evaluator"
+            "cidx_xray.server.mcp.xray._explore.validate_rust_evaluator"
         ) as mock_validate,
         patch("asyncio.get_running_loop", return_value=loop_instance),
     ):
@@ -101,7 +101,7 @@ VALID_PARAMS: Dict[str, Any] = {
 
 
 def _import_handler():
-    from code_indexer.server.mcp.handlers.xray import handle_xray_explore
+    from cidx_xray.server.mcp.xray import handle_xray_explore
 
     return handle_xray_explore
 
@@ -116,7 +116,7 @@ class TestXrayExploreHandlerOptionalEvaluatorCode:
 
     async def test_explore_accepts_missing_evaluator_code_v10_4_1(self):
         """Engine receives _DEFAULT_EVALUATOR_CODE when evaluator_code is omitted."""
-        from code_indexer.server.mcp.handlers.xray import _DEFAULT_EVALUATOR_CODE
+        from cidx_xray.server.mcp.xray import _DEFAULT_EVALUATOR_CODE
 
         user = _make_user(UserRole.NORMAL_USER)
         captured_kwargs: Dict[str, Any] = {}
@@ -129,7 +129,7 @@ class TestXrayExploreHandlerOptionalEvaluatorCode:
         with (
             _xray_single_repo_env() as (bjm, jt, ex, loop),
             patch(
-                "code_indexer.xray.search_engine.XRaySearchEngine.run",
+                "cidx_xray.search_engine.XRaySearchEngine.run",
                 side_effect=lambda **kw: captured_kwargs.update(kw)
                 or _NOOP_ENGINE_RESULT,
             ),
@@ -148,7 +148,7 @@ class TestXrayExploreHandlerOptionalEvaluatorCode:
 
     async def test_explore_empty_evaluator_code_engine_receives_default_v10_4_1(self):
         """Engine receives _DEFAULT_EVALUATOR_CODE when evaluator_code is empty string."""
-        from code_indexer.server.mcp.handlers.xray import _DEFAULT_EVALUATOR_CODE
+        from cidx_xray.server.mcp.xray import _DEFAULT_EVALUATOR_CODE
 
         user = _make_user(UserRole.NORMAL_USER)
         captured_kwargs: Dict[str, Any] = {}
@@ -162,7 +162,7 @@ class TestXrayExploreHandlerOptionalEvaluatorCode:
         with (
             _xray_single_repo_env() as (bjm, jt, ex, loop),
             patch(
-                "code_indexer.xray.search_engine.XRaySearchEngine.run",
+                "cidx_xray.search_engine.XRaySearchEngine.run",
                 side_effect=lambda **kw: captured_kwargs.update(kw)
                 or _NOOP_ENGINE_RESULT,
             ),
@@ -219,7 +219,7 @@ class TestXrayExploreHandlerMatchedNode:
         with (
             _xray_single_repo_env() as (bjm, jt, ex, loop),
             patch(
-                "code_indexer.xray.search_engine.XRaySearchEngine.run",
+                "cidx_xray.search_engine.XRaySearchEngine.run",
                 side_effect=lambda **kw: captured_kwargs.update(kw) or engine_result,
             ),
         ):
@@ -278,7 +278,7 @@ class TestXrayExploreHandlerRenamedParams:
 
         # Validation rejects missing 'pattern' before reaching async infra
         with patch(
-            "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
+            "cidx_xray.server.mcp.xray._explore._resolve_repo_path",
             return_value="/some/path",
         ):
             result = await _import_handler()(params, user)
@@ -313,7 +313,7 @@ class TestXrayExploreHandlerMaxResults:
 
         # Validation rejects before async infra needed
         with patch(
-            "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
+            "cidx_xray.server.mcp.xray._explore._resolve_repo_path",
             return_value="/some/path",
         ):
             result = await _import_handler()({**VALID_PARAMS, "max_results": 0}, user)

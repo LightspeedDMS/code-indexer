@@ -33,7 +33,7 @@ exception-guard LOGIC in `_run_multi_repo_analyze_graph` and its caller,
 not of the real xray-cli pipeline -- that real-pipeline coverage already
 exists in test_analyze_graph_multi_repo_1902.py). Where a clock must be
 controlled, `time.monotonic` is patched at the seam
-(`code_indexer.server.mcp.handlers.xray_graph.time.monotonic`) rather than
+(`cidx_xray.server.mcp.xray_graph.time.monotonic`) rather than
 restructuring production code for testability, per Bug #1913's own
 instruction -- driven off an OBSERVABLE TRIGGER (a shared counter the
 pipeline mock's own side effect advances), never off the ordinal position
@@ -52,10 +52,10 @@ import pytest
 
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.services.config_service import get_config_service
-from code_indexer.server.mcp.handlers.xray_graph import (
+from cidx_xray.server.mcp.xray_graph import (
     _MULTI_REPO_TOTAL_TIMEOUT_CEILING_SECONDS,
 )
-from code_indexer.xray.rust_backend import _graph_error_result
+from cidx_xray.rust_backend import _graph_error_result
 
 
 def _make_user(role: UserRole = UserRole.NORMAL_USER) -> User:
@@ -72,7 +72,7 @@ def _parse_response(result: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _import_handler():
-    from code_indexer.server.mcp.handlers.xray_graph import handle_analyze_graph
+    from cidx_xray.server.mcp.xray_graph import handle_analyze_graph
 
     return handle_analyze_graph
 
@@ -98,7 +98,7 @@ async def test_request_admitted_under_old_rule_still_succeeds() -> None:
     len(results) + len(errors) == len(repositories))."""
     handler = _import_handler()
     with patch(
-        "code_indexer.server.mcp.handlers.xray_graph._run_analyze_graph_pipeline",
+        "cidx_xray.server.mcp.xray_graph._run_analyze_graph_pipeline",
         new=AsyncMock(return_value=dict(CANNED_OK)),
     ) as mock_pipeline:
         params = {
@@ -140,7 +140,7 @@ async def test_request_old_rule_would_refuse_now_runs_instead() -> None:
     handler = _import_handler()
     aliases = [f"repo-{i}" for i in range(alias_count)]
     with patch(
-        "code_indexer.server.mcp.handlers.xray_graph._run_analyze_graph_pipeline",
+        "cidx_xray.server.mcp.xray_graph._run_analyze_graph_pipeline",
         new=AsyncMock(return_value=dict(CANNED_OK)),
     ) as mock_pipeline:
         params = {
@@ -223,11 +223,11 @@ async def test_deadline_crossed_mid_loop_yields_partial_results_and_deadline_err
 
     with (
         patch(
-            "code_indexer.server.mcp.handlers.xray_graph._run_analyze_graph_pipeline",
+            "cidx_xray.server.mcp.xray_graph._run_analyze_graph_pipeline",
             new=AsyncMock(side_effect=_pipeline_side_effect),
         ) as mock_pipeline,
         patch(
-            "code_indexer.server.mcp.handlers.xray_graph.time.monotonic",
+            "cidx_xray.server.mcp.xray_graph.time.monotonic",
             side_effect=_fake_monotonic,
         ),
     ):
@@ -302,7 +302,7 @@ async def test_per_alias_exception_recorded_in_errors_earlier_results_survive() 
         raise RuntimeError("boom: simulated resolver/thread-pool failure")
 
     with patch(
-        "code_indexer.server.mcp.handlers.xray_graph._run_analyze_graph_pipeline",
+        "cidx_xray.server.mcp.xray_graph._run_analyze_graph_pipeline",
         new=AsyncMock(side_effect=_pipeline_side_effect),
     ) as mock_pipeline:
         params = {
@@ -361,7 +361,7 @@ async def test_per_alias_exception_server_path_is_never_leaked_to_caller() -> No
         )
 
     with patch(
-        "code_indexer.server.mcp.handlers.xray_graph._run_analyze_graph_pipeline",
+        "cidx_xray.server.mcp.xray_graph._run_analyze_graph_pipeline",
         new=AsyncMock(side_effect=_pipeline_side_effect),
     ):
         # A single-element repository_alias list collapses to the
@@ -406,7 +406,7 @@ async def test_per_alias_bare_exception_still_yields_nonempty_message_with_type_
         raise RuntimeError()
 
     with patch(
-        "code_indexer.server.mcp.handlers.xray_graph._run_analyze_graph_pipeline",
+        "cidx_xray.server.mcp.xray_graph._run_analyze_graph_pipeline",
         new=AsyncMock(side_effect=_pipeline_side_effect),
     ):
         # A single-element repository_alias list collapses to the
@@ -457,7 +457,7 @@ async def test_real_graph_error_result_shape_gets_synthesized_message() -> None:
         return dict(real_failure)
 
     with patch(
-        "code_indexer.server.mcp.handlers.xray_graph._run_analyze_graph_pipeline",
+        "cidx_xray.server.mcp.xray_graph._run_analyze_graph_pipeline",
         new=AsyncMock(side_effect=_pipeline_side_effect),
     ):
         params = {

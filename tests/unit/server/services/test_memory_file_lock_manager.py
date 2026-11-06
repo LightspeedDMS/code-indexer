@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from code_indexer.server.services.memory_file_lock_manager import MemoryFileLockManager
+from cidx_memory.server.memory_file_lock_manager import MemoryFileLockManager
 
 
 # ---------------------------------------------------------------------------

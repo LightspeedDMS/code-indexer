@@ -66,3 +66,36 @@ class TestSQLMigrationFiles:
             assert prefix.isdigit(), (
                 f"Migration file {f.name} must start with numeric prefix"
             )
+
+    def test_migration_prefixes_are_unique(self):
+        """No two migrations may share a numeric prefix (EVO-65021): a collision
+        makes their relative order filesystem-dependent and ambiguous. This
+        caught the 038 workspace_id/embedding-call-stats collision.
+
+        ``024`` is a KNOWN pre-existing collision on master
+        (024_wiki_article_views / 024_token_bucket_state) that predates this work;
+        renumbering an already-applied migration is unsafe (schema_migrations
+        dedups on filename), so it is allow-listed here rather than renumbered.
+        Any NEW collision still fails.
+        """
+        known_pre_existing = {"024"}
+        migrations_dir = Path("src/code_indexer/server/storage/postgres/migrations/sql")
+        seen: dict[str, str] = {}
+        for f in sorted(migrations_dir.glob("*.sql")):
+            prefix = f.stem.split("_")[0]
+            if prefix in known_pre_existing:
+                continue
+            assert prefix not in seen, (
+                f"Duplicate migration prefix {prefix}: {f.name} collides with "
+                f"{seen[prefix]}"
+            )
+            seen[prefix] = f.name
+
+    def test_workspace_id_migration_renumbered_to_039(self):
+        """EVO-65021: the golden-repo workspace_id migration lives at 039 (038
+        was already taken by embedding_call_stats on master)."""
+        migrations_dir = Path("src/code_indexer/server/storage/postgres/migrations/sql")
+        assert (migrations_dir / "039_golden_repo_workspace_id.sql").exists()
+        assert not (migrations_dir / "038_golden_repo_workspace_id.sql").exists()
+        # The pre-existing 038 is untouched.
+        assert (migrations_dir / "038_embedding_call_stats.sql").exists()

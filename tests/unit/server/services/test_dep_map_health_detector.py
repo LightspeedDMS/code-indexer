@@ -192,7 +192,7 @@ _No cross-domain dependencies detected._
 
 def _get_detector():
     """Import DepMapHealthDetector -- fails if not yet implemented."""
-    from code_indexer.server.services.dep_map_health_detector import (
+    from cidx_depmap.server.dep_map_health_detector import (
         DepMapHealthDetector,
     )
 

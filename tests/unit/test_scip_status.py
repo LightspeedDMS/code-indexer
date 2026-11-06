@@ -1,7 +1,7 @@
 """Unit tests for SCIP status tracking."""
 
 from datetime import datetime
-from code_indexer.scip.status import (
+from cidx_scip.status import (
     StatusTracker,
     ProjectStatus,
     GenerationStatus,

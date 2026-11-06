@@ -20,10 +20,17 @@ from typing import Generator
 
 import pytest
 
+from cidx_testkit.registry import register_in_tree_entry_points
+
 from code_indexer.config import Config
 
 # Load environment variables from .env files
 from . import load_env  # noqa: F401 - Used for side effects
+
+# Seam providers (``local`` on each seam's entry-point group) are found through
+# distribution metadata. Register what the in-repo distributions declare, so a
+# PYTHONPATH=src run resolves seams exactly as `pip install .` would.
+register_in_tree_entry_points(Path(__file__).resolve().parents[1])
 
 
 # Global helper functions for local tmp directory management

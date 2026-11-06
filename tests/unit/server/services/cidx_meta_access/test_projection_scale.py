@@ -18,7 +18,7 @@ from code_indexer.server.services.cidx_meta_access import (
     project_lines,
     projection_cache_stats,
 )
-from code_indexer.server.services.dep_map_index_regenerator import IndexRegenerator
+from cidx_depmap.server.dep_map_index_regenerator import IndexRegenerator
 
 REPOS = [f"repo-{n:04d}" for n in range(1, 901)]
 DOMAINS = 50

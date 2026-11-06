@@ -12,6 +12,7 @@ from typing import Any, Dict, Tuple
 import pytest
 
 from code_indexer.server.services.siem_delivery import admin, ops_documents
+from code_indexer.server.utils.route_table import iter_routes
 
 from .conftest import harness_destination
 from .test_ops_documents import _halt_on
@@ -259,8 +260,8 @@ def test_routes_are_mounted_in_the_real_app(
     finally:
         reset_config_service()
     routes = {
-        (method, r.path): r.endpoint
-        for r in app.routes
+        (method, route_path): r.endpoint
+        for route_path, r in iter_routes(app.routes)
         if isinstance(r, APIRoute)
         for method in r.methods
     }

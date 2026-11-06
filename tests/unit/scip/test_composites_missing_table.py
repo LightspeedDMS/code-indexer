@@ -19,7 +19,7 @@ except ImportError:
 
 import pytest
 
-from code_indexer.scip.query.composites import (
+from cidx_scip.query.composites import (
     _find_target_definition,
     _bfs_traverse_dependents,
     trace_call_chain,
@@ -100,9 +100,7 @@ class TestFindTargetDefinitionMissingCallGraph:
         db_path = tmp_path / "test.scip.db"
         _create_minimal_scip_db(db_path)
 
-        with caplog.at_level(
-            logging.DEBUG, logger="code_indexer.scip.query.composites"
-        ):
+        with caplog.at_level(logging.DEBUG, logger="cidx_scip.query.composites"):
             result = _find_target_definition("SomeSymbol", tmp_path)
 
         assert result is None
@@ -144,9 +142,7 @@ class TestBfsTraverseDependentsMissingCallGraph:
         db_path = tmp_path / "test.scip.db"
         _create_minimal_scip_db(db_path)
 
-        with caplog.at_level(
-            logging.DEBUG, logger="code_indexer.scip.query.composites"
-        ):
+        with caplog.at_level(logging.DEBUG, logger="cidx_scip.query.composites"):
             result = _bfs_traverse_dependents(
                 symbol="SomeSymbol",
                 scip_dir=tmp_path,
@@ -205,9 +201,7 @@ class TestTraceCallChainMissingCallGraph:
         db_path = tmp_path / "test.scip.db"
         _create_minimal_scip_db(db_path)
 
-        with caplog.at_level(
-            logging.DEBUG, logger="code_indexer.scip.query.composites"
-        ):
+        with caplog.at_level(logging.DEBUG, logger="cidx_scip.query.composites"):
             result = trace_call_chain(
                 from_symbol="from_sym",
                 to_symbol="to_sym",
@@ -248,9 +242,7 @@ class TestGetSmartContextMissingCallGraph:
         db_path = tmp_path / "test.scip.db"
         _create_minimal_scip_db(db_path)
 
-        with caplog.at_level(
-            logging.DEBUG, logger="code_indexer.scip.query.composites"
-        ):
+        with caplog.at_level(logging.DEBUG, logger="cidx_scip.query.composites"):
             result = get_smart_context("SomeSymbol", tmp_path)
 
         # Should return a result (not raise), with empty data
@@ -309,9 +301,7 @@ class TestValidScipDbStillWorks:
 
     def test_no_errors_on_real_fixture(self, comprehensive_fixture_dir, caplog):
         """No ERROR-level logs when querying the real full-schema fixture database."""
-        with caplog.at_level(
-            logging.DEBUG, logger="code_indexer.scip.query.composites"
-        ):
+        with caplog.at_level(logging.DEBUG, logger="cidx_scip.query.composites"):
             _find_target_definition("__NonExistentSymbol__", comprehensive_fixture_dir)
             _bfs_traverse_dependents(
                 "__NonExistentSymbol__",

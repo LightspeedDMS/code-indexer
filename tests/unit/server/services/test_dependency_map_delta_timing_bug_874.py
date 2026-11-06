@@ -33,7 +33,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from code_indexer.server.services.dependency_map_service import DependencyMapService
+from cidx_depmap.server.dependency_map_service import DependencyMapService
 
 
 # ---------------------------------------------------------------------------

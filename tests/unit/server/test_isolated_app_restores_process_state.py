@@ -53,14 +53,8 @@ _NAMED_BINDINGS: Tuple[Tuple[str, str], ...] = (
     ("code_indexer.server.routers.repo_categories", "_category_service"),
     ("code_indexer.server.services.dependency_latency_tracker", "_tracker_instance"),
     ("code_indexer.server.services.memory_governor", "_governor"),
-    (
-        "code_indexer.server.services.xray_graph_governor.cache_proxy",
-        "_xray_graph_cache",
-    ),
-    (
-        "code_indexer.server.services.xray_graph_governor.k_calibration_store",
-        "_xray_k_provider",
-    ),
+    # The governor's composite cache (features add theirs to it on startup).
+    ("code_indexer.server.feature_platform", "_governed_composite"),
 )
 
 # Module-level singletons service_init re-points in place (set_sqlite_path,

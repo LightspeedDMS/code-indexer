@@ -14,6 +14,7 @@ import tempfile
 import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from code_indexer.server.utils.route_table import iter_routes
 
 _ELEVATION_QUALNAME = "require_elevation.<locals>._check"
 
@@ -22,7 +23,7 @@ def _bypass_elevation(app, rtr):
     """Override all require_elevation deps so functional tests can run without TOTP."""
     from fastapi.routing import APIRoute
 
-    for route in rtr.routes:
+    for route_path, route in iter_routes(rtr.routes):
         if not isinstance(route, APIRoute):
             continue
         for dep in route.dependencies or []:

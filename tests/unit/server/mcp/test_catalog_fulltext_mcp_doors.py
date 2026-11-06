@@ -15,16 +15,19 @@ from code_indexer.server.services.cidx_meta_access.fulltext_terms import (
     FULLTEXT_FORM_REFUSAL,
 )
 from tests.shared.cidx_meta_visibility_fixture import ALPHA, CANARY
-from tests.unit.server.mcp.test_search_meta_doors import (  # noqa: F401
+from tests.unit.server.mcp.test_search_meta_doors import (
     _results,
     _search,
-    env,
 )
+from tests.unit.server.mcp import test_search_meta_doors as _test_search_meta_doors
 from tests.unit.server.query.catalog_search_env import (
     CATALOG_ALIAS,
     RESTRICTED,
     CatalogEnv,
 )
+
+# Shared fixtures (pytest finds them as module attributes).
+env = _test_search_meta_doors.env
 
 pytestmark = pytest.mark.timeout(60)
 ABSENT = "zzqqxxnotthere"
@@ -44,7 +47,7 @@ def _paths(payload: Any) -> List[str]:
 
 @pytest.mark.parametrize("alias", DOORS, ids=["single", "omni"])
 def test_hidden_word_answers_like_an_absent_word(
-    env: CatalogEnv,  # noqa: F811
+    env: CatalogEnv,
     alias: Alias,
 ) -> None:
     hidden = _fts(alias, f"payments {CANARY}")
@@ -56,7 +59,7 @@ def test_hidden_word_answers_like_an_absent_word(
 
 @pytest.mark.parametrize("alias", DOORS, ids=["single", "omni"])
 def test_unevaluable_forms_are_refused_identically(
-    env: CatalogEnv,  # noqa: F811
+    env: CatalogEnv,
     alias: Alias,
 ) -> None:
     answers = [_fts(alias, f"payments NOT {word}") for word in (CANARY, ABSENT)]
@@ -66,7 +69,7 @@ def test_unevaluable_forms_are_refused_identically(
 
 
 def test_ordinary_repository_boolean_query_is_not_refused(
-    env: CatalogEnv,  # noqa: F811
+    env: CatalogEnv,
 ) -> None:
     payload = _fts([f"{ALPHA}-global"], f"payments NOT {ABSENT}")
     assert payload["success"], payload

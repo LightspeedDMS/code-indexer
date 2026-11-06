@@ -18,7 +18,7 @@ class TestSCIPSelfHealingPromptBuilding:
 
     def test_build_project_prompt_python_poetry(self, job_manager, tmp_path):
         """AC2: Verify language-specific prompt generation for Python/poetry project."""
-        from code_indexer.server.services.scip_self_healing import (
+        from cidx_scip.server.self_healing import (
             SCIPSelfHealingService,
         )
 
@@ -48,7 +48,7 @@ class TestSCIPSelfHealingPromptBuilding:
 
     def test_build_project_prompt_typescript_npm(self, job_manager, tmp_path):
         """AC2: Verify language-specific prompt generation for TypeScript/npm project."""
-        from code_indexer.server.services.scip_self_healing import (
+        from cidx_scip.server.self_healing import (
             SCIPSelfHealingService,
         )
 

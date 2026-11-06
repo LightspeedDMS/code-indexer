@@ -35,7 +35,7 @@ class TestAsyncAwaitBugFix:
 
     def test_apply_multi_scip_truncation_is_sync_function(self):
         """Verify _apply_multi_scip_truncation is NOT an async function."""
-        from code_indexer.server.routes.scip_multi_routes import (
+        from cidx_scip.server.multi_routes import (
             _apply_multi_scip_truncation,
         )
 
@@ -46,7 +46,7 @@ class TestAsyncAwaitBugFix:
 
     def test_multi_repository_definition_is_sync_function(self):
         """Verify multi_repository_definition route handler is sync."""
-        from code_indexer.server.routes.scip_multi_routes import (
+        from cidx_scip.server.multi_routes import (
             multi_repository_definition,
         )
 
@@ -57,7 +57,7 @@ class TestAsyncAwaitBugFix:
 
     def test_multi_repository_references_is_sync_function(self):
         """Verify multi_repository_references route handler is sync."""
-        from code_indexer.server.routes.scip_multi_routes import (
+        from cidx_scip.server.multi_routes import (
             multi_repository_references,
         )
 
@@ -68,7 +68,7 @@ class TestAsyncAwaitBugFix:
 
     def test_multi_repository_dependencies_is_sync_function(self):
         """Verify multi_repository_dependencies route handler is sync."""
-        from code_indexer.server.routes.scip_multi_routes import (
+        from cidx_scip.server.multi_routes import (
             multi_repository_dependencies,
         )
 
@@ -79,7 +79,7 @@ class TestAsyncAwaitBugFix:
 
     def test_multi_repository_dependents_is_sync_function(self):
         """Verify multi_repository_dependents route handler is sync."""
-        from code_indexer.server.routes.scip_multi_routes import (
+        from cidx_scip.server.multi_routes import (
             multi_repository_dependents,
         )
 
@@ -90,7 +90,7 @@ class TestAsyncAwaitBugFix:
 
     def test_multi_repository_callchain_is_sync_function(self):
         """Verify multi_repository_callchain route handler is sync."""
-        from code_indexer.server.routes.scip_multi_routes import (
+        from cidx_scip.server.multi_routes import (
             multi_repository_callchain,
         )
 
@@ -100,16 +100,17 @@ class TestAsyncAwaitBugFix:
         )
 
     def test_underlying_apply_scip_payload_truncation_is_sync(self):
-        """Verify the underlying _apply_scip_payload_truncation in handlers.py is sync.
+        """Verify the underlying _apply_scip_payload_truncation (the scip
+        feature's MCP helpers, cidx_scip.server.mcp._common) is sync.
 
         This is the root cause check - if this function changes to async,
         the route handlers would need to change too.
         """
-        from code_indexer.server.mcp.handlers import _apply_scip_payload_truncation
+        from cidx_scip.server.mcp._common import _apply_scip_payload_truncation
 
         assert not inspect.iscoroutinefunction(_apply_scip_payload_truncation), (
-            "_apply_scip_payload_truncation in handlers.py must remain sync. "
-            "If this changes to async, scip_multi_routes.py must be updated."
+            "_apply_scip_payload_truncation must remain sync. "
+            "If this changes to async, multi_routes.py must be updated."
         )
 
 
@@ -153,9 +154,7 @@ class TestSCIPMultiRoutesAuthentication:
 @pytest.fixture
 def mock_scip_multi_service():
     """Mock SCIPMultiService for testing."""
-    with patch(
-        "code_indexer.server.routes.scip_multi_routes.SCIPMultiService"
-    ) as mock_service_class:
+    with patch("cidx_scip.server.multi_routes.SCIPMultiService") as mock_service_class:
         mock_service = Mock()
         mock_service_class.return_value = mock_service
         yield mock_service
@@ -167,7 +166,7 @@ class TestSCIPMultiRoutesDefinition:
     def test_successful_definition_lookup(self, mock_auth, mock_scip_multi_service):
         """Successful definition lookup across multiple repositories."""
         from unittest.mock import AsyncMock
-        from code_indexer.server.multi.scip_models import (
+        from cidx_scip.server.multi_models import (
             SCIPMultiResponse,
             SCIPMultiMetadata,
         )
@@ -216,7 +215,7 @@ class TestSCIPMultiRoutesReferences:
     def test_successful_references_lookup(self, mock_auth, mock_scip_multi_service):
         """Successful references lookup across multiple repositories with limit."""
         from unittest.mock import AsyncMock
-        from code_indexer.server.multi.scip_models import (
+        from cidx_scip.server.multi_models import (
             SCIPMultiResponse,
             SCIPMultiMetadata,
         )

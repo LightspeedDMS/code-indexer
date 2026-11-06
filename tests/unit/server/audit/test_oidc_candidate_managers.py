@@ -23,6 +23,7 @@ import anyio
 import pytest
 
 from code_indexer.server.utils.config_manager import OIDCProviderConfig, ServerConfig
+from tests.unit.server.app_state_patch import patch_app_state
 
 
 class _Pool:
@@ -89,9 +90,7 @@ def _set_registry(monkeypatch, **pools: Any) -> None:
         critical_connection_pool=pools.get("critical"),
         connection_pool=pools.get("general"),
     )
-    monkeypatch.setattr(
-        app_module.app.state, "backend_registry", registry, raising=False
-    )
+    patch_app_state(monkeypatch, app_module.app.state, "backend_registry", registry)
 
 
 def test_state_manager_is_built_off_the_event_loop(recorded, monkeypatch) -> None:

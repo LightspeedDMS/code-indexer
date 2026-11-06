@@ -7,7 +7,6 @@ and git change detection.
 
 from ...conftest import local_temporary_directory
 
-import tempfile
 import time
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -183,32 +182,6 @@ class TestWatchMetadata:
 
         assert metadata.processing_interrupted is True
         assert metadata.last_error == "test error"
-
-    def test_should_reprocess_file(self):
-        """Test file reprocessing logic based on timestamps."""
-        metadata = WatchMetadata()
-        metadata.last_sync_timestamp = time.time() - 10  # 10 seconds ago
-
-        with tempfile.NamedTemporaryFile(delete=False) as temp_file:
-            temp_path = Path(temp_file.name)
-
-            try:
-                # File is newer than last sync
-                assert metadata.should_reprocess_file(temp_path) is True
-
-                # Update sync timestamp to future
-                metadata.last_sync_timestamp = time.time() + 10
-                assert metadata.should_reprocess_file(temp_path) is False
-
-            finally:
-                temp_path.unlink(missing_ok=True)
-
-    def test_should_reprocess_nonexistent_file(self):
-        """Test reprocessing logic for non-existent files."""
-        metadata = WatchMetadata()
-        nonexistent = Path("/path/that/does/not/exist.py")
-
-        assert metadata.should_reprocess_file(nonexistent) is False
 
     def test_get_recovery_files(self):
         """Test getting files that need recovery processing."""

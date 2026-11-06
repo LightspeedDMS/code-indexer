@@ -6,8 +6,8 @@ Declared scenarios (exactly 6):
   2. query_user_repositories signature accepts precomputed_query_vector at END
   3. _search_activated_repo passes precomputed vector to query_user_repositories
   4. _search_activated_repo passes the SAME vector to get_memory_candidates
-  5a. _run_memory_retrieval signature includes query_vector parameter
-  5b. _run_memory_retrieval does NOT call _compute_memory_query_vector when query_vector supplied
+  5a. the memory section receives the query vector on its request
+  5b. the memory section computes no vector of its own (none: no section)
 
 TDD: tests are written BEFORE the Phase C implementation.
 
@@ -18,19 +18,24 @@ Design under test:
   - SemanticQueryManager.query_user_repositories gains optional
     `precomputed_query_vector: Optional[List[float]] = None` at END of signature.
   - _search_activated_repo computes the vector ONCE (via _compute_shared_query_vector)
-    and passes it to both query_user_repositories AND _run_memory_retrieval.
-  - _run_memory_retrieval accepts `query_vector: List[float]` and does NOT call
-    _compute_memory_query_vector internally.
+    and passes it to both query_user_repositories AND every search augmenter
+    (the cidx-memory feature's relevant_memories, modular phase 4f).
+  - The memory section takes the vector from its SearchAugmentRequest and
+    never computes one itself.
 
 External dependencies mocked:
   - For search_repository_path: spy on _perform_semantic_search
-  - For handler tests: app_module, config_service, MemoryRetrievalPipeline, golden_repos_dir
+  - For handler tests: app_module, the memory section's settings,
+    MemoryRetrievalPipeline, golden_repos_dir
 """
 
 import inspect
 from unittest.mock import MagicMock, patch
 
-import pytest
+from tests.unit.server._memory_feature import (
+    memory_context_installed,
+    memory_search_section_installed,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -126,15 +131,8 @@ class TestQueryUserRepositoriesSignature:
 # Shared helpers for handler integration tests (Scenarios 3-4, 5a-5b)
 # ---------------------------------------------------------------------------
 
-_PIPELINE_CLS_PATCH = (
-    "code_indexer.server.mcp.handlers.search.memory_retrieval.MemoryRetrievalPipeline"
-)
-_CONFIG_SVC_PATCH = (
-    "code_indexer.server.mcp.handlers.search.repo_search.get_config_service"
-)
-_GOLDEN_DIR_PATCH = (
-    "code_indexer.server.mcp.handlers.search.memory_retrieval._get_golden_repos_dir"
-)
+_PIPELINE_CLS_PATCH = "cidx_memory.server.retrieval.MemoryRetrievalPipeline"
+_GOLDEN_DIR_PATCH = "cidx_memory.server.retrieval._golden_repos_dir"
 _APP_MODULE_PATCH = "code_indexer.server.mcp.handlers._utils.app_module"
 _COMPUTE_VECTOR_PATCH = (
     "code_indexer.server.mcp.handlers.search.repo_search._compute_shared_query_vector"
@@ -158,16 +156,9 @@ def _make_mock_user():
     return user
 
 
-def _make_mock_config_service(enabled: bool = True):
-    """Return a mock config service with MemoryRetrievalConfig."""
-    from code_indexer.server.utils.config_manager import MemoryRetrievalConfig
-
-    mem_cfg = MemoryRetrievalConfig(memory_retrieval_enabled=enabled)
-    config = MagicMock()
-    config.memory_retrieval_config = mem_cfg
-    svc = MagicMock()
-    svc.get_config.return_value = config
-    return svc
+def _memory_settings(enabled: bool = True) -> dict:
+    """The memory feature's config section with the kill-switch at *enabled*."""
+    return {"memory_retrieval_enabled": enabled}
 
 
 def _make_activated_repo_result():
@@ -208,7 +199,8 @@ def _invoke_with_precomputed_vector_mock(pipeline_instance):
 
     with (
         patch(_APP_MODULE_PATCH) as mock_app,
-        patch(_CONFIG_SVC_PATCH, return_value=_make_mock_config_service(enabled=True)),
+        memory_search_section_installed(),
+        memory_context_installed(settings=_memory_settings(enabled=True)),
         patch(_GOLDEN_DIR_PATCH, return_value=_FAKE_GOLDEN_DIR),
         patch(_PIPELINE_CLS_PATCH, pipeline_cls),
         patch(
@@ -291,65 +283,38 @@ class TestSearchActivatedRepoVectorSharing:
 # ---------------------------------------------------------------------------
 
 
-class TestRunMemoryRetrievalAcceptsQueryVector:
-    """Scenarios 5a-5b: _run_memory_retrieval accepts query_vector and skips internal compute.
+class TestMemorySectionTakesTheSharedVector:
+    """Scenarios 5a-5b: the memory section's request carries the vector, and
+    the section computes none of its own."""
 
-    5a: structural — signature must have query_vector parameter.
-    5b: behavioral — _compute_memory_query_vector must NOT be called when vector supplied.
-    """
+    def test_the_request_carries_the_query_vector(self):
+        """Scenario 5a: the SDK request a section receives has the vector."""
+        from cidx_sdk import SearchAugmentRequest
 
-    def test_run_memory_retrieval_signature_has_query_vector(self):
-        """Scenario 5a: _run_memory_retrieval signature must include query_vector."""
-        from code_indexer.server.mcp.handlers import search as search_module
-
-        sig = inspect.signature(search_module._run_memory_retrieval)
-        assert "query_vector" in sig.parameters, (
-            "_run_memory_retrieval must accept query_vector parameter "
-            "(Phase C: vector computed externally and passed in)"
+        request = SearchAugmentRequest(
+            username="u",
+            query_text="q",
+            search_mode="semantic",
+            limit=5,
+            query_vector=_EXPECTED_PRECOMPUTED_VECTOR,
         )
+        assert list(request.query_vector) == _EXPECTED_PRECOMPUTED_VECTOR
 
-    def test_run_memory_retrieval_does_not_call_compute_when_query_vector_supplied(
-        self,
-    ):
-        """Scenario 5b: _compute_memory_query_vector must NOT be called when query_vector given.
-
-        Asserts:
-        - _run_memory_retrieval accepts query_vector without TypeError
-        - _compute_memory_query_vector is not called internally when vector is provided
-        """
-        from code_indexer.server.mcp.handlers import search as search_module
-        from code_indexer.server.auth.user_manager import User
-
-        user = MagicMock(spec=User)
-        user.username = "test-user"
-
-        config_svc = _make_mock_config_service(enabled=True)
-        pipeline_instance = _build_pipeline_instance_stub()
+    def test_no_vector_means_no_section_and_no_pipeline(self):
+        """Scenario 5b: without the core's vector the section answers None
+        and builds no pipeline (there is no fallback embedding call)."""
+        from cidx_memory.server.retrieval import relevant_memories
+        from cidx_sdk import SearchAugmentRequest
 
         with (
-            patch(_PIPELINE_CLS_PATCH, return_value=pipeline_instance),
-            patch(_GOLDEN_DIR_PATCH, return_value=_FAKE_GOLDEN_DIR),
-            patch(
-                "code_indexer.server.mcp.handlers.search.memory_retrieval._compute_memory_query_vector"
-            ) as mock_compute,
+            memory_context_installed(settings=_memory_settings(enabled=True)),
+            patch(_PIPELINE_CLS_PATCH) as pipeline_cls,
         ):
-            params = {
-                "query_text": "test query",
-                "search_mode": "semantic",
-                "limit": 5,
-            }
-            try:
-                search_module._run_memory_retrieval(
-                    params=params,
-                    user=user,
-                    config_service=config_svc,
-                    reranker_status="disabled",
-                    query_vector=_EXPECTED_PRECOMPUTED_VECTOR,
+            section = relevant_memories(
+                SearchAugmentRequest(
+                    username="u", query_text="q", search_mode="semantic", limit=5
                 )
-            except TypeError as e:
-                pytest.fail(
-                    f"_run_memory_retrieval must accept query_vector parameter, "
-                    f"got TypeError: {e}"
-                )
+            )
 
-            mock_compute.assert_not_called()
+        assert section is None
+        pipeline_cls.assert_not_called()

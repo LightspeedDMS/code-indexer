@@ -42,7 +42,7 @@ server.
 import logging
 from pathlib import Path
 
-_WIKI_CACHE_MODULE = "code_indexer.server.wiki.wiki_cache"
+_WIKI_CACHE_MODULE = "cidx_wiki.server.wiki_cache"
 _JSON_COLUMN_MODULE = "code_indexer.server.storage.json_column"
 
 
@@ -79,7 +79,7 @@ class TestGetSidebarWithPostgresDictBackend:
         TypeError("the JSON object must be str, bytes or bytearray, not list")
         because get_sidebar() called json.loads() unconditionally.
         """
-        from code_indexer.server.wiki.wiki_cache import WikiCache
+        from cidx_wiki.server.wiki_cache import WikiCache
 
         sidebar_data = [{"title": "Home", "path": "home", "children": []}]
         backend = _FakeBackend(sidebar_raw=sidebar_data)
@@ -90,7 +90,7 @@ class TestGetSidebarWithPostgresDictBackend:
         assert result == sidebar_data
 
     def test_get_sidebar_returns_none_when_backend_has_no_row(self):
-        from code_indexer.server.wiki.wiki_cache import WikiCache
+        from cidx_wiki.server.wiki_cache import WikiCache
 
         backend = _FakeBackend(sidebar_raw=None)
         cache = WikiCache(db_path=":memory:", storage_backend=backend)
@@ -99,7 +99,7 @@ class TestGetSidebarWithPostgresDictBackend:
 
     def test_get_sidebar_still_parses_json_string_from_sqlite_shaped_backend(self):
         """Regression: a TEXT-column backend returning a JSON string must still work."""
-        from code_indexer.server.wiki.wiki_cache import WikiCache
+        from cidx_wiki.server.wiki_cache import WikiCache
 
         backend = _FakeBackend(sidebar_raw='[{"title": "Home", "path": "home"}]')
         cache = WikiCache(db_path=":memory:", storage_backend=backend)
@@ -121,7 +121,7 @@ class TestGetArticleWithPostgresDictBackendMetadata:
         logged a spurious WARNING, and returned metadata=None — silently
         discarding valid cached front-matter metadata on PostgreSQL.
         """
-        from code_indexer.server.wiki.wiki_cache import WikiCache
+        from cidx_wiki.server.wiki_cache import WikiCache
 
         article_file = tmp_path / "article.md"
         article_file.write_text("# Hello")
@@ -148,7 +148,7 @@ class TestGetArticleWithPostgresDictBackendMetadata:
     def test_get_article_still_parses_json_string_metadata_from_sqlite_shaped_backend(
         self, tmp_path
     ):
-        from code_indexer.server.wiki.wiki_cache import WikiCache
+        from cidx_wiki.server.wiki_cache import WikiCache
         import json
 
         article_file = tmp_path / "article.md"

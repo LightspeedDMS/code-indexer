@@ -96,7 +96,7 @@ class _FakeGoldenRepoManagerAtScale:
     def get_golden_repo(self, alias: str) -> Dict[str, Any]:
         return {"alias": alias}
 
-    def _index_exists(self, golden_repo: Dict[str, Any], kind: str) -> bool:
+    def counts_as_indexed(self, golden_repo: Dict[str, Any]) -> bool:
         return True
 
 

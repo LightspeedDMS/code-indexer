@@ -29,7 +29,7 @@ import pytest
 from code_indexer.server.services.alias_lock_store.base import (
     AliasLockOwnershipLostError,
 )
-from code_indexer.server.services.dependency_map_service import DependencyMapService
+from cidx_depmap.server.dependency_map_service import DependencyMapService
 from code_indexer.server.services.job_tracker import JobTracker
 
 
@@ -160,8 +160,8 @@ class TestLifecyclePreFlightOwnershipCheckpoint:
             ("run_delta_analysis", "alias-x"),
         ],
     )
-    @patch("code_indexer.server.services.dependency_map_service.LifecycleBatchRunner")
-    @patch("code_indexer.server.services.dependency_map_service.LifecycleFleetScanner")
+    @patch("cidx_depmap.server.dependency_map_service.LifecycleBatchRunner")
+    @patch("cidx_depmap.server.dependency_map_service.LifecycleFleetScanner")
     def test_ownership_loss_aborts_before_lifecycle_repair_writes(
         self,
         scanner_cls,

@@ -17,7 +17,7 @@ import threading
 import time
 from unittest.mock import MagicMock
 
-from code_indexer.server.services.dependency_map_service import DependencyMapService
+from cidx_depmap.server.dependency_map_service import DependencyMapService
 from code_indexer.server.services.shared_job_sentinel import SharedJobSentinel
 
 # Matches DependencyMapService's own ANALYSIS_STALE_TIMEOUT_SECONDS (4 hours).

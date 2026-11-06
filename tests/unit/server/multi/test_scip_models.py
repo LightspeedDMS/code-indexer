@@ -19,7 +19,7 @@ class TestSCIPMultiRequest:
 
     def test_valid_request_definition(self):
         """Valid definition request with repositories and symbol."""
-        from code_indexer.server.multi.scip_models import SCIPMultiRequest
+        from cidx_scip.server.multi_models import SCIPMultiRequest
 
         request = SCIPMultiRequest(
             repositories=["repo1", "repo2"], symbol="UserService"
@@ -32,7 +32,7 @@ class TestSCIPMultiRequest:
 
     def test_valid_request_callchain(self):
         """Valid callchain request with from_symbol and to_symbol."""
-        from code_indexer.server.multi.scip_models import SCIPMultiRequest
+        from cidx_scip.server.multi_models import SCIPMultiRequest
 
         request = SCIPMultiRequest(
             repositories=["repo1"],
@@ -47,14 +47,14 @@ class TestSCIPMultiRequest:
 
     def test_empty_repositories_rejected(self):
         """Request with empty repositories list is rejected."""
-        from code_indexer.server.multi.scip_models import SCIPMultiRequest
+        from cidx_scip.server.multi_models import SCIPMultiRequest
 
         with pytest.raises(ValidationError):
             SCIPMultiRequest(repositories=[], symbol="UserService")
 
     def test_missing_symbol_rejected(self):
         """Request without symbol is rejected."""
-        from code_indexer.server.multi.scip_models import SCIPMultiRequest
+        from cidx_scip.server.multi_models import SCIPMultiRequest
 
         with pytest.raises(ValidationError):
             SCIPMultiRequest(repositories=["repo1"])
@@ -65,7 +65,7 @@ class TestSCIPResult:
 
     def test_valid_definition_result(self):
         """Valid definition result with all required fields."""
-        from code_indexer.server.multi.scip_models import SCIPResult
+        from cidx_scip.server.multi_models import SCIPResult
 
         result = SCIPResult(
             repository="repo1",
@@ -86,7 +86,7 @@ class TestSCIPResult:
 
     def test_valid_reference_result_with_context(self):
         """Valid reference result with optional context."""
-        from code_indexer.server.multi.scip_models import SCIPResult
+        from cidx_scip.server.multi_models import SCIPResult
 
         result = SCIPResult(
             repository="repo2",
@@ -103,7 +103,7 @@ class TestSCIPResult:
 
     def test_dependency_result(self):
         """Valid dependency result."""
-        from code_indexer.server.multi.scip_models import SCIPResult
+        from cidx_scip.server.multi_models import SCIPResult
 
         result = SCIPResult(
             repository="repo1",
@@ -118,7 +118,7 @@ class TestSCIPResult:
 
     def test_dependent_result(self):
         """Valid dependent result."""
-        from code_indexer.server.multi.scip_models import SCIPResult
+        from cidx_scip.server.multi_models import SCIPResult
 
         result = SCIPResult(
             repository="repo1",
@@ -137,7 +137,7 @@ class TestSCIPMultiMetadata:
 
     def test_valid_metadata(self):
         """Valid metadata with all fields."""
-        from code_indexer.server.multi.scip_models import SCIPMultiMetadata
+        from cidx_scip.server.multi_models import SCIPMultiMetadata
 
         metadata = SCIPMultiMetadata(
             total_results=25,
@@ -153,7 +153,7 @@ class TestSCIPMultiMetadata:
 
     def test_zero_results_metadata(self):
         """Valid metadata with zero results."""
-        from code_indexer.server.multi.scip_models import SCIPMultiMetadata
+        from cidx_scip.server.multi_models import SCIPMultiMetadata
 
         metadata = SCIPMultiMetadata(
             total_results=0,
@@ -171,7 +171,7 @@ class TestSCIPMultiResponse:
 
     def test_valid_response_with_results(self):
         """Valid response with results from multiple repos."""
-        from code_indexer.server.multi.scip_models import (
+        from cidx_scip.server.multi_models import (
             SCIPMultiResponse,
             SCIPResult,
             SCIPMultiMetadata,
@@ -217,7 +217,7 @@ class TestSCIPMultiResponse:
 
     def test_valid_response_with_skipped_repos(self):
         """Valid response with some repos skipped (no SCIP index)."""
-        from code_indexer.server.multi.scip_models import (
+        from cidx_scip.server.multi_models import (
             SCIPMultiResponse,
             SCIPResult,
             SCIPMultiMetadata,
@@ -255,7 +255,7 @@ class TestSCIPMultiResponse:
 
     def test_valid_response_with_errors(self):
         """Valid response with errors from some repos."""
-        from code_indexer.server.multi.scip_models import (
+        from cidx_scip.server.multi_models import (
             SCIPMultiResponse,
             SCIPMultiMetadata,
         )
@@ -280,7 +280,7 @@ class TestSCIPMultiResponse:
 
     def test_empty_response(self):
         """Valid empty response (no results, no errors)."""
-        from code_indexer.server.multi.scip_models import (
+        from cidx_scip.server.multi_models import (
             SCIPMultiResponse,
             SCIPMultiMetadata,
         )

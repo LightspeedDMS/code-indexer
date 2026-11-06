@@ -22,10 +22,10 @@ HAS_PSYCOPG_FOR_LIVE_PG = False
 try:
     import psycopg
     from code_indexer.server.storage.postgres.connection_pool import ConnectionPool
-    from code_indexer.server.storage.postgres.xray_graph_k_calibration_backend import (
+    from cidx_xray.server.graph_governor.k_calibration_postgres import (
         XrayGraphKCalibrationPostgresBackend,
     )
-    from code_indexer.server.services.xray_graph_governor.k_calibration_store import (
+    from cidx_xray.server.graph_governor.k_calibration_store import (
         KCalibrationSample,
     )
 

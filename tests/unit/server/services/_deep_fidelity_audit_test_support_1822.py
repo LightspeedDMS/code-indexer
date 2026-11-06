@@ -84,6 +84,39 @@ def assert_gate_at_full_capacity(gate: threading.Semaphore, expected: int) -> No
         restore_gate(gate, drained)
 
 
+def build_tiny_fsv_store(tmp_path):
+    """A FilesystemVectorStore with a small real collection for search()
+    integration -- the body of the ``tiny_fsv_store`` fixture, shared by
+    conftest.py and any test module that must not depend on conftest loading
+    (the smoke job collects files from many non-package directories, and
+    pytest can then shadow this directory's conftest module)."""
+    from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
+
+    store = FilesystemVectorStore(tmp_path, project_root=tmp_path)
+    store.create_collection(COLLECTION_NAME, vector_size=DIM)
+
+    vecs = [
+        norm([1, 0, 0, 0, 0, 0, 0, 0]),
+        norm([0, 1, 0, 0, 0, 0, 0, 0]),
+        norm([0, 0, 1, 0, 0, 0, 0, 0]),
+        norm([0, 0, 0, 1, 0, 0, 0, 0]),
+        norm([0, 0, 0, 0, 1, 0, 0, 0]),
+    ]
+    points = [
+        {
+            "id": f"doc_{i}",
+            "vector": vecs[i],
+            "payload": {"path": f"file_{i}.py", "content": f"content {i}"},
+        }
+        for i in range(len(vecs))
+    ]
+    store.begin_indexing(COLLECTION_NAME)
+    store.upsert_points(COLLECTION_NAME, points)
+    store.end_indexing(COLLECTION_NAME)
+
+    return store, vecs
+
+
 def make_fake_provider(query_vec: List[float]) -> MagicMock:
     provider = MagicMock()
     provider.get_embedding.return_value = query_vec

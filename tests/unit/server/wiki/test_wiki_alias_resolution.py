@@ -16,7 +16,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from code_indexer.server.wiki.routes import (
+from cidx_wiki.server.routes import (
     wiki_router,
     get_wiki_user_hybrid,
     get_current_user_hybrid,
@@ -44,7 +44,7 @@ def _make_app(
     user_accessible_repos=None,
 ):
     """Create a FastAPI test app wired to wiki_router with alias-aware state."""
-    from code_indexer.server.wiki.routes import _reset_wiki_cache
+    from cidx_wiki.server.routes import _reset_wiki_cache
 
     _reset_wiki_cache()
 

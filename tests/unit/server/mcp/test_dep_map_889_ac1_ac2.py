@@ -16,9 +16,10 @@ Invariant (MESSI rule 15, AC2):
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from code_indexer.server.auth.user_manager import User, UserRole
+from tests.unit.server._depmap_feature import depmap_service_reading, depmap_started
 
 
 # ---------------------------------------------------------------------------
@@ -33,10 +34,8 @@ def _make_user() -> MagicMock:
     return user
 
 
-def _make_app_state(read_path: Path) -> MagicMock:
-    state = MagicMock()
-    state.dependency_map_service.cidx_meta_read_path = read_path
-    return state
+def _running_service(read_path: Path) -> Any:
+    return depmap_service_reading(read_path)
 
 
 def _parse_response(result: Any) -> Dict[str, Any]:
@@ -45,15 +44,12 @@ def _parse_response(result: Any) -> Dict[str, Any]:
 
 
 def _call_graph(params: dict, root: Path) -> Dict[str, Any]:
-    from code_indexer.server.mcp.handlers.depmap import (
+    from cidx_depmap.server.mcp.handlers import (
         depmap_get_cross_domain_graph_handler,
     )
 
-    state = _make_app_state(root)
-    with patch(
-        "code_indexer.server.mcp.handlers.depmap._utils.app_module.app.state",
-        state,
-    ):
+    service = _running_service(root)
+    with depmap_started(service, MagicMock()):
         result = depmap_get_cross_domain_graph_handler(params, _make_user())
     return _parse_response(result)
 

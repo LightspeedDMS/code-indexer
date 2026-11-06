@@ -51,7 +51,7 @@ def env(tmp_path: Path) -> CatalogFileDoorEnv:
     env = CatalogFileDoorEnv(tmp_path)
     for name in NAMES:
         point_alias(env.golden_root, f"{name}-global", env.alpha_dir)
-    env.activations.data_dir = str(env.golden_root.parent)  # type: ignore[attr-defined]
+    setattr(env.activations, "data_dir", str(env.golden_root.parent))
     return env
 
 

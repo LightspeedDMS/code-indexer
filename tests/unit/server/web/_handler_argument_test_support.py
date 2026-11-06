@@ -22,6 +22,10 @@ import jinja2
 
 REPO_ROOT = Path(__file__).parent.parent.parent.parent.parent
 TEMPLATES_DIR = REPO_ROOT / "src/code_indexer/server/web/templates"
+#: The dependency map's templates (the cidx-depmap feature, modular phase 4g).
+DEPMAP_TEMPLATES_DIR = (
+    REPO_ROOT / "packages/features/cidx-depmap/src/cidx_depmap/server/web/templates"
+)
 STATIC_JS_DIR = REPO_ROOT / "src/code_indexer/server/web/static/js"
 
 # A single value combining every character class a handler argument must
@@ -36,7 +40,13 @@ def render(
     """Render a template from the real templates directory through a
     real Jinja2 environment (autoescape on, matching production)."""
     env = jinja2.Environment(
-        loader=jinja2.FileSystemLoader(str(TEMPLATES_DIR)), autoescape=True
+        loader=jinja2.ChoiceLoader(
+            [
+                jinja2.FileSystemLoader(str(TEMPLATES_DIR)),
+                jinja2.FileSystemLoader(str(DEPMAP_TEMPLATES_DIR)),
+            ]
+        ),
+        autoescape=True,
     )
     if extra_filters:
         env.filters.update(extra_filters)

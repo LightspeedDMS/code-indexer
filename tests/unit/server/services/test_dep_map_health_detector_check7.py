@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 
 
-from code_indexer.server.services.dep_map_health_detector import (
+from cidx_depmap.server.dep_map_health_detector import (
     REPAIRABLE_ANOMALY_TYPES,
     DepMapHealthDetector,
 )
@@ -455,7 +455,7 @@ class TestStaleParticipatingRepoTriggersNeedsRepairNotCritical:
 
     def test_stale_participating_repo_not_in_critical_anomaly_types(self, tmp_path):
         """Verify 'stale_participating_repo' is NOT in CRITICAL_ANOMALY_TYPES."""
-        from code_indexer.server.services.dep_map_health_detector import (
+        from cidx_depmap.server.dep_map_health_detector import (
             CRITICAL_ANOMALY_TYPES,
         )
 

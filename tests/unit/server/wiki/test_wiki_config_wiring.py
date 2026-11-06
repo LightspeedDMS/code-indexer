@@ -1,8 +1,10 @@
-"""Tests for Story #323 code review fix: wiki_config wired through wiki/routes.py.
+"""Tests for Story #323 code review fix: wiki_config wired through the routes.
 
 These tests verify that:
-1. _get_wiki_config() helper in wiki/routes.py returns a WikiConfig instance
-   derived from ConfigService (not None / all-True fallback silently).
+1. _get_wiki_config() helper in cidx_wiki.server.routes returns a WikiConfig
+   instance derived from the feature's config section -- the ``config``
+   capability of the started feature (modular phase 4e) -- not None / an
+   all-True fallback silently.
 2. When wiki_config toggles are OFF, the route responses respect them —
    e.g. article_number does not appear in the metadata panel.
 3. web/routes.py background thread passes wiki_config to
@@ -13,25 +15,60 @@ TDD Red Phase: written BEFORE production code changes.
 
 import os
 import tempfile
+from dataclasses import asdict
 from pathlib import Path
+from typing import Any, Dict, Iterator, cast
 from unittest.mock import MagicMock, patch
 
+import pytest
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from code_indexer.server.wiki.routes import (
+from cidx_wiki.server.routes import (
     _reset_wiki_cache,
     get_wiki_user_hybrid,
     wiki_router,
 )
-from code_indexer.server.auth.dependencies import get_current_user_hybrid
-from tests.unit.server.wiki.wiki_test_helpers import make_aliases_dir
+from cidx_wiki.server.routes import get_current_user_hybrid
+from tests.unit.server.wiki.wiki_test_helpers import (
+    app_golden_repos_dir,
+    make_aliases_dir,
+)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+class _ConfigCapability:
+    """The ``config`` capability, reduced to the wiki's section."""
+
+    def __init__(self, values: Dict[str, Any]) -> None:
+        self._values = values
+
+    def section(self) -> Dict[str, Any]:
+        return dict(self._values)
+
+
+class _Context:
+    def __init__(self, values: Dict[str, Any]) -> None:
+        self._config = _ConfigCapability(values)
+
+    def has_capability(self, name: str) -> bool:
+        return name == "config"
+
+    def capability(self, name: str) -> object:
+        return self._config
+
+
+@pytest.fixture(autouse=True)
+def _no_feature_context_left() -> Iterator[None]:
+    from cidx_wiki.server import runtime
+
+    yield
+    runtime.CONTEXT.uninstall()
 
 
 def _make_user(username: str):
@@ -44,8 +81,8 @@ def _make_user(username: str):
 def _make_wiki_app(actual_repo_path: str, wiki_config=None):
     """Build a minimal FastAPI test app with wiki_router mounted.
 
-    If wiki_config is provided it is placed on a mock ConfigService attached
-    to app.state so that _get_wiki_config() can retrieve it.
+    If wiki_config is provided it becomes the started feature's config
+    section so that _get_wiki_config() can retrieve it.
     """
     _reset_wiki_cache()
 
@@ -62,8 +99,7 @@ def _make_wiki_app(actual_repo_path: str, wiki_config=None):
     app.state.golden_repo_manager.get_wiki_enabled.return_value = True
     app.state.golden_repo_manager.db_path = _db_path
 
-    golden_repos_dir = Path(actual_repo_path).parent / "golden-repos-wiring-test"
-    golden_repos_dir.mkdir(parents=True, exist_ok=True)
+    golden_repos_dir = app_golden_repos_dir(app)
     make_aliases_dir(str(golden_repos_dir), "test-repo", actual_repo_path)
     app.state.golden_repo_manager.golden_repos_dir = str(golden_repos_dir)
 
@@ -71,16 +107,11 @@ def _make_wiki_app(actual_repo_path: str, wiki_config=None):
     app.state.access_filtering_service.is_admin_user.return_value = True
     app.state.access_filtering_service.get_accessible_repos.return_value = {"test-repo"}
 
-    # Wire config_service onto app.state if wiki_config supplied
+    # The feature's config section, as the started feature reads it
     if wiki_config is not None:
-        from code_indexer.server.utils.config_manager import ServerConfig
+        from cidx_wiki.server import runtime
 
-        server_config = MagicMock(spec=ServerConfig)
-        server_config.wiki_config = wiki_config
-
-        config_service = MagicMock()
-        config_service.get_config.return_value = server_config
-        app.state.config_service = config_service
+        runtime.CONTEXT.install(cast(Any, _Context(asdict(wiki_config))))
 
     return app
 
@@ -94,9 +125,9 @@ class TestGetWikiConfigHelper:
     """_get_wiki_config() must return a WikiConfig instance from ConfigService."""
 
     def test_get_wiki_config_returns_wiki_config_instance(self):
-        """_get_wiki_config() returns the WikiConfig stored on ConfigService."""
-        from code_indexer.server.wiki.routes import _get_wiki_config  # noqa: F401
-        from code_indexer.server.utils.config_manager import WikiConfig
+        """_get_wiki_config() returns the feature section as a WikiConfig."""
+        from cidx_wiki.server.routes import _get_wiki_config  # noqa: F401
+        from cidx_wiki.config import WikiConfig
 
         wiki_config = WikiConfig(
             enable_header_block_parsing=True,
@@ -117,10 +148,10 @@ class TestGetWikiConfigHelper:
             assert result.enable_views_seeding is False
 
     def test_get_wiki_config_returns_default_when_no_config_service(self):
-        """_get_wiki_config() returns default WikiConfig (all-True) when app.state
-        has no config_service."""
-        from code_indexer.server.wiki.routes import _get_wiki_config
-        from code_indexer.server.utils.config_manager import WikiConfig
+        """_get_wiki_config() returns default WikiConfig (all-True) when the
+        feature has not started (no config capability)."""
+        from cidx_wiki.server.routes import _get_wiki_config
+        from cidx_wiki.config import WikiConfig
 
         with tempfile.TemporaryDirectory() as tmpdir:
             # App with NO config_service on state
@@ -147,7 +178,7 @@ class TestWikiRoutesHonourWikiConfig:
     def test_article_number_hidden_when_toggle_off_in_golden_repo_route(self):
         """serve_wiki_article must NOT show article_number in metadata panel
         when enable_article_number=False is configured on the server."""
-        from code_indexer.server.utils.config_manager import WikiConfig
+        from cidx_wiki.config import WikiConfig
 
         wiki_config = WikiConfig(
             enable_header_block_parsing=False,
@@ -178,7 +209,7 @@ class TestWikiRoutesHonourWikiConfig:
     def test_article_number_shown_when_toggle_on_in_golden_repo_route(self):
         """serve_wiki_article MUST show article_number in metadata panel
         when enable_article_number=True is configured."""
-        from code_indexer.server.utils.config_manager import WikiConfig
+        from cidx_wiki.config import WikiConfig
 
         wiki_config = WikiConfig(
             enable_header_block_parsing=True,
@@ -205,7 +236,7 @@ class TestWikiRoutesHonourWikiConfig:
 
     def test_wiki_root_article_number_hidden_when_toggle_off(self):
         """serve_wiki_root must NOT show article_number when toggle is OFF."""
-        from code_indexer.server.utils.config_manager import WikiConfig
+        from cidx_wiki.config import WikiConfig
 
         wiki_config = WikiConfig(
             enable_header_block_parsing=False,
@@ -239,7 +270,7 @@ class TestWebRoutesPopulateViewsUsesWikiConfig:
     def test_populate_views_receives_wiki_config_from_config_service(self):
         """When enable_views_seeding=False is configured, the background
         populate_views_from_front_matter call must NOT seed views."""
-        from code_indexer.server.utils.config_manager import WikiConfig
+        from cidx_wiki.config import WikiConfig
 
         _wiki_config = WikiConfig(
             enable_header_block_parsing=True,
@@ -259,11 +290,11 @@ class TestWebRoutesPopulateViewsUsesWikiConfig:
 
             # Patch WikiService.populate_views_from_front_matter to capture args
             with patch(
-                "code_indexer.server.wiki.wiki_service.WikiService.populate_views_from_front_matter",
+                "cidx_wiki.server.wiki_service.WikiService.populate_views_from_front_matter",
                 side_effect=capture_call,
             ):
                 # Import the function that triggers the background thread
-                from code_indexer.server.web.routes import web_router
+                from cidx_wiki.server.admin_routes import web_router
 
                 # Find the wiki-toggle route handler
                 toggle_route = None

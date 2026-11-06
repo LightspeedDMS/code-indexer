@@ -10,9 +10,10 @@ import json
 import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from code_indexer.server.auth.user_manager import User, UserRole
+from tests.unit.server._depmap_feature import depmap_service_reading, depmap_started
 
 
 def _call_handler(handler: Callable, params: dict, root: Path) -> Dict[str, Any]:
@@ -23,12 +24,8 @@ def _call_handler(handler: Callable, params: dict, root: Path) -> Dict[str, Any]
     user = MagicMock(spec=User)
     user.username = "testuser"
     user.role = UserRole.NORMAL_USER
-    state = MagicMock()
-    state.dependency_map_service.cidx_meta_read_path = root
-    with patch(
-        "code_indexer.server.mcp.handlers.depmap._utils.app_module.app.state",
-        state,
-    ):
+    service = depmap_service_reading(root)
+    with depmap_started(service, MagicMock()):
         result = handler(params, user)
     # cast needed: json.loads() returns Any; MCP handlers always return dict envelope
     return cast(Dict[str, Any], json.loads(result["content"][0]["text"]))

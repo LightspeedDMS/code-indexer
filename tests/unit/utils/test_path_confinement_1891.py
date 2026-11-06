@@ -48,7 +48,14 @@ def test_module_pulls_in_zero_server_modules():
             "if m.startswith('code_indexer.server')]; "
             "print(len(server_mods))",
         ],
-        env={**os.environ, "PYTHONPATH": src_root},
+        # src first; the inherited path keeps the in-repo distributions the
+        # module depends on (cidx_sdk) importable in a source-tree run.
+        env={
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join(
+                p for p in (src_root, os.environ.get("PYTHONPATH", "")) if p
+            ),
+        },
         capture_output=True,
         text=True,
         timeout=30,

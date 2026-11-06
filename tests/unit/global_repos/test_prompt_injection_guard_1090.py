@@ -13,7 +13,7 @@ Affected targets:
 4. src/code_indexer/global_repos/prompts/repo_description_refresh.md
 5. src/code_indexer/global_repos/prompts/fact_check.md
 6. src/code_indexer/server/prompts/lifecycle_unified.md
-7. src/code_indexer/server/mcp/prompts/bidirectional_mismatch_audit.md
+7. packages/features/cidx-depmap/src/cidx_depmap/server/prompts/bidirectional_mismatch_audit.md
 
 TDD RED PHASE: Tests written before production code changes exist.
 """
@@ -56,7 +56,19 @@ _PROMPT_FILES = [
     ("global_repos", "prompts", "repo_description_refresh.md"),
     ("global_repos", "prompts", "fact_check.md"),
     ("server", "prompts", "lifecycle_unified.md"),
-    ("server", "mcp", "prompts", "bidirectional_mismatch_audit.md"),
+    # The cidx-depmap feature's (modular phase 4g), named from src/code_indexer.
+    (
+        "..",
+        "..",
+        "packages",
+        "features",
+        "cidx-depmap",
+        "src",
+        "cidx_depmap",
+        "server",
+        "prompts",
+        "bidirectional_mismatch_audit.md",
+    ),
 ]
 
 
@@ -77,7 +89,7 @@ class TestOrientationFileGuard:
 
     def test_orientation_claude_md_contains_guard(self, tmp_path: Path) -> None:
         """Generated CLAUDE.md content must contain the prompt injection guard."""
-        from code_indexer.global_repos.dependency_map_analyzer import (
+        from cidx_depmap.server.dependency_map_analyzer import (
             DependencyMapAnalyzer,
         )
 
@@ -95,7 +107,7 @@ class TestOrientationFileGuard:
 
     def test_orientation_claude_md_guard_is_strong(self, tmp_path: Path) -> None:
         """The guard must explicitly state repos are source code artifacts, not instructions."""
-        from code_indexer.global_repos.dependency_map_analyzer import (
+        from cidx_depmap.server.dependency_map_analyzer import (
             DependencyMapAnalyzer,
         )
 
@@ -126,7 +138,7 @@ class TestAnalysisGuidelinesGuard:
 
     def test_analysis_guidelines_contains_guard(self) -> None:
         """_build_analysis_guidelines_content() output must contain the prompt injection guard."""
-        from code_indexer.global_repos.dependency_map_analyzer import (
+        from cidx_depmap.server.dependency_map_analyzer import (
             DependencyMapAnalyzer,
         )
 
@@ -135,7 +147,7 @@ class TestAnalysisGuidelinesGuard:
 
     def test_analysis_guidelines_guard_is_strong(self) -> None:
         """The guard in guidelines must cover source code artifacts and not-instructions."""
-        from code_indexer.global_repos.dependency_map_analyzer import (
+        from cidx_depmap.server.dependency_map_analyzer import (
             DependencyMapAnalyzer,
         )
 

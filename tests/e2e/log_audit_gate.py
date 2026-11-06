@@ -475,7 +475,7 @@ LOG_AUDIT_ALLOWLIST: List[str] = [
 LOG_AUDIT_EXACT_ALLOWLIST: List[Tuple[str, str]] = [
     # Wiki doors render the fixture's deliberately unparsable "reports" domain.
     (
-        "code_indexer.server.wiki.wiki_service",
+        "cidx_wiki.server.wiki_service",
         r"Failed to parse front matter, treating as plain content",
     ),
     # mcp_search_temporal admin control: temporal query on a catalog with no
@@ -498,6 +498,11 @@ LOG_AUDIT_EXACT_ALLOWLIST: List[Tuple[str, str]] = [
     (
         "code_indexer.services.git_aware_watch_handler",
         r"Git not available - proceeding with file-only monitoring",
+    ),
+    # Stopping that auto-watch (exit_write_mode, deactivation); Bug #2180
+    (
+        "code_indexer.daemon.watch_manager",
+        r"Watch thread did not stop within 5 seconds",
     ),
 ]
 

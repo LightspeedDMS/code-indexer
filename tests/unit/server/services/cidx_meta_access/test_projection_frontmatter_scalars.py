@@ -21,7 +21,7 @@ from code_indexer.server.services.cidx_meta_access.depmap_projection import (
 from code_indexer.server.services.cidx_meta_access.depmap_source import (
     source_for_visibility,
 )
-from code_indexer.server.services.dep_map_mcp_parser import DepMapMCPParser
+from cidx_depmap.server.dep_map_mcp_parser import DepMapMCPParser
 from code_indexer.server.services.dep_map_parser_tables import (
     parse_frontmatter_strict,
 )

@@ -25,13 +25,13 @@ import pytest
 
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.cache.payload_cache import PayloadCache, PayloadCacheConfig
-from code_indexer.xray.rust_backend import _XRAY_CLI_DEFAULT
+from cidx_xray.rust_backend import resolve_xray_cli_path
 
 
 def _require_xray_cli_binary() -> None:
-    if not _XRAY_CLI_DEFAULT.exists():
+    if not resolve_xray_cli_path().exists():
         pytest.skip(
-            f"xray-cli binary not built at {_XRAY_CLI_DEFAULT}; "
+            f"xray-cli binary not built at {resolve_xray_cli_path()}; "
             "run 'cargo build --release' inside rust/ to enable this test."
         )
 
@@ -50,7 +50,7 @@ def _parse_response(result: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _import_handler():
-    from code_indexer.server.mcp.handlers.xray_graph import handle_analyze_graph
+    from cidx_xray.server.mcp.xray_graph import handle_analyze_graph
 
     return handle_analyze_graph
 
@@ -145,9 +145,7 @@ async def test_analyze_graph_rejects_malformed_globs_before_repo_resolution(
     at the real MCP handler, before an invalid exclusion can fail open."""
     handler = _import_handler()
     params = {**VALID_PARAMS, field_name: patterns}
-    with patch(
-        "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path"
-    ) as mock_resolve:
+    with patch("cidx_xray.server.mcp.xray_graph._resolve_repo_path") as mock_resolve:
         result = await handler(params, _make_user())
 
     mock_resolve.assert_not_called()
@@ -158,7 +156,7 @@ async def test_analyze_graph_rejects_malformed_globs_before_repo_resolution(
 async def test_analyze_graph_unresolvable_alias_returns_repository_not_found() -> None:
     handler = _import_handler()
     with patch(
-        "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path",
+        "cidx_xray.server.mcp.xray_graph._resolve_repo_path",
         return_value=None,
     ):
         result = await handler(dict(VALID_PARAMS), _make_user())
@@ -173,9 +171,7 @@ async def test_analyze_graph_forbidden_construct_never_touches_filesystem() -> N
     handler = _import_handler()
     params = dict(VALID_PARAMS)
     params["evaluator_code"] = UNSAFE_EVALUATOR
-    with patch(
-        "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path"
-    ) as mock_resolve:
+    with patch("cidx_xray.server.mcp.xray_graph._resolve_repo_path") as mock_resolve:
         result = await handler(params, _make_user())
     mock_resolve.assert_not_called()
     parsed = _parse_response(result)
@@ -216,7 +212,7 @@ async def test_analyze_graph_cross_file_reference_through_the_real_handler(
 
     handler = _import_handler()
     with patch(
-        "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path",
+        "cidx_xray.server.mcp.xray_graph._resolve_repo_path",
         return_value=str(repo_root),
     ):
         result = await handler(dict(VALID_PARAMS), _make_user())
@@ -329,8 +325,8 @@ async def test_analyze_graph_large_result_is_routed_through_payload_cache_trunca
     right shape by coincidence."""
     from unittest.mock import AsyncMock, MagicMock
 
-    from code_indexer.server.mcp.handlers import xray_graph as xray_graph_module
-    from code_indexer.server.mcp.handlers.xray_graph import (
+    from cidx_xray.server.mcp import xray_graph as xray_graph_module
+    from cidx_xray.server.mcp.xray_graph import (
         _truncate_graph_result as real_truncate_graph_result,
     )
 
@@ -343,7 +339,7 @@ async def test_analyze_graph_large_result_is_routed_through_payload_cache_trunca
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray_graph._run_analyze_graph_pipeline",
+                "cidx_xray.server.mcp.xray_graph._run_analyze_graph_pipeline",
                 new=AsyncMock(return_value=large_result),
             ),
             patch.object(xray_graph_module, "_truncate_graph_result", truncate_spy),

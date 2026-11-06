@@ -192,6 +192,51 @@ class TestFilterConditionsBuilder:
         assert item.get("key") == "language"
         assert "match" in item
 
+    # -- GAP-6: comma-separated path_filter ---------------------------------
+
+    def test_comma_separated_path_filter_no_must_clause(self):
+        """Multiple comma-separated patterns must NOT produce a must clause
+        (post-filtered instead because FSV does not support should-within-must)."""
+        result = SemanticSearchService()._build_filter_conditions(
+            path_filter="Customer/**,Public/**",
+            language=None,
+            exclude_language=None,
+            exclude_path=None,
+        )
+        # No path must clause should be generated for multi-pattern
+        if "must" in result:
+            for item in result["must"]:
+                assert item.get("key") != "path", (
+                    "Multi-pattern path_filter should not produce a must clause"
+                )
+
+    def test_single_path_filter_still_produces_must_clause(self):
+        """A single pattern (no comma) should still produce a must clause."""
+        result = SemanticSearchService()._build_filter_conditions(
+            path_filter="Customer/**",
+            language=None,
+            exclude_language=None,
+            exclude_path=None,
+        )
+        assert "must" in result
+        assert {"key": "path", "match": {"text": "Customer/**"}} in result["must"]
+
+    def test_comma_separated_with_language_preserves_language_must(self):
+        """Multi-pattern path_filter omits path must but keeps language must."""
+        result = SemanticSearchService()._build_filter_conditions(
+            path_filter="src/**,lib/**",
+            language="python",
+            exclude_language=None,
+            exclude_path=None,
+        )
+        assert "must" in result
+        # Language must clause present (may use 'should' wrapper for multi-ext languages)
+        assert len(result["must"]) >= 1, "language must clause should remain"
+        # Path must clause absent -- no entry should have key=path
+        assert not any(item.get("key") == "path" for item in result["must"]), (
+            "multi-pattern path_filter must NOT have a path must clause"
+        )
+
 
 # ===========================================================================
 # 3. SemanticSearchService passes filter_conditions to vector store
@@ -447,6 +492,126 @@ class TestSemanticSearchServiceFiltersWired:
         assert {"key": "language", "match": {"value": "java"}} in filter_conds[
             "must_not"
         ]
+
+    # -- GAP-6: comma-separated path_filter post-filtering -------------------
+
+    @patch("code_indexer.server.services.search_service.BackendFactory")
+    @patch("code_indexer.server.services.search_service.EmbeddingProviderFactory")
+    @patch("code_indexer.server.services.search_service.ConfigManager")
+    def test_comma_path_filter_post_filters_results(
+        self,
+        mock_config_manager,
+        mock_embedding_factory,
+        mock_backend_factory,
+        tmp_path,
+    ):
+        """Comma-separated path_filter must post-filter results with OR semantics."""
+        from code_indexer.server.services.search_service import SemanticSearchService
+        from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
+
+        (tmp_path / ".code-indexer").mkdir()
+
+        mock_config = MagicMock()
+        mock_config_manager.create_with_backtrack.return_value.get_config.return_value = mock_config
+
+        mock_embedding = MagicMock()
+        mock_embedding_factory.create.return_value = mock_embedding
+
+        # Three results: two matching the filter patterns, one not
+        mock_results = [
+            {
+                "payload": {
+                    "path": "Customer/foo.cs",
+                    "line_start": 1,
+                    "line_end": 5,
+                    "content": "class Foo {}",
+                },
+                "score": 0.9,
+            },
+            {
+                "payload": {
+                    "path": "Public/bar.cs",
+                    "line_start": 1,
+                    "line_end": 5,
+                    "content": "class Bar {}",
+                },
+                "score": 0.8,
+            },
+            {
+                "payload": {
+                    "path": "Private/baz.cs",
+                    "line_start": 1,
+                    "line_end": 5,
+                    "content": "class Baz {}",
+                },
+                "score": 0.7,
+            },
+        ]
+
+        mock_vector_store = MagicMock(spec=FilesystemVectorStore)
+        mock_vector_store.resolve_collection_name.return_value = "test_collection"
+        mock_vector_store.search.return_value = (mock_results, {})
+
+        mock_backend = MagicMock()
+        mock_backend.get_vector_store_client.return_value = mock_vector_store
+        mock_backend_factory.create.return_value = mock_backend
+
+        service = SemanticSearchService()
+        request = SemanticSearchRequest(
+            query="test query",
+            path_filter="Customer/**,Public/**",
+        )
+
+        with patch("code_indexer.server.app._server_hnsw_cache", None):
+            response = service.search_repository_path(str(tmp_path), request)
+
+        # Only the Customer and Public results should survive post-filter
+        result_paths = [r.file_path for r in response.results]
+        assert "Customer/foo.cs" in result_paths
+        assert "Public/bar.cs" in result_paths
+        assert "Private/baz.cs" not in result_paths
+
+    @patch("code_indexer.server.services.search_service.BackendFactory")
+    @patch("code_indexer.server.services.search_service.EmbeddingProviderFactory")
+    @patch("code_indexer.server.services.search_service.ConfigManager")
+    def test_single_path_filter_no_post_filter(
+        self,
+        mock_config_manager,
+        mock_embedding_factory,
+        mock_backend_factory,
+        tmp_path,
+    ):
+        """Single path_filter should use vector-store must clause, not post-filter."""
+        from code_indexer.server.services.search_service import SemanticSearchService
+        from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
+
+        (tmp_path / ".code-indexer").mkdir()
+
+        mock_config = MagicMock()
+        mock_config_manager.create_with_backtrack.return_value.get_config.return_value = mock_config
+
+        mock_embedding = MagicMock()
+        mock_embedding_factory.create.return_value = mock_embedding
+
+        mock_vector_store = MagicMock(spec=FilesystemVectorStore)
+        mock_vector_store.resolve_collection_name.return_value = "test_collection"
+        mock_vector_store.search.return_value = ([], {})
+
+        mock_backend = MagicMock()
+        mock_backend.get_vector_store_client.return_value = mock_vector_store
+        mock_backend_factory.create.return_value = mock_backend
+
+        service = SemanticSearchService()
+        request = SemanticSearchRequest(query="test query", path_filter="Customer/**")
+
+        with patch("code_indexer.server.app._server_hnsw_cache", None):
+            service.search_repository_path(str(tmp_path), request)
+
+        # Single pattern must produce a vector-store must clause
+        call_kwargs = mock_vector_store.search.call_args
+        filter_conds = call_kwargs.kwargs.get("filter_conditions", {})
+        assert "must" in filter_conds
+        assert {"key": "path", "match": {"text": "Customer/**"}} in filter_conds["must"]
 
 
 # ===========================================================================

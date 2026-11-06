@@ -41,6 +41,8 @@ import pytest
 
 from code_indexer.global_repos.regex_search import RegexSearchService
 
+from .conftest import executor_target
+
 _TEST_MAX_RESULTS = 1_000_000
 
 
@@ -104,8 +106,8 @@ def _build_service(tmp_path, engine: str) -> RegexSearchService:
         if engine == "ripgrep":
             mock_which.return_value = "/usr/bin/rg"
         else:
-            mock_which.side_effect = (
-                lambda cmd: "/usr/bin/grep" if cmd == "grep" else None
+            mock_which.side_effect = lambda cmd: (
+                "/usr/bin/grep" if cmd == "grep" else None
             )
         return RegexSearchService(tmp_path)
 
@@ -146,10 +148,9 @@ class TestRegexSearchEventLoopOffload:
         mock_executor = _mock_executor_copying_from(str(source_path))
         original_parse_method = getattr(service, parse_attr)
         with (
-            patch(
-                "code_indexer.global_repos.regex_search.SubprocessExecutor",
-                return_value=mock_executor,
-            ),
+            # ripgrep runs through LocalRipgrepBackend, grep through
+            # regex_search's own import: executor_target() picks the one.
+            patch(executor_target(engine), return_value=mock_executor),
             patch.object(
                 service,
                 parse_attr,

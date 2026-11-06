@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from code_indexer.xray.sandbox import validate_rust_evaluator
+from cidx_xray.sandbox import validate_rust_evaluator
 
 # ^ why literals 131_072 and 64, not the module constants; these tests pin the values
 _PINNED_MAX_SOURCE_BYTES = 131_072

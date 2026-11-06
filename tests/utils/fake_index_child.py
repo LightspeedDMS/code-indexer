@@ -12,8 +12,11 @@ call:
 - ``recover``: exit 0, the retried files succeeded (no failure recorded);
 - ``noop``: exit 0 with the provider metadata untouched -- the real
   no-work path (the default);
+
+Every other mode that exits 0 records the current chunk coverage version, as
+the real child does once it has checked the store (EVO-64616).
 - ``stale``: exit 0, a ``failed_files`` counter of 5 with no recorded path
-  (a counter the real child does not always keep current);
+  (failures no path-based retry reaches: refresh owes a full reconcile);
 - ``defect``: exit 88 (Story #2122 run-spend meter defect), the provider
   metadata left ``in_progress`` as the real child leaves it;
 - ``chunk_store_env``: exit 87, a fatal chunk-store ENVIRONMENT failure.
@@ -31,7 +34,12 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
+
+from code_indexer.services.chunk_coverage import (
+    CHUNK_COVERAGE_KEY,
+    CHUNK_COVERAGE_VERSION,
+)
 
 PARTIAL_FAILED_FILES = ("module_1.py", "module_2.py", "module_3.py")
 STALE_FAILED_FILES = 5
@@ -49,6 +57,8 @@ if args[:1] == ["index"]:
     mode = (here / "index-mode").read_text().strip()
     with open(here / "index-calls", "a") as calls:
         calls.write(mode + "\\n")
+    with open(here / "index-args", "a") as recorded:
+        recorded.write(json.dumps(args) + "\\n")
     if "--index-commits" in args:
         sys.exit(0)
     stdout_file = here / "index-stdout"
@@ -80,6 +90,7 @@ if args[:1] == ["index"]:
     else:
         data.update(failed_files=0, failed_file_paths=[])
     data["status"] = "completed"
+    data[{coverage_key!r}] = {coverage_version}
     meta.write_text(json.dumps(data))
     sys.exit(0)
 os.execv(sys.executable, [sys.executable, "-m", "code_indexer.cli", *args])
@@ -117,6 +128,13 @@ class FakeIndexChild:
         progress = {"current": 1, "total": 1, "info": "1/1 files (100%)"}
         self.set_stdout(json.dumps(progress) + "\n" + json.dumps(record) + "\n")
 
+    def index_args(self) -> List[List[str]]:
+        """The argv of every ``index`` call, in order."""
+        recorded = self.bin_dir / "index-args"
+        if not recorded.exists():
+            return []
+        return [json.loads(line) for line in recorded.read_text().splitlines()]
+
     def index_calls(self) -> int:
         calls = self.bin_dir / "index-calls"
         return len(calls.read_text().splitlines()) if calls.exists() else 0
@@ -133,6 +151,8 @@ def install_fake_index_child(bin_dir: Path) -> FakeIndexChild:
             stale=STALE_FAILED_FILES,
             defect_exit=EXIT_CODE_RUN_SPEND_DEFECT,
             store_env_exit=EXIT_CODE_CHUNK_STORE_ENVIRONMENT,
+            coverage_key=CHUNK_COVERAGE_KEY,
+            coverage_version=CHUNK_COVERAGE_VERSION,
         )
     )
     shim.chmod(0o755)

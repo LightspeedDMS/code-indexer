@@ -32,6 +32,10 @@ from code_indexer.services.tantivy_index_manager import TantivyIndexManager
 from tests.unit.global_repos.test_refresh_scheduler_stale_index_1508 import (
     _run_execute_refresh,
 )
+from code_indexer.services.chunk_coverage import (
+    CHUNK_COVERAGE_KEY,
+    CHUNK_COVERAGE_VERSION,
+)
 
 ALIAS = "my-repo-global"
 
@@ -72,7 +76,13 @@ def _repo_with_fts(root: Path, marker: Optional[str]) -> Path:
     meta_dir = root / ".code-indexer"
     meta_dir.mkdir(parents=True)
     (meta_dir / "metadata.json").write_text(
-        json.dumps({"status": "completed", "current_commit": "cccc111"})
+        json.dumps(
+            {
+                "status": "completed",
+                "current_commit": "cccc111",
+                CHUNK_COVERAGE_KEY: CHUNK_COVERAGE_VERSION,
+            }
+        )
     )
     index_dir = fts_index_dir_for_repo(root)
     fts = TantivyIndexManager(index_dir)

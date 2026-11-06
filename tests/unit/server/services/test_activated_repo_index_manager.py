@@ -25,6 +25,7 @@ from code_indexer.server.repositories.background_jobs import (
     BackgroundJobManager,
 )
 from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
+from tests.unit.server._scip_feature import scip_pipeline_installed
 
 # Round-7 dual-review Issue 2 (GitHub Issue #1476): permission modes used
 # to simulate/restore a real unreadable .code-indexer/index directory.
@@ -395,6 +396,77 @@ class TestGetIndexStatus:
 
         # Should be stale (>7 days old)
         assert status["temporal"]["status"] == "stale"
+
+
+class TestFtsAndScipStatusRealLayout:
+    """get_index_status reads the directories the index writers really create.
+
+    FTS lives in ``.code-indexer/tantivy_index`` (``FTS_INDEX_DIRNAME``) and
+    SCIP databases are nested per project (``scip/<project path>/index.scip.db``).
+    Reading ``tantivy`` and a flat ``scip/*.scip.db`` reported a fully built
+    golden repo (evolution) as ``not_indexed``.
+    """
+
+    @staticmethod
+    def _status(index_manager, repo_path):
+        index_manager.activated_repo_manager.get_activated_repo_path.return_value = str(
+            repo_path
+        )
+        return index_manager.get_index_status(
+            repo_alias="test-repo", username="testuser"
+        )
+
+    def test_fts_up_to_date_when_tantivy_index_dir_has_files(
+        self, index_manager, temp_data_dir
+    ):
+        repo_path = Path(temp_data_dir) / "activated-repos" / "testuser" / "test-repo"
+        fts_dir = repo_path / ".code-indexer" / "tantivy_index"
+        fts_dir.mkdir(parents=True)
+        (fts_dir / "segment.store").write_bytes(b"x")
+
+        status = self._status(index_manager, repo_path)
+
+        assert status["fts"]["status"] == "up_to_date"
+        assert status["fts"]["document_count"] == 1
+
+    def test_fts_not_indexed_when_only_the_old_tantivy_name_exists(
+        self, index_manager, temp_data_dir
+    ):
+        repo_path = Path(temp_data_dir) / "activated-repos" / "testuser" / "test-repo"
+        (repo_path / ".code-indexer" / "tantivy").mkdir(parents=True)
+
+        status = self._status(index_manager, repo_path)
+
+        assert status["fts"]["status"] == "not_indexed"
+
+    def test_scip_counts_nested_project_databases(self, index_manager, temp_data_dir):
+        repo_path = Path(temp_data_dir) / "activated-repos" / "testuser" / "test-repo"
+        scip_dir = repo_path / ".code-indexer" / "scip"
+        for project in ("code/util/nativeapp", "code/util/nativeapp/NativeApp"):
+            (scip_dir / project).mkdir(parents=True)
+            (scip_dir / project / "index.scip.db").touch()
+
+        status = self._status(index_manager, repo_path)
+
+        assert status["scip"]["status"] == "SUCCESS"
+        assert status["scip"]["project_count"] == 2
+        assert sorted(status["scip"]["projects"]) == [
+            "code/util/nativeapp",
+            "code/util/nativeapp/NativeApp",
+        ]
+
+    def test_scip_flat_database_keeps_its_project_name(
+        self, index_manager, temp_data_dir
+    ):
+        repo_path = Path(temp_data_dir) / "activated-repos" / "testuser" / "test-repo"
+        scip_dir = repo_path / ".code-indexer" / "scip"
+        scip_dir.mkdir(parents=True)
+        (scip_dir / "index.scip.db").touch()
+
+        status = self._status(index_manager, repo_path)
+
+        assert status["scip"]["project_count"] == 1
+        assert status["scip"]["projects"] == ["index"]
 
 
 class TestGetSemanticStatusRealLayoutBug1476:
@@ -1035,7 +1107,9 @@ class TestJobExecution:
         # Mock successful SCIP generation
         mock_subprocess.return_value = Mock(returncode=0, stderr="", stdout="")
 
-        result = index_manager._execute_scip_indexing("/tmp/test-repo", False)
+        # SCIP is the cidx-scip feature's index type (modular phase 4d).
+        with scip_pipeline_installed():
+            result = index_manager._execute_scip_indexing("/tmp/test-repo", False)
 
         assert result["success"] is True
         assert "SCIP generation completed" in result["message"]
@@ -1190,7 +1264,7 @@ class TestJobResultErrorFieldBug1978:
             "'.code-indexer/.index-mutation.lock'"
         )
 
-        def _fake_single(rp, index_type, clear):
+        def _fake_single(rp, index_type, clear, repo_alias=None):
             return {"success": False, "error": real_error}
 
         with patch.object(
@@ -1225,7 +1299,7 @@ class TestJobResultErrorFieldBug1978:
         )
         Path(repo_path).mkdir(parents=True, exist_ok=True)
 
-        def _fake_single(rp, index_type, clear):
+        def _fake_single(rp, index_type, clear, repo_alias=None):
             if index_type == "semantic":
                 return {"success": False, "error": "EACCES on chunks.db"}
             if index_type == "fts":
@@ -1257,7 +1331,7 @@ class TestJobResultErrorFieldBug1978:
         )
         Path(repo_path).mkdir(parents=True, exist_ok=True)
 
-        def _fake_single(rp, index_type, clear):
+        def _fake_single(rp, index_type, clear, repo_alias=None):
             return {"success": True, "message": "ok"}
 
         with patch.object(
@@ -1285,7 +1359,7 @@ class TestJobResultErrorFieldBug1978:
 
         huge_error = "Permission denied: " + ("x" * 10000)
 
-        def _fake_single(rp, index_type, clear):
+        def _fake_single(rp, index_type, clear, repo_alias=None):
             return {"success": False, "error": huge_error}
 
         with patch.object(
@@ -1414,7 +1488,7 @@ class TestSvcMigrate003Regression:
         expected_error = "Voyage AI timed out after 30s"
         expected_type = "semantic"
 
-        def _fake_single(rp, index_type, clear):
+        def _fake_single(rp, index_type, clear, repo_alias=None):
             return {"success": False, "error": expected_error}
 
         captured_calls = []
@@ -1471,7 +1545,7 @@ class TestSvcMigrate003Regression:
         )
         Path(repo_path).mkdir(parents=True, exist_ok=True)
 
-        def _fake_single(rp, index_type, clear):
+        def _fake_single(rp, index_type, clear, repo_alias=None):
             if index_type == "semantic":
                 return {"success": False, "error": "VoyageAI connection refused"}
             return {"success": True, "message": "ok"}

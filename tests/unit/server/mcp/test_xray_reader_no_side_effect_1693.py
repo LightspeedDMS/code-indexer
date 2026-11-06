@@ -87,9 +87,8 @@ def _assert_singleton_untouched(fresh_module: Any) -> None:
 def test_get_xray_executor_probe_does_not_construct_singleton_1693() -> None:
     """_get_xray_executor() must not construct the process-wide app
     singleton when it is genuinely unbound, and must raise an accurate
-    "app is not configured" error rather than implying the setter was
-    never called."""
-    from code_indexer.server.mcp.handlers import xray as xray_module
+    error rather than implying the setter was never called."""
+    from cidx_xray.server.mcp import xray as xray_module
 
     with _probe_context() as fresh_module:
         with pytest.raises(RuntimeError) as exc_info:
@@ -97,9 +96,10 @@ def test_get_xray_executor_probe_does_not_construct_singleton_1693() -> None:
         _assert_singleton_untouched(fresh_module)
 
     message = str(exc_info.value)
-    assert "app is not configured" in message, (
-        f"Bug #1693: error message must accurately state the app is not "
-        f"configured: {message}"
+    # Phase 4c: the executor is the xray feature's (its on_startup installs
+    # it), so the accurate message names the feature, not the app.
+    assert "the xray feature has not started" in message, (
+        f"Bug #1693: error message must accurately state why: {message}"
     )
     assert "set_xray_executor() was not called" not in message, (
         "Bug #1693: misleading error message -- the setter WAS called, it "
@@ -110,7 +110,7 @@ def test_get_xray_executor_probe_does_not_construct_singleton_1693() -> None:
 def test_get_xray_cell_limiter_probe_does_not_construct_singleton_1693() -> None:
     """xray.py's _get_xray_cell_limiter() must not construct the
     process-wide app singleton when it is genuinely unbound."""
-    from code_indexer.server.mcp.handlers import xray as xray_module
+    from cidx_xray.server.mcp import xray as xray_module
 
     with _probe_context() as fresh_module:
         result = xray_module._get_xray_cell_limiter()
@@ -124,7 +124,7 @@ def test_xray_batch_get_xray_cell_limiter_probe_does_not_construct_singleton_169
 ):
     """xray_batch.py's _get_xray_cell_limiter() must not construct the
     process-wide app singleton when it is genuinely unbound."""
-    from code_indexer.server.mcp.handlers import xray_batch as xray_batch_module
+    from cidx_xray.server.mcp import xray_batch as xray_batch_module
 
     with _probe_context() as fresh_module:
         result = xray_batch_module._get_xray_cell_limiter()

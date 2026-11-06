@@ -23,10 +23,12 @@ def _template_path() -> Path:
     project_root = here.parent.parent.parent.parent
     return (
         project_root
+        / "packages"
+        / "features"
+        / "cidx-wiki"
         / "src"
-        / "code_indexer"
+        / "cidx_wiki"
         / "server"
-        / "wiki"
         / "templates"
         / "article.html"
     )
@@ -37,10 +39,12 @@ def _css_path() -> Path:
     project_root = here.parent.parent.parent.parent
     return (
         project_root
+        / "packages"
+        / "features"
+        / "cidx-wiki"
         / "src"
-        / "code_indexer"
+        / "cidx_wiki"
         / "server"
-        / "wiki"
         / "static"
         / "wiki.css"
     )
@@ -50,7 +54,15 @@ def _js_path() -> Path:
     here = Path(__file__).parent
     project_root = here.parent.parent.parent.parent
     return (
-        project_root / "src" / "code_indexer" / "server" / "wiki" / "static" / "wiki.js"
+        project_root
+        / "packages"
+        / "features"
+        / "cidx-wiki"
+        / "src"
+        / "cidx_wiki"
+        / "server"
+        / "static"
+        / "wiki.js"
     )
 
 

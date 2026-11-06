@@ -4,7 +4,7 @@ Used by ``test_catalog_completeness``.  The routes are registered by the
 production wiring (``create_fastapi_app``) with a real ``ConfigService`` on
 the server directory named by ``CIDX_SERVER_DATA_DIR`` and no managers
 (route registration only stores references), plus EVERY router the lifespan
-mounts at startup: each ``include_router`` call in ``startup/lifespan.py`` is
+mounts at startup (and every in-tree feature's routers and pages): each ``include_router`` call in ``startup/lifespan.py`` is
 found in that file's syntax tree and its router resolved through the file's
 own imports, so a router the lifespan starts mounting is inventoried without
 editing this probe.  The fault-injection admin router, which
@@ -53,10 +53,12 @@ def _dependency_names(dependant: Any, names: Set[str], perms: Set[str]) -> None:
         _dependency_names(dep, names, perms)
 
 
-def _entry(method: str, route: Any, names: Set[str], perms: Set[str]) -> Dict:
+def _entry(
+    method: str, path: str, route: Any, names: Set[str], perms: Set[str]
+) -> Dict:
     endpoint = inspect.unwrap(route.endpoint)
     return {
-        "key": f"{method} {route.path}",
+        "key": f"{method} {path}",
         "dependencies": sorted(names),
         "permissions": sorted(perms),
         "file": inspect.getsourcefile(endpoint),
@@ -70,20 +72,22 @@ def _route_entries(app: Any) -> List[Dict[str, Any]]:
     from starlette.routing import Mount, Route
     from starlette.staticfiles import StaticFiles
 
+    from code_indexer.server.utils.route_table import iter_routes
+
     entries: List[Dict[str, Any]] = []
-    for route in app.routes:
+    for path, route in iter_routes(app.routes):
         names: Set[str] = set()
         perms: Set[str] = set()
         if isinstance(route, APIRoute):
             _dependency_names(route.dependant, names, perms)
         elif isinstance(route, Mount):
             if not isinstance(route.app, StaticFiles):
-                raise SystemExit(f"unclassifiable mount at {route.path}")
+                raise SystemExit(f"unclassifiable mount at {path}")
             continue  # static files: read-only, no endpoint of ours
         elif not isinstance(route, Route):
             raise SystemExit(f"unknown route kind {type(route).__name__}")
         for method in sorted(route.methods or ()):
-            entries.append(_entry(method, route, names, perms))
+            entries.append(_entry(method, path, route, names, perms))
     return entries
 
 
@@ -167,6 +171,12 @@ def main() -> int:
     from code_indexer.server.fault_injection.router import router as fault_router
 
     app.include_router(fault_router)
+    # Every in-tree feature's routers and pages, as on a server that enables
+    # them all: their doors are classified like the core's.
+    from code_indexer.server.features.web import install_feature_web
+    from tests.unit.server._in_tree_features import loaded_in_tree_features
+
+    install_feature_web(app, loaded_in_tree_features())
     with open(sys.argv[1], "w", encoding="utf-8") as out:
         json.dump(_route_entries(app), out)
     return 0

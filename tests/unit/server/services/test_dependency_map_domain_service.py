@@ -36,7 +36,7 @@ def _make_config_manager():
 
 
 def _import_service():
-    from code_indexer.server.services.dependency_map_domain_service import (
+    from cidx_depmap.server.dependency_map_domain_service import (
         DependencyMapDomainService,
     )
 
@@ -1356,7 +1356,7 @@ class TestIdentifyAffectedDomainsIntegration:
     def _make_service(self, tmp: str):
         """Build a minimal DependencyMapService for testing."""
         from unittest.mock import Mock
-        from code_indexer.server.services.dependency_map_service import (
+        from cidx_depmap.server.dependency_map_service import (
             DependencyMapService,
         )
 

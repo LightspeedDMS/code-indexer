@@ -17,13 +17,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from code_indexer.server.services.memory_store_service_factory import (
+from cidx_memory.server.memory_store_service_factory import (
     MemoryStoreBundle,
     build_memory_store_service,
 )
-from code_indexer.server.services.memory_store_service import MemoryStoreService
-from code_indexer.server.services.memory_file_lock_manager import MemoryFileLockManager
-from code_indexer.server.services.memory_rate_limiter import MemoryRateLimiter
+from cidx_memory.server.memory_store_service import MemoryStoreService
+from cidx_memory.server.memory_file_lock_manager import MemoryFileLockManager
+from cidx_memory.server.memory_rate_limiter import MemoryRateLimiter
 
 # ---------------------------------------------------------------------------
 # Named constants for non-default test values

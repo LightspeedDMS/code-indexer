@@ -12,8 +12,9 @@ lock acquire + one ``queue.put`` -- all formatting and handler I/O happen on the
 single listener thread, off the hot path.
 
 These tests verify:
-1. The custom QueueHandler.prepare() is an identity no-op (does NOT format the
-   message or null out args) -- formatting must happen on the listener side.
+1. The custom QueueHandler.prepare() does NOT format the message or null out
+   args -- formatting must happen on the listener side -- and hands the
+   listener its own copy, so redacting it there never races the caller.
 2. install_queue_logging() routes the root logger through ONE QueueHandler and
    moves the previously-attached real handlers behind the listener.
 3. A logged record is delivered to the underlying real handlers via the listener
@@ -73,11 +74,11 @@ def _make_record(msg: str = "msg", level: int = logging.INFO) -> logging.LogReco
 
 
 # ---------------------------------------------------------------------------
-# Test 1: identity prepare() does NOT format/copy the record
+# Test 1: prepare() does NOT format the record; the listener gets a copy
 # ---------------------------------------------------------------------------
 
 
-def test_identity_prepare_returns_record_unchanged() -> None:
+def test_prepare_returns_record_unformatted() -> None:
     from code_indexer.server.services.async_logging import IdentityQueueHandler
 
     q: queue.Queue = queue.Queue()
@@ -87,14 +88,41 @@ def test_identity_prepare_returns_record_unchanged() -> None:
 
     prepared = handler.prepare(record)
 
-    # Identity: same object, args NOT nulled, message NOT pre-formatted.
-    assert prepared is record, "prepare() must return the same record object"
+    # Args NOT nulled, message NOT pre-formatted.
+    assert prepared.msg == "hello %s"
     assert prepared.args == ("world",), "prepare() must NOT null record.args"
     # The default QueueHandler.prepare sets record.message; identity must not.
     assert getattr(prepared, "message", None) is None, (
         "prepare() must NOT pre-format record.message (formatting belongs on the "
         "listener thread)"
     )
+
+
+def test_listener_redaction_leaves_the_callers_record_alone() -> None:
+    # The listener redacts its record in place (exc_info formatted into
+    # exc_text, then cleared). If that were the caller's own object, a handler
+    # still formatting it on the calling thread (pytest's capture handler, or
+    # any handler added without the redacting filter) could write the
+    # unredacted traceback back after the listener redacted it.
+    import sys
+
+    from code_indexer.server.logging_utils import redact_log_record
+    from code_indexer.server.services.async_logging import IdentityQueueHandler
+
+    handler = IdentityQueueHandler(queue.Queue())
+    try:
+        raise RuntimeError("refused password=FAKEsecret4242")
+    except RuntimeError:
+        record = _make_record("failed")
+        record.exc_info = sys.exc_info()
+
+    prepared = handler.prepare(record)
+    redact_log_record(prepared)
+
+    assert prepared is not record
+    assert "FAKEsecret4242" not in (prepared.exc_text or "")
+    assert record.exc_info is not None, "the caller's record must stay as logged"
+    assert record.exc_text is None
 
 
 # ---------------------------------------------------------------------------

@@ -19,12 +19,12 @@ from unittest.mock import patch
 
 import pytest
 
-from code_indexer.global_repos.dependency_map_analyzer import (
+from cidx_depmap.server.dependency_map_analyzer import (
     DependencyMapAnalyzer,
     _DELTA_NOOP,
 )
 
-_SUBPROCESS_PATH = "code_indexer.global_repos.dependency_map_analyzer.subprocess.run"
+_SUBPROCESS_PATH = "cidx_depmap.server.dependency_map_analyzer.subprocess.run"
 _TEST_TIMEOUT = 60
 _TEST_MAX_TURNS = 5
 

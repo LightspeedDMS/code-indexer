@@ -873,3 +873,17 @@ def _restore_event_loop_after_asyncio_run() -> Generator[None, None, None]:
     measured leak evidence this closes.
     """
     yield from _restore_event_loop_impl()
+
+
+@pytest.fixture(autouse=True)
+def _depmap_feature_context() -> Generator[None, None, None]:
+    """The dependency map's tools and pages see the core's capabilities, as
+    on a server with "depmap" enabled (cidx-depmap, modular phase 4g): its
+    MCP handlers and web views ask the ``access_projection`` capability for
+    each caller's view of the catalog's dependency map, which the feature
+    reads from the context its on_startup installs. Tests that start the
+    feature themselves (removability) replace and then clear it."""
+    from tests.unit.server._depmap_feature import depmap_context_installed
+
+    with depmap_context_installed():
+        yield

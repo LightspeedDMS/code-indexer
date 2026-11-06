@@ -31,9 +31,17 @@ from unittest.mock import patch
 import pytest
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
+from code_indexer.server.utils.route_table import iter_routes
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
-_ROUTES_PATH = _REPO_ROOT / "src" / "code_indexer" / "server" / "web" / "routes.py"
+# restart_server and update_config_section live in web/pages/ since web/routes.py
+# was split.
+_RESTART_PATH = (
+    _REPO_ROOT / "src" / "code_indexer" / "server" / "web" / "pages" / "restart.py"
+)
+_CONFIG_PATH = (
+    _REPO_ROOT / "src" / "code_indexer" / "server" / "web" / "pages" / "config.py"
+)
 
 _ELEVATION_QUALNAME = "require_elevation.<locals>._check"
 _TOKEN_USERNAME_BYTES = 8
@@ -80,7 +88,7 @@ def _bypass_elevation(app, router) -> None:
     Established pattern from test_users_elevation_gate.py,
     test_groups_toggle_ajax.py, test_dep_map_health_repair_api.py.
     """
-    for route in router.routes:
+    for route_path, route in iter_routes(router.routes):
         if not isinstance(route, APIRoute):
             continue
         for dep in route.dependencies or []:
@@ -101,7 +109,7 @@ class TestAC3RestartSourceGuards:
     """FIX-2: cluster branch must NOT synchronously call _schedule_delayed_restart."""
 
     def _restart_fn_body(self) -> str:
-        source = _ROUTES_PATH.read_text()
+        source = _RESTART_PATH.read_text()
         fn_start = source.find("def restart_server(")
         assert fn_start != -1
         # the whole function (a fixed-size window broke whenever it grew)
@@ -157,7 +165,7 @@ class TestAC4ElevationGateSource:
 
     def test_config_section_route_decorator_has_require_elevation(self) -> None:
         """POST /config/{section} decorator must have require_elevation()."""
-        src = _ROUTES_PATH.read_text()
+        src = _CONFIG_PATH.read_text()
         route_pos = src.find('"/config/{section}"')
         assert route_pos != -1, '"/config/{section}" not found'
         context = src[max(0, route_pos - 100) : route_pos + 300]
@@ -167,7 +175,7 @@ class TestAC4ElevationGateSource:
 
     def test_restart_route_decorator_has_require_elevation(self) -> None:
         """POST /restart decorator must have require_elevation()."""
-        src = _ROUTES_PATH.read_text()
+        src = _RESTART_PATH.read_text()
         route_pos = src.find('"/restart"')
         assert route_pos != -1, '"/restart" not found'
         context = src[max(0, route_pos - 100) : route_pos + 300]
@@ -177,7 +185,7 @@ class TestAC4ElevationGateSource:
 
     def test_no_duplicate_elevation_inside_update_config_body(self) -> None:
         """AC4: require_elevation must NOT be duplicated inside update_config_section body."""
-        src = _ROUTES_PATH.read_text()
+        src = _CONFIG_PATH.read_text()
         fn_start = src.find("async def update_config_section(")
         assert fn_start != -1
         fn_body = src[fn_start : fn_start + 8000]
@@ -189,7 +197,7 @@ class TestAC4ElevationGateSource:
 
     def test_no_duplicate_elevation_inside_restart_server_body(self) -> None:
         """AC4: require_elevation must NOT be duplicated inside restart_server body."""
-        src = _ROUTES_PATH.read_text()
+        src = _RESTART_PATH.read_text()
         fn_start = src.find("def restart_server(")
         assert fn_start != -1
         fn_body = src[fn_start : fn_start + 3500]
@@ -208,7 +216,7 @@ class TestAC4ElevationGateRouteInspection:
     def _get_web_router_routes(self):
         from code_indexer.server.web.routes import web_router
 
-        return list(web_router.routes)
+        return [route for _, route in iter_routes(web_router.routes)]
 
     def _route_has_elevation_dep(self, route) -> bool:
         for dep in getattr(route, "dependencies", []):

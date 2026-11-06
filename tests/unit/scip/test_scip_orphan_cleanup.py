@@ -9,8 +9,8 @@ index.scip.db files for projects that no longer exist in the codebase.
 from pathlib import Path
 
 
-from code_indexer.scip.generator import SCIPGenerator
-from code_indexer.scip.discovery import DiscoveredProject
+from cidx_scip.generator import SCIPGenerator
+from cidx_scip.discovery import DiscoveredProject
 
 
 def _make_generator(repo_root: Path) -> SCIPGenerator:
@@ -198,7 +198,7 @@ class TestGenerateCallsOrphanCleanup:
             mock_cleanup.return_value = 0
 
             # Patch discovery to avoid filesystem scanning
-            from code_indexer.scip.discovery import ProjectDiscovery
+            from cidx_scip.discovery import ProjectDiscovery
 
             with patch.object(ProjectDiscovery, "discover", return_value=[]):
                 generator.generate()
@@ -217,7 +217,7 @@ class TestGenerateCallsOrphanCleanup:
         scip_dir.mkdir(parents=True, exist_ok=True)
 
         # Create a minimal status file so rebuild_projects() can load it
-        from code_indexer.scip.status import (
+        from cidx_scip.status import (
             StatusTracker,
             OverallStatus,
             GenerationStatus,
@@ -237,7 +237,7 @@ class TestGenerateCallsOrphanCleanup:
             mock_cleanup.return_value = 0
 
             # Patch discovery to avoid filesystem scanning
-            from code_indexer.scip.discovery import ProjectDiscovery
+            from cidx_scip.discovery import ProjectDiscovery
 
             with patch.object(ProjectDiscovery, "discover", return_value=[]):
                 # rebuild_projects with empty list - no projects to rebuild

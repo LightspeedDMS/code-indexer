@@ -13,6 +13,7 @@ import pytest
 from code_indexer.server.services.config_service import ConfigService
 from code_indexer.server.utils.config_manager import (
     ServerConfig,
+    ServerConfigManager,
     CacheConfig,
 )
 
@@ -621,3 +622,30 @@ def test_clone_backend_cow_daemon_are_bootstrap_keys() -> None:
         "cow_daemon must be in BOOTSTRAP_KEYS: it is read at startup before "
         "the runtime DB is available and is stripped by _strip_config_file_to_bootstrap()"
     )
+
+
+def test_scip_backend_survives_the_bootstrap_strip(tmp_path) -> None:
+    """EVO-65365: scip_backend must survive the bootstrap strip.
+
+    It selects the SCIP backend at startup, before the runtime DB is
+    available. Since modular phase 4d it is the cidx-scip feature's bootstrap
+    key, kept in ``feature_bootstrap_settings`` (itself a bootstrap key); a
+    legacy top-level ``scip_backend`` in config.json is moved there on load.
+    Otherwise _strip_config_file_to_bootstrap() would drop it and SCIP would
+    fall back to 'local'.
+    """
+    import json
+
+    from code_indexer.server.services.config_service import BOOTSTRAP_KEYS
+
+    assert "feature_bootstrap_settings" in BOOTSTRAP_KEYS
+    server_dir = tmp_path / "server"
+    server_dir.mkdir()
+    (server_dir / "config.json").write_text(
+        json.dumps({"server_dir": str(server_dir), "scip_backend": "delegated-plugin"})
+    )
+    config = ServerConfigManager(str(server_dir)).load_config()
+    assert config is not None
+    assert config.feature_bootstrap_settings["scip"] == {
+        "scip_backend": "delegated-plugin"
+    }

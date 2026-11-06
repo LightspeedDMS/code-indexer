@@ -5,8 +5,13 @@ Covers:
   2. _get_xray_cell_limiter returns None when not wired.
   3. _run_xray_batch_job acquires and releases the limiter for each cell.
   4. _run_xray_batch_job times out when limiter is full.
-  5. Config-service _update_xray_setting calls set_limit on the live limiter.
+  5. (moved) a committed xray_worker_threads change resizes the live limiter:
+     the xray feature subscribes to config commits when it starts --
+     tests/unit/xray/test_xray_feature_lifecycle.py.
   6. single-repo job_fn returns xray_cell_queue_timeout error on acquire timeout.
+
+Phase 4c: the limiter is the xray feature's process wiring
+(``cidx_xray.server.runtime``), installed by its on_startup, not app state.
 """
 
 from __future__ import annotations
@@ -20,29 +25,41 @@ import pytest
 from code_indexer.server.services.resizable_limiter import ResizableLimiter
 
 
+class _CountingLimiter(ResizableLimiter):
+    """A real limiter that counts its acquisitions."""
+
+    acquired = 0
+
+    def acquire(self, timeout: float) -> bool:
+        self.acquired += 1
+        return super().acquire(timeout)
+
+
+@pytest.fixture(autouse=True)
+def _no_limiter_left_behind():
+    from cidx_xray.server.mcp.xray import set_xray_cell_limiter
+
+    set_xray_cell_limiter(None)
+    yield
+    set_xray_cell_limiter(None)
+
+
 # ---------------------------------------------------------------------------
 # Test 1: set_xray_cell_limiter / _get_xray_cell_limiter round-trip
 # ---------------------------------------------------------------------------
 
 
 def test_set_and_get_xray_cell_limiter():
-    """set_xray_cell_limiter stores the limiter on app.state; _get_xray_cell_limiter returns it."""
-    from code_indexer.server.mcp.handlers import xray as xray_module
-    from code_indexer.server.mcp.handlers.xray import (
+    """set_xray_cell_limiter installs the limiter; _get_xray_cell_limiter returns it."""
+    from cidx_xray.server.mcp.xray import (
         _get_xray_cell_limiter,
         set_xray_cell_limiter,
     )
 
     limiter = ResizableLimiter(initial=4, k_min=1, k_max=50)
-    mock_app = MagicMock()
+    set_xray_cell_limiter(limiter)
 
-    with patch.object(xray_module._utils, "app_module", mock_app):
-        set_xray_cell_limiter(limiter)
-        result = _get_xray_cell_limiter()
-
-    assert result is limiter, (
-        "set_xray_cell_limiter should store the limiter on app.state.xray_cell_limiter"
-    )
+    assert _get_xray_cell_limiter() is limiter
 
 
 # ---------------------------------------------------------------------------
@@ -51,19 +68,10 @@ def test_set_and_get_xray_cell_limiter():
 
 
 def test_get_xray_cell_limiter_returns_none_when_not_wired():
-    """_get_xray_cell_limiter returns None when app.state has no xray_cell_limiter."""
-    from code_indexer.server.mcp.handlers import xray as xray_module
-    from code_indexer.server.mcp.handlers.xray import _get_xray_cell_limiter
+    """_get_xray_cell_limiter returns None when the feature has not started."""
+    from cidx_xray.server.mcp.xray import _get_xray_cell_limiter
 
-    mock_app = MagicMock(spec=[])  # spec=[] means no attributes defined
-    mock_app.state = MagicMock(spec=[])  # no xray_cell_limiter attribute
-
-    with patch.object(xray_module._utils, "app_module", mock_app):
-        result = _get_xray_cell_limiter()
-
-    assert result is None, (
-        "_get_xray_cell_limiter must return None when xray_cell_limiter is not set on app.state"
-    )
+    assert _get_xray_cell_limiter() is None
 
 
 # ---------------------------------------------------------------------------
@@ -73,13 +81,11 @@ def test_get_xray_cell_limiter_returns_none_when_not_wired():
 
 def test_batch_cell_acquires_and_releases_limiter():
     """_run_xray_batch_job acquires a limiter slot per cell and releases it after."""
-    from code_indexer.server.mcp.handlers import xray_batch as xray_batch_module
-    from code_indexer.server.mcp.handlers.xray_batch import _run_xray_batch_job
+    from cidx_xray.server.mcp.xray import set_xray_cell_limiter
+    from cidx_xray.server.mcp.xray_batch import _run_xray_batch_job
 
-    limiter = ResizableLimiter(initial=2, k_min=1, k_max=10)
-
-    mock_app = MagicMock()
-    mock_app.state.xray_cell_limiter = limiter
+    limiter = _CountingLimiter(initial=2, k_min=1, k_max=10)
+    set_xray_cell_limiter(limiter)
 
     mock_cell_result: Dict[str, Any] = {
         "matches": [],
@@ -103,12 +109,7 @@ def test_batch_cell_acquires_and_releases_limiter():
         }
     ]
 
-    with (
-        patch.object(xray_batch_module._utils, "app_module", mock_app),
-        patch(
-            "code_indexer.server.mcp.handlers.xray_batch.XRaySearchEngine"
-        ) as MockEngine,
-    ):
+    with patch("cidx_xray.server.mcp.xray_batch.XRaySearchEngine") as MockEngine:
         MockEngine.return_value.run.return_value = mock_cell_result
 
         _run_xray_batch_job(
@@ -123,6 +124,7 @@ def test_batch_cell_acquires_and_releases_limiter():
             progress_callback=mock_progress,
         )
 
+    assert limiter.acquired == 1, "one slot per cell"
     assert limiter.in_flight == 0, (
         f"Expected in_flight=0 after job completion, got {limiter.in_flight}"
     )
@@ -135,15 +137,13 @@ def test_batch_cell_acquires_and_releases_limiter():
 
 def test_batch_cell_times_out_on_full_limiter():
     """_run_xray_batch_job sets timed_out=True when limiter is fully occupied."""
-    from code_indexer.server.mcp.handlers import xray_batch as xray_batch_module
-    from code_indexer.server.mcp.handlers.xray_batch import _run_xray_batch_job
+    from cidx_xray.server.mcp.xray import set_xray_cell_limiter
+    from cidx_xray.server.mcp.xray_batch import _run_xray_batch_job
 
     # 1-slot limiter, already acquired externally
     limiter = ResizableLimiter(initial=1, k_min=1, k_max=10)
     assert limiter.acquire(timeout=1.0), "pre-acquire for saturation must succeed"
-
-    mock_app = MagicMock()
-    mock_app.app.state.xray_cell_limiter = limiter
+    set_xray_cell_limiter(limiter)
 
     mock_bjm = MagicMock()
     mock_bjm.jobs = {}
@@ -160,18 +160,17 @@ def test_batch_cell_times_out_on_full_limiter():
         }
     ]
 
-    with patch.object(xray_batch_module._utils, "app_module", mock_app):
-        result = _run_xray_batch_job(
-            resolved_repos=resolved_repos,
-            scans=scans,
-            repo_errors=[],
-            cidx_meta_path=Path("/fake/cidx-meta"),
-            max_results=None,
-            timeout_seconds=1,  # 1-second total budget -> deadline reached fast
-            job_id="test-job-002",
-            bjm=mock_bjm,
-            progress_callback=mock_progress,
-        )
+    result = _run_xray_batch_job(
+        resolved_repos=resolved_repos,
+        scans=scans,
+        repo_errors=[],
+        cidx_meta_path=Path("/fake/cidx-meta"),
+        max_results=None,
+        timeout_seconds=1,  # 1-second total budget -> deadline reached fast
+        job_id="test-job-002",
+        bjm=mock_bjm,
+        progress_callback=mock_progress,
+    )
 
     # Release the pre-acquired slot
     limiter.release()
@@ -181,37 +180,6 @@ def test_batch_cell_times_out_on_full_limiter():
     )
     assert result.get("partial") is True, (
         f"Expected partial=True when job timed out, got: {result}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Test 5: Config-service _update_xray_setting calls set_limit on the live limiter
-# ---------------------------------------------------------------------------
-
-
-def test_config_update_calls_set_limit():
-    """_update_xray_setting for xray_worker_threads calls set_limit on the live limiter."""
-    from code_indexer.server.mcp.handlers import xray as xray_module
-    from code_indexer.server.mcp.handlers.xray import set_xray_cell_limiter
-    from code_indexer.server.services.config_service import ConfigService
-    from code_indexer.server.utils.config_manager import ServerConfig
-
-    limiter = ResizableLimiter(initial=4, k_min=1, k_max=50)
-    mock_app = MagicMock()
-    mock_app.state.xray_cell_limiter = limiter
-
-    config = ServerConfig(server_dir="/tmp")
-    assert config.xray_config is not None
-
-    with patch.object(xray_module._utils, "app_module", mock_app):
-        set_xray_cell_limiter(limiter)
-
-        # Invoke the real update path in ConfigService
-        svc = ConfigService.__new__(ConfigService)
-        svc._update_xray_setting(config, "xray_worker_threads", 8)
-
-    assert limiter.limit == 8, (
-        f"_update_xray_setting should call set_limit(8) on the live limiter, got {limiter.limit}"
     )
 
 
@@ -227,8 +195,8 @@ def test_job_fn_returns_error_on_acquire_timeout():
     returns a dict with error='xray_cell_queue_timeout'."""
     import asyncio
 
-    from code_indexer.server.mcp.handlers import xray as xray_module
-    from code_indexer.server.mcp.handlers.xray import (
+    from cidx_xray.server.mcp import xray as xray_module
+    from cidx_xray.server.mcp.xray import (
         handle_xray_search,
         set_xray_cell_limiter,
     )
@@ -278,7 +246,7 @@ def test_job_fn_returns_error_on_acquire_timeout():
     }
 
     with (
-        patch.object(xray_module._utils, "app_module", mock_app),
+        patch("code_indexer.server.mcp.handlers._utils.app_module", mock_app),
         patch.object(
             xray_module._search, "_get_background_job_manager", return_value=mock_bjm
         ),

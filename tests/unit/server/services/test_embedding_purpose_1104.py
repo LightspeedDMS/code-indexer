@@ -436,26 +436,26 @@ class TestQueryCallSitesPurpose:
         )
 
     def test_mcp_handlers_search_does_not_pass_none_purpose(self):
-        """mcp/handlers/search/memory_retrieval.py _compute_memory_query_vector
+        """mcp/handlers/search/query_vector.py _compute_shared_query_vector
         must NOT pass None.
 
         The MCP site may use the default (no kwarg) or pass 'query' explicitly;
         either is acceptable.  Only None is forbidden.
 
         Issue #1935: search.py was split into the search/ package;
-        _compute_memory_query_vector (and its coalesced_query_embedding call)
-        now lives in search/memory_retrieval.py, not in the package's
+        _compute_shared_query_vector (and its coalesced_query_embedding call)
+        now lives in search/query_vector.py, not in the package's
         __init__.py facade that inspect.getsource() on the bare package
         would return.
         """
-        import code_indexer.server.mcp.handlers.search.memory_retrieval as mcp_search_memory_module
+        import code_indexer.server.mcp.handlers.search.query_vector as mcp_search_memory_module
 
         source = inspect.getsource(mcp_search_memory_module)
         calls = _ast_coalesced_calls(source)
 
         assert calls, (
             "No call to coalesced_query_embedding found in "
-            "mcp/handlers/search/memory_retrieval.py"
+            "mcp/handlers/search/query_vector.py"
         )
 
         for call in calls:
@@ -464,7 +464,7 @@ class TestQueryCallSitesPurpose:
                     assert not (
                         isinstance(kw.value, ast.Constant) and kw.value.value is None
                     ), (
-                        "mcp/handlers/search/memory_retrieval.py passes "
+                        "mcp/handlers/search/query_vector.py passes "
                         "embedding_purpose=None to coalesced_query_embedding — "
                         "must not be None"
                     )

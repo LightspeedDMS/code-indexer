@@ -27,9 +27,11 @@ i.e. genuinely unbounded.
 from __future__ import annotations
 
 import logging
+import os
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -46,6 +48,7 @@ from _deep_fidelity_audit_test_support_1822 import (
     SEARCH_LIMIT,
     assert_audit_dispatched_to_dedicated_executor,
     assert_gate_at_full_capacity,
+    build_tiny_fsv_store,
     drain_gate,
     make_event_signaling_reembed,
     make_fake_provider,
@@ -61,6 +64,15 @@ from _deep_fidelity_audit_test_support_1822 import (
 # on that fixture for why: importing a fixture function and using its name
 # as a test-parameter reads to ruff as an unused import shadowed by that
 # parameter).
+
+
+@pytest.fixture()
+def tiny_fsv_store(tmp_path):
+    """This module's own copy of the conftest fixture: the smoke job collects
+    this file alongside many non-package test directories, where pytest can
+    shadow this directory's conftest module (the fixture was then "not
+    found")."""
+    return build_tiny_fsv_store(tmp_path)
 
 
 class TestAuditGateCapacityConstant:
@@ -242,3 +254,110 @@ class TestAuditCapacityBoundedBehavior:
             executor.shutdown(wait=True)
 
         assert_gate_at_full_capacity(gate, fvs._DEEP_FIDELITY_AUDIT_GATE_CAPACITY)
+
+
+class TestAuditCarriesTheReadsCheckouts:
+    """The out-of-band audit runs after the read returned and released its
+    served checkouts: it carries its own copy of them until it ends, so an
+    eviction cannot remove the index it is still reading. A skipped audit
+    releases its copy at once."""
+
+    @staticmethod
+    def _held_by_read(target):
+        """Inside a read scope: hold ``target``'s readers lock as a serve does."""
+        import fcntl
+
+        from code_indexer.server.services import served_index_cache as sic
+
+        target.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(sic.readers_lock_path(target)), os.O_CREAT | os.O_RDWR)
+        fcntl.flock(fd, fcntl.LOCK_SH)
+        assert sic._keep_in_scope(str(target), fd)
+
+    @staticmethod
+    def _free(target) -> bool:
+        from code_indexer.server.services import served_index_cache as sic
+
+        with sic.readers_free([target]) as free:
+            return free
+
+    def test_a_running_audit_keeps_the_checkout_after_the_read(
+        self, tiny_fsv_store, tmp_path
+    ):
+        from code_indexer.server.services import served_index_cache as sic
+
+        store, vecs = tiny_fsv_store
+        query_vec = vecs[0]
+        target = tmp_path / "pod" / "checkout"
+        started, release = threading.Event(), threading.Event()
+
+        def _blocking_reembed(provider, text, *, embedding_purpose="query"):
+            started.set()
+            release.wait(EVENT_WAIT_TIMEOUT_SECS * 5)
+            return query_vec
+
+        hnsw_fn, hnsw_done, _calls = make_counting_hnsw_query()
+        executor = ThreadPoolExecutor(max_workers=EXECUTOR_WORKERS)
+        try:
+            # The patches stay active until the background audit is done.
+            with patched_audit_sampled_search(query_vec, _blocking_reembed, hnsw_fn):
+                with sic.served_index_reads():
+                    self._held_by_read(target)
+                    store.search(
+                        query="hello",
+                        embedding_provider=make_fake_provider(query_vec),
+                        collection_name=COLLECTION_NAME,
+                        limit=SEARCH_LIMIT,
+                        parallel_executor=executor,
+                    )
+                    assert started.wait(EVENT_WAIT_TIMEOUT_SECS * 5)
+                assert not self._free(target), "the audit lost the checkout"
+                release.set()
+                assert hnsw_done.wait(EVENT_WAIT_TIMEOUT_SECS * 5)
+                deadline = time.monotonic() + EVENT_WAIT_TIMEOUT_SECS * 5
+                while not self._free(target):
+                    assert time.monotonic() < deadline, "the audit never released it"
+                    time.sleep(0.02)
+        finally:
+            release.set()
+            executor.shutdown(wait=True)
+
+    def test_a_skipped_audit_releases_its_copy(self, tiny_fsv_store, tmp_path):
+        from code_indexer.server.services import served_index_cache as sic
+
+        store, vecs = tiny_fsv_store
+        query_vec = vecs[0]
+        target = tmp_path / "pod" / "checkout"
+        gate = fvs._deep_fidelity_audit_gate
+        drained = drain_gate(gate)
+        executor = ThreadPoolExecutor(max_workers=EXECUTOR_WORKERS)
+        try:
+            with sic.served_index_reads():
+                self._held_by_read(target)
+                run_sampled_search(
+                    store, query_vec, make_fake_provider(query_vec), executor
+                )
+            assert self._free(target), "a skipped audit kept a copy"
+        finally:
+            restore_gate(gate, drained)
+            executor.shutdown(wait=True)
+
+    def test_a_rejected_submit_releases_its_copy(self, tiny_fsv_store, tmp_path):
+        from code_indexer.server.services import served_index_cache as sic
+
+        store, vecs = tiny_fsv_store
+        query_vec = vecs[0]
+        target = tmp_path / "pod" / "checkout"
+        rejecting = MagicMock()
+        rejecting.submit.side_effect = RuntimeError("shutting down")
+        executor = ThreadPoolExecutor(max_workers=EXECUTOR_WORKERS)
+        try:
+            with patch.object(fvs, "_deep_fidelity_audit_executor", rejecting):
+                with sic.served_index_reads():
+                    self._held_by_read(target)
+                    run_sampled_search(
+                        store, query_vec, make_fake_provider(query_vec), executor
+                    )
+            assert self._free(target), "a rejected audit kept a copy"
+        finally:
+            executor.shutdown(wait=True)

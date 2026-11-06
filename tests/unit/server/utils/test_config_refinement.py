@@ -3,15 +3,20 @@ Unit tests for Story #359: Refinement configuration fields.
 
 Tests cover Component 9:
 - Default values for 3 new fields on ClaudeIntegrationConfig
-- ConfigService exposes refinement settings in get_all_settings()
-- ConfigService updates refinement settings via update_setting()
+- the config API / screen lists the refinement settings
+- the feature config door updates them
 
 TDD RED PHASE: Tests written before production code exists.
 """
 
+from tests.unit.server._depmap_feature import (
+    depmap_claude_config,
+    depmap_section_of,
+    set_depmap_settings,
+)
 import pytest
 
-from code_indexer.server.utils.config_manager import ClaudeIntegrationConfig
+from code_indexer.server.features import config as feature_config
 from code_indexer.server.services.config_service import ConfigService
 
 
@@ -20,22 +25,22 @@ class TestDefaultRefinementConfig:
 
     def test_default_refinement_enabled_is_false(self):
         """refinement_enabled defaults to False (opt-in behavior)."""
-        config = ClaudeIntegrationConfig()
+        config = depmap_claude_config()
         assert config.refinement_enabled is False
 
     def test_default_refinement_interval_hours_is_24(self):
         """refinement_interval_hours defaults to 24 hours."""
-        config = ClaudeIntegrationConfig()
+        config = depmap_claude_config()
         assert config.refinement_interval_hours == 24
 
     def test_default_refinement_domains_per_run_is_3(self):
         """refinement_domains_per_run defaults to 3."""
-        config = ClaudeIntegrationConfig()
+        config = depmap_claude_config()
         assert config.refinement_domains_per_run == 3
 
     def test_refinement_fields_independent_of_dependency_map(self):
         """Refinement fields are separate from existing dependency_map fields."""
-        config = ClaudeIntegrationConfig(
+        config = depmap_claude_config(
             dependency_map_enabled=True,
             refinement_enabled=False,
         )
@@ -44,7 +49,7 @@ class TestDefaultRefinementConfig:
 
     def test_refinement_fields_settable_at_construction(self):
         """All 3 refinement fields can be set at construction time."""
-        config = ClaudeIntegrationConfig(
+        config = depmap_claude_config(
             refinement_enabled=True,
             refinement_interval_hours=48,
             refinement_domains_per_run=5,
@@ -54,94 +59,57 @@ class TestDefaultRefinementConfig:
         assert config.refinement_domains_per_run == 5
 
 
-class TestConfigServiceExposesRefinementSettings:
-    """ConfigService.get_all_settings() exposes refinement fields under claude_cli."""
+class TestRefinementSettingsListed:
+    """The config API / screen lists the refinement keys at their defaults
+    (the cidx-depmap feature's section since modular phase 4g)."""
 
-    def test_refinement_enabled_exposed_in_settings(self, tmp_path):
-        """get_all_settings() includes refinement_enabled key."""
+    def test_refinement_defaults_listed(self, tmp_path):
+        from cidx_depmap.config import DEPMAP_CONFIG_SECTION
+
         service = ConfigService(server_dir_path=str(tmp_path))
-        settings = service.get_all_settings()
-        assert "refinement_enabled" in settings["claude_cli"]
+        (section,) = feature_config.describe_sections(
+            [("depmap", DEPMAP_CONFIG_SECTION)], service.get_config()
+        )
+        values = {key["name"]: key["value"] for key in section["keys"]}
+        assert values["refinement_enabled"] is False
+        assert values["refinement_interval_hours"] == 24
+        assert values["refinement_domains_per_run"] == 3
 
-    def test_refinement_interval_hours_exposed_in_settings(self, tmp_path):
-        """get_all_settings() includes refinement_interval_hours key."""
+
+class TestRefinementSettingsUpdates:
+    """The feature config door handles the refinement keys."""
+
+    def test_update_refinement_enabled_true_then_false(self, tmp_path):
         service = ConfigService(server_dir_path=str(tmp_path))
-        settings = service.get_all_settings()
-        assert "refinement_interval_hours" in settings["claude_cli"]
-
-    def test_refinement_domains_per_run_exposed_in_settings(self, tmp_path):
-        """get_all_settings() includes refinement_domains_per_run key."""
-        service = ConfigService(server_dir_path=str(tmp_path))
-        settings = service.get_all_settings()
-        assert "refinement_domains_per_run" in settings["claude_cli"]
-
-    def test_refinement_enabled_default_value_in_settings(self, tmp_path):
-        """get_all_settings() returns False for refinement_enabled by default."""
-        service = ConfigService(server_dir_path=str(tmp_path))
-        settings = service.get_all_settings()
-        assert settings["claude_cli"]["refinement_enabled"] is False
-
-    def test_refinement_interval_hours_default_in_settings(self, tmp_path):
-        """get_all_settings() returns 24 for refinement_interval_hours by default."""
-        service = ConfigService(server_dir_path=str(tmp_path))
-        settings = service.get_all_settings()
-        assert settings["claude_cli"]["refinement_interval_hours"] == 24
-
-    def test_refinement_domains_per_run_default_in_settings(self, tmp_path):
-        """get_all_settings() returns 3 for refinement_domains_per_run by default."""
-        service = ConfigService(server_dir_path=str(tmp_path))
-        settings = service.get_all_settings()
-        assert settings["claude_cli"]["refinement_domains_per_run"] == 3
-
-
-class TestConfigServiceUpdatesRefinementSettings:
-    """ConfigService.update_setting() handles refinement fields correctly."""
-
-    def test_update_refinement_enabled_true(self, tmp_path):
-        """update_setting accepts true string for refinement_enabled."""
-        service = ConfigService(server_dir_path=str(tmp_path))
-        service.update_setting("claude_cli", "refinement_enabled", "true")
-        config = service.get_claude_integration_config()
-        assert config.refinement_enabled is True
-
-    def test_update_refinement_enabled_false(self, tmp_path):
-        """update_setting accepts false string for refinement_enabled."""
-        service = ConfigService(server_dir_path=str(tmp_path))
-        service.update_setting("claude_cli", "refinement_enabled", True)
-        service.update_setting("claude_cli", "refinement_enabled", "false")
-        config = service.get_claude_integration_config()
-        assert config.refinement_enabled is False
+        set_depmap_settings(service, refinement_enabled=True)
+        assert depmap_section_of(service).refinement_enabled is True
+        set_depmap_settings(service, refinement_enabled=False)
+        assert depmap_section_of(service).refinement_enabled is False
 
     def test_update_refinement_interval_hours(self, tmp_path):
-        """update_setting updates refinement_interval_hours to specified value."""
         service = ConfigService(server_dir_path=str(tmp_path))
-        service.update_setting("claude_cli", "refinement_interval_hours", 48)
-        config = service.get_claude_integration_config()
-        assert config.refinement_interval_hours == 48
-
-    def test_update_refinement_interval_hours_clamped_to_min(self, tmp_path):
-        """refinement_interval_hours is clamped to minimum value of 1."""
-        service = ConfigService(server_dir_path=str(tmp_path))
-        service.update_setting("claude_cli", "refinement_interval_hours", 0)
-        config = service.get_claude_integration_config()
-        assert config.refinement_interval_hours == 1
+        set_depmap_settings(service, refinement_interval_hours=48)
+        assert depmap_section_of(service).refinement_interval_hours == 48
 
     def test_update_refinement_domains_per_run(self, tmp_path):
-        """update_setting updates refinement_domains_per_run to specified value."""
         service = ConfigService(server_dir_path=str(tmp_path))
-        service.update_setting("claude_cli", "refinement_domains_per_run", 5)
-        config = service.get_claude_integration_config()
-        assert config.refinement_domains_per_run == 5
+        set_depmap_settings(service, refinement_domains_per_run=5)
+        assert depmap_section_of(service).refinement_domains_per_run == 5
 
-    def test_update_refinement_domains_per_run_clamped_to_min(self, tmp_path):
-        """refinement_domains_per_run is clamped to minimum value of 1."""
+    @pytest.mark.parametrize(
+        "key,value",
+        [
+            ("refinement_interval_hours", 0),
+            ("refinement_domains_per_run", 0),
+            ("refinement_domains_per_run", 51),
+        ],
+    )
+    def test_update_out_of_bounds_refused(self, tmp_path, key, value):
         service = ConfigService(server_dir_path=str(tmp_path))
-        service.update_setting("claude_cli", "refinement_domains_per_run", 0)
-        config = service.get_claude_integration_config()
-        assert config.refinement_domains_per_run == 1
+        with pytest.raises(feature_config.FeatureConfigError, match="between"):
+            set_depmap_settings(service, **{key: value})
 
     def test_unknown_refinement_setting_rejected(self, tmp_path):
-        """Unknown claude_cli settings raise ValueError (existing behavior preserved)."""
         service = ConfigService(server_dir_path=str(tmp_path))
-        with pytest.raises(ValueError, match="Unknown claude_cli setting"):
-            service.update_setting("claude_cli", "refinement_unknown_field", "value")
+        with pytest.raises(feature_config.FeatureConfigError, match="no setting"):
+            set_depmap_settings(service, refinement_unknown_field="value")

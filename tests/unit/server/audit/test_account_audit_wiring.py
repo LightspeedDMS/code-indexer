@@ -21,7 +21,7 @@ _SERVER = Path(code_indexer.__file__).parent / "server"
 _DOOR_FILES: List[Path] = sorted(
     [
         *(_SERVER / "routers").glob("*.py"),
-        *(_SERVER / "web").glob("*.py"),
+        *(_SERVER / "web").rglob("*.py"),
         *(_SERVER / "mcp" / "handlers").rglob("*.py"),
         _SERVER / "auth" / "oidc" / "routes.py",
         _SERVER / "auth" / "oauth" / "routes.py",

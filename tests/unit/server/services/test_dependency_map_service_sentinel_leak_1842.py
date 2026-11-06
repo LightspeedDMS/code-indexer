@@ -31,7 +31,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from code_indexer.server.services.dependency_map_service import (
+from cidx_depmap.server.dependency_map_service import (
     ANALYSIS_STALE_TIMEOUT_SECONDS,
     DependencyMapService,
 )
@@ -141,10 +141,10 @@ class TestLifecyclePreflightExceptionLeaksSentinel:
 
         with (
             patch(
-                "code_indexer.server.services.dependency_map_service.LifecycleFleetScanner"
+                "cidx_depmap.server.dependency_map_service.LifecycleFleetScanner"
             ) as mock_scanner_cls,
             patch(
-                "code_indexer.server.services.dependency_map_service.LifecycleBatchRunner"
+                "cidx_depmap.server.dependency_map_service.LifecycleBatchRunner"
             ) as mock_runner_cls,
         ):
             mock_scanner_cls.return_value.find_broken_or_missing.return_value = [

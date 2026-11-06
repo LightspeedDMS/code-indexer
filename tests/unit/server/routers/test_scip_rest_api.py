@@ -9,8 +9,11 @@ from datetime import datetime, timezone
 from fastapi.testclient import TestClient
 from unittest.mock import Mock, patch
 
+from fastapi import FastAPI
+
+from cidx_scip.server import routes as scip_routes
+from cidx_scip.server.route_auth import current_caller
 from code_indexer.server.auth.user_manager import User, UserRole
-from code_indexer.server.auth.dependencies import get_current_user
 
 
 @pytest.fixture
@@ -33,9 +36,6 @@ def mock_scip_service():
     return service
 
 
-_UNSET = object()
-
-
 @pytest.fixture
 def test_client(mock_user, tmp_path):
     """Create a test client with auth mocked and a REAL access service wired.
@@ -43,7 +43,6 @@ def test_client(mock_user, tmp_path):
     The SCIP routes filter by group access and refuse to run without the
     access service, so it is wired on app.state for the test and restored.
     """
-    from code_indexer.server.app import app
     from code_indexer.server.services.access_filtering_service import (
         AccessFilteringService,
     )
@@ -51,9 +50,12 @@ def test_client(mock_user, tmp_path):
         GroupAccessManager,
     )
 
-    # Override auth dependency to return mock user
-    app.dependency_overrides[get_current_user] = lambda: mock_user
-    previous = getattr(app.state, "access_filtering_service", _UNSET)
+    # The SCIP routes are the cidx-scip feature's router (modular phase 4d);
+    # the core authenticates the caller before them, stood in for here by
+    # overriding the route's caller dependency.
+    app = FastAPI()
+    app.include_router(scip_routes.router)
+    app.dependency_overrides[current_caller] = lambda: mock_user
     app.state.access_filtering_service = AccessFilteringService(
         GroupAccessManager(tmp_path / "groups.db")
     )
@@ -62,12 +64,7 @@ def test_client(mock_user, tmp_path):
     try:
         yield client
     finally:
-        # Clean up overrides
         app.dependency_overrides.clear()
-        if previous is _UNSET:
-            del app.state.access_filtering_service
-        else:
-            app.state.access_filtering_service = previous
 
 
 class TestDefinitionEndpoint:
@@ -90,12 +87,12 @@ class TestDefinitionEndpoint:
         ]
 
         with patch(
-            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            "cidx_scip.server.routes._get_scip_query_service",
             return_value=mock_scip_service,
         ):
             # Story #50: Use regular patch since function is now sync
             with patch(
-                "code_indexer.server.routers.scip_queries._apply_scip_payload_truncation",
+                "cidx_scip.server.routes._apply_scip_payload_truncation",
             ) as mock_truncate:
                 mock_truncate.return_value = (
                     mock_scip_service.find_definition.return_value
@@ -140,12 +137,12 @@ class TestReferencesEndpoint:
         ]
 
         with patch(
-            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            "cidx_scip.server.routes._get_scip_query_service",
             return_value=mock_scip_service,
         ):
             # Story #50: Use regular patch since function is now sync
             with patch(
-                "code_indexer.server.routers.scip_queries._apply_scip_payload_truncation",
+                "cidx_scip.server.routes._apply_scip_payload_truncation",
             ) as mock_truncate:
                 mock_truncate.return_value = (
                     mock_scip_service.find_references.return_value
@@ -197,12 +194,12 @@ class TestDependenciesEndpoint:
         ]
 
         with patch(
-            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            "cidx_scip.server.routes._get_scip_query_service",
             return_value=mock_scip_service,
         ):
             # Story #50: Use regular patch since function is now sync
             with patch(
-                "code_indexer.server.routers.scip_queries._apply_scip_payload_truncation",
+                "cidx_scip.server.routes._apply_scip_payload_truncation",
             ) as mock_truncate:
                 mock_truncate.return_value = (
                     mock_scip_service.get_dependencies.return_value
@@ -252,12 +249,12 @@ class TestDependentsEndpoint:
         ]
 
         with patch(
-            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            "cidx_scip.server.routes._get_scip_query_service",
             return_value=mock_scip_service,
         ):
             # Story #50: Use regular patch since function is now sync
             with patch(
-                "code_indexer.server.routers.scip_queries._apply_scip_payload_truncation",
+                "cidx_scip.server.routes._apply_scip_payload_truncation",
             ) as mock_truncate:
                 mock_truncate.return_value = (
                     mock_scip_service.get_dependents.return_value
@@ -319,7 +316,7 @@ class TestImpactEndpoint:
         }
 
         with patch(
-            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            "cidx_scip.server.routes._get_scip_query_service",
             return_value=mock_scip_service,
         ):
             response = test_client.get("/scip/impact?symbol=UserService&depth=3")
@@ -358,7 +355,7 @@ class TestCallChainEndpoint:
         )
 
         with patch(
-            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            "cidx_scip.server.routes._get_scip_query_service",
             return_value=mock_scip_service,
         ):
             response = test_client.get(
@@ -384,7 +381,7 @@ class TestCallChainEndpoint:
         mock_scip_service.trace_callchain.return_value = ([], [])
 
         with patch(
-            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            "cidx_scip.server.routes._get_scip_query_service",
             return_value=mock_scip_service,
         ):
             response = test_client.get(
@@ -407,7 +404,7 @@ class TestCallChainEndpoint:
         )
 
         with patch(
-            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            "cidx_scip.server.routes._get_scip_query_service",
             return_value=mock_scip_service,
         ):
             response = test_client.get(
@@ -490,7 +487,7 @@ class TestContextEndpoint:
         }
 
         with patch(
-            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            "cidx_scip.server.routes._get_scip_query_service",
             return_value=mock_scip_service,
         ):
             response = test_client.get("/scip/context?symbol=UserService&limit=20")

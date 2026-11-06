@@ -207,8 +207,8 @@ def _make_bug_1603_index():
     tests/unit/test_scip_database_queries.py, e.g.
     _create_hybrid_dependencies_test_database).
     """
-    from code_indexer.scip.protobuf import scip_pb2
-    from code_indexer.scip.database.builder import ROLE_DEFINITION, ROLE_READ_ACCESS
+    from cidx_scip.protobuf import scip_pb2
+    from cidx_scip.database.builder import ROLE_DEFINITION, ROLE_READ_ACCESS
 
     index = scip_pb2.Index()
 
@@ -249,8 +249,8 @@ def _build_bug_1603_callchain_fixture(build_dir: Path) -> Path:
 
     Returns the path to the built .scip.db file.
     """
-    from code_indexer.scip.database.schema import DatabaseManager
-    from code_indexer.scip.database.builder import SCIPDatabaseBuilder
+    from cidx_scip.database.schema import DatabaseManager
+    from cidx_scip.database.builder import SCIPDatabaseBuilder
 
     index = _make_bug_1603_index()
     scip_file = build_dir / "bug_1603_callchain_fixture.scip"

@@ -38,6 +38,7 @@ from fastapi.testclient import TestClient
 from code_indexer.server.auth.dependencies import get_current_user_hybrid
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.repositories.background_jobs import BackgroundJobManager
+from tests.unit.server._scip_feature import scip_pipeline_installed
 from code_indexer.server.routers.activated_repos import router
 from tests.unit.server.routers.inline_routes_test_helpers import (
     caller_is_access_admin,  # noqa: F401
@@ -136,6 +137,9 @@ def test_reindex_job_actually_invokes_real_indexing_subprocess_per_index_type(
 
     try:
         with (
+            # scip: built through the enabled cidx-scip feature's index
+            # builder (modular phase 4d), as an app with it enabled has it.
+            scip_pipeline_installed(),
             patch(
                 "code_indexer.server.routers.activated_repos._get_activated_repo_manager",
                 return_value=activated_manager,

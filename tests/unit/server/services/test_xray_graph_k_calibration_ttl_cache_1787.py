@@ -7,9 +7,9 @@ MemoryGovernor itself uses for deterministic time-based tests.
 
 from __future__ import annotations
 
-from code_indexer.server.services.xray_graph_governor.k_calibration_store import (
+from cidx_xray.testing import sqlite_k_calibration_backend
+from cidx_xray.server.graph_governor.k_calibration_store import (
     KCalibrationSample,
-    SqliteKCalibrationBackend,
     TTLCachedKProvider,
 )
 
@@ -26,7 +26,7 @@ class _FakeClock:
 
 
 def _store_with_java_sample(tmp_path):
-    store = SqliteKCalibrationBackend(str(tmp_path / "k.db"))
+    store = sqlite_k_calibration_backend(str(tmp_path / "k.db"))
     store.record_sample(
         KCalibrationSample(
             language="java",
@@ -102,7 +102,7 @@ def test_cache_expiry_after_ttl_re_queries_the_store(tmp_path):
 def test_a_language_with_no_recorded_samples_degrades_to_the_conservative_default(
     tmp_path,
 ):
-    store = SqliteKCalibrationBackend(str(tmp_path / "k.db"))
+    store = sqlite_k_calibration_backend(str(tmp_path / "k.db"))
     provider = TTLCachedKProvider(store, ttl_seconds=TTL_SECONDS, time_fn=_FakeClock())
 
     assert provider.get_k("cobol", CONSERVATIVE_DEFAULT) == CONSERVATIVE_DEFAULT
@@ -117,14 +117,14 @@ class TestXrayKProviderProcessSingleton:
     """
 
     def teardown_method(self) -> None:
-        from code_indexer.server.services.xray_graph_governor.k_calibration_store import (
+        from cidx_xray.server.graph_governor.k_calibration_store import (
             clear_xray_k_provider,
         )
 
         clear_xray_k_provider()
 
     def test_get_returns_none_before_any_set(self) -> None:
-        from code_indexer.server.services.xray_graph_governor.k_calibration_store import (
+        from cidx_xray.server.graph_governor.k_calibration_store import (
             clear_xray_k_provider,
             get_xray_k_provider,
         )
@@ -140,13 +140,13 @@ class TestXrayKProviderProcessSingleton:
     def test_set_then_get_returns_the_same_instance_and_clear_resets_to_none(
         self, tmp_path
     ) -> None:
-        from code_indexer.server.services.xray_graph_governor.k_calibration_store import (
+        from cidx_xray.server.graph_governor.k_calibration_store import (
             clear_xray_k_provider,
             get_xray_k_provider,
             set_xray_k_provider,
         )
 
-        store = SqliteKCalibrationBackend(str(tmp_path / "k.db"))
+        store = sqlite_k_calibration_backend(str(tmp_path / "k.db"))
         provider = TTLCachedKProvider(store, ttl_seconds=TTL_SECONDS)
         set_xray_k_provider(provider)
         assert get_xray_k_provider() is provider

@@ -49,7 +49,7 @@ def test_journal_entry_has_all_12_fields():
 
 def test_invalid_action_raises_value_error():
     """Invalid action raises ValueError at JournalEntry construction."""
-    from code_indexer.server.services.dep_map_repair_executor import JournalEntry
+    from cidx_depmap.server.dep_map_repair_executor import JournalEntry
 
     with pytest.raises(ValueError, match="action"):
         JournalEntry(
@@ -69,7 +69,7 @@ def test_invalid_action_raises_value_error():
 
 def test_invalid_verdict_raises_value_error():
     """Invalid verdict raises ValueError at JournalEntry construction."""
-    from code_indexer.server.services.dep_map_repair_executor import JournalEntry
+    from cidx_depmap.server.dep_map_repair_executor import JournalEntry
 
     with pytest.raises(ValueError, match="verdict"):
         JournalEntry(
@@ -109,7 +109,7 @@ def test_timestamp_is_iso8601_with_timezone():
 
 def test_action_enum_has_self_loop_deleted():
     """Action enum exposes 'self_loop_deleted' member with correct string value."""
-    from code_indexer.server.services.dep_map_repair_executor import Action
+    from cidx_depmap.server.dep_map_repair_executor import Action
 
     assert hasattr(Action, "self_loop_deleted"), (
         "Action enum missing 'self_loop_deleted' member"
@@ -125,7 +125,7 @@ def test_file_writes_inner_schema_has_path_and_operation(tmp_path):
     """
     import json
 
-    from code_indexer.server.services.dep_map_repair_phase37 import (
+    from cidx_depmap.server.dep_map_repair_phase37 import (
         RepairJournal,
         build_and_append_journal_entry,
     )

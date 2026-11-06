@@ -161,6 +161,11 @@ def test_branch_change_reports_the_current_runs_plan(tmp_path, monkeypatch):
 
     indexer = SmartIndexer.__new__(SmartIndexer)
     indexer.config = SimpleNamespace(codebase_dir=tmp_path)  # type: ignore[assignment]
+    # smart_index opens a content-seam pass; None is the local default.
+    indexer.content_backend = None
+    indexer.repo_manifest = None
+    # Local git: the graph-optimized branch path is only taken without a seam.
+    indexer.git_backend = None
     indexer.embedding_provider = _Provider()  # type: ignore[assignment]
     indexer.vector_store_client = _VectorStore()
     indexer.progressive_metadata = ProgressiveMetadata(metadata_path)

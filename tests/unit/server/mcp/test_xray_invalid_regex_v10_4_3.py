@@ -98,42 +98,46 @@ def _xray_single_repo_env(
     with (
         patch("code_indexer.server.mcp.handlers._utils.app_module", mock_app),
         patch(
-            "code_indexer.server.mcp.handlers.xray._search._resolve_repo_path",
+            "cidx_xray.server.mcp.xray._search._resolve_repo_path",
             return_value="/fake/repo/path",
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
+            "cidx_xray.server.mcp.xray._explore._resolve_repo_path",
             return_value="/fake/repo/path",
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._search._get_background_job_manager",
+            "cidx_xray.server.mcp.xray._search._get_background_job_manager",
             return_value=mock_bjm,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._explore._get_background_job_manager",
+            "cidx_xray.server.mcp.xray._explore._get_background_job_manager",
             return_value=mock_bjm,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._search._get_job_tracker",
+            "cidx_xray.server.mcp.xray._search._get_job_tracker",
             return_value=mock_jt,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._explore._get_job_tracker",
+            "cidx_xray.server.mcp.xray._explore._get_job_tracker",
             return_value=mock_jt,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._search._get_xray_executor",
+            "cidx_xray.server.mcp.xray._search._get_xray_executor",
             return_value=mock_exec,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._explore._get_xray_executor",
+            "cidx_xray.server.mcp.xray._infra._get_xray_executor",
             return_value=mock_exec,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._search.validate_rust_evaluator"
+            "cidx_xray.server.mcp.xray._explore._get_xray_executor",
+            return_value=mock_exec,
+        ),
+        patch(
+            "cidx_xray.server.mcp.xray._search.validate_rust_evaluator"
         ) as mock_validate,
         patch(
-            "code_indexer.server.mcp.handlers.xray._explore.validate_rust_evaluator"
+            "cidx_xray.server.mcp.xray._explore.validate_rust_evaluator"
         ) as mock_validate_explore,
         patch("asyncio.get_running_loop", return_value=loop_instance),
     ):
@@ -152,7 +156,7 @@ class TestXraySearchInvalidRegex:
 
     async def test_search_invalid_regex_returns_invalid_regex_error(self):
         """Invalid non-PCRE2 pattern returns error='invalid_regex'."""
-        from code_indexer.server.mcp.handlers.xray import handle_xray_search
+        from cidx_xray.server.mcp.xray import handle_xray_search
 
         user = _make_admin_user()
         mock_bjm = MagicMock()
@@ -160,11 +164,11 @@ class TestXraySearchInvalidRegex:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray._search._resolve_repo_path",
+                "cidx_xray.server.mcp.xray._search._resolve_repo_path",
                 return_value="/some/repo/path",
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray._search._get_background_job_manager",
+                "cidx_xray.server.mcp.xray._search._get_background_job_manager",
                 return_value=mock_bjm,
             ),
         ):
@@ -180,7 +184,7 @@ class TestXraySearchInvalidRegex:
 
     async def test_search_invalid_regex_does_not_submit_job(self):
         """submit_job must NOT be called when the pattern is invalid (non-PCRE2)."""
-        from code_indexer.server.mcp.handlers.xray import handle_xray_search
+        from cidx_xray.server.mcp.xray import handle_xray_search
 
         user = _make_admin_user()
         mock_bjm = MagicMock()
@@ -188,11 +192,11 @@ class TestXraySearchInvalidRegex:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray._search._resolve_repo_path",
+                "cidx_xray.server.mcp.xray._search._resolve_repo_path",
                 return_value="/some/repo/path",
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray._search._get_background_job_manager",
+                "cidx_xray.server.mcp.xray._search._get_background_job_manager",
                 return_value=mock_bjm,
             ),
         ):
@@ -204,7 +208,7 @@ class TestXraySearchInvalidRegex:
 
     async def test_search_pcre2_invalid_regex_skips_pre_validation(self):
         """pcre2=True bypasses Python pre-validation; handler returns job_id."""
-        from code_indexer.server.mcp.handlers.xray import handle_xray_search
+        from cidx_xray.server.mcp.xray import handle_xray_search
 
         user = _make_admin_user()
 
@@ -232,7 +236,7 @@ class TestXrayExploreInvalidRegex:
 
     async def test_explore_invalid_regex_returns_invalid_regex_error(self):
         """Invalid non-PCRE2 pattern returns error='invalid_regex'."""
-        from code_indexer.server.mcp.handlers.xray import handle_xray_explore
+        from cidx_xray.server.mcp.xray import handle_xray_explore
 
         user = _make_admin_user()
         mock_bjm = MagicMock()
@@ -240,11 +244,11 @@ class TestXrayExploreInvalidRegex:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
+                "cidx_xray.server.mcp.xray._explore._resolve_repo_path",
                 return_value="/some/repo/path",
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray._explore._get_background_job_manager",
+                "cidx_xray.server.mcp.xray._explore._get_background_job_manager",
                 return_value=mock_bjm,
             ),
         ):
@@ -260,7 +264,7 @@ class TestXrayExploreInvalidRegex:
 
     async def test_explore_invalid_regex_does_not_submit_job(self):
         """submit_job must NOT be called when the pattern is invalid (non-PCRE2)."""
-        from code_indexer.server.mcp.handlers.xray import handle_xray_explore
+        from cidx_xray.server.mcp.xray import handle_xray_explore
 
         user = _make_admin_user()
         mock_bjm = MagicMock()
@@ -268,11 +272,11 @@ class TestXrayExploreInvalidRegex:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
+                "cidx_xray.server.mcp.xray._explore._resolve_repo_path",
                 return_value="/some/repo/path",
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray._explore._get_background_job_manager",
+                "cidx_xray.server.mcp.xray._explore._get_background_job_manager",
                 return_value=mock_bjm,
             ),
         ):
@@ -284,7 +288,7 @@ class TestXrayExploreInvalidRegex:
 
     async def test_explore_pcre2_invalid_regex_skips_pre_validation(self):
         """pcre2=True bypasses Python pre-validation; handler returns job_id."""
-        from code_indexer.server.mcp.handlers.xray import handle_xray_explore
+        from cidx_xray.server.mcp.xray import handle_xray_explore
 
         user = _make_admin_user()
 

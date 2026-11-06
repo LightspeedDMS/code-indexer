@@ -20,7 +20,8 @@ from unittest.mock import MagicMock, patch
 
 
 from code_indexer.server.auth.user_manager import User, UserRole
-from code_indexer.server.mcp.handlers.admin import handle_trigger_dependency_analysis
+from cidx_depmap.server.mcp.trigger import handle_trigger_dependency_analysis
+from tests.unit.server._depmap_feature import depmap_service_installed
 
 
 # ---------------------------------------------------------------------------
@@ -138,15 +139,10 @@ class TestMcpTriggerErrorEnvelopeWithJobIdWhenSentinelHeld:
         assert claim.success, "Pre-test setup: sentinel claim must succeed"
 
         svc = _FakeDepMapService(available=False, sentinel_dir=sentinel_dir)
-        mock_app_state = MagicMock()
-        mock_app_state.dependency_map_service = svc
 
         with (
             patch(_CONFIG_SVC, return_value=_make_config_mock()),
-            patch(
-                f"{_MCP_HANDLER}._utils.app_module.app.state",
-                mock_app_state,
-            ),
+            depmap_service_installed(svc),
         ):
             result = handle_trigger_dependency_analysis(
                 {"mode": "full"}, _make_admin_user()
@@ -185,15 +181,10 @@ class TestMcpTriggerPassesThroughWhenSentinelAbsent:
         sentinel_dir.mkdir()
 
         svc = _FakeDepMapService(available=True, sentinel_dir=sentinel_dir)
-        mock_app_state = MagicMock()
-        mock_app_state.dependency_map_service = svc
 
         with (
             patch(_CONFIG_SVC, return_value=_make_config_mock()),
-            patch(
-                f"{_MCP_HANDLER}._utils.app_module.app.state",
-                mock_app_state,
-            ),
+            depmap_service_installed(svc),
         ):
             result = handle_trigger_dependency_analysis(
                 {"mode": "delta"}, _make_admin_user()
@@ -240,15 +231,10 @@ class TestMcpTriggerHandlesAnalysisAlreadyRunningErrorFromSynchronousClaim:
 
         # is_available returns True (pre-flight passes), but sentinel is held
         svc = _FakeDepMapService(available=True, sentinel_dir=sentinel_dir)
-        mock_app_state = MagicMock()
-        mock_app_state.dependency_map_service = svc
 
         with (
             patch(_CONFIG_SVC, return_value=_make_config_mock()),
-            patch(
-                f"{_MCP_HANDLER}._utils.app_module.app.state",
-                mock_app_state,
-            ),
+            depmap_service_installed(svc),
         ):
             result = handle_trigger_dependency_analysis(
                 {"mode": "full"}, _make_admin_user()
@@ -299,8 +285,6 @@ class TestMcpTriggerNarrowsDuplicateJobErrorToMcpEnvelope:
         svc = _FakeDepMapService(
             available=True, sentinel_dir=sentinel_dir, raise_on_run=dup_error
         )
-        mock_app_state = MagicMock()
-        mock_app_state.dependency_map_service = svc
 
         error_logged = []
 
@@ -331,10 +315,7 @@ class TestMcpTriggerNarrowsDuplicateJobErrorToMcpEnvelope:
         try:
             with (
                 patch(_CONFIG_SVC, return_value=_make_config_mock()),
-                patch(
-                    f"{_MCP_HANDLER}._utils.app_module.app.state",
-                    mock_app_state,
-                ),
+                depmap_service_installed(svc),
                 patch.object(threading.Thread, "start", _patched_start),
             ):
                 result = handle_trigger_dependency_analysis(

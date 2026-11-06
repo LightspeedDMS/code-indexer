@@ -171,7 +171,7 @@ class TestBranchGuardWrongBranch:
         checkout_calls = []
 
         def fake_subprocess_run(cmd, **kwargs):
-            if cmd == ["git", "branch", "--show-current"]:
+            if cmd == ["git", "symbolic-ref", "--short", "HEAD"]:
                 # Report we are on 'develop' instead of 'main'
                 return _proc(returncode=0, stdout="develop")
             if cmd == ["git", "checkout", "main"]:
@@ -248,7 +248,7 @@ class TestBranchGuardCorrectBranch:
         checkout_calls = []
 
         def fake_subprocess_run(cmd, **kwargs):
-            if cmd == ["git", "branch", "--show-current"]:
+            if cmd == ["git", "symbolic-ref", "--short", "HEAD"]:
                 # Already on main — no checkout needed
                 return _proc(returncode=0, stdout="main")
             if cmd[:2] == ["git", "checkout"]:
@@ -327,10 +327,15 @@ class TestBranchGuardCheckoutFailure:
         }
 
         def fake_subprocess_run(cmd, **kwargs):
-            if cmd == ["git", "branch", "--show-current"]:
+            if cmd == ["git", "symbolic-ref", "--short", "HEAD"]:
                 return _proc(returncode=0, stdout="develop")
             if cmd == ["git", "checkout", "main"]:
-                # Simulate checkout failure
+                # Simulate checkout failure. The git seam runs it with
+                # check=True, as subprocess.run does that raises.
+                if kwargs.get("check"):
+                    raise subprocess.CalledProcessError(
+                        1, cmd, output="", stderr="error: checkout failed"
+                    )
                 return _proc(returncode=1, stderr="error: checkout failed")
             return _proc(returncode=0)
 
@@ -432,7 +437,7 @@ class TestBranchGuardDefaultBranch:
         symbolic_ref_calls = []
 
         def fake_subprocess_run(cmd, **kwargs):
-            if cmd == ["git", "branch", "--show-current"]:
+            if cmd == ["git", "symbolic-ref", "--short", "HEAD"]:
                 return _proc(returncode=0, stdout="feature/something")
             if cmd == ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"]:
                 symbolic_ref_calls.append(cmd)

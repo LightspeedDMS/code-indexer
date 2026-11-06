@@ -8,7 +8,7 @@ Story #645 AC7.
 """
 
 import pytest
-from code_indexer.server.services.scip_self_healing import SCIPSelfHealingService
+from cidx_scip.server.self_healing import SCIPSelfHealingService
 from code_indexer.server.repositories.background_jobs import JobStatus
 
 

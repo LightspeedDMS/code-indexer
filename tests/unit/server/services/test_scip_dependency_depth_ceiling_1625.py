@@ -16,20 +16,24 @@ An operator saving 11-20 in the Config screen therefore broke the multi-repo
 dependency/dependents endpoints for every repo, failing only at QUERY time
 with an opaque ``ValueError`` instead of at CONFIG-SAVE time.
 
-These tests prove the engine's real ceiling (10) and assert that BOTH
-config-validation layers (``ServerConfigManager.validate_config`` and the
-Web UI's ``_validate_config_section``) now agree with it.
+These tests prove the engine's real ceiling (10) and assert that the
+config validation agrees with it: the cidx-scip feature's config section
+(``scip_dependency_depth`` is a feature setting since modular phase 4d,
+bounded by ``cidx_scip.limits`` and enforced by the core's feature config
+door on every runtime update, the Web UI config screen's save included --
+it replaced ``ServerConfigManager.validate_config``'s check and the core's
+own save-time validation).
 """
 
 import pytest
 
-from code_indexer.scip.database import queries as scip_queries
-from code_indexer.server.services.constants import (
-    MIN_SCIP_DEPENDENCY_DEPTH,
-    MAX_SCIP_DEPENDENCY_DEPTH,
+from cidx_scip import limits as scip_limits
+from cidx_scip.config import SCIP_CONFIG_SECTION
+from cidx_scip.database import queries as scip_queries
+from code_indexer.server.features.config import (
+    FeatureConfigError,
+    validate_runtime_update,
 )
-from code_indexer.server.utils.config_manager import ServerConfigManager
-from code_indexer.server.web.routes import _validate_config_section
 
 # The SCIP engine's real ceiling for get_dependencies()/get_dependents(),
 # hardcoded in scip/database/queries.py. All config-side validation must
@@ -72,55 +76,29 @@ class TestEngineDependencyDepthCeiling:
 
 
 class TestConstantsMatchEngineCeiling:
-    """MAX_SCIP_DEPENDENCY_DEPTH must never exceed the engine's real ceiling."""
+    """The feature's limits (cidx_scip.limits) must not drift from the
+    engine's real ceiling."""
 
-    def test_max_scip_dependency_depth_matches_engine_ceiling(self):
-        assert MAX_SCIP_DEPENDENCY_DEPTH == ENGINE_MAX_DEPENDENCY_DEPTH, (
-            "MAX_SCIP_DEPENDENCY_DEPTH must equal the SCIP engine's real "
-            "get_dependencies()/get_dependents() ceiling, enforced in "
-            "scip/database/queries.py -- Bug #1625 drift."
-        )
-
-    def test_min_scip_dependency_depth_matches_engine_floor(self):
-        assert MIN_SCIP_DEPENDENCY_DEPTH == ENGINE_MIN_DEPENDENCY_DEPTH
+    def test_feature_limits_match_engine_ceiling(self):
+        assert scip_limits.MAX_SCIP_DEPENDENCY_DEPTH == ENGINE_MAX_DEPENDENCY_DEPTH
+        assert scip_limits.MIN_SCIP_DEPENDENCY_DEPTH == ENGINE_MIN_DEPENDENCY_DEPTH
 
 
-class TestConfigManagerValidationMatchesEngineCeiling:
-    """ServerConfigManager.validate_config must reject what the engine rejects."""
+class TestFeatureSettingValidationMatchesEngineCeiling:
+    """A runtime update of the feature setting must reject what the engine
+    rejects (the core's feature-config validation, bounds from the section)."""
 
     @pytest.mark.parametrize("depth", [ENGINE_MAX_DEPENDENCY_DEPTH + 1, 20, 0])
-    def test_validation_rejects_out_of_range_depth(self, tmp_path, depth):
-        config_manager = ServerConfigManager(str(tmp_path))
-        config = config_manager.create_default_config()
-        config.scip_config.scip_dependency_depth = depth
+    def test_validation_rejects_out_of_range_depth(self, depth):
+        with pytest.raises(FeatureConfigError, match="scip_dependency_depth"):
+            validate_runtime_update(
+                "scip", SCIP_CONFIG_SECTION, {"scip_dependency_depth": depth}
+            )
 
-        with pytest.raises(ValueError, match="scip_dependency_depth"):
-            config_manager.validate_config(config)
-
-    def test_validation_accepts_depth_at_engine_ceiling_boundary(self, tmp_path):
-        config_manager = ServerConfigManager(str(tmp_path))
-        config = config_manager.create_default_config()
-        config.scip_config.scip_dependency_depth = ENGINE_MAX_DEPENDENCY_DEPTH
-
-        config_manager.validate_config(config)  # Should not raise
-
-
-class TestWebConfigScreenSaveTimeValidationMatchesEngineCeiling:
-    """The Config screen's own save-time validation must reject 11-20.
-
-    This is the correct place to catch the drift -- at config-save time,
-    not as an opaque ValueError from the query engine later.
-    """
-
-    @pytest.mark.parametrize("depth", [ENGINE_MAX_DEPENDENCY_DEPTH + 1, 20])
-    def test_rejects_out_of_range_depth_at_save_time(self, depth):
-        error = _validate_config_section("scip", {"scip_dependency_depth": depth})
-        assert error is not None
-        assert "SCIP Dependency Depth" in error
-
-    @pytest.mark.parametrize(
-        "depth", [ENGINE_MIN_DEPENDENCY_DEPTH, ENGINE_MAX_DEPENDENCY_DEPTH]
-    )
-    def test_accepts_boundary_depth_at_save_time(self, depth):
-        error = _validate_config_section("scip", {"scip_dependency_depth": depth})
-        assert error is None
+    def test_validation_accepts_depth_at_engine_ceiling_boundary(self):
+        checked = validate_runtime_update(
+            "scip",
+            SCIP_CONFIG_SECTION,
+            {"scip_dependency_depth": ENGINE_MAX_DEPENDENCY_DEPTH},
+        )
+        assert checked == {"scip_dependency_depth": ENGINE_MAX_DEPENDENCY_DEPTH}

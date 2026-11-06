@@ -698,7 +698,7 @@ class TestAC2OmniPrecomputedVectorReuse:
 
     def test_cold_omni_k_repos_records_one_miss(self, monkeypatch):
         """Cold omni: pre-fan-out embed (MISS) + K precomputed bypass calls -> 1 miss."""
-        from code_indexer.server.services.memory_candidate_retriever import (
+        from cidx_memory.server.memory_candidate_retriever import (
             _PrecomputedEmbeddingProvider,
         )
 
@@ -738,7 +738,7 @@ class TestAC2OmniPrecomputedVectorReuse:
 
     def test_warm_omni_k_repos_records_one_hit(self, monkeypatch):
         """Warm omni: pre-fan-out embed (HIT) + K precomputed bypass calls -> 1 hit."""
-        from code_indexer.server.services.memory_candidate_retriever import (
+        from cidx_memory.server.memory_candidate_retriever import (
             _PrecomputedEmbeddingProvider,
         )
 
@@ -818,7 +818,7 @@ class TestEmbedOnceReuse:
         to the direct provider.get_embedding() call without any cache I/O).
         The cache metrics therefore record ONLY the first call's MISS.
         """
-        from code_indexer.server.services.memory_candidate_retriever import (
+        from cidx_memory.server.memory_candidate_retriever import (
             _PrecomputedEmbeddingProvider,
         )
 
@@ -861,7 +861,7 @@ class TestEmbedOnceReuse:
         The pre-seeded cache represents the warm scenario. First call is a HIT.
         FSV reuse via _PrecomputedEmbeddingProvider adds no further metric.
         """
-        from code_indexer.server.services.memory_candidate_retriever import (
+        from cidx_memory.server.memory_candidate_retriever import (
             _PrecomputedEmbeddingProvider,
         )
 
@@ -918,7 +918,7 @@ class TestEmbedOnceReuse:
         # _search_with_provider(provider_name="voyage-ai",
         #                       precomputed_query_vector=vec_a) wraps vec_a in
         # _PrecomputedEmbeddingProvider, bypassing coalesced_query_embedding.
-        from code_indexer.server.services.memory_candidate_retriever import (
+        from cidx_memory.server.memory_candidate_retriever import (
             _PrecomputedEmbeddingProvider,
         )
 
@@ -1697,7 +1697,7 @@ class TestFSVPrecomputedVectorBypass:
         )
 
         # embedding_provider must be the real service, NOT _PrecomputedEmbeddingProvider.
-        from code_indexer.server.services.memory_candidate_retriever import (
+        from cidx_memory.server.memory_candidate_retriever import (
             _PrecomputedEmbeddingProvider,
         )
 
@@ -1757,7 +1757,7 @@ class TestFSVPrecomputedVectorBypass:
         )
 
         # The embedding_provider must be the real service.
-        from code_indexer.server.services.memory_candidate_retriever import (
+        from cidx_memory.server.memory_candidate_retriever import (
             _PrecomputedEmbeddingProvider,
         )
 

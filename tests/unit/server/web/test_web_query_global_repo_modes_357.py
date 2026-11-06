@@ -35,6 +35,7 @@ from code_indexer.server.web import auth as web_auth
 from code_indexer.server.web import routes as web_routes
 from code_indexer.services.tantivy_index_manager import TantivyIndexManager
 from tests.unit.server._isolated_app import isolated_app
+from tests.unit.server._scip_feature import scip_pipeline_installed
 from tests.unit.server.query.query_repo_access_env import (
     ADMIN,
     ALL_REPOS,
@@ -46,6 +47,7 @@ from tests.unit.server.query.query_repo_access_env import (
     build_server_db_template,
     global_alias,
 )
+from tests.unit.server.app_state_patch import patch_app_state
 
 PASSWORD = "Example-Web-Query-Passw0rd!"
 PARTIAL = "/admin/partials/query-results"
@@ -195,6 +197,15 @@ def env(
     finally:
         del web_app.state.backend_registry
         e.close()
+
+
+@pytest.fixture
+def scip_mode(web_app: Any) -> Iterator[None]:
+    """The query page's ``scip`` search mode: the cidx-scip feature's
+    (``web_query_modes()``, modular phase 4d), installed after the app is
+    built, as an app built with "scip" enabled has it."""
+    with scip_pipeline_installed():
+        yield
 
 
 def _cookie_value(response: Response, name: str) -> str:
@@ -571,8 +582,8 @@ class TestQueryFailureLogging:
         # allows to the client, so it is shown; an unwired server-side
         # service is an internal failure, so it is logged at ERROR.
         app_module = importlib.import_module("code_indexer.server.app")
-        monkeypatch.setattr(
-            vars(app_module)["app"].state, "access_filtering_service", None
+        patch_app_state(
+            monkeypatch, vars(app_module)["app"].state, "access_filtering_service", None
         )
 
         with caplog.at_level(logging.WARNING):
@@ -617,7 +628,7 @@ class TestQueryFailureLogging:
         assert errors[0].exc_info is not None
 
     def test_unexpected_value_error_in_scip_mode_logs_error_with_traceback(
-        self, web_app, env, handler, caplog, monkeypatch
+        self, web_app, env, handler, caplog, monkeypatch, scip_mode
     ):
         # Only the text query's own failures are expected outcomes; a
         # ValueError anywhere else (here the repository listing a SCIP
@@ -676,7 +687,7 @@ class TestUnchangedPaths:
         assert _error(html) == "Query service not available"
         assert env.searched_paths == []
 
-    def test_scip_on_global_repo_without_index(self, web_app, env, handler):
+    def test_scip_on_global_repo_without_index(self, web_app, env, handler, scip_mode):
         html = _query(web_app, handler, GRANTED_GLOBAL, "Example", "scip")
 
         error = _error(html)
