@@ -1472,13 +1472,13 @@ fn main() {
             if json_output {
                 let json_findings: Vec<JsonFinding> = result
                     .findings
-                    .iter()
+                    .into_iter()
                     .map(|f| JsonFinding {
-                        pattern: f.pattern.clone(),
-                        file: f.file.clone(),
+                        pattern: f.pattern,
+                        file: f.file,
                         line: f.line,
-                        snippet: f.snippet.clone(),
-                        line_content: f.line_content.clone(),
+                        snippet: f.snippet,
+                        line_content: f.line_content,
                     })
                     .collect();
                 let out = JsonOutput {

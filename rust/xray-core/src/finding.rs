@@ -75,9 +75,18 @@ pub fn source_lines(s: &str) -> Vec<&str> {
 /// it: `source.decode("utf-8", errors="replace").splitlines()[line - 1]`.
 /// `from_utf8_lossy` substitutes U+FFFD per maximal invalid subpart, as
 /// Python's `replace` handler does.
+const LINE_CONTENT_MAX_BYTES: usize = 1024;
+
 pub fn line_content_at(lines: &[&str], line: usize) -> String {
     match line.checked_sub(1).and_then(|idx| lines.get(idx)) {
-        Some(text) => (*text).to_string(),
+        Some(text) if text.len() <= LINE_CONTENT_MAX_BYTES => (*text).to_string(),
+        Some(text) => {
+            let mut end = LINE_CONTENT_MAX_BYTES;
+            while end > 0 && !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text[..end].to_string()
+        }
         None => String::new(),
     }
 }
