@@ -178,3 +178,192 @@ pub extern "C" fn xray_rustc_version_len() -> u64 {
     XRAY_RUSTC_VERSION.len() as u64
 }
 "#;
+
+/// Invariant: preamble constants may import only the reviewed bindings
+/// listed in ALLOWED_IMPORTS. Evaluator code shares the preamble's module
+/// scope, so any name imported here is reachable from evaluator code.
+/// These tests enforce the invariant: a new import must be added to
+/// ALLOWED_IMPORTS with a safety rationale before the suite passes.
+#[cfg(test)]
+mod import_allowlist_tests {
+    use crate::compiler::assemble::ASSEMBLED_PARTS;
+
+    /// The ONLY imports an evaluator's module may contain, as exact
+    /// normalised statements.
+    ///
+    /// Exact statements, not path prefixes, on purpose: `use std::sync::*;`
+    /// or `use std::sync::{Arc, Mutex};` would both pass a "starts with
+    /// std::sync" rule while dragging in names nobody reviewed. Each entry
+    /// is one reviewed binding, and the reason it is safe to expose as
+    /// `crate::<name>`:
+    ///
+    ///   Arc         -- shared ownership of the node source text; no I/O,
+    ///                  no syscalls, no interior mutability of its own.
+    ///   RefCell     -- the thread-local debug_log buffer. Single-threaded
+    ///                  interior mutability; worst case is a panic.
+    ///   PhantomData -- a zero-sized lifetime marker on GraphHandle. Cannot
+    ///                  do anything at all at runtime.
+    ///   debug_log   -- appends to a thread-local Vec inside the preamble's
+    ///                  own xray_host_debug_log module; no I/O.
+    ///   FactsHandle, GraphHandle
+    ///               -- opaque accessor handles defined in the preamble's
+    ///                  own xray_host_handles module; method dispatch only.
+    ///   DeclarationKind, EdgeReason, SymbolId, UserFact, Visibility
+    ///               -- data types from the evaluator's parent module;
+    ///                  no methods that perform I/O.
+    ///
+    /// Anything that performs I/O, spawns a process, loads a library,
+    /// touches the filesystem, opens a socket, or reaches the environment
+    /// does NOT belong here, however convenient it would be in the preamble
+    /// -- the evaluator inherits it.
+    const ALLOWED_IMPORTS: &[&str] = &[
+        "use std::sync::Arc;",
+        "use std::cell::RefCell;",
+        "use std::marker::PhantomData;",
+        // Preamble-internal modules: these re-export items defined
+        // within the preamble itself, not std capabilities.
+        "use xray_host_debug_log::debug_log;",
+        "pub use xray_host_handles::{FactsHandle, GraphHandle};",
+        "use super::{DeclarationKind, EdgeReason, SymbolId, UserFact, Visibility};",
+    ];
+
+    /// Collapse runs of whitespace so formatting can never hide a statement
+    /// from the allowlist.
+    fn normalise(statement: &str) -> String {
+        let collapsed: Vec<&str> = statement.split_whitespace().collect();
+        format!("{};", collapsed.join(" "))
+    }
+
+    /// Every `use` / `pub use` / `extern crate` statement in `source`.
+    ///
+    /// Splits on `;` rather than on lines: statements can share a line, and
+    /// a line-oriented scan would miss `use std::sync::Arc; use
+    /// std::process::Command;`.
+    fn import_statements(source: &str) -> Vec<String> {
+        let mut found = Vec::new();
+        for segment in source.split(';') {
+            // A segment starts just after the previous `;`, so it carries
+            // the tail of that line plus everything up to this statement.
+            // Only the final line can be the statement itself.
+            let mut statement = match segment.rfind('\n') {
+                Some(idx) => segment[idx + 1..].trim(),
+                None => segment.trim(),
+            };
+            // Drop leading attributes: `#[allow(unused_imports)] use std::fs`.
+            while statement.starts_with("#[") {
+                match statement.find(']') {
+                    Some(idx) => statement = statement[idx + 1..].trim(),
+                    None => break,
+                }
+            }
+            if statement.starts_with("use ")
+                || statement.starts_with("pub use ")
+                || statement.starts_with("extern crate ")
+            {
+                found.push(normalise(statement));
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn preamble_imports_stay_inside_the_allowlist() {
+        for (name, source) in ASSEMBLED_PARTS {
+            for statement in import_statements(source) {
+                assert!(
+                    ALLOWED_IMPORTS.contains(&statement.as_str()),
+                    "{name} imports `{statement}`, which is not on the \
+                     evaluator import allowlist.\n\n\
+                     Evaluator code shares this module's scope, so anything \
+                     imported here is reachable from evaluator code. Add the \
+                     exact statement to ALLOWED_IMPORTS with a rationale that \
+                     it cannot reach the filesystem, network, environment, \
+                     another process or the dynamic linker. If it is not safe \
+                     to expose, it does not belong in the preamble -- put it \
+                     in xray-core's own code instead."
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_allowlisted_import_is_actually_present() {
+        let present: Vec<String> = ASSEMBLED_PARTS
+            .iter()
+            .flat_map(|(_, source)| import_statements(source))
+            .collect();
+        for allowed in ALLOWED_IMPORTS {
+            assert!(
+                present.iter().any(|s| s == allowed),
+                "ALLOWED_IMPORTS lists `{allowed}` but no preamble constant \
+                 imports it. An allowlist that outlives what it describes \
+                 silently re-permits a removed import later; delete the entry \
+                 along with the import."
+            );
+        }
+    }
+
+    #[test]
+    fn the_scanner_finds_imports_in_every_shape_they_can_be_written() {
+        // If this scanner missed a shape, the allowlist test above would pass
+        // vacuously on exactly the import someone was trying to sneak in.
+        let hostile = "\n\
+            use std::process::Command;\n\
+            pub use std::fs;\n\
+            #[allow(unused_imports)] use std::net::TcpStream;\n\
+            use std::sync::Arc; use std::env;\n\
+            use std::{io, path::PathBuf};\n\
+            use std::process::Command as Shell;\n\
+            use std::os::unix::fs::*;\n\
+            extern crate libc;\n\
+            use   std::ffi::CString  ;\n";
+
+        let found = import_statements(hostile);
+
+        for expected in [
+            "use std::process::Command;",
+            "pub use std::fs;",
+            "use std::net::TcpStream;",
+            "use std::env;",
+            "use std::{io, path::PathBuf};",
+            "use std::process::Command as Shell;",
+            "use std::os::unix::fs::*;",
+            "extern crate libc;",
+            "use std::ffi::CString;",
+        ] {
+            assert!(
+                found.iter().any(|s| s == expected),
+                "scanner missed `{expected}`; found {found:?}"
+            );
+        }
+
+        let violations: Vec<&String> = found
+            .iter()
+            .filter(|s| !ALLOWED_IMPORTS.contains(&s.as_str()))
+            .collect();
+        assert_eq!(
+            violations.len(),
+            found.len() - 1,
+            "only the `use std::sync::Arc;` in that sample is allowlisted; \
+             everything else must be rejected, got {violations:?}"
+        );
+    }
+
+    #[test]
+    fn wildcard_and_group_forms_of_an_allowed_path_are_still_rejected() {
+        // `std::sync::Arc` is allowed; `std::sync::*` is not the same thing.
+        for broadened in [
+            "use std::sync::*;",
+            "use std::sync::{Arc, Mutex};",
+            "use std::sync::Arc as _;",
+            "use std::cell::*;",
+        ] {
+            let found = import_statements(broadened);
+            assert_eq!(found.len(), 1, "scanner failed on `{broadened}`");
+            assert!(
+                !ALLOWED_IMPORTS.contains(&found[0].as_str()),
+                "`{broadened}` widens an allowlisted import and must not pass"
+            );
+        }
+    }
+}

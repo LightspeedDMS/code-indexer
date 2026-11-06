@@ -125,6 +125,54 @@ pub(crate) fn evaluator_rustc_command(build_rs_path: &Path, build_so_path: &Path
     command
 }
 
+/// Environment variable carrying the heap bound (bytes) for every rustc this
+/// process spawns. Set by cidx (`rust_backend.py::xray_subprocess_env`) from
+/// its configurable compile limit, the same number its `--compile-only`
+/// spawn runs under. Applied to the rustc CHILD only: on the default scan
+/// path the compile and the scan share this process, and the scan's memory
+/// scales with the repository, so only the compile can be capped safely.
+/// Unset, empty, zero or unparseable means no bound (the prior behaviour).
+pub(crate) const COMPILE_RLIMIT_DATA_ENV: &str = "CIDX_XRAY_COMPILE_RLIMIT_DATA_BYTES";
+
+/// Parses a `COMPILE_RLIMIT_DATA_ENV` value. Split from the env read so the
+/// rule is testable without mutating the process environment.
+pub(crate) fn parse_compile_rlimit_data(raw: Option<&str>) -> Option<u64> {
+    raw?.trim().parse::<u64>().ok().filter(|bytes| *bytes > 0)
+}
+
+/// Arranges for `command`'s child to start with RLIMIT_DATA lowered to
+/// `limit_bytes` (never above the inherited hard limit -- an unprivileged
+/// process cannot raise it, and asking would fail). RLIMIT_DATA is inherited
+/// across fork/exec, so it also reaches the `cc`/`ld` rustc runs to link.
+/// A failure to set it is swallowed: a compile that refuses to start would
+/// turn a hardening measure into an outage.
+pub(crate) fn apply_compile_memory_limit(command: &mut std::process::Command, limit_bytes: Option<u64>) {
+    use std::os::unix::process::CommandExt;
+
+    let Some(bytes) = limit_bytes else { return };
+    let requested = bytes as libc::rlim_t;
+    // SAFETY: runs in the forked child between fork() and execve(). It makes
+    // only getrlimit/setrlimit syscalls on stack values -- no allocation, no
+    // locks -- and always returns Ok(()).
+    unsafe {
+        command.pre_exec(move || {
+            let mut current = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+            if libc::getrlimit(libc::RLIMIT_DATA, &mut current) == 0 {
+                // Clamp to rlim_cur (not rlim_max): a sandbox should
+                // never raise an inherited soft limit, only lower it.
+                let soft = if current.rlim_cur == libc::RLIM_INFINITY {
+                    requested
+                } else {
+                    requested.min(current.rlim_cur)
+                };
+                let wanted = libc::rlimit { rlim_cur: soft, rlim_max: current.rlim_max };
+                let _ = libc::setrlimit(libc::RLIMIT_DATA, &wanted);
+            }
+            Ok(())
+        });
+    }
+}
+
 /// Clippy type-complexity escape hatch for `spawn_rustc_child`'s return
 /// type: the spawned child, its pid, and the stdout/stderr drain-thread
 /// receivers `run_rustc_with_timeout` needs after `poll_rustc_until_done`
@@ -136,13 +184,14 @@ type SpawnedRustcChild = (Child, i32, Receiver<Vec<u8>>, Receiver<Vec<u8>>);
 /// Extracted out of `run_rustc_with_timeout` (mechanical split, no logic
 /// change) -- see that function's doc comment for the full rationale
 /// (process-group isolation, no bare `.output()`).
-fn spawn_rustc_child(mut command: std::process::Command) -> Result<SpawnedRustcChild, CompileError> {
+fn spawn_rustc_child(compile_limit: Option<u64>, mut command: std::process::Command) -> Result<SpawnedRustcChild, CompileError> {
     use std::os::unix::process::CommandExt;
 
     command.process_group(0);
     crate::child_group_reaper::die_with_parent(&mut command);
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
+    apply_compile_memory_limit(&mut command, compile_limit);
 
     let mut child = command.spawn().map_err(|e| CompileError {
         message: format!("Failed to invoke rustc: {}", e),
@@ -227,7 +276,10 @@ pub(crate) fn run_rustc_with_timeout(
     command: std::process::Command,
     timeout: std::time::Duration,
 ) -> Result<(bool, Vec<u8>, Vec<u8>), CompileError> {
-    let (mut child, pid, stdout_rx, stderr_rx) = spawn_rustc_child(command)?;
+    let compile_limit = parse_compile_rlimit_data(
+        std::env::var(COMPILE_RLIMIT_DATA_ENV).ok().as_deref(),
+    );
+    let (mut child, pid, stdout_rx, stderr_rx) = spawn_rustc_child(compile_limit, command)?;
     let mut tracked = crate::child_group_reaper::TrackedGroup::track(pid);
     let start = Instant::now();
     let polled = poll_rustc_until_done(&mut child, pid, start, timeout);
@@ -238,4 +290,66 @@ pub(crate) fn run_rustc_with_timeout(
     let stdout = drain_pipe_or_warn(stdout_rx, "stdout");
     let stderr = drain_pipe_or_warn(stderr_rx, "stderr");
     Ok((success, stdout, stderr))
+}
+
+#[cfg(test)]
+mod compile_memory_limit_tests {
+    use super::*;
+
+    /// 64 MiB: low enough to stay below any CI hard limit, high enough to
+    /// not interfere with a concurrent compile.
+    const LIMIT_BYTES: u64 = 64 * 1024 * 1024;
+
+    fn ulimit_data_kib() -> std::process::Command {
+        let mut command = std::process::Command::new("sh");
+        command.arg("-c").arg("ulimit -d");
+        command
+    }
+
+    fn inherited_data_kib() -> String {
+        let out = ulimit_data_kib().output().expect("sh must run");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn parse_accepts_only_a_positive_byte_count() {
+        assert_eq!(parse_compile_rlimit_data(Some("1073741824")), Some(LIMIT_BYTES));
+        assert_eq!(parse_compile_rlimit_data(Some(" 4096 ")), Some(4096));
+        assert_eq!(parse_compile_rlimit_data(None), None);
+        assert_eq!(parse_compile_rlimit_data(Some("")), None);
+        assert_eq!(parse_compile_rlimit_data(Some("0")), None);
+        assert_eq!(parse_compile_rlimit_data(Some("-1")), None);
+        assert_eq!(parse_compile_rlimit_data(Some("1GiB")), None);
+    }
+
+    #[test]
+    fn the_limit_reaches_the_spawned_child() {
+        let mut command = ulimit_data_kib();
+        apply_compile_memory_limit(&mut command, Some(LIMIT_BYTES));
+        let out = command.output().expect("sh must run");
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), (LIMIT_BYTES / 1024).to_string());
+    }
+
+    #[test]
+    fn no_limit_leaves_the_child_with_the_inherited_one() {
+        let mut command = ulimit_data_kib();
+        apply_compile_memory_limit(&mut command, None);
+        let out = command.output().expect("sh must run");
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), inherited_data_kib());
+    }
+
+    /// spawn_rustc_child forwards the compile limit to the child process
+    /// without touching process-global state (no env mutation = no data race).
+    #[test]
+    fn spawn_rustc_child_forwards_the_compile_limit() {
+        let (mut child, _pid, stdout_rx, _stderr_rx) =
+            spawn_rustc_child(Some(LIMIT_BYTES), ulimit_data_kib())
+                .expect("sh must run");
+        let _ = child.wait();
+        let stdout = stdout_rx.recv().unwrap_or_default();
+        assert_eq!(
+            String::from_utf8_lossy(&stdout).trim(),
+            (LIMIT_BYTES / 1024).to_string()
+        );
+    }
 }

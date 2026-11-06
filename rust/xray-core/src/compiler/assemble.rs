@@ -12,6 +12,22 @@ use super::graph_preamble::{
     GRAPH_PREAMBLE_EXTRA_4, GRAPH_PREAMBLE_EXTRA_5, GRAPH_PREAMBLE_EXTRA_6, GRAPH_REFINE_EPILOGUE,
 };
 use super::types::{CompileError, CompileErrorKind};
+
+/// Every constant whose text is concatenated into an evaluator's compiled
+/// source. The preamble import-allowlist test scans this list, so a new
+/// constant added to an assembly function must also appear here.
+pub(crate) const ASSEMBLED_PARTS: &[(&str, &str)] = &[
+    ("PREAMBLE", PREAMBLE),
+    ("EPILOGUE", EPILOGUE),
+    ("GRAPH_PREAMBLE_EXTRA_1", GRAPH_PREAMBLE_EXTRA_1),
+    ("GRAPH_PREAMBLE_EXTRA_2", GRAPH_PREAMBLE_EXTRA_2),
+    ("GRAPH_PREAMBLE_EXTRA_3", GRAPH_PREAMBLE_EXTRA_3),
+    ("GRAPH_PREAMBLE_EXTRA_4", GRAPH_PREAMBLE_EXTRA_4),
+    ("GRAPH_PREAMBLE_EXTRA_5", GRAPH_PREAMBLE_EXTRA_5),
+    ("GRAPH_PREAMBLE_EXTRA_6", GRAPH_PREAMBLE_EXTRA_6),
+    ("GRAPH_EPILOGUE", GRAPH_EPILOGUE),
+    ("GRAPH_REFINE_EPILOGUE", GRAPH_REFINE_EPILOGUE),
+];
 use sha2::{Digest, Sha256};
 
 /// ABI version of the compiled evaluator artifact. This is the SINGLE
