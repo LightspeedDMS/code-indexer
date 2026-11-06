@@ -813,34 +813,12 @@ async def get_current_user_for_mcp(request: Request) -> User:
                         headers={"WWW-Authenticate": _build_www_authenticate_header()},
                     )
                 _check_non_sso_api_restriction(gw_user)
-                # Pre-elevate: the per-user gateway token is itself a step-up
-                # artifact (the gateway authenticated the user). This mirrors the
-                # OAuth Bearer path. A stable session key is derived from the token
-                # so the elevation window is scoped to this specific bearer.
-                # NOTE: this grants full elevation scope -- callers requiring TOTP
-                # step-up should verify the elevation was TOTP-based, not just present.
-                import hashlib
-
-                _session_key = (
-                    f"gw:{hashlib.sha256(_gw_token.encode()).hexdigest()[:16]}"
-                )
-                request.state.user_jti = _session_key
-                if elevated_session_manager is not None:
-                    try:
-                        _ip = request.client.host if request.client else "unknown"
-                        elevated_session_manager.create(
-                            session_key=_session_key,
-                            username=gw_user.username,
-                            elevated_from_ip=_ip,
-                            scope="full",
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            "Failed to pre-elevate gateway session for %s: %s",
-                            gw_user.username,
-                            exc,
-                            exc_info=True,
-                        )
+                # Gateway users step up through TOTP like JWT-bearer users.
+                # No automatic pre-elevation: the gateway token is NOT proof of
+                # a second factor (unlike OAuth tokens cidx issued after its own
+                # MFA flow). Set elevation_username so the elevation decorator
+                # can bind the window to this user if they do step up.
+                request.state.elevation_username = gw_user.username
                 return gw_user
 
     # Priority 2: Fall back to OAuth/JWT (existing auth)
