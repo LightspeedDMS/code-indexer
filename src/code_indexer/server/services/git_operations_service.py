@@ -14,6 +14,7 @@ single-use, bound to user, repository alias, operation and parameters, and kept
 in the cluster-shared PayloadCache (see git_confirmation_tokens).
 """
 
+from code_indexer.utils.index_store import INDEX_DIRNAME
 from code_indexer.server.middleware.correlation import get_correlation_id
 
 import json
@@ -23,7 +24,7 @@ import re
 import subprocess
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from code_indexer.server.services.git_confirmation_tokens import (
     ConfirmationBinding,
@@ -32,7 +33,7 @@ from code_indexer.server.services.git_confirmation_tokens import (
 )
 from code_indexer.server.utils.config_manager import ServerConfigManager
 from code_indexer.utils.git_runner import run_git_command
-from code_indexer.server.logging_utils import format_error_log
+from code_indexer.server.logging_utils import format_error_log, mask_url_credentials
 from code_indexer.server.services.git_argv_safety import (
     GIT_CLEAN_UNTRACKED_ARGV,
     validate_branch_name,
@@ -41,6 +42,12 @@ from code_indexer.server.services.git_argv_safety import (
     validate_reset_mode,
     validate_revision,
     validate_revision_range,
+)
+from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
+from code_indexer.server.services.git_tools_seam import (
+    DelegatedGitTools,
+    GitToolsUnavailableError,
+    delegated_git_tools,
 )
 
 if TYPE_CHECKING:
@@ -52,6 +59,7 @@ if TYPE_CHECKING:
         GitTimeoutsConfig,
         ApiLimitsConfig,
     )
+    from code_indexer.server.storage.shared.git_backend import GitBackend
     from code_indexer.server.repositories.activated_repo_manager import (
         ActivatedRepoManager,
     )
@@ -102,9 +110,38 @@ class GitCommandError(Exception):
             parts.append(f"Return code: {self.returncode}")
 
         if self.stderr:
-            parts.append(f"stderr: {self.stderr}")
+            parts.append(f"stderr: {redact_url_credentials(self.stderr)}")
 
         return " | ".join(parts)
+
+
+_BRANCH_LIST_REF_FIELDS = 3
+
+
+_BRANCH_LIST_REF_FORMAT = "%(HEAD)%00%(refname)%00%(symref)%00"
+
+
+_BRANCH_LIST_REF_PATTERNS = ("refs/heads", "refs/remotes")
+
+
+_LOCAL_BRANCH_PREFIX = "refs/heads/"
+
+
+_REMOTE_BRANCH_PREFIX = "refs/remotes/"
+
+
+def _may_cover_index_state(pathspec: str) -> bool:
+    """Whether staging *pathspec* could reach ``.code-indexer/`` at the
+    repository root: the root itself, a glob, or pathspec magic."""
+    parts = [p for p in pathspec.replace("\\", "/").split("/") if p not in ("", ".")]
+    return not parts or pathspec.startswith(":") or any(c in pathspec for c in "*?[")
+
+
+def is_index_state_path(path: str) -> bool:
+    """Whether a repository-relative *path* is ``.code-indexer`` or inside it
+    (``./`` prefixes and a trailing ``/`` allowed)."""
+    parts = [p for p in path.replace("\\", "/").split("/") if p not in ("", ".")]
+    return bool(parts) and parts[0] == INDEX_DIRNAME
 
 
 class GitOperationsService:
@@ -409,6 +446,74 @@ class GitOperationsService:
                 )
             )
 
+    def _git_run(
+        self,
+        cmd: List[str],
+        cwd: Any,
+        check: bool = True,
+        timeout: Optional[float] = None,
+        **kwargs: Any,
+    ) -> "subprocess.CompletedProcess[str]":
+        """``run_git_command``, or -- when the repository is not on this pod
+        (delegated content backend) -- the same git through the git seam."""
+        tools = self._delegated_tools()
+        if tools is None:
+            result: "subprocess.CompletedProcess[str]" = run_git_command(
+                cmd, cwd=cwd, check=check, timeout=timeout, **kwargs
+            )
+            return result
+        try:
+            return tools.run(
+                cmd, cwd, check=check, timeout=timeout, env=kwargs.get("env")
+            )
+        except GitToolsUnavailableError as e:
+            raise GitCommandError(str(e), stderr="", command=list(cmd), cwd=cwd)
+
+    @staticmethod
+    def _delegated_tools() -> Optional[DelegatedGitTools]:
+        """The delegated git tools, or None (local default)."""
+        try:
+            return delegated_git_tools()
+        except GitToolsUnavailableError as e:
+            raise GitCommandError(str(e), stderr="")
+
+    def _fetch_credentials(
+        self, repo_path: Path, remote: str, credentials_url: Optional[str]
+    ) -> Optional[str]:
+        """The credential a pull/fetch on *remote* may carry
+        (``credentials_for_remote``). None when the repository is delegated:
+        git-mcp supplies its own credential, and resolving the remote here
+        would run git on a pod that does not hold the repository."""
+        if not credentials_url or self._delegated_tools() is not None:
+            return None
+        from code_indexer.server.git.remote_credentials import (
+            credentials_for_remote,
+        )
+
+        return credentials_for_remote(
+            repo_path, remote, credentials_url, push=False
+        ).credentials_url
+
+    def _git_config_value(self, repo_path: str, key: str) -> str:
+        """``git config <key>`` in the repository (CalledProcessError if unset)."""
+        if self._delegated_tools() is None:
+            return subprocess.check_output(
+                ["git", "config", key], cwd=repo_path, text=True
+            ).strip()
+        return self._git_run(
+            ["git", "config", "--get", key], cwd=repo_path
+        ).stdout.strip()
+
+    def _worktree_text(self, repo_path: Path, file_path: str) -> Optional[str]:
+        """A working-tree file's text, confined to the repository; None if absent."""
+        tools = self._delegated_tools()
+        if tools is not None:
+            return tools.read_worktree_text(repo_path, file_path)
+        full_path = self._safe_repo_file_path(repo_path, file_path)
+        if not full_path.exists():
+            return None
+        return full_path.read_text(encoding="utf-8", errors="strict")
+
     def get_status(self, repo_alias: str, username: str) -> Dict[str, Any]:
         """
         Get git status for an activated repository (REST API wrapper).
@@ -577,17 +682,13 @@ class GitOperationsService:
         if not user_email or not user_name:
             try:
                 if not user_email:
-                    user_email = subprocess.check_output(
-                        ["git", "config", "user.email"], cwd=repo_path, text=True
-                    ).strip()
+                    user_email = self._git_config_value(repo_path, "user.email")
                     logger.debug(
                         f"Using git config user.email: {user_email}",
                         extra={"correlation_id": get_correlation_id()},
                     )
                 if not user_name:
-                    user_name = subprocess.check_output(
-                        ["git", "config", "user.name"], cwd=repo_path, text=True
-                    ).strip()
+                    user_name = self._git_config_value(repo_path, "user.name")
                     logger.debug(
                         f"Using git config user.name: {user_name}",
                         extra={"correlation_id": get_correlation_id()},
@@ -984,12 +1085,16 @@ class GitOperationsService:
 
     # F2: Status/Inspection Operations
 
-    def git_status(self, repo_path: Path) -> Dict[str, Any]:
+    def git_status(
+        self, repo_path: Path, *, git_backend: Optional["GitBackend"] = None
+    ) -> Dict[str, Any]:
         """
         Get git repository status.
 
         Args:
             repo_path: Path to git repository
+            git_backend: the git seam (git-mcp) for a golden repository this
+                pod does not hold; None runs local git
 
         Returns:
             Dict with staged, unstaged, and untracked file lists
@@ -999,12 +1104,18 @@ class GitOperationsService:
         """
         try:
             cmd = ["git", "status", "--porcelain=v1"]
-            result = run_git_command(
-                cmd,
-                cwd=repo_path,
-                timeout=self._git_timeouts.git_local_timeout,
-                check=True,
-            )
+            if git_backend is not None:
+                # `git status --porcelain`: the v1 format, the same lines.
+                stdout = git_backend.status_porcelain(
+                    str(repo_path), timeout=self._git_timeouts.git_local_timeout
+                )
+            else:
+                stdout = self._git_run(
+                    cmd,
+                    cwd=repo_path,
+                    timeout=self._git_timeouts.git_local_timeout,
+                    check=True,
+                ).stdout
 
             # Parse porcelain v1 format: XY PATH
             # X = staged status, Y = unstaged status
@@ -1012,7 +1123,7 @@ class GitOperationsService:
             unstaged = []
             untracked = []
 
-            for line in result.stdout.splitlines():
+            for line in stdout.splitlines():
                 if not line:
                     continue
 
@@ -1027,8 +1138,10 @@ class GitOperationsService:
                 if status_code[1] in "MADRC":
                     unstaged.append(file_path)
 
-                # Untracked files
-                if status_code == "??":
+                # Untracked files -- never cidx's own index state (EVO-64616:
+                # a copy activated before its .git/info/exclude was written
+                # still lists it).
+                if status_code == "??" and not is_index_state_path(file_path):
                     untracked.append(file_path)
 
             return {"staged": staged, "unstaged": unstaged, "untracked": untracked}
@@ -1060,6 +1173,7 @@ class GitOperationsService:
         stat_only: Optional[bool] = None,
         offset: int = 0,
         limit: Optional[int] = None,
+        git_backend: Optional["GitBackend"] = None,
     ) -> Dict[str, Any]:
         """
         Get git diff output with pagination support.
@@ -1074,6 +1188,8 @@ class GitOperationsService:
             stat_only: Show only file statistics (--stat flag)
             offset: Number of lines to skip (default: 0)
             limit: Maximum lines to return (default: 500, max: 5000)
+            git_backend: the git seam (git-mcp) for a golden repository this
+                pod does not hold. None runs git as before.
 
         Returns:
             Dict with diff_text, files_changed, and pagination metadata
@@ -1145,7 +1261,7 @@ class GitOperationsService:
                 cmd.append("--")
                 cmd.extend(file_paths)
 
-            result = run_git_command(
+            result = self._runner_for(git_backend)(
                 cmd,
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -1216,6 +1332,7 @@ class GitOperationsService:
         path: Optional[str] = None,
         aggregation_mode: Optional[str] = None,
         response_format: Optional[str] = None,
+        git_backend: Optional["GitBackend"] = None,
     ) -> Dict[str, Any]:
         """
         Get git commit history with pagination support.
@@ -1231,6 +1348,10 @@ class GitOperationsService:
             path: Optional path filter to show only commits affecting this path
             aggregation_mode: Optional MCP aggregation mode (affects response formatting)
             response_format: Optional MCP response format (affects response structure)
+            git_backend: the git seam (git-mcp) for a golden repository this
+                pod does not hold; None runs local git. git-mcp counts and
+                lists one revision without since/until/author/path filters:
+                a filtered log REFUSES (DelegatedRepositoryUnsupportedError).
 
         Returns:
             Dict with commits list and pagination metadata
@@ -1257,6 +1378,20 @@ class GitOperationsService:
             # validation at all. See git_argv_safety module docstring for
             # the invariant.
             branch = validate_revision_range(branch, repo_path, param_name="branch")
+            format_str = "%H\x1f%an\x1f%ai\x1f%s"
+
+            if git_backend is not None and not (since_date or until or author or path):
+                total_commits, log_stdout = self._git_log_through_backend(
+                    git_backend,
+                    repo_path,
+                    format_str,
+                    branch=branch,
+                    offset=offset,
+                    limit=effective_limit,
+                )
+                return self._git_log_page(
+                    repo_path, log_stdout, total_commits, offset=offset, limit=limit
+                )
 
             # Get total commit count (for pagination metadata)
             # Use branch or HEAD as the revision specifier
@@ -1274,7 +1409,8 @@ class GitOperationsService:
                 count_cmd.append("--")
                 count_cmd.append(path)
 
-            count_result = run_git_command(
+            run = self._runner_for(git_backend)
+            count_result = run(
                 count_cmd,
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -1289,7 +1425,6 @@ class GitOperationsService:
             # whose subject contained `"` or `\` because json.loads raised
             # JSONDecodeError per-line and the except branch swallowed it.
             # Fields order: hash, author, date, message.  Bug #825 fix.
-            format_str = "%H\x1f%an\x1f%ai\x1f%s"
             cmd = ["git", "log", f"--format={format_str}", f"-n{effective_limit}"]
 
             # Story #686: Add offset via --skip
@@ -1309,58 +1444,15 @@ class GitOperationsService:
                 cmd.append("--")
                 cmd.append(path)
 
-            result = run_git_command(
+            result = run(
                 cmd,
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
                 check=True,
             )
-
-            commits = []
-            for line in result.stdout.splitlines():
-                # Skip blank lines only. Do NOT strip the raw payload —
-                # leading/trailing whitespace inside a commit subject must
-                # be preserved.
-                if not line.strip():
-                    continue
-                # maxsplit=3 preserves any stray \x1f inside the subject
-                # (git won't emit one there, but stay strict).
-                parts = line.split("\x1f", 3)
-                if len(parts) != 4:
-                    # Malformed output shouldn't happen with this format
-                    # string; surface it at WARNING instead of silent drop.
-                    logger.warning(
-                        "git log produced malformed line for %s (expected 4 "
-                        "fields separated by \\x1f, got %d): %r",
-                        repo_path,
-                        len(parts),
-                        line,
-                    )
-                    continue
-                commit_hash, commit_author, commit_date, commit_message = parts
-                commits.append(
-                    {
-                        "commit_hash": commit_hash,
-                        "author": commit_author,
-                        "date": commit_date,
-                        "message": commit_message,
-                    }
-                )
-
-            # Story #686: Calculate pagination metadata
-            commits_returned = len(commits)
-            has_more = (offset + commits_returned) < total_commits
-            next_offset = (offset + commits_returned) if has_more else None
-
-            return {
-                "commits": commits,
-                "commits_returned": commits_returned,
-                "total_commits": total_commits,
-                "has_more": has_more,
-                "next_offset": next_offset,
-                "offset": offset,
-                "limit": limit,
-            }
+            return self._git_log_page(
+                repo_path, result.stdout, total_commits, offset=offset, limit=limit
+            )
 
         except subprocess.CalledProcessError as e:
             raise GitCommandError(
@@ -1378,7 +1470,113 @@ class GitOperationsService:
                 cwd=repo_path,
             )
 
+    def _git_log_through_backend(
+        self,
+        git_backend: "GitBackend",
+        repo_path: Path,
+        format_str: str,
+        *,
+        branch: Optional[str],
+        offset: int,
+        limit: int,
+    ) -> "tuple[int, str]":
+        """:meth:`git_log`'s count and page through git-mcp: ``rev_list_count``
+        and ``log_raw`` -- the same two commands for an unfiltered log."""
+        from code_indexer.global_repos.git_operations import (
+            decode_like_run_git_command,
+        )
+
+        timeout = self._git_timeouts.git_local_timeout
+        repo = str(repo_path)
+        total_commits = git_backend.rev_list_count(
+            repo, branch if branch else "HEAD", timeout=timeout
+        )
+        if limit <= 0:
+            return total_commits, ""  # local `-n0` lists nothing
+        raw = git_backend.log_raw(
+            repo,
+            format_str,
+            [branch] if branch else [],
+            skip=offset if offset > 0 else None,
+            max_count=limit,
+            timeout=timeout,
+        )
+        return total_commits, decode_like_run_git_command(bytes(raw))
+
+    def _git_log_page(
+        self,
+        repo_path: Path,
+        stdout: str,
+        total_commits: int,
+        *,
+        offset: int,
+        limit: int,
+    ) -> Dict[str, Any]:
+        """Parse one ``git log`` page and its pagination metadata."""
+        commits = []
+        for line in stdout.splitlines():
+            # Skip blank lines only. Do NOT strip the raw payload —
+            # leading/trailing whitespace inside a commit subject must
+            # be preserved.
+            if not line.strip():
+                continue
+            # maxsplit=3 preserves any stray \x1f inside the subject
+            # (git won't emit one there, but stay strict).
+            parts = line.split("\x1f", 3)
+            if len(parts) != 4:
+                # Malformed output shouldn't happen with this format
+                # string; surface it at WARNING instead of silent drop.
+                logger.warning(
+                    "git log produced malformed line for %s (expected 4 "
+                    "fields separated by \\x1f, got %d): %r",
+                    repo_path,
+                    len(parts),
+                    line,
+                )
+                continue
+            commit_hash, commit_author, commit_date, commit_message = parts
+            commits.append(
+                {
+                    "commit_hash": commit_hash,
+                    "author": commit_author,
+                    "date": commit_date,
+                    "message": commit_message,
+                }
+            )
+
+        # Story #686: Calculate pagination metadata
+        commits_returned = len(commits)
+        has_more = (offset + commits_returned) < total_commits
+        next_offset = (offset + commits_returned) if has_more else None
+
+        return {
+            "commits": commits,
+            "commits_returned": commits_returned,
+            "total_commits": total_commits,
+            "has_more": has_more,
+            "next_offset": next_offset,
+            "offset": offset,
+            "limit": limit,
+        }
+
     # F3: Staging/Commit Operations
+
+    @staticmethod
+    def _exclude_index_state(repo_path: Path) -> None:
+        """Exclude ``.code-indexer/`` from git in *repo_path* before a stage
+        that could reach it; refuse the stage when that cannot be done."""
+        from code_indexer.server.repositories.activated_working_copy import (
+            exclude_index_state,
+        )
+
+        try:
+            exclude_index_state(repo_path)
+        except Exception as exc:
+            raise GitCommandError(
+                "refusing to stage the whole tree: could not exclude cidx's "
+                f"{INDEX_DIRNAME}/ index state from git ({exc})",
+                stderr="",
+            ) from exc
 
     def git_stage(self, repo_path: Path, file_paths: List[str]) -> Dict[str, Any]:
         """
@@ -1405,9 +1603,16 @@ class GitOperationsService:
             # invariant.
             validated_paths = validate_pathspecs(validated_paths) or []
 
+            if any(_may_cover_index_state(p) for p in validated_paths):
+                # EVO-64616: a stage of the whole tree must not pick up cidx's
+                # index state in a copy activated before activation excluded
+                # it. Excluding it first (idempotent) is the guarantee; an
+                # exclude PATHSPEC is not -- git fails the add when it names a
+                # path that is already ignored.
+                self._exclude_index_state(repo_path)
             cmd = ["git", "add", "--"] + validated_paths
 
-            run_git_command(
+            self._git_run(
                 cmd,
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -1448,7 +1653,7 @@ class GitOperationsService:
             file_paths = validate_pathspecs(file_paths) or []
             cmd = ["git", "reset", "HEAD", "--"] + file_paths
 
-            run_git_command(
+            self._git_run(
                 cmd,
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -1527,7 +1732,7 @@ class GitOperationsService:
                 raise ValueError(f"Invalid user name format: {user_name}")
 
             # Check for staged .code-indexer files before committing
-            staged_result = run_git_command(
+            staged_result = self._git_run(
                 ["git", "diff", "--cached", "--name-only"],
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -1581,7 +1786,7 @@ class GitOperationsService:
 
             cmd = ["git", "commit", "-m", attributed_message]
 
-            run_git_command(
+            self._git_run(
                 cmd,
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -1591,7 +1796,7 @@ class GitOperationsService:
 
             # Get full commit hash using git rev-parse HEAD
             # (git commit output only shows short hash)
-            hash_result = run_git_command(
+            hash_result = self._git_run(
                 ["git", "rev-parse", "HEAD"],
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -1600,7 +1805,7 @@ class GitOperationsService:
             commit_hash = hash_result.stdout.strip()
 
             # Get actual committer email from the commit
-            committer_result = run_git_command(
+            committer_result = self._git_run(
                 ["git", "show", "-s", "--format=%ce", "HEAD"],
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -1663,7 +1868,7 @@ class GitOperationsService:
             from code_indexer.utils import git_runner
 
             try:
-                count_result = run_git_command(
+                count_result = self._git_run(
                     [
                         "git",
                         "rev-list",
@@ -1727,24 +1932,32 @@ class GitOperationsService:
         )
 
         try:
-            result = push(
-                repo_path,
-                remote,
-                branch,
-                set_upstream=set_upstream,
-                credentials_url=credentials_url,
-                push_url=push_url,
-                timeout=self._git_timeouts.git_remote_timeout,
-            )
-
+            if self._delegated_tools() is not None:
+                result = self._delegated_push(
+                    repo_path, remote, branch, set_upstream, push_url
+                )
+            else:
+                result = push(
+                    repo_path,
+                    remote,
+                    branch,
+                    set_upstream=set_upstream,
+                    credentials_url=credentials_url,
+                    push_url=push_url,
+                    timeout=self._git_timeouts.git_remote_timeout,
+                )
             pushed_commits = self._count_pushed_commits(result, repo_path)
-
             return {"success": True, "pushed_commits": pushed_commits}
 
         except PushCredentialsNotApplicableError as e:
             raise GitCommandError(str(e), stderr="")
         except subprocess.CalledProcessError as e:
-            stderr = getattr(e, "stderr", "")
+            # Defense in depth: git can echo a remote URL carrying userinfo
+            # (a stored or rewritten one) in its stderr, and str(e) renders
+            # the whole command; neither may reach a caller or a log with the
+            # authority in it. run_git_command already masks the credential
+            # it supplied.
+            stderr = str(mask_url_credentials(getattr(e, "stderr", "") or ""))
 
             if "Authentication" in stderr or "Permission denied" in stderr:
                 raise GitCommandError(
@@ -1759,11 +1972,60 @@ class GitOperationsService:
                     returncode=e.returncode,
                 )
             else:
+                detail = stderr or str(mask_url_credentials(str(e)))
                 raise GitCommandError(
-                    f"git push failed: {e}", stderr=stderr, returncode=e.returncode
+                    f"git push failed: {detail}",
+                    stderr=stderr,
+                    returncode=e.returncode,
                 )
         except subprocess.TimeoutExpired as e:
             raise self._remote_timeout_error(e, "push", remote)
+
+    def _delegated_push(
+        self,
+        repo_path: Path,
+        remote: str,
+        branch: Optional[str],
+        set_upstream: bool,
+        push_url: Optional[str],
+    ) -> "subprocess.CompletedProcess[str]":
+        """git_push when the working copy is not on this pod (EVO-64616): the
+        push runs in git-mcp, which supplies its OWN credential, so no
+        credential from here applies and none is sent. Validation runs
+        through the same seam (the remote must be configured there). A
+        ``push_url`` (a run-time URL rewrite) cannot travel through the seam's
+        structured push and is refused; ``set_upstream`` is applied after a
+        successful push as ``git branch --set-upstream-to`` (git-mcp's push
+        takes no options)."""
+        if push_url:
+            raise GitCommandError(
+                "Pushing over a different URL is not supported when the "
+                "repository is delegated: git-mcp pushes to the remote's own "
+                "URL with its own credential",
+                stderr="",
+            )
+        remote = validate_remote_name(remote, repo_path, runner=self._git_run)
+        branch = validate_branch_name(branch, param_name="branch")
+        # Defense in depth: hard option boundary right after the subcommand.
+        cmd = ["git", "push", "--end-of-options", remote]
+        if branch:
+            cmd.append(branch)
+        result = self._git_run(
+            cmd, cwd=repo_path, timeout=self._git_timeouts.git_remote_timeout
+        )
+        local_branch = branch.split(":", 1)[0].lstrip("+") if branch else ""
+        if set_upstream and local_branch and local_branch != "HEAD":
+            self._git_run(
+                [
+                    "git",
+                    "branch",
+                    f"--set-upstream-to={remote}/{local_branch}",
+                    local_branch,
+                ],
+                cwd=repo_path,
+                check=True,
+            )
+        return result
 
     def git_push_with_pat(
         self,
@@ -1818,11 +2080,19 @@ class GitOperationsService:
         from code_indexer.utils import git_runner
 
         # Local metadata lookups, bounded; a timeout says what timed out.
+        # Through self._git_run: on a pod that does not hold the repository
+        # they run where it is (EVO-64616).
         try:
-            remote = validate_remote_name(remote, repo_path)
+            remote = validate_remote_name(remote, repo_path, runner=self._git_run)
             branch = validate_branch_name(branch, param_name="branch")
+            if self._delegated_tools() is not None:
+                # EVO-64616: git-mcp pushes with its OWN credential; the
+                # user's PAT never leaves this pod.
+                return self.git_push(
+                    repo_path, remote=remote, branch=branch, set_upstream=set_upstream
+                )
             if remote_url is None:
-                remote_url = run_git_command(
+                remote_url = self._git_run(
                     ["git", "remote", "get-url", remote],
                     cwd=repo_path,
                     check=True,
@@ -1886,7 +2156,7 @@ class GitOperationsService:
             # whole element is checked and its '+'/'src:dst' contents reach
             # git unchanged. See git_argv_safety module docstring for
             # the invariant.
-            remote = validate_remote_name(remote, repo_path)
+            remote = validate_remote_name(remote, repo_path, runner=self._git_run)
             branch = validate_branch_name(branch, param_name="branch")
 
             # NOTE: unlike push/fetch below, `--end-of-options` is not a
@@ -1904,18 +2174,14 @@ class GitOperationsService:
             if branch:
                 cmd.append(branch)
 
-            from code_indexer.server.git.remote_credentials import (
-                credentials_for_remote,
-            )
-
-            result = run_git_command(
+            result = self._git_run(
                 cmd,
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_remote_timeout,
                 check=False,
-                credentials_url=credentials_for_remote(
-                    repo_path, remote, credentials_url, push=False
-                ).credentials_url,
+                credentials_url=self._fetch_credentials(
+                    repo_path, remote, credentials_url
+                ),
             )
 
             conflicts = []
@@ -1966,22 +2232,18 @@ class GitOperationsService:
             # remote must be a configured remote name; it never reaches
             # argv with a leading '-'. See git_argv_safety module docstring
             # for the invariant.
-            remote = validate_remote_name(remote, repo_path)
+            remote = validate_remote_name(remote, repo_path, runner=self._git_run)
 
-            from code_indexer.server.git.remote_credentials import (
-                credentials_for_remote,
-            )
-
-            result = run_git_command(
+            result = self._git_run(
                 # Defense in depth: hard option boundary right after the
                 # subcommand, before remote.
                 ["git", "fetch", "--end-of-options", remote],
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_remote_timeout,
                 check=True,
-                credentials_url=credentials_for_remote(
-                    repo_path, remote, credentials_url, push=False
-                ).credentials_url,
+                credentials_url=self._fetch_credentials(
+                    repo_path, remote, credentials_url
+                ),
             )
 
             fetched_refs = []
@@ -2066,7 +2328,7 @@ class GitOperationsService:
         try:
             cmd = ["git", "reset", f"--{mode}", target]
 
-            run_git_command(
+            self._git_run(
                 cmd,
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -2118,7 +2380,7 @@ class GitOperationsService:
             return pending
 
         try:
-            result = run_git_command(
+            result = self._git_run(
                 list(GIT_CLEAN_UNTRACKED_ARGV),
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -2156,7 +2418,7 @@ class GitOperationsService:
             GitCommandError: If git merge --abort fails
         """
         try:
-            run_git_command(
+            self._git_run(
                 ["git", "merge", "--abort"],
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -2209,7 +2471,7 @@ class GitOperationsService:
         assert source_branch is not None  # required parameter, never None here
 
         try:
-            result = run_git_command(
+            result = self._git_run(
                 ["git", "merge", source_branch],
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -2287,7 +2549,7 @@ class GitOperationsService:
         # Phase 2: git status --porcelain for definitive conflict list
         conflicts: List[Dict[str, Any]] = []
         try:
-            status_result = run_git_command(
+            status_result = self._git_run(
                 ["git", "status", "--porcelain"],
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -2340,6 +2602,11 @@ class GitOperationsService:
             text conflict markers
         """
         try:
+            if self._delegated_tools() is not None:
+                text = self._worktree_text(repo_path, file_path)
+                if text is None:
+                    return True
+                return "<<<<<<< " not in text
             full_path = repo_path / file_path
             content = full_path.read_text(encoding="utf-8", errors="strict")
             return "<<<<<<< " not in content
@@ -2364,11 +2631,15 @@ class GitOperationsService:
               - total_conflicts: int
         """
         # Check if merge is in progress
-        merge_head = repo_path / ".git" / "MERGE_HEAD"
-        in_merge = merge_head.exists()
+        tools = self._delegated_tools()
+        if tools is not None:
+            in_merge = tools.merge_in_progress(repo_path)
+        else:
+            merge_head = repo_path / ".git" / "MERGE_HEAD"
+            in_merge = merge_head.exists()
 
         # Get conflicted files from git status
-        result = run_git_command(
+        result = self._git_run(
             ["git", "status", "--porcelain"],
             cwd=repo_path,
             timeout=self._git_timeouts.git_local_timeout,
@@ -2425,8 +2696,11 @@ class GitOperationsService:
           - theirs_content: str
         """
         try:
-            full_path = self._safe_repo_file_path(repo_path, file_path)
-            content = full_path.read_text(encoding="utf-8", errors="strict")
+            if self._delegated_tools() is not None:
+                content = self._worktree_text(repo_path, file_path) or ""
+            else:
+                full_path = self._safe_repo_file_path(repo_path, file_path)
+                content = full_path.read_text(encoding="utf-8", errors="strict")
             lines = content.split("\n")
         except (UnicodeDecodeError, OSError):
             return []
@@ -2477,7 +2751,7 @@ class GitOperationsService:
             ValueError: If file is not conflicted or still has markers
         """
         # Verify file is currently conflicted
-        status_result = run_git_command(
+        status_result = self._git_run(
             ["git", "status", "--porcelain", "--", file_path],
             cwd=repo_path,
             timeout=self._git_timeouts.git_local_timeout,
@@ -2497,20 +2771,18 @@ class GitOperationsService:
             raise ValueError(f"File '{file_path}' is not in a conflicted state.")
 
         # Check that conflict markers are removed (for text files)
-        full_path = self._safe_repo_file_path(repo_path, file_path)
-        if full_path.exists():
-            try:
-                content = full_path.read_text(encoding="utf-8", errors="strict")
-                if "<<<<<<< " in content:
-                    raise ValueError(
-                        "File still contains conflict markers. "
-                        "Edit the file to resolve conflicts before marking as resolved."
-                    )
-            except UnicodeDecodeError:
-                pass  # Binary file — no markers to check
+        try:
+            content = self._worktree_text(repo_path, file_path)
+        except UnicodeDecodeError:
+            content = None  # Binary file — no markers to check
+        if content is not None and "<<<<<<< " in content:
+            raise ValueError(
+                "File still contains conflict markers. "
+                "Edit the file to resolve conflicts before marking as resolved."
+            )
 
         # Stage the resolved file
-        run_git_command(
+        self._git_run(
             ["git", "add", "--", file_path],
             cwd=repo_path,
             timeout=self._git_timeouts.git_local_timeout,
@@ -2518,7 +2790,7 @@ class GitOperationsService:
         )
 
         # Count remaining conflicts
-        remaining_result = run_git_command(
+        remaining_result = self._git_run(
             ["git", "status", "--porcelain"],
             cwd=repo_path,
             timeout=self._git_timeouts.git_local_timeout,
@@ -2563,7 +2835,7 @@ class GitOperationsService:
             GitCommandError: If git checkout fails
         """
         try:
-            run_git_command(
+            self._git_run(
                 ["git", "checkout", "HEAD", "--", file_path],
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -2585,12 +2857,16 @@ class GitOperationsService:
 
     # F6: Branch Management Operations
 
-    def git_branch_list(self, repo_path: Path) -> Dict[str, Any]:
+    def git_branch_list(
+        self, repo_path: Path, *, git_backend: Optional["GitBackend"] = None
+    ) -> Dict[str, Any]:
         """
         List all branches (local and remote).
 
         Args:
             repo_path: Path to git repository
+            git_backend: the git seam (git-mcp) for a golden repository this
+                pod does not hold; None runs local git
 
         Returns:
             Dict with current branch, local branches, and remote branches
@@ -2599,18 +2875,21 @@ class GitOperationsService:
             GitCommandError: If git branch fails
         """
         try:
-            result = run_git_command(
-                ["git", "branch", "-a"],
-                cwd=repo_path,
-                timeout=self._git_timeouts.git_local_timeout,
-                check=True,
-            )
+            if git_backend is not None:
+                return self._branch_list_through_backend(repo_path, git_backend)
+            else:
+                lines = self._git_run(
+                    ["git", "branch", "-a"],
+                    cwd=repo_path,
+                    timeout=self._git_timeouts.git_local_timeout,
+                    check=True,
+                ).stdout.splitlines()
 
             current_branch = ""
             local_branches = []
             remote_branches = []
 
-            for line in result.stdout.splitlines():
+            for line in lines:
                 line = line.strip()
                 if not line:
                     continue
@@ -2666,7 +2945,7 @@ class GitOperationsService:
             branch_name = validate_branch_name(branch_name, param_name="branch_name")
             assert branch_name is not None  # required parameter, never None here
 
-            run_git_command(
+            self._git_run(
                 ["git", "branch", branch_name],
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -2712,7 +2991,7 @@ class GitOperationsService:
             assert branch_name is not None  # required parameter, never None here
 
             # Get current branch first
-            current_result = run_git_command(
+            current_result = self._git_run(
                 ["git", "branch", "--show-current"],
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -2721,7 +3000,7 @@ class GitOperationsService:
             previous_branch = current_result.stdout.strip()
 
             # Switch branch
-            run_git_command(
+            self._git_run(
                 ["git", "checkout", branch_name],
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -2794,7 +3073,7 @@ class GitOperationsService:
             return pending
 
         try:
-            run_git_command(
+            self._git_run(
                 ["git", "branch", "-d", branch_name],
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -2831,7 +3110,10 @@ class GitOperationsService:
         """
         forbidden_patterns = [".code-indexer/", ".code-indexer-override.yaml"]
         forbidden_files = [
-            f for f in file_paths if any(pattern in f for pattern in forbidden_patterns)
+            f
+            for f in file_paths
+            if any(pattern in f for pattern in forbidden_patterns)
+            or is_index_state_path(f)
         ]
 
         if forbidden_files:
@@ -2900,7 +3182,7 @@ class GitOperationsService:
             if message:
                 cmd.extend(["-m", message])
 
-            result = run_git_command(
+            result = self._git_run(
                 cmd,
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -2944,7 +3226,7 @@ class GitOperationsService:
             GitCommandError: If git stash pop fails
         """
         try:
-            result = run_git_command(
+            result = self._git_run(
                 ["git", "stash", "pop", f"stash@{{{index}}}"],
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -2987,7 +3269,7 @@ class GitOperationsService:
             GitCommandError: If git stash apply fails
         """
         try:
-            result = run_git_command(
+            result = self._git_run(
                 ["git", "stash", "apply", f"stash@{{{index}}}"],
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -3029,7 +3311,7 @@ class GitOperationsService:
             GitCommandError: If git stash list fails
         """
         try:
-            result = run_git_command(
+            result = self._git_run(
                 ["git", "stash", "list", "--format=%gd|||%gs|||%ci"],
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -3097,7 +3379,7 @@ class GitOperationsService:
             GitCommandError: If git stash drop fails
         """
         try:
-            result = run_git_command(
+            result = self._git_run(
                 ["git", "stash", "drop", f"stash@{{{index}}}"],
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -3162,10 +3444,10 @@ class GitOperationsService:
             if env is not None:
                 run_kwargs["env"] = env
 
-            run_git_command(cmd, **run_kwargs)
+            self._git_run(cmd, **run_kwargs)
 
             # Get the new commit hash via rev-parse HEAD
-            hash_result = run_git_command(
+            hash_result = self._git_run(
                 ["git", "rev-parse", "HEAD"],
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_local_timeout,
@@ -3189,6 +3471,82 @@ class GitOperationsService:
             raise GitCommandError(
                 f"git commit --amend timed out after {e.timeout}s", stderr=""
             )
+
+    def _branch_list_through_backend(
+        self, repo_path: Path, git_backend: "GitBackend"
+    ) -> Dict[str, Any]:
+        """:meth:`git_branch_list` through the git seam, from ``for-each-ref``.
+
+        Not ``list_branches``: git-mcp answers that in ``%(refname:short)``
+        shape (no ``*`` marker, remotes without ``remotes/``), which the
+        ``git branch -a`` parser would misread -- current branch lost, remote
+        branches reported as local. ``for-each-ref`` returns git's own bytes
+        through either backend: ``%(HEAD)`` marks the current branch, the full
+        refname says local or remote, ``%(symref)`` renders ``origin/HEAD`` as
+        ``git branch -a`` does. A detached HEAD (no ``*`` ref) reads as local
+        git prints it, ``(HEAD detached at <short sha>)``.
+        """
+        from code_indexer.global_repos.git_operations import (
+            decode_like_run_git_command,
+        )
+        from code_indexer.server.storage.shared.git_backend import head_branch
+
+        repo = str(repo_path)
+        timeout = self._git_timeouts.git_local_timeout
+        raw = git_backend.for_each_ref(
+            repo, _BRANCH_LIST_REF_FORMAT, _BRANCH_LIST_REF_PATTERNS, timeout=timeout
+        )
+        tokens = decode_like_run_git_command(bytes(raw)).split("\x00")
+        # Every record ends with a NUL then git's newline, which leads the
+        # next record's first field (and is the whole trailing token).
+        tail = tokens.pop()
+        if tail.strip() or len(tokens) % _BRANCH_LIST_REF_FIELDS:
+            raise GitCommandError(
+                f"git branch list: unexpected for-each-ref output from the git "
+                f"backend ({len(tokens)} fields, trailing {tail[:40]!r})",
+                stderr="",
+            )
+        current_branch = ""
+        local_branches: List[str] = []
+        remote_branches: List[str] = []
+        for start in range(0, len(tokens), _BRANCH_LIST_REF_FIELDS):
+            head, refname, symref = tokens[start : start + _BRANCH_LIST_REF_FIELDS]
+            head = head.lstrip("\n")
+            if refname.startswith(_LOCAL_BRANCH_PREFIX):
+                name = refname[len(_LOCAL_BRANCH_PREFIX) :]
+                local_branches.append(name)
+                if head.strip() == "*":
+                    current_branch = name
+            elif refname.startswith(_REMOTE_BRANCH_PREFIX):
+                name = refname[len(_REMOTE_BRANCH_PREFIX) :]
+                if symref.startswith(_REMOTE_BRANCH_PREFIX):
+                    name = f"{name} -> {symref[len(_REMOTE_BRANCH_PREFIX) :]}"
+                remote_branches.append(name)
+        if not current_branch and head_branch(git_backend, repo, timeout) is None:
+            # Detached: `git branch -a` lists it first, as the current entry.
+            short = str(
+                git_backend.rev_parse(repo, "--short", "HEAD", timeout=timeout)
+            ).strip()
+            current_branch = f"(HEAD detached at {short})"
+            local_branches.insert(0, current_branch)
+        return {
+            "current": current_branch,
+            "local": local_branches,
+            "remote": remote_branches,
+        }
+
+    def _runner_for(
+        self, git_backend: Optional["GitBackend"]
+    ) -> Callable[..., "subprocess.CompletedProcess[str]"]:
+        """The git runner for one operation: :meth:`_git_run`, or -- for a
+        golden repository through the git seam (*git_backend*) -- the read-only
+        golden reader (git-mcp ``git_exec``; golden repositories are never
+        modified)."""
+        if git_backend is None:
+            return self._git_run
+        from code_indexer.server.services.git_tools_seam import golden_git_reader
+
+        return golden_git_reader(git_backend).run
 
 
 # Bug #1650 (mirrors Bug #1638): the lazy-init lock MUST be an RLock, not a

@@ -43,6 +43,13 @@ from code_indexer.server.services.job_tracker import (
     is_restart_interruption_error,
 )
 
+from code_indexer.utils.worker_budget import (
+    detect_worker_count,
+    per_process_budget,
+)
+
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
     from code_indexer.server.utils.config_manager import (
         ServerResourceConfig,
@@ -66,13 +73,14 @@ if TYPE_CHECKING:
 #     repo_alias) uniqueness gate is the wrong dedup tool for temporal
 #     queries -- correct dedup granularity is the full query signature,
 #     enforced separately by TemporalDedupCache.
-#   - "xray_search_batch" (xray_batch.py): "no per-repo dedup; concurrent
-#     batches allowed" -- an explicit design comment at the call site.
+#   - feature job types (X-Ray's "xray_search_batch": no per-repo dedup,
+#     concurrent batches allowed) are declared by the feature
+#     (JobTypeContribution.repo_alias_optional, SDK 0.5) and checked below.
 #   - "query_analytics_export" (inline_admin_ops.py's
 #     trigger_query_analytics_export): a global, cross-repo export job
 #     with no single owning repo_alias.
 _OPERATIONS_WITHOUT_REPO_ALIAS_BY_DESIGN = frozenset(
-    {"temporal_query", "xray_search_batch", "query_analytics_export"}
+    {"temporal_query", "query_analytics_export"}
 )
 
 # Bug #1535: the "{platform}_discovery" family (web/routes.py's
@@ -95,6 +103,12 @@ def _operation_omits_repo_alias_by_design(operation_type: str) -> bool:
     match), so submit_job should log the omission at DEBUG rather than
     WARNING."""
     if operation_type in _OPERATIONS_WITHOUT_REPO_ALIAS_BY_DESIGN:
+        return True
+    from code_indexer.server.features.dispatch_policy import (
+        feature_operation_omits_repo_alias,
+    )
+
+    if feature_operation_omits_repo_alias(operation_type):
         return True
     return any(
         operation_type.endswith(suffix)
@@ -250,6 +264,10 @@ _MEMORY_HEAVY_OPS: frozenset = frozenset(
         "provider_temporal_index_rebuild",
         "sync_repository",
         "change_branch",
+        # A semantic re-embed re-runs `cidx index` (VoyageAI embed) on a golden clone —
+        # as heavy as add_golden_repo, so it goes through the same memory-admission gate.
+        # Must equal semantic_backfill.policy.SEMANTIC_BACKFILL_REINDEX_OP (validate_dispatch_covers).
+        "semantic_backfill_reindex",
     }
 )
 
@@ -262,7 +280,26 @@ _MEMORY_HEAVY_OPS: frozenset = frozenset(
 # IndexJobClaimLoop, or it simply keeps the legacy local-pool path.
 # Public (imported by distributed_job_worker + index_job_claim_loop + lifespan)
 # so the ops set has a single source of truth across the cluster job plumbing.
-POD_PULL_OPS: frozenset = _MEMORY_HEAVY_OPS
+#
+# EVO-66445: fts_backfill_build is POD_PULL (work-stealable across pods) but NOT
+# memory-heavy — a tantivy rebuild is a cheap LOCAL build, so it must not be gated by
+# the memory-admission path (which keys on _MEMORY_HEAVY_OPS above). Keeping the two
+# sets distinct lets a light op be distributed without being throttled. The literal
+# must equal ``fts_backfill.policy.FTS_BACKFILL_BUILD_OP`` — a mismatch fails loudly at
+# startup via ``validate_dispatch_covers`` (dispatch keys must == POD_PULL_OPS).
+#
+# global_repo_refresh is POD_PULL but NOT in _MEMORY_HEAVY_OPS, for the same
+# reason as fts_backfill_build: that set gates the LOCAL pool worker, which a
+# pod-pull row never reaches, and adding it there would newly throttle refreshes
+# on a solo/sqlite server that has always run them ungated. The cluster
+# backpressure arrives anyway -- DistributedJobClaimer memory-gates EVERY claim,
+# not just memory-heavy ops -- so a pressured pod leaves the row for one with
+# headroom. Leader-gating refresh would be the wrong fix: ~922 repos funnelled
+# through one pod trades a load spike for a throughput collapse. The literal must
+# equal ``global_repos.refresh_scheduler.GLOBAL_REPO_REFRESH_OP``.
+POD_PULL_OPS: frozenset = _MEMORY_HEAVY_OPS | frozenset(
+    {"fts_backfill_build", "global_repo_refresh"}
+)
 
 # Memory-aware admission: min seconds between "deferring under memory pressure" INFO
 # logs per manager, so a sustained RED spell (a heavy job deferred every
@@ -407,8 +444,20 @@ class BackgroundJobManager:
         # Workers pull (job_id, func, args, kwargs) tuples from
         # _pending_job_queue.  N submits → only pool_size threads alive,
         # not N per-submit threads each blocking on a semaphore.
-        pool_size = self._background_jobs_config.max_concurrent_background_jobs
-        for _ in range(pool_size):
+        # R4 (docs/background-work-distribution.md): max_concurrent_background_jobs
+        # is a NODE budget -- "how many background jobs this server runs at once".
+        # It was applied per uvicorn worker PROCESS, so the default of 5 meant 10
+        # threads on a 2-worker pod and 60 across the tools-* StatefulSet, all
+        # pulling on one Postgres and one NFS mount. Take this process's share.
+        #
+        # Stored, not recomputed: shutdown() drains the pool by sending one
+        # sentinel per worker, and if the two sides ever disagree about the count
+        # the surplus threads block on get() forever and the process never exits.
+        self._pool_size = per_process_budget(
+            self._background_jobs_config.max_concurrent_background_jobs,
+            detect_worker_count(),
+        )
+        for _ in range(self._pool_size):
             t = threading.Thread(
                 target=self._pool_worker,
                 args=(self._pending_job_queue, "ordinary"),
@@ -423,6 +472,13 @@ class BackgroundJobManager:
         # reading ONLY _temporal_pending_job_queue -- real isolation, so a
         # saturated ordinary lane can never starve a temporal job and vice
         # versa. Sized by temporal_lane_concurrency (restart-required).
+        #
+        # R4 exemption: deliberately NOT divided by the worker count. It
+        # defaults to 2, so halving it on a 2-worker node leaves 1 -- and the
+        # entire point of the separate lane is that temporal queries are not
+        # queued behind the ordinary pool. The lane is latency isolation, not a
+        # resource budget. A test pins this so a later divide-by-workers pass
+        # cannot absorb it without a decision.
         self._temporal_pool_size = (
             self._background_jobs_config.temporal_lane_concurrency
         )
@@ -553,8 +609,13 @@ class BackgroundJobManager:
 
     @property
     def max_concurrent_jobs(self) -> int:
-        """Get the maximum number of concurrent background jobs (Story #26)."""
-        return self._background_jobs_config.max_concurrent_background_jobs  # type: ignore[no-any-return]
+        """Concurrent background jobs THIS PROCESS runs (Story #26).
+
+        R4: the config value is the node budget; this is this process's share of
+        it, i.e. the real pool size. Reporting the undivided number here would
+        make the queue-depth stats say "2/5 running" while the pool is full.
+        """
+        return self._pool_size
 
     def register_cancel_handler(
         self, operation_type: str, handler: Callable[[], Any]
@@ -2384,16 +2445,19 @@ class BackgroundJobManager:
         """
         # Bug #1063 Part 3: Signal pool workers to stop accepting new work.
         self._pool_shutdown.set()
-        pool_size = self._background_jobs_config.max_concurrent_background_jobs
-        # Send one sentinel per worker so each blocked worker.get() wakes up.
-        for _ in range(pool_size):
+        # The size the pool was actually BUILT with, not a fresh read of config:
+        # a live config reload or a changed worker count would otherwise leave
+        # some pool threads without a sentinel, blocked on get() forever.
+        for _ in range(self._pool_size):
             self._pending_job_queue.put(None)
         # Story #1400 CRITICAL 1: separate sentinels for the separate
-        # temporal-lane queue/pool (exact per-worker count, mirroring the
-        # ordinary pool above; same config source used to size the pool at
-        # construction).
-        temporal_pool_size = self._background_jobs_config.temporal_lane_concurrency
-        for _ in range(temporal_pool_size):
+        # temporal-lane queue/pool, mirroring the ordinary pool above --
+        # including reading the size the lane was BUILT with rather than
+        # re-deriving it from config. Harmless today (the lane is not divided,
+        # so both reads agree) but it is the same drift hazard: any future
+        # change to how the lane is sized, or a live config reload, would leave
+        # some lane threads without a sentinel, blocked on get() forever.
+        for _ in range(self._temporal_pool_size):
             self._temporal_pending_job_queue.put(None)
 
         with self._lock:
@@ -2800,10 +2864,17 @@ class BackgroundJobManager:
             # JobTracker._should_skip_unscoped_orphan_sweep for the same
             # guard applied to the sibling JobTracker sweep.
             _backend_type_name = type(self._sqlite_backend).__name__
-            if (
-                _backend_type_name != "BackgroundJobsPostgresBackend"
-                and not self._is_primary_instance
-            ):
+            if _backend_type_name == "BackgroundJobsPostgresBackend":
+                # EVO-70528: the cluster backend refuses an unscoped sweep (it
+                # would fail other nodes' live jobs), so asking only produced a
+                # WARNING on every start. The node-scoped sweep runs through
+                # JobTracker.cleanup_orphaned_jobs_on_startup(node_id).
+                logging.debug(
+                    "BackgroundJobManager: skipping unscoped orphan-cleanup "
+                    "sweep -- PostgreSQL cleanup is node-scoped via JobTracker "
+                    "(Story #1400 CRITICAL 3)"
+                )
+            elif not self._is_primary_instance:
                 # Finding 2b: routine under `uvicorn --workers N` -- demoted
                 # to DEBUG per the Bug #1535 precedent so this doesn't break
                 # the post-E2E log-audit gate.

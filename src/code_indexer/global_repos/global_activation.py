@@ -99,6 +99,7 @@ class GlobalActivator:
         clone_path: str,
         enable_temporal: bool = False,
         temporal_options: Optional[Dict[str, Union[int, str]]] = None,
+        alias_extra: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
         Activate a golden repository globally.
@@ -112,6 +113,8 @@ class GlobalActivator:
             clone_path: Path to the cloned/indexed repository
             enable_temporal: Whether to enable temporal indexing (git history search)
             temporal_options: Temporal indexing options (max_commits, since_date, diff_context)
+            alias_extra: Fields written with the alias pointer (the published
+                index version under a delegated IndexStore)
 
         Raises:
             GlobalActivationError: If activation fails
@@ -121,9 +124,17 @@ class GlobalActivator:
         try:
             # Step 1: Create alias pointer file (atomically)
             logger.info(f"Creating global alias: {alias_name}")
-            self.alias_manager.create_alias(
-                alias_name=alias_name, target_path=clone_path, repo_name=repo_name
-            )
+            if alias_extra:
+                self.alias_manager.create_alias(
+                    alias_name=alias_name,
+                    target_path=clone_path,
+                    repo_name=repo_name,
+                    extra=alias_extra,
+                )
+            else:
+                self.alias_manager.create_alias(
+                    alias_name=alias_name, target_path=clone_path, repo_name=repo_name
+                )
 
             # Step 2: Register in global registry (atomically)
             # Include temporal settings for RefreshScheduler to use (Story #527)

@@ -125,7 +125,23 @@ def _base_clone_is_confirmed_absent(base_clone: Path) -> bool:
     genuinely absent. Any OTHER OSError (permission denied, a stale NFS
     handle, an I/O error) means "cannot confirm absence" -- returns False
     so the caller stays fail-closed rather than risking a false-positive
-    reclaim of a live repo's data under a flaky/stale mount."""
+    reclaim of a live repo's data under a flaky/stale mount.
+
+    Content seam: with content_backend='delegated' the base clone is with
+    workspace-mcp and this pod holds only index state, so nothing here can
+    confirm its absence -- always False (reclaim never fires)."""
+    from code_indexer.server.startup.content_backend_wiring import (
+        is_content_seam_delegated,
+    )
+
+    if is_content_seam_delegated():
+        logger.warning(
+            "Bug #1570 reconcile: cannot confirm base-clone absence at '%s' "
+            "with content_backend='delegated' (the repository is not on this "
+            "pod) -- treating as present, blocking reclaim (fail-closed).",
+            base_clone,
+        )
+        return False
     try:
         os.stat(base_clone)
     except (FileNotFoundError, NotADirectoryError):

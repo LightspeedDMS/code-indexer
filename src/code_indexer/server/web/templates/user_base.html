@@ -31,6 +31,7 @@
                     <li><a href="/user/mcp-credentials" {% if current_page == 'mcp-credentials' %}aria-current="page"{% endif %}>MCP Credentials</a></li>
                     <li><a href="/user/git-credentials" {% if current_page == 'git-credentials' %}aria-current="page"{% endif %}>Git Credentials</a></li>
                     <li><a href="/user/mfa/setup" {% if current_page == 'mfa' %}aria-current="page"{% endif %}>MFA</a></li>
+                    {% include "partials/feature_nav.html" %}
                     <li class="logout-btn"><a href="/user/logout" role="button" class="outline">Logout</a></li>
                 </ul>
             </nav>

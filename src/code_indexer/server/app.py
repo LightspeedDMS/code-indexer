@@ -14,7 +14,6 @@ from .repositories.background_jobs import BackgroundJobManager
 from .repositories.activated_repo_manager import ActivatedRepoManager
 from .repositories.repository_listing_manager import RepositoryListingManager
 from .query.semantic_query_manager import SemanticQueryManager
-from .services.workspace_cleanup_service import WorkspaceCleanupService
 
 # Constants for job operations and status
 GOLDEN_REPO_ADD_OPERATION = "add_golden_repo"
@@ -59,7 +58,6 @@ job_tracker: Optional[Any]  # Story #311: JobTracker instance
 activated_repo_manager: Optional[ActivatedRepoManager]
 repository_listing_manager: Optional[RepositoryListingManager]
 semantic_query_manager: Optional[SemanticQueryManager]
-workspace_cleanup_service: Optional[WorkspaceCleanupService]
 langfuse_sync_service: Optional[Any]  # Story #168: Langfuse trace sync service
 _server_hnsw_cache: Optional[Any]  # Server-wide HNSW cache (Story #526)
 _server_fts_cache: Optional[Any]  # Server-wide FTS cache
@@ -79,7 +77,6 @@ _LAZY_INIT_ATTRS = frozenset(
         "activated_repo_manager",
         "repository_listing_manager",
         "semantic_query_manager",
-        "workspace_cleanup_service",
         "langfuse_sync_service",
         "_server_hnsw_cache",
         "_server_fts_cache",
@@ -365,7 +362,7 @@ def create_app():
     global jwt_manager, user_manager, refresh_token_manager, golden_repo_manager
     global background_job_manager, job_tracker, activated_repo_manager
     global repository_listing_manager, semantic_query_manager
-    global _server_hnsw_cache, _server_fts_cache, workspace_cleanup_service
+    global _server_hnsw_cache, _server_fts_cache
 
     from .startup.service_init import initialize_services
     from .startup.lifespan import make_lifespan
@@ -384,7 +381,6 @@ def create_app():
     activated_repo_manager = services["activated_repo_manager"]
     repository_listing_manager = services["repository_listing_manager"]
     semantic_query_manager = services["semantic_query_manager"]
-    workspace_cleanup_service = services["workspace_cleanup_service"]
     _server_hnsw_cache = services["_server_hnsw_cache"]
     _server_fts_cache = services["_server_fts_cache"]
 
@@ -403,6 +399,13 @@ def create_app():
     )
 
     app = create_fastapi_app(services, lifespan)
+
+    # Feature add-ons (enabled_features): load them and consume their hooks
+    # (migrations, MCP tools, routers, pages, config sections, jobs) before
+    # the app serves anything. A refusal stops startup.
+    from .startup.feature_wiring import wire_features
+
+    wire_features(app, services)
     return app
 
 

@@ -11,6 +11,10 @@ from typing import Dict, Any, Optional, List
 from datetime import datetime, timezone
 
 from code_indexer.utils.file_locking import nfs_safe_flock
+from code_indexer.services.chunk_coverage import (
+    CHUNK_COVERAGE_KEY,
+    CHUNK_COVERAGE_VERSION,
+)
 from code_indexer.services.resume_state_seal import (
     RESUME_SEAL_FIELD,
     compute_resume_seal,
@@ -200,6 +204,7 @@ class ProgressiveMetadata:
                 "files_processed": 0,
                 "chunks_indexed": 0,
                 "failed_files": 0,
+                "multimodal_chunks_failed": 0,
                 "store_verified_by_reconcile": False,
             }
         )
@@ -224,6 +229,12 @@ class ProgressiveMetadata:
         self.metadata["store_verified_by_reconcile"] = True
         self._save_metadata()
 
+    def mark_chunk_coverage_current(self) -> None:
+        """Record that every stored file was checked against (or written
+        under) the current chunk routing (EVO-64616, chunk_coverage)."""
+        self.metadata[CHUNK_COVERAGE_KEY] = CHUNK_COVERAGE_VERSION
+        self._save_metadata()
+
     def start_fresh_indexing(
         self, provider_name: str, model_name: str, git_status: Dict[str, Any]
     ):
@@ -234,15 +245,25 @@ class ProgressiveMetadata:
         self.start_indexing(provider_name, model_name, git_status)
 
     def update_progress(
-        self, files_processed: int = 0, chunks_added: int = 0, failed_files: int = 0
+        self,
+        files_processed: int = 0,
+        chunks_added: int = 0,
+        failed_files: int = 0,
+        multimodal_chunks_failed: int = 0,
     ):
-        """Update progress counters and timestamp after each file."""
+        """Update progress counters and timestamp after each file.
+
+        ``multimodal_chunks_failed`` (EVO-64616): image chunks of this run
+        that got no multimodal point; their text is indexed."""
         current_timestamp = time.time()
 
         self.metadata["last_index_timestamp"] = current_timestamp
         self.metadata["files_processed"] += files_processed
         self.metadata["chunks_indexed"] += chunks_added
         self.metadata["failed_files"] += failed_files
+        self.metadata["multimodal_chunks_failed"] = (
+            self.metadata.get("multimodal_chunks_failed", 0) + multimodal_chunks_failed
+        )
 
         # Save after every update for resumability
         self._save_metadata()

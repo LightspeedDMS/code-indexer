@@ -23,6 +23,9 @@ from code_indexer.server.services.file_crud_service import (
 )
 from code_indexer.server.services.xray_pattern_authority import PatternWriter
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.server.services.activated_write_reindex import (
+    attach_reindex_outcome,
+)
 from code_indexer.server.routers import repo_access_http
 
 logger = logging.getLogger(__name__)
@@ -51,6 +54,7 @@ def _lock_store_unavailable(alias: str, exc: Exception) -> HTTPException:
     return HTTPException(status_code=unavailable, detail=str(exc))
 
 
+
 def _catalog_judge(
     request: Request, alias: str, user: User
 ) -> Callable[[str], CatalogFileAccess]:
@@ -70,6 +74,7 @@ def _pattern_writer(request: Request, user: User) -> PatternWriter:
     """The caller of a file write, for the X-Ray pattern rule."""
     access = getattr(request.app.state, "access_filtering_service", None)
     return PatternWriter.of(user, access)
+
 
 
 # Request/Response Models
@@ -176,6 +181,7 @@ def create_file(
             access_for=_catalog_judge(http_request, alias, user),
             pattern_writer=_pattern_writer(http_request, user),
         )
+        attach_reindex_outcome(result, user.username, alias, [request.file_path])
         return CreateFileResponse(**result)
 
     except FileExistsError as e:
@@ -277,6 +283,7 @@ def edit_file(
             access_for=_catalog_judge(http_request, alias, user),
             pattern_writer=_pattern_writer(http_request, user),
         )
+        attach_reindex_outcome(result, user.username, alias, [file_path])
         return EditFileResponse(**result)
 
     except HashMismatchError as e:
@@ -375,6 +382,7 @@ def delete_file(
             access_for=_catalog_judge(http_request, alias, user),
             pattern_writer=_pattern_writer(http_request, user),
         )
+        attach_reindex_outcome(result, user.username, alias, [file_path])
         return DeleteFileResponse(**result)
 
     except WriteModeLockUnavailableError as e:

@@ -70,6 +70,7 @@ requirement: docs/architecture/invariants/indexing-and-migrations.md, "Temporal
 indexing" (golden lineage read from the shared stores).
 """
 
+from code_indexer.server.services.served_index_cache import reads_served_indexes
 import logging
 import os
 import time
@@ -238,8 +239,8 @@ def _resolve_golden_temporal_context(
         ValueError: the alias is known but its fixed root cannot be derived.
         Exception: any lineage-lookup failure propagates unchanged.
     """
-    from code_indexer.services.temporal.temporal_server_paths import (
-        server_temporal_index_root,
+    from code_indexer.server.services.temporal_index_store import (
+        served_temporal_index_root,
     )
 
     manager = _resolve_lineage_repo_manager(activated_repo_manager)
@@ -254,7 +255,7 @@ def _resolve_golden_temporal_context(
     return _GoldenTemporalContext(
         golden_repo_alias,
         manager,
-        server_temporal_index_root(golden_repos_dir, golden_repo_alias),
+        served_temporal_index_root(golden_repos_dir, golden_repo_alias),
     )
 
 
@@ -464,6 +465,34 @@ def _run_fusion(
     )
 
 
+def _serve_worker_repo(
+    worker_input: TemporalWorkerInput, manager: Optional[Any]
+) -> None:
+    """Hold, in this worker's read scope, the repository whose config the
+    temporal backend reads (``repo_path``): served on the request thread, but
+    that scope ended when the job was queued. A golden ``-global`` alias's
+    target is served through its alias; an activated copy through the
+    registry for its user. No-op under the local store, and without a manager
+    (outside postgres/cluster mode the alias store is not reachable here)."""
+    if manager is None:
+        return
+    alias = worker_input.repository_alias
+    if alias.endswith("-global"):
+        from code_indexer.global_repos.alias_manager import AliasManager
+
+        golden_repos_dir = Path(manager.activated_repos_dir).parent / "golden-repos"
+        AliasManager(str(golden_repos_dir / "aliases")).ensure_served_here(
+            alias, str(worker_input.repo_path)
+        )
+        return
+    from code_indexer.server.services.activated_index_store import (
+        serve_activated_index,
+    )
+
+    serve_activated_index(manager, worker_input.username, alias)
+
+
+@reads_served_indexes
 def run_temporal_worker(
     worker_input: TemporalWorkerInput,
     payload_cache: PayloadCache,
@@ -497,6 +526,7 @@ def run_temporal_worker(
     golden_ctx = _resolve_golden_temporal_context(
         worker_input, job_id, activated_repo_manager=activated_repo_manager
     )
+    _serve_worker_repo(worker_input, golden_ctx.activated_repo_manager)
     config, index_path, vector_store = _build_temporal_backend(
         worker_input, golden_ctx, job_id
     )

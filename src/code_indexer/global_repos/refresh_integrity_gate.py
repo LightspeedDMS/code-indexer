@@ -62,7 +62,7 @@ import stat
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import BinaryIO, Callable, List, Optional, Tuple
+from typing import BinaryIO, Callable, Dict, List, Optional, Tuple
 
 from code_indexer.storage.shared.chunk_layout import (
     ChunkLayout,
@@ -88,6 +88,12 @@ _RESTORE_COPY_BUFFER_BYTES = 8 * 1024 * 1024
 # SQLite's per-database sidecar files: a restored chunks.db must never be
 # opened beside the discarded database's journal or WAL.
 _SQLITE_SIDECAR_SUFFIXES = ("-journal", "-wal", "-shm")
+
+#: A collection that keeps less than this share of its points is logged loudly.
+#: Only a collapse to ZERO is refused: a legitimate mass deletion would otherwise
+#: be refused on every later refresh too (the previous count never changes) and
+#: the repository would serve a stale index forever.
+_LARGE_DROP_KEEPS_LESS_THAN = 0.5
 
 
 @dataclass
@@ -155,6 +161,85 @@ def discover_chunks_db_collection_dirs(index_dir: Path) -> List[Path]:
         if resolve_chunk_layout(entry) == ChunkLayout.CHUNKS_DB:
             collections.append(entry)
     return collections
+
+
+def count_collection_points(index_dir: Path) -> Dict[str, int]:
+    """Point count of every CHUNKS_DB collection under *index_dir*, by name.
+
+    Read-only. A collection whose count cannot be read is left out (unknown
+    is not zero), and a missing index dir gives ``{}``.
+    """
+    counts: Dict[str, int] = {}
+    for collection_dir in discover_chunks_db_collection_dirs(Path(index_dir)):
+        chunks_db_path = collection_dir / _CHUNKS_DB_FILENAME
+        if not chunks_db_path.exists():
+            continue
+        try:
+            with ChunkStore(chunks_db_path, read_only=True) as store:
+                counts[collection_dir.name] = store.count()
+        except Exception as exc:  # any read failure: the count is unknown
+            logger.warning(
+                "Point count unavailable for %s: %s: %s",
+                chunks_db_path,
+                type(exc).__name__,
+                exc,
+            )
+    return counts
+
+
+def _refuse_collapsed_collections(
+    source_index_dir: Path,
+    previous_points: Dict[str, int],
+    result: "RefreshIntegrityGateResult",
+) -> None:
+    """Fail *result* for every collection that had points and now has none.
+
+    An emptied index is structurally healthy SQLite, so the integrity check
+    alone passes it -- and publishing it serves zero results for every query
+    until the next good refresh. Seen on a pod without the repository, where
+    a reconcile pass deleted every chunk and re-indexed nothing.
+    """
+    now = count_collection_points(source_index_dir)
+    # A collection the integrity check already failed is judged there (a
+    # corrupt, unverifiable or missing store, Bug #2022 / Story #2126); a
+    # second "collapsed" failure for it would turn an unverifiable check
+    # into a corruption strike.
+    judged = {failure.collection_dir.name for failure in result.failures}
+    for name, before in sorted(previous_points.items()):
+        if before <= 0 or name in judged:
+            continue
+        if name in now:
+            after = now[name]
+        elif (Path(source_index_dir) / name / _CHUNKS_DB_FILENAME).exists():
+            # Unknown is not zero: a store whose count cannot be read.
+            continue
+        else:
+            after = 0  # the collection vanished
+        if after == 0:
+            result.passed = False
+            result.failures.append(
+                CollectionIntegrityFailure(
+                    collection_dir=Path(source_index_dir) / name,
+                    detail=(
+                        f"collection collapsed from {before} points to 0 -- "
+                        "refusing to publish an emptied index"
+                    ),
+                )
+            )
+            logger.error(
+                "Refresh produced an EMPTY %s (was %d points) -- refusing to "
+                "publish; the alias keeps serving the last published index.",
+                name,
+                before,
+            )
+        elif after < before * _LARGE_DROP_KEEPS_LESS_THAN:
+            logger.warning(
+                "Refresh shrank %s from %d to %d points -- publishing, but "
+                "verify the repository really lost that much.",
+                name,
+                before,
+                after,
+            )
 
 
 class IntegrityVerdict(str, Enum):
@@ -433,6 +518,7 @@ def run_refresh_integrity_gate(
     healthy_index_dir: Optional[Path],
     before_restore: Optional[Callable[[], None]] = None,
     restore_missing_stores: bool = False,
+    previous_points: Optional[Dict[str, int]] = None,
 ) -> RefreshIntegrityGateResult:
     """Run the Bug #1506 durability-flush + integrity gate against every
     CHUNKS_DB collection under *source_index_dir* (the just-mutated
@@ -485,6 +571,11 @@ def run_refresh_integrity_gate(
     this cycle gracefully. A SHARDED_JSON-only collection set (no
     ``chunks.db`` anywhere) is a clean no-op pass (``passed=True``,
     ``checked_collections=[]``).
+
+    *previous_points* -- each collection's point count BEFORE this refresh
+    indexed (:func:`count_collection_points` of the published index). A
+    collection that had points and now has none fails the gate: an emptied
+    index is healthy SQLite, so the integrity check alone would publish it.
     """
     result = RefreshIntegrityGateResult(passed=True)
 
@@ -693,5 +784,8 @@ def run_refresh_integrity_gate(
             )
 
         result.failures.append(failure)
+
+    if previous_points:
+        _refuse_collapsed_collections(Path(source_index_dir), previous_points, result)
 
     return result

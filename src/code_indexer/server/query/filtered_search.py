@@ -73,7 +73,8 @@ def fts_filter_kwargs(
     """The request filters as TantivyIndexManager.search keyword arguments.
 
     ``language`` goes in as ``languages`` so it applies together with
-    ``exclude_language``; ``exclude_path`` is split on commas (Bug #1095);
+    ``exclude_language``; ``exclude_path`` is split on commas (Bug #1095),
+    and so is ``path_filter`` (GAP-6: independent patterns, OR semantics);
     ``file_extensions`` is pushed down with the #2047 bounded refetch under
     the request-wide ``deadline``.
     """
@@ -81,7 +82,7 @@ def fts_filter_kwargs(
 
     return {
         "languages": [language] if language else None,
-        "path_filters": [path_filter] if path_filter else None,
+        "path_filters": parse_exclude_patterns(path_filter) or None,
         "exclude_languages": [exclude_language] if exclude_language else None,
         "exclude_paths": parse_exclude_patterns(exclude_path) or None,
         "file_extensions": file_extensions,

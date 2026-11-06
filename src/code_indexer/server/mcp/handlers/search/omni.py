@@ -16,6 +16,7 @@ Refactoring is tracked separately.
 import logging
 from typing import Any, Dict, Optional
 
+from cidx_sdk.tool_args import coerce_float, coerce_int
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.logging_utils import format_error_log
@@ -26,8 +27,6 @@ from code_indexer.server.telemetry.correlation_bridge import (
 from .._utils import (
     CapBreach,
     cap_breach_response,
-    _coerce_float,
-    _coerce_int,
     _enforce_repo_count_cap,
     _enrich_with_wiki_url,
     _expand_wildcard_patterns,
@@ -48,7 +47,7 @@ from ._shared import (
     _load_category_map,
     _resolve_search_type,
 )
-from .memory_retrieval import _compute_shared_query_vector
+from .query_vector import _compute_shared_query_vector
 
 logger = logging.getLogger("code_indexer.server.mcp.handlers.search")
 
@@ -85,7 +84,7 @@ def _build_multi_search_request(
     fields (query vector, its digest, deadline) are set by the server.
 
     Args:
-        limit: pre-validated via _coerce_int(default=10) and _compute_effective_limit
+        limit: pre-validated via coerce_int(default=10) and _compute_effective_limit
     """
     from pydantic import ValidationError
 
@@ -99,7 +98,7 @@ def _build_multi_search_request(
             search_type=search_type,  # type: ignore[arg-type]
             limit=limit,
             min_score=(
-                _coerce_float(params.get("min_score"), 0.0)
+                coerce_float(params.get("min_score"), 0.0)
                 if params.get("min_score") is not None
                 else None
             ),
@@ -159,7 +158,7 @@ def _aggregate_results(
     """Aggregate results based on per_repo or global mode.
 
     Args:
-        requested_limit: pre-validated non-negative int from _coerce_int(default=10)
+        requested_limit: pre-validated non-negative int from coerce_int(default=10)
     """
     from collections import defaultdict
 
@@ -216,7 +215,7 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     _repo_count_breach = _enforce_repo_count_cap(repo_aliases)
     if _repo_count_breach is not None:
         return cap_breach_response(_repo_count_breach)
-    requested_limit = _coerce_int(params.get("limit"), _DEFAULT_SEARCH_LIMIT)
+    requested_limit = coerce_int(params.get("limit"), _DEFAULT_SEARCH_LIMIT)
     aggregation_mode = params.get(
         "aggregation_mode", "per_repo" if len(repo_aliases) > 1 else "global"
     )

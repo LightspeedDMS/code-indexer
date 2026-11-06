@@ -27,6 +27,8 @@ stuck on.
 """
 
 from __future__ import annotations
+from pathlib import Path
+from code_indexer.utils.git_runner import run_git_command
 
 import subprocess
 from dataclasses import dataclass
@@ -34,7 +36,9 @@ from datetime import datetime, timezone
 from typing import Callable, Optional
 
 from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
-from code_indexer.server.utils.cancellable_subprocess import run_with_cancel
+from code_indexer.server.services.cidx_meta_content import (
+    refuse_backup_of_shared_content,
+)
 
 
 @dataclass
@@ -64,17 +68,23 @@ class CidxMetaBackupSync:
         self._cancel_check = cancel_check
 
     def _git(self, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-        from .stall_detection import stall_detecting_git_argv, with_ssh_keepalive
+        from .stall_detection import with_ssh_keepalive
 
         env = with_ssh_keepalive(build_non_interactive_git_env())
         env.setdefault("GIT_AUTHOR_NAME", "cidx-meta-backup")
         env.setdefault("GIT_AUTHOR_EMAIL", "cidx-meta-backup@example.invalid")
         env.setdefault("GIT_COMMITTER_NAME", env["GIT_AUTHOR_NAME"])
         env.setdefault("GIT_COMMITTER_EMAIL", env["GIT_AUTHOR_EMAIL"])
-        return run_with_cancel(
-            stall_detecting_git_argv(*args),
-            self._cancel_check,
-            cwd=self.cidx_meta_path,
+        # EVO-64678: this helper runs arbitrary git (including commits) against
+        # cidx-meta with argv only known at runtime, so it goes through the seam
+        # chokepoint and lets is_mutating_git() classify each call rather than a
+        # static scan guessing. No invoker claims cidx-meta today, so behaviour is
+        # unchanged; the env below is merged on top of get_git_environment().
+        # Bug #2012: the owning job's cancel check terminates the git process.
+        return run_git_command(
+            ["git", *args],
+            cwd=Path(self.cidx_meta_path),
+            cancel_check=self._cancel_check,
             capture_output=True,
             text=True,
             env=env,
@@ -91,6 +101,10 @@ class CidxMetaBackupSync:
         )
 
     def sync(self) -> SyncResult:
+        # Under a delegated content backend this pod's directory is index
+        # state only: committing and force-pushing it would replace the real
+        # backup with an empty tree. Refused loudly instead.
+        refuse_backup_of_shared_content(self.cidx_meta_path)
         status = self._git("status", "--porcelain")
         local_committed = False
         if status.stdout.strip():

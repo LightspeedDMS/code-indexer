@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 
 from code_indexer.server.middleware.error_handler import GlobalErrorHandler
 
@@ -44,7 +45,6 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
     activated_repo_manager = services["activated_repo_manager"]
     repository_listing_manager = services["repository_listing_manager"]
     semantic_query_manager = services["semantic_query_manager"]
-    workspace_cleanup_service = services["workspace_cleanup_service"]
     mcp_credential_manager = services["mcp_credential_manager"]
     mcp_registration_service = services["mcp_registration_service"]
     config_service = services["config_service"]
@@ -52,8 +52,6 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
     data_dir = services["data_dir"]
     db_path_str = services["db_path_str"]
     secret_key = services["secret_key"]
-    # SCIPAuditRepository with backend support (may be None on legacy startup)
-    scip_audit_repository = services.get("scip_audit_repository")
     # BackendRegistry (may be None in solo/SQLite mode). Its .connection_pool
     # is the shared PG pool -- already created by initialize_services() (PG
     # migrations + StorageFactory.create_backends() both run there, well
@@ -231,7 +229,6 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
     app.state.activated_repo_manager = activated_repo_manager
     app.state.repository_listing_manager = repository_listing_manager
     app.state.semantic_query_manager = semantic_query_manager
-    app.state.workspace_cleanup_service = workspace_cleanup_service
 
     # AC4: Attach typed AppState for dependency-injection access by routers
     _app_state = _AppState()
@@ -240,7 +237,6 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
     _app_state.activated_repo_manager = activated_repo_manager
     _app_state.repository_listing_manager = repository_listing_manager
     _app_state.semantic_query_manager = semantic_query_manager
-    _app_state.workspace_cleanup_service = workspace_cleanup_service
     app.state.app_state = _app_state
 
     # Set global dependencies
@@ -271,7 +267,6 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
     app.state.data_dir = data_dir
     app.state.db_path_str = db_path_str
     app.state.job_tracker = job_tracker
-    app.state.scip_audit_repository = scip_audit_repository
 
     # AC2: Route handlers extracted to routers/inline_routes.py (Story #409)
     register_inline_routes(
@@ -281,7 +276,6 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
         activated_repo_manager=activated_repo_manager,
         repository_listing_manager=repository_listing_manager,
         semantic_query_manager=semantic_query_manager,
-        workspace_cleanup_service=workspace_cleanup_service,
         jwt_manager=jwt_manager,
         user_manager=user_manager,
         refresh_token_manager=refresh_token_manager,
@@ -296,53 +290,29 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
         secret_key=secret_key,
     )
 
+    # Bare "/" has no registered page (login_router mounts only at "/login",
+    # the dashboard lives under "/admin/") -- send visitors straight to the
+    # unified login form instead of a dead-end 404.
+    @app.get("/", include_in_schema=False)
+    async def _root_redirect() -> RedirectResponse:
+        return RedirectResponse(url="/login")
+
     # Authenticated API documentation (/docs, /redoc, /openapi.json).
     from code_indexer.server.routers.api_docs import api_docs_router
 
     app.include_router(api_docs_router)
+
+    # Feature add-on settings doors (modular phase 4a): part of the core
+    # shell, mounted whether or not any feature is enabled (empty without
+    # one). Feature routes and pages are added by create_app (wire_features).
+    from code_indexer.server.features.web import install_feature_config_routes
+
+    install_feature_config_routes(app)
 
     # Initialize self-monitoring app.state attributes to None (Bug #87 fix)
     # These will be updated during lifespan startup if self-monitoring is enabled
     # Ensures manual trigger route can always access these attributes
     app.state.self_monitoring_repo_root = None
     app.state.self_monitoring_github_repo = None
-
-    # Bug #1667: wire the module-level WikiCacheInvalidator singleton to a
-    # live WikiCache instance. Prior to this fix, wiki_cache_invalidator.
-    # wiki_cache was NEVER set anywhere in production, so every one of its
-    # methods (invalidate_repo, invalidate_for_file_change,
-    # invalidate_for_git_operation, on_refresh_complete) was a permanent
-    # no-op guarded by `if self.wiki_cache is None: return` -- even though
-    # 3 live call sites (mcp/handlers/git_write.py, mcp/handlers/files.py x2)
-    # invoke it after every git write / file mutation. This mattered because
-    # WikiCache.get_sidebar() has NO independent staleness check (Story #304
-    # deliberately removed the old per-request filesystem mtime poll in
-    # favor of this event-driven invalidator) -- unlike get_article(), which
-    # still self-validates via file_mtime/file_size. Without this wiring the
-    # sidebar cache could go stale indefinitely after any git write or file
-    # mutation.
-    #
-    # This wiring is done here (app-wiring time), not via the request-time
-    # resolve_backend_registry_attr() helper other wiki_cache call sites use
-    # (e.g. golden_repo_manager.py, mcp/handlers/guides.py): at THIS point
-    # `backend_registry` is the real, already-fully-initialized instance
-    # (StorageFactory.create_backends() already ran inside
-    # initialize_services(), well before create_fastapi_app() is called --
-    # see the backend_registry comment above), not a pending-startup-window
-    # snapshot, so caching the resolved backend on the singleton here is
-    # safe and does not risk permanently wedging a node onto the wrong
-    # backend the way caching a resolve_backend_registry_attr() result
-    # during the STORAGE_MODE_PENDING_SENTINEL window would.
-    from code_indexer.server.wiki.wiki_cache import WikiCache
-    from code_indexer.server.wiki.wiki_cache_invalidator import (
-        wiki_cache_invalidator,
-    )
-
-    _wiki_cache_backend = (
-        backend_registry.wiki_cache if backend_registry is not None else None
-    )
-    wiki_cache_invalidator.set_wiki_cache(
-        WikiCache(db_path_str, storage_backend=_wiki_cache_backend)
-    )
 
     return app

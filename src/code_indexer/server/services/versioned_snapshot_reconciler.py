@@ -43,13 +43,15 @@ THREE POINTER-READING HOLES CLOSED:
   A. NEVER AliasManager.read_alias()/get_previous_path() -- read_alias
      applies WRITE-MODE SOURCE redirection for an active write session on
      a `-global` alias, silently excluding the real live snapshot from
-     the keep set. Pointer files are read directly here instead.
-  B. SINGLE ATOMIC READ: one open+json.load per pointer, target_path AND
-     previous_path from the SAME dict -- the pre-existing
+     the keep set. Raw pointers (AliasManager.list_pointers) are read here
+     instead.
+  B. SINGLE ATOMIC READ: one read per pointer, target_path AND
+     previous_path from the SAME document -- the pre-existing
      enforce_snapshot_retention read them via two separate opens, which
      can straddle a concurrent swap. Both now share
-     read_pointer_target_and_previous() -- ONE "read a pointer" impl.
-  C. UNION OVER EVERY `*.json` in aliases/, not just `*-global.json` --
+     AliasManager.read_pointer/list_pointers -- ONE "read a pointer" impl
+     (content seam step 5a: the documents live in the registry).
+  C. UNION OVER EVERY alias, not just `*-global` --
      temporal sister pointers reference snapshots in their own
      namespaces; the mechanism that refreshed them is RETIRED
      (Bug #1528/#1529) but the pointer files still exist and must still
@@ -96,6 +98,7 @@ DuplicateJobError.
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -108,15 +111,13 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 # is a deletion). Re-exported under the SAME names (via __all__ below) for
 # backward compatibility with existing test imports
 # (`from ...versioned_snapshot_reconciler import
-# compute_snapshot_deletion_candidates, read_pointer_target_and_previous`).
+# compute_snapshot_deletion_candidates`).
 from code_indexer.global_repos.snapshot_retention import (
     DEFAULT_MIN_ABSOLUTE_AGE_SECONDS,
     _protected_snapshot_paths,
-    collect_all_pointers,
     compute_snapshot_deletion_candidates,
     globally_referenced_paths,
     parse_live_timestamp,
-    read_pointer_target_and_previous,
     resolve_governing_pointer,
     resolve_retention_keep_last,
 )
@@ -136,11 +137,9 @@ from code_indexer.server.services.versioned_snapshot_reclaim import (
 
 __all__ = [
     "_protected_snapshot_paths",
-    "collect_all_pointers",
     "compute_snapshot_deletion_candidates",
     "globally_referenced_paths",
     "parse_live_timestamp",
-    "read_pointer_target_and_previous",
     "resolve_governing_pointer",
     "reconcile_versioned_snapshots",
     "VersionedSnapshotReconcileResult",
@@ -283,8 +282,8 @@ def reconcile_versioned_snapshots(
     age-gated CleanupManager. See the module docstring for the full
     contract.
 
-    ``alias_manager`` is used ONLY for its ``aliases_dir`` path -- pointer
-    files are read directly (module docstring hole A). Deletion is NOT
+    ``alias_manager`` is used ONLY for raw pointer reads
+    (``list_pointers``), never ``read_alias`` (module docstring hole A). Deletion is NOT
     gated by a mode flag: a computed candidate is safe to delete precisely
     because it survived the age-floor, keep-last-N, and pointer-protection
     checks in ``compute_snapshot_deletion_candidates`` -- there is no
@@ -379,12 +378,14 @@ def _build_sweep_context(
         return _SweepContext(versioned_dir, [], {}, set(), 1)
 
     try:
-        pointers = collect_all_pointers(alias_manager.aliases_dir)
-    except OSError as aliases_error:
+        pointers = alias_manager.list_pointers()
+    except Exception as aliases_error:
+        # A pointer listing that failed is NOT an empty one: sweeping
+        # against it would treat every live target as unreferenced.
         result.aborted = True
         result.abort_reason = (
-            f"'{alias_manager.aliases_dir}' is not a healthy/readable "
-            f"directory -- refusing to sweep (likely an infra/mount "
+            f"alias pointers for '{alias_manager.aliases_dir}' could not be "
+            f"listed -- refusing to sweep (likely an infra/mount/registry "
             f"problem): {aliases_error}"
         )
         logger.warning("Bug #1567 reconcile: %s", result.abort_reason)
@@ -559,6 +560,18 @@ def _debug_log_namespace_decision(
     )
 
 
+def namespace_paths_referenced(
+    bare_namespace: str, golden_repos_path: Path, referenced_paths: Set[str]
+) -> List[str]:
+    """The pointer-referenced paths inside ``.versioned/<bare_namespace>/``."""
+    root = os.path.normpath(str(golden_repos_path / ".versioned" / bare_namespace))
+    return sorted(
+        path
+        for path in referenced_paths
+        if os.path.normpath(path).startswith(root + os.sep)
+    )
+
+
 def _reconcile_one_namespace_body(
     bare_namespace: str,
     *,
@@ -580,6 +593,20 @@ def _reconcile_one_namespace_body(
         # skipped forever. A repo that still exists but has a merely
         # unreadable pointer right now is never reclaimed: it fails this
         # check via either the registry or the base-clone conjunct.
+        # EVO-64616: a renamed alias keeps serving the snapshots under its
+        # OLD namespace (a published path is opaque) until its next refresh
+        # snapshots under the new one. A namespace any pointer still names is
+        # never reclaimed, whatever its own alias's state.
+        named = namespace_paths_referenced(
+            bare_namespace, golden_repos_path, referenced_paths
+        )
+        if named:
+            result.skipped_namespaces[bare_namespace] = (
+                f"no alias pointer of its own, but {len(named)} snapshot(s) "
+                "are named by another alias's pointer (a renamed alias) -- "
+                "kept"
+            )
+            return
         if namespace_is_genuinely_orphaned(
             bare_namespace, golden_repos_path, registered_aliases
         ):

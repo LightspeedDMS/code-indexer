@@ -17,16 +17,16 @@ import datetime
 import subprocess
 from pathlib import Path
 from typing import (
-    List,
-    Dict,
+    TYPE_CHECKING,
     Any,
+    Callable,
+    Dict,
     FrozenSet,
     Iterable,
+    List,
     Optional,
-    Callable,
     Set,
     Tuple,
-    TYPE_CHECKING,
 )
 from dataclasses import dataclass
 
@@ -36,6 +36,7 @@ from ..indexing.processor import ProcessingStats
 from .progressive_metadata import ProgressiveMetadata
 from .resume_state_seal import load_or_create_resume_seal_key
 from .resume_path_anchor import reanchor_resume_path
+from .chunk_coverage import coverage_is_current, incomplete_chunk_paths
 from .git_topology_service import GitTopologyService
 
 # Removed: SmartBranchIndexer (abandoned code)
@@ -50,6 +51,7 @@ from ..storage.sqlite_chunk_store import (
     ChunkStoreUnavailableError,
     is_chunk_store_lock_contention,
 )
+from ..indexing.file_facts import ContentUnavailableError
 
 # CRITICAL: Lazy import for FTS - only load when --fts flag used
 # This prevents Tantivy from loading on every cidx command (including --help)
@@ -103,9 +105,19 @@ def working_dir_content_id(relative_path: str, mtime: int, size: int) -> str:
     through this function. `mtime` is the INTEGER-second mtime the indexer
     stores (`FileIdentifier._get_filesystem_metadata` writes
     `int(st_mtime)` into the `filesystem_mtime` payload field), so callers
-    building the disk side pass `int(stat.st_mtime)`.
+    building the disk side pass `int(stat.st_mtime)`. The stored payload
+    fields are the only persisted half, so this is the format existing
+    indexes already compare against.
     """
     return f"{relative_path}:working_dir:{mtime}:{size}"
+
+
+def unreadable_content_id(relative_path: str) -> str:
+    """Reconcile content id for a file whose identity could not be computed.
+
+    Never equal to an indexed id, so the file is re-indexed (or fails there).
+    """
+    return f"{relative_path}:working_dir_error"
 
 
 @dataclass
@@ -166,6 +178,9 @@ class SmartIndexer(HighThroughputProcessor):
     #: Set by each smart_index() run: it created or rebuilt the FTS index,
     #: so it changed the index even if it processed no file (_finish_run).
     _run_rebuilt_fts: bool = False
+    #: EVO-64616: relative paths the reconcile snapshot found missing some of
+    #: their chunks (chunk_coverage); the reconcile re-processes them.
+    _reconcile_incomplete_paths: FrozenSet[str] = frozenset()
     #: Files this run's processing failed (its stats, set by _finish_run);
     #: those it cannot name count as missing from FTS (Bug #2056).
     _run_failed_files: int = 0
@@ -188,13 +203,34 @@ class SmartIndexer(HighThroughputProcessor):
         embedding_provider: EmbeddingProvider,
         vector_store_client: Any,  # FilesystemVectorStore (vector store backend)
         metadata_path: Path,
+        content_backend: Optional[Any] = None,  # ContentBackend
+        git_backend: Optional[Any] = None,  # GitBackend
     ):
-        super().__init__(config, embedding_provider, vector_store_client)
+        super().__init__(
+            config,
+            embedding_provider,
+            vector_store_client,
+            content_backend,
+            git_backend=git_backend,
+        )
         self.progressive_metadata = ProgressiveMetadata(metadata_path)
+        if content_backend is not None and not getattr(
+            content_backend, "is_local", True
+        ):
+            # The repository is not on this machine: its chunks must not be
+            # stored as pointers into a local git object store.
+            mark_delegated = getattr(
+                vector_store_client, "mark_repository_delegated", None
+            )
+            if callable(mark_delegated):
+                mark_delegated()
 
         # Initialize branch topology services
+        # The same git backend FileIdentifier asks: on a pod without the
+        # repository, local git would call it "not a git repository" and the
+        # reconcile pass would read every chunk as a modified file.
         self.git_topology_service = GitTopologyService(
-            config.codebase_dir, config=config
+            config.codebase_dir, config=config, git_backend=git_backend
         )
         # Removed: SmartBranchIndexer initialization (abandoned code)
 
@@ -210,6 +246,64 @@ class SmartIndexer(HighThroughputProcessor):
 
         # Initialize git hook manager for branch change detection
         self.git_hook_manager = GitHookManager(config.codebase_dir, metadata_path)
+
+    def _paths_present_at_head(self, repo: str) -> set:
+        """What exists now, for classifying touched paths as kept or deleted.
+
+        The pass's manifest when there is one -- it is already in hand, and on
+        a repository this pod does not hold there always is one -- else the
+        tracked list from the git backend, which grows with the repository.
+        """
+        manifest = getattr(self, "repo_manifest", None)
+        if manifest is not None:
+            return set(manifest.paths())
+        return set(self.git_backend.ls_files(repo))
+
+    def _git_deltas_via_seam(
+        self, last_commit: str, current_commit: str
+    ) -> Optional[GitDelta]:
+        """The changes between two commits, asked of the git backend.
+
+        For a repository this pod does not hold. The seam has ``diff
+        --name-only``, not ``--name-status``, and with rename detection a
+        forward diff names only a rename's NEW path -- the old path's chunks
+        would never be removed. So both directions are asked: the reverse diff
+        names the old path. Every touched path is then classified by whether
+        it is still tracked at HEAD: tracked -> re-index, gone -> delete. A
+        rename is exactly delete-old + add-new, as the local path treats it.
+
+        Returns None when the backend cannot answer; the caller must not read
+        that as "nothing changed" (an empty delta would leave the index stale
+        without a word) and does a full index instead.
+        """
+        repo = str(self.config.codebase_dir)
+        try:
+            touched = set(
+                self.git_backend.diff_name_only(
+                    repo, f"{last_commit}..{current_commit}"
+                )
+            )
+            touched |= set(
+                self.git_backend.diff_name_only(
+                    repo, f"{current_commit}..{last_commit}"
+                )
+            )
+            tracked = self._paths_present_at_head(repo) if touched else set()
+        except Exception as e:  # the backend's transport, whatever it is
+            logger.error(
+                f"Git delta through the git backend failed "
+                f"({type(e).__name__}: {e}); falling back to a full index"
+            )
+            return None
+        kept = {p for p in touched if p in tracked and self._should_index_file(p)}
+        oversized = {p for p in kept if self._exceeds_max_file_size(p)}
+        modified = sorted(kept - oversized)
+        deleted = sorted(
+            {p for p in touched if p not in tracked and self._should_index_file(p)}
+            | oversized
+        )
+        logger.info(f"Git delta (git backend): ~{len(modified)} -{len(deleted)}")
+        return GitDelta(added=[], modified=modified, deleted=deleted, renamed=[])
 
     def _get_git_deltas_since_commit(
         self, last_commit: str, current_commit: str
@@ -267,17 +361,19 @@ class SmartIndexer(HighThroughputProcessor):
 
                 # ^ hazard filtering a rename's old path first => its new path is dropped too (#1467)
                 if status.startswith("R"):
-                    old_path, new_path = record[1], record[2]
-                    renamed.append((old_path, new_path))
-                    # Treat rename as delete old + add new for indexing
-                    if self._should_index_file(old_path):
-                        deleted.append(old_path)
-                    if self._should_index_file(new_path):
-                        added.append(new_path)
-                    continue
-                if status.startswith("C"):
-                    if self._should_index_file(record[2]):
-                        added.append(record[2])
+                    # Renamed file: R100\told_path\tnew_path
+                    if len(record) >= 3:
+                        old_path = record[1]
+                        new_path = record[2]
+                        renamed.append((old_path, new_path))
+                        # Treat rename as delete old + add new for indexing
+                        if self._should_index_file(old_path):
+                            deleted.append(old_path)
+                        if self._should_index_file(new_path):
+                            if self._exceeds_max_file_size(new_path):
+                                deleted.append(new_path)
+                            else:
+                                added.append(new_path)
                     continue
 
                 file_path = record[1]
@@ -286,7 +382,9 @@ class SmartIndexer(HighThroughputProcessor):
                 if not self._should_index_file(file_path):
                     continue
 
-                if status == "A":
+                if status in ("A", "M") and self._exceeds_max_file_size(file_path):
+                    deleted.append(file_path)
+                elif status == "A":
                     added.append(file_path)
                 elif status == "M":
                     modified.append(file_path)
@@ -305,6 +403,23 @@ class SmartIndexer(HighThroughputProcessor):
                 f"git diff {last_commit}..{current_commit} could not run: "
                 f"{type(e).__name__}: {e}"
             ) from e
+
+    def _exceeds_max_file_size(self, file_path: str) -> bool:
+        """The full walk's max_file_size gate, for a path present at HEAD.
+
+        ``_should_index_file`` is string-only (it also classifies deleted
+        paths), so a git delta never applied the walk's size limit: a commit
+        touching an over-limit file (a 1.19 MB package-lock.json, measured on
+        EKS) indexed it on refresh although the first index excluded it. Such
+        a path is routed to ``deleted`` -- what the walk's index holds for it
+        is nothing, including when it grew past the limit in this commit.
+        Asks FileFinder, so the manifest's size answers on a delegated pass.
+        """
+        return bool(
+            self.file_finder.exceeds_max_file_size(
+                Path(self.config.codebase_dir) / file_path
+            )
+        )
 
     def _should_index_file(self, file_path: str) -> bool:
         """Check if a file should be indexed based on configuration."""
@@ -411,6 +526,45 @@ class SmartIndexer(HighThroughputProcessor):
         return deleted_count
 
     def smart_index(
+        self,
+        force_full: bool = False,
+        reconcile_with_database: bool = False,
+        batch_size: int = 50,
+        progress_callback: Optional[Callable] = None,
+        safety_buffer_seconds: int = 60,
+        files_count_to_process: Optional[int] = None,
+        quiet: bool = False,
+        vector_thread_count: Optional[int] = None,
+        detect_deletions: bool = False,
+        enable_fts: bool = False,
+        trust_resume_state: bool = True,
+    ) -> ProcessingStats:
+        """Run one indexing pass; see ``_smart_index`` for the behaviour.
+
+        The manifest pass opens HERE, around discovery as well as processing,
+        so a delegated pass discovers its files from the same snapshot it then
+        reads them against (the high-throughput pass nests inside and reuses
+        it). A no-op for a local backend.
+        """
+        self.begin_manifest_pass()
+        try:
+            return self._smart_index(
+                force_full=force_full,
+                reconcile_with_database=reconcile_with_database,
+                batch_size=batch_size,
+                progress_callback=progress_callback,
+                safety_buffer_seconds=safety_buffer_seconds,
+                files_count_to_process=files_count_to_process,
+                quiet=quiet,
+                vector_thread_count=vector_thread_count,
+                detect_deletions=detect_deletions,
+                enable_fts=enable_fts,
+                trust_resume_state=trust_resume_state,
+            )
+        finally:
+            self.end_manifest_pass()
+
+    def _smart_index(
         self,
         force_full: bool = False,
         reconcile_with_database: bool = False,
@@ -542,12 +696,17 @@ class SmartIndexer(HighThroughputProcessor):
                 FtsWriteFailures() if fts_manager is not None else None
             )
 
-            # Ensure git hook is installed for branch change detection
-            try:
-                self.git_hook_manager.ensure_hook_installed()
-            except Exception as e:
-                logger.warning(f"Failed to install git hook for branch tracking: {e}")
-                # Continue without hook - branch tracking will fall back to git subprocess
+            # Ensure git hook is installed for branch change detection. Not
+            # through the git seam: the repository's .git is not on this
+            # machine, so there is no hooks directory to write into.
+            if self.git_backend is None:
+                try:
+                    self.git_hook_manager.ensure_hook_installed()
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to install git hook for branch tracking: {e}"
+                    )
+                    # Continue without hook - branch tracking will fall back to git subprocess
 
             # Story #2121: an interrupted run (status in_progress or failed)
             # is ALWAYS recovered by the store-derived reconcile, FIRST --
@@ -581,10 +740,16 @@ class SmartIndexer(HighThroughputProcessor):
                     f"Branch change detection: stored_branch={stored_branch}, current_branch={current_branch}"
                 )
 
+                # The graph-optimized path diffs branches with LOCAL git
+                # (merge-base, diff, ls-tree); through the git seam there is no
+                # local repository to diff, so a backend skips it -- as it did
+                # when the topology service could not see the branch at all --
+                # and the change is indexed by the seam-aware paths below.
                 if (
                     current_branch
                     and stored_branch
                     and stored_branch != current_branch
+                    and self.git_backend is None
                     and self.vector_store_client.collection_exists(collection_name)
                 ):
                     # Branch change detected - use graph-optimized branch indexing
@@ -940,6 +1105,7 @@ class SmartIndexer(HighThroughputProcessor):
                 + self._run_unresolved_fts_deletes,
                 source_files=self.file_finder.find_files(),
                 progress_callback=progress_callback,
+                **self._fts_content_source(),
             )
         except Exception as e:
             self.progressive_metadata.fail_indexing(str(e))
@@ -1289,7 +1455,7 @@ class SmartIndexer(HighThroughputProcessor):
             abs_path = codebase / rel_path
             if str(abs_path) in covered:
                 continue
-            if not abs_path.exists():
+            if not self._exists_in_this_pass(abs_path):
                 continue
             merged.append(abs_path)
             covered.add(str(abs_path))
@@ -1337,7 +1503,7 @@ class SmartIndexer(HighThroughputProcessor):
         reprocess_files: List[Path] = []
         for rel_path in pending:
             abs_path = codebase / rel_path
-            if str(abs_path) in covered or not abs_path.exists():
+            if str(abs_path) in covered or not self._exists_in_this_pass(abs_path):
                 continue
             reprocess_files.append(abs_path)
 
@@ -1632,6 +1798,8 @@ class SmartIndexer(HighThroughputProcessor):
         # points/layout just because only the TEXT collection was cleared
         # above.
         self._clear_current_provider_multimodal_collection(provider_name)
+        # EVO-64616: every file is written under the current chunk routing.
+        self.progressive_metadata.mark_chunk_coverage_current()
         if enhanced_callback and points_before_clear > 0:
             enhanced_callback(
                 0,
@@ -1826,12 +1994,17 @@ class SmartIndexer(HighThroughputProcessor):
             files_processed=stats.files_processed,
             chunks_added=stats.chunks_created,
             failed_files=stats.failed_files,
+            multimodal_chunks_failed=stats.multimodal_chunks_failed,
         )
 
         # Mark as completed only if not cancelled
         if not stats.cancelled:
             if progress_callback:
                 progress_callback(0, 0, Path(""), info="Finalizing indexing session...")
+            # EVO-64616: a full run records its failed paths like every other
+            # run; it used to count failed_files with no failed_file_paths,
+            # which no path-based retry could ever reach.
+            self._record_failures_of_run(stats, [], [])
             self._advance_commit_watermark(git_status)
             self.progressive_metadata.complete_indexing(listing_started)
             self.progress_log.complete_session()
@@ -1949,9 +2122,24 @@ class SmartIndexer(HighThroughputProcessor):
                     )
 
                 # Get git deltas - this is the KEY improvement for deletion detection
-                git_delta = self._get_git_deltas_since_commit(
-                    last_indexed_commit, current_commit
-                )
+                if self.git_backend is not None:
+                    seam_delta = self._git_deltas_via_seam(
+                        last_indexed_commit, current_commit
+                    )
+                    if seam_delta is None:
+                        return self._do_full_index(
+                            batch_size,
+                            progress_callback,
+                            git_status,
+                            provider_name,
+                            model_name,
+                            quiet,
+                        )
+                    git_delta = seam_delta
+                else:
+                    git_delta = self._get_git_deltas_since_commit(
+                        last_indexed_commit, current_commit
+                    )
 
                 # Handle deletions FIRST (critical for git pull scenarios)
                 if git_delta.deleted:
@@ -2035,6 +2223,11 @@ class SmartIndexer(HighThroughputProcessor):
         # Files the previous run could not index are retried even when
         # nothing changed since, so they never stay missing from the index.
         retried_failures, files_to_index = self._merge_recorded_failures(files_to_index)
+        # EVO-64616: files indexed before every chunk reached the text index
+        # are re-processed once (chunk_coverage).
+        coverage_checked, files_to_index = self._fold_in_incomplete_chunk_files(
+            _self_heal_collection_name, files_to_index
+        )
 
         if not files_to_index and not deleted_files:
             # SAFETY CHECK (Issue #1975): stored chunks with a zero processed-
@@ -2084,6 +2277,9 @@ class SmartIndexer(HighThroughputProcessor):
                 )
                 return reconcile_stats
 
+            if coverage_checked:
+                # The coverage check found nothing to re-process.
+                self.progressive_metadata.mark_chunk_coverage_current()
             # No changes at all - system is up-to-date, don't touch metadata
             if progress_callback:
                 progress_callback(
@@ -2283,11 +2479,16 @@ class SmartIndexer(HighThroughputProcessor):
             files_processed=stats.files_processed,
             chunks_added=stats.chunks_created,
             failed_files=stats.failed_files,
+            multimodal_chunks_failed=stats.multimodal_chunks_failed,
         )
 
         # Mark as completed only if not cancelled
         if not stats.cancelled:
             self._record_failures_of_run(stats, retried_failures, [])
+            if coverage_checked:
+                # A healed file that failed is recorded above and retried
+                # like any other failure.
+                self.progressive_metadata.mark_chunk_coverage_current()
             self._advance_commit_watermark(git_status)
             self.progressive_metadata.complete_indexing(listing_started)
             self.progress_log.complete_session()
@@ -2320,15 +2521,32 @@ class SmartIndexer(HighThroughputProcessor):
     def _populate_fts_from_all_files(
         self, fts_manager, progress_callback=None
     ) -> List[Tuple[Path, str]]:
-        """Fill a new or rebuilt FTS index from every file on disk (chunk
-        level, no embedding). Returns the (file, error) pairs it could not
-        index, for finish_fts_run's per-file rule (#2056): reported and the
-        index left unmarked; the run fails only if nothing was indexed."""
+        """Fill a new or rebuilt FTS index from every file (chunk level, no
+        embedding). Returns the (file, error) pairs it could not index, for
+        finish_fts_run's per-file rule (#2056): reported and the index left
+        unmarked; the run fails only if nothing was indexed. Under a delegated
+        pass the text is fetched through the content backend in batches, never
+        read off this disk (``_fts_content_source``)."""
         from .fts_lifecycle import bootstrap_fts_from_disk
 
         return bootstrap_fts_from_disk(
-            fts_manager, self.config, self.file_finder.find_files(), progress_callback
+            fts_manager,
+            self.config,
+            self.file_finder.find_files(),
+            progress_callback,
+            **self._fts_content_source(),
         )
+
+    def _fts_content_source(self) -> Dict[str, Any]:
+        """Where this pass's FTS builders read file bytes: the delegated
+        content backend and the open manifest under a delegated pass, else
+        nothing (the local disk). Every FTS rebuild path -- bootstrap, the
+        finish's retry and empty-index check, the reconcile restore -- takes
+        it, so none of them reads the disk of a pod without the repository."""
+        manifest = getattr(self, "repo_manifest", None)
+        if manifest is None:
+            return {}
+        return {"backend": self.content_backend, "manifest": manifest}
 
     def _reconcile_and_verify(
         self,
@@ -2363,6 +2581,10 @@ class SmartIndexer(HighThroughputProcessor):
             and stats.failed_files == 0
         ):
             self.progressive_metadata.mark_store_verified()
+        if not stats.cancelled and files_count_to_process is None:
+            # EVO-64616: this reconcile re-processed every file whose stored
+            # chunks were incomplete; one that failed is a recorded failure.
+            self.progressive_metadata.mark_chunk_coverage_current()
         return stats
 
     def _remove_reconcile_gone_paths(
@@ -2535,7 +2757,9 @@ class SmartIndexer(HighThroughputProcessor):
         from .fts_file_documents import FileFtsDocuments
 
         try:
-            FileFtsDocuments(self.config).replace_in_index(
+            FileFtsDocuments(
+                self.config, **self._fts_content_source()
+            ).replace_in_index(
                 fts_manager, Path(self.config.codebase_dir) / relative_path
             )
             return True
@@ -2725,6 +2949,16 @@ class SmartIndexer(HighThroughputProcessor):
                             f"RECONCILE: Content ID mismatch for {relative_path}: "
                             f"current='{current_effective_id}' vs db='{db_content_id}' - will re-index"
                         )
+                    elif relative_path in self._reconcile_incomplete_paths:
+                        # EVO-64616: indexed while image chunks bypassed the
+                        # text index; only the missing chunks are embedded
+                        # (the stored ones are reused by content hash).
+                        files_to_index.append(file_path)
+                        modified_files += 1
+                        logger.info(
+                            f"RECONCILE: {relative_path} is missing some of its "
+                            "chunks - will re-index"
+                        )
                     elif db_content_id and self._working_dir_file_racily_modified(
                         relative_path
                     ):
@@ -2887,7 +3121,7 @@ class SmartIndexer(HighThroughputProcessor):
                 # on-disk scan, so "not scanned" says nothing about it: remove
                 # it (git hide / non-git hard delete) only when the file is
                 # really gone from its own absolute location.
-                if not Path(indexed_file_str).exists():
+                if not self._exists_in_this_pass(Path(indexed_file_str)):
                     deleted_files.append(indexed_file_str)
                 elif current_branch not in self._reconcile_hidden_on_all_points.get(
                     indexed_file_str, set()
@@ -3243,6 +3477,7 @@ class SmartIndexer(HighThroughputProcessor):
             files_processed=stats.files_processed,
             chunks_added=stats.chunks_created,
             failed_files=stats.failed_files,
+            multimodal_chunks_failed=stats.multimodal_chunks_failed,
         )
 
         # Mark as completed only if not cancelled
@@ -3267,7 +3502,8 @@ class SmartIndexer(HighThroughputProcessor):
         return stats
 
     # Moved to services/resume_path_anchor (Bug #2125); kept under its old
-    # name for existing callers.
+    # name for existing callers. ``manifest``: the pass's delegated manifest,
+    # which answers "exists" for a repository not on this machine.
     _reanchor_resume_path = staticmethod(reanchor_resume_path)
 
     def _enable_server_resume_seal(self) -> bool:
@@ -3303,10 +3539,11 @@ class SmartIndexer(HighThroughputProcessor):
         codebase = Path(self.config.codebase_dir)
         resolved_codebase = codebase.resolve()
         retried: List[Path] = []
+        manifest = getattr(self, "repo_manifest", None)
         unsafe_count = 0
         for stored in recorded:
-            candidate = reanchor_resume_path(stored, codebase)
-            if not candidate.exists():
+            candidate = reanchor_resume_path(stored, codebase, manifest)
+            if not self._exists_in_this_pass(candidate):
                 continue
             if self._resume_candidate_is_safe(candidate, resolved_codebase):
                 retried.append(candidate)
@@ -3329,6 +3566,52 @@ class SmartIndexer(HighThroughputProcessor):
                 len(retried),
             )
         return retried, merged
+
+    def _fold_in_incomplete_chunk_files(
+        self, collection_name: str, files: List[Path]
+    ) -> Tuple[bool, List[Path]]:
+        """EVO-64616: add the files whose stored chunks do not cover their
+        ``total_chunks`` -- indexed while image chunks bypassed the text
+        index -- to ``files``, once per index (``chunk_coverage``).
+
+        Returns ``(checked, merged_files)``; ``checked`` is True when the
+        check ran, so the caller records the current coverage version once
+        the run completes. An index already checked, or without points, is
+        not read."""
+        if coverage_is_current(self.progressive_metadata.metadata):
+            return False, files
+        if not self.vector_store_client.has_committed_points(collection_name):
+            return True, files
+        points = self._scroll_content_points_through_lock_contention(collection_name)
+        stored_paths = incomplete_chunk_paths(points, self._visible_branch())
+        codebase = Path(self.config.codebase_dir)
+        resolved_codebase = codebase.resolve()
+        manifest = getattr(self, "repo_manifest", None)
+        covered = {str(f) for f in files}
+        healed: List[Path] = []
+        for stored in sorted(stored_paths):
+            candidate = reanchor_resume_path(stored, codebase, manifest)
+            if (
+                str(candidate) not in covered
+                and self._exists_in_this_pass(candidate)
+                and self._resume_candidate_is_safe(candidate, resolved_codebase)
+            ):
+                covered.add(str(candidate))
+                healed.append(candidate)
+        if healed:
+            logger.info(
+                "Re-indexing %d file(s) whose stored chunks are incomplete "
+                "(indexed before every chunk reached the text index, EVO-64616)",
+                len(healed),
+            )
+        return True, list(files) + healed
+
+    def _visible_branch(self) -> Optional[str]:
+        """The branch whose visible points the coverage check judges; None
+        without git (no point is hidden then)."""
+        if not self.git_topology_service.is_git_available():
+            return None
+        return self.git_topology_service.get_current_branch()
 
     def _relative_to_codebase(self, path: Path) -> str:
         try:
@@ -3802,6 +4085,17 @@ class SmartIndexer(HighThroughputProcessor):
                 info=f"✅ Snapshot complete: {len(indexed_files_with_timestamps)} unique files found",
             )
 
+        # EVO-64616: files whose stored chunks do not cover total_chunks
+        # (chunk_coverage), from the same snapshot -- no extra read.
+        stored_to_relative = {
+            str(stored): relative
+            for relative, stored_points in db_point_paths.items()
+            for stored, _file_hash in stored_points.values()
+        }
+        self._reconcile_incomplete_paths = frozenset(
+            stored_to_relative.get(stored, stored)
+            for stored in incomplete_chunk_paths(all_points, self._visible_branch())
+        )
         self._reconcile_db_content_ids = db_content_ids
         self._reconcile_hidden_branches = db_hidden_branches
         self._reconcile_hidden_on_all_points = db_hidden_on_all_points
@@ -3827,7 +4121,7 @@ class SmartIndexer(HighThroughputProcessor):
         contain a "working_dir" substring -- a previous string-match check
         on the point id was dead code against real persisted data. The
         authoritative signal is the payload shape itself:
-        `high_throughput_processor.py`'s `_create_vector_point` writes
+        `file_chunking_manager.py`'s `_create_vector_point` writes
         `filesystem_mtime`/`filesystem_size` payload fields ONLY for a
         non-git-available (mtime/size-identified) file, and never alongside
         `git_blob_hash`/`git_commit_hash`.
@@ -4270,7 +4564,13 @@ class SmartIndexer(HighThroughputProcessor):
 
         Raises OSError when the file cannot be read for the check, so the
         caller records a failed analysis instead of treating it as changed.
+
+        Never under a delegated pass: its content ids are the pass
+        manifest's blob hashes, which identify the content exactly (no
+        timestamp to be racy about), and the file is not on this machine.
         """
+        if getattr(self, "repo_manifest", None) is not None:
+            return False
         entry = self._reconcile_working_dir_index.get(relative_path)
         if entry is None:
             return False
@@ -4351,12 +4651,24 @@ class SmartIndexer(HighThroughputProcessor):
         """Get content ID that represents current working directory state.
 
         This method replaces the BranchAwareIndexer equivalent for reconciliation.
+
+        Under a delegated pass the repository is not on this machine: the id is
+        the manifest's blob hash -- the one this pass's FileIdentifier stores as
+        ``git_blob_hash`` (a manifest makes every repository git-addressable,
+        cidx-meta included) -- never a local stat or ``git log``. A file the
+        manifest cannot vouch for raises, and reconcile records it as failed.
         """
-        # Check if this is a git repository
-        is_git_repo = self.git_topology_service.is_git_available()
+        manifest = getattr(self, "repo_manifest", None)
+        if manifest is not None:
+            blob_hash = manifest.blob_sha(file_path)
+            if blob_hash is None:
+                raise ContentUnavailableError(
+                    f"{file_path}: no blob hash in this pass's manifest"
+                )
+            return f"{file_path}:blob:{blob_hash}"
 
         # Non-git projects always use mtime/size content ids.
-        if not is_git_repo:
+        if not self.git_topology_service.is_git_available():
             return self._disk_working_dir_content_id(file_path)
         if self._file_differs_from_committed_version(file_path):
             return self._working_blob_content_id(file_path)
@@ -4416,7 +4728,15 @@ class SmartIndexer(HighThroughputProcessor):
             Empty dict on any failure (callers gracefully fall back to the
             original per-file `_get_file_commit` computation for any path
             missing from the map -- never silently skip a file).
+
+        With a delegated manifest for this pass the map is the manifest's: the
+        repository is not on this machine, so ``git ls-tree`` has nothing to
+        run against, and the manifest's blob hashes are the ones the chunks
+        were indexed under.
         """
+        manifest = getattr(self, "repo_manifest", None)
+        if manifest is not None:
+            return dict(manifest.blob_hashes())
         try:
             # ^ hazard text=True here => one non-UTF-8 committed name raises, the map is {} and every file takes the slow path
             result = subprocess.run(
@@ -4481,6 +4801,10 @@ class SmartIndexer(HighThroughputProcessor):
 
         Bug #471: Replaces per-file git diff subprocess calls with a single batched check.
 
+        Empty with a delegated manifest: its blob hashes are taken from the
+        working tree the content backend serves, so the blob-hash content id
+        already tells a modified file from an unmodified one.
+
         Story #2121 (Codex P1): never "nothing modified" on error. Every
         interrupted run is recovered by the reconcile, and a tracked file
         with working changes that is missed here is compared by its HEAD
@@ -4489,6 +4813,8 @@ class SmartIndexer(HighThroughputProcessor):
         repository without any commit yet (unborn HEAD) is not an error:
         nothing has a committed version to differ from.
         """
+        if getattr(self, "repo_manifest", None) is not None:
+            return set()
         head = self._run_git_for_modified_files(
             ["git", "rev-parse", "--verify", "--quiet", "HEAD^{commit}"]
         )
@@ -4570,38 +4896,13 @@ class SmartIndexer(HighThroughputProcessor):
         return False
 
     def _get_file_commit(self, file_path: str) -> str:
-        """Get current commit hash for file, or working directory indicator if modified."""
+        """Last commit touching a committed, unmodified file ("unknown" if none).
+
+        Only reached from ``_get_effective_content_id_for_reconcile`` for a file
+        of a git repository that is clean and missing from the HEAD blob map;
+        non-git and dirty files are identified there before this is consulted.
+        """
         try:
-            # Check if this is a git repository
-            is_git_repo = self.git_topology_service.is_git_available()
-
-            if not is_git_repo:
-                # For non-git projects, always use timestamp-based IDs for consistency
-                try:
-                    file_path_obj = Path(self.config.codebase_dir) / file_path
-                    file_stat = file_path_obj.stat()
-                    return f"working_dir_{file_stat.st_mtime}_{file_stat.st_size}"
-                except Exception:
-                    # Fallback if stat fails
-                    import time
-
-                    return f"working_dir_{time.time()}_error"
-
-            # For git repositories, use the git-aware logic
-            # Check if file differs from committed version
-            if self._file_differs_from_committed_version(file_path):
-                # File has working directory changes - generate unique ID based on mtime/size
-                try:
-                    file_path_obj = Path(self.config.codebase_dir) / file_path
-                    file_stat = file_path_obj.stat()
-                    return f"working_dir_{file_stat.st_mtime}_{file_stat.st_size}"
-                except Exception:
-                    # Fallback if stat fails
-                    import time
-
-                    return f"working_dir_{time.time()}_error"
-
-            # File matches committed version - use commit hash
             result = subprocess.run(
                 ["git", "log", "-1", "--format=%H", "--", file_path],
                 cwd=self.config.codebase_dir,

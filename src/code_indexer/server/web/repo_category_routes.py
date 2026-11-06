@@ -16,7 +16,7 @@ from fastapi.templating import Jinja2Templates
 
 from code_indexer.server.auth import dependencies
 
-from .routes import (
+from .pages._shared import (
     _require_admin_session,
     _create_login_redirect,
     validate_login_csrf_token,

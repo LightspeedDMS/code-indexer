@@ -68,6 +68,17 @@ class GitFetchError(Exception):
 # "fatal: Could not read from remote repository." line that would otherwise
 # match the broader TRANSIENT_PATTERNS entry "Could not read from remote",
 # causing a permanently-broken upstream to be endlessly retried/re-cloned.
+#: What git says when a fetched branch is gone upstream (EVO-64616).
+MISSING_REMOTE_REF = "couldn't find remote ref"
+
+
+def names_missing_remote_ref(stderr: object) -> bool:
+    """Whether git's *stderr* says a fetched ref does not exist upstream."""
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    return MISSING_REMOTE_REF in str(stderr or "")
+
+
 PERMANENT_PATTERNS: List[str] = [
     "The project you were looking for could not be found",
     "you don't have permission",
@@ -113,6 +124,10 @@ PERMANENT_PATTERNS: List[str] = [
     # clone if the source is only temporarily unavailable). See Bug
     # #1534 round-3 review.
     "does not appear to be a git repository",
+    # EVO-64616: the branch the clone fetches no longer exists upstream (a
+    # renamed default branch). Retrying or re-cloning the same branch cannot
+    # fix it -- changing the registered branch does (see MISSING_REMOTE_REF).
+    MISSING_REMOTE_REF,
 ]
 
 # Patterns indicating local object database corruption.

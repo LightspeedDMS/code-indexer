@@ -14,7 +14,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable, List, Optional, TypeVar
 
 from .membership import request_participants_reader
-from .path_policy import DEP_MAP_DIR, Decision, DecisionKind, classify
+from .path_policy import Decision, DecisionKind, catalog_dep_map_dir, classify
 from .visibility import MetaVisibility, memory_visibility_fn
 
 T = TypeVar("T")
@@ -35,7 +35,7 @@ def catalog_decider(
     catalog_root: Path, vis: MetaVisibility, access_service: Optional[Any]
 ) -> Callable[[str], Decision]:
     """``classify`` for one request over the catalog at *catalog_root*."""
-    participants = request_participants_reader(Path(catalog_root) / DEP_MAP_DIR)
+    participants = request_participants_reader(catalog_dep_map_dir(catalog_root))
     memory_fn = memory_visibility_fn(access_service, vis)
     return lambda relative_path: classify(relative_path, vis, participants, memory_fn)
 

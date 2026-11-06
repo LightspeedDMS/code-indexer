@@ -19,12 +19,12 @@ from code_indexer.server.services.constants import (
     DEFAULT_GROUP_ADMINS,
 )
 
-from .routes import (
+from .pages._shared import (
     _get_golden_repo_manager,
     _get_group_manager,
     _require_admin_session,
-    _validate_repo_access_csrf,
 )
+from .pages.groups import _validate_repo_access_csrf
 
 logger = logging.getLogger(__name__)
 

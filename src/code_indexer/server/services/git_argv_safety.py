@@ -40,14 +40,15 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Any, Callable, Iterable, List, Optional
 
 from code_indexer.utils.git_runner import run_git_command
+from code_indexer.utils.index_store import INDEX_DIRNAME
 
 # cidx's own untracked working paths inside a repository clone: the index
 # directory and the project-level override file. Unanchored patterns, so
 # they are kept at any depth.
-CIDX_OWNED_WORKING_PATHS = (".code-indexer", ".code-indexer-override.yaml")
+CIDX_OWNED_WORKING_PATHS = (INDEX_DIRNAME, f"{INDEX_DIRNAME}-override.yaml")
 
 # The ONE argv every server-side "remove untracked files" runs (REST and
 # MCP git_clean, and the pre-refresh clearing of a dirty repository). Each
@@ -135,7 +136,9 @@ def validate_remote_syntax(remote: str) -> str:
     return remote
 
 
-def validate_remote_name(remote: str, repo_path: Path) -> str:
+def validate_remote_name(
+    remote: str, repo_path: Path, runner: Callable[..., Any] = run_git_command
+) -> str:
     """Validate `remote` is a safe, actually-configured remote name.
 
     An empty string is not one of the two hazards this module checks (it
@@ -161,7 +164,11 @@ def validate_remote_name(remote: str, repo_path: Path) -> str:
     from code_indexer.utils import git_runner
 
     try:
-        result = run_git_command(
+        # *runner*: run_git_command, or the git tools' seam runner on a pod
+        # that does not hold the repository (same signature). A local
+        # metadata lookup, bounded like every other on the push/pull/fetch
+        # paths.
+        result = runner(
             ["git", "remote"],
             cwd=repo_path,
             check=True,

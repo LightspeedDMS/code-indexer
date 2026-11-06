@@ -68,18 +68,12 @@ _MAX_REGEX_MAX_RESULTS = 1000
 # <huge>` even though the aggregate result-content budget (this same
 # remediation round) still bounds the resulting memory.
 _MAX_REGEX_CONTEXT_LINES = 10
-# Filesystem subdirectory name for the memory HNSW index (Story #883).
-_CIDX_META_DIR_NAME = "cidx-meta"
-
 # Bug #881 Phase 1: query_text is truncated to this length in INFO logs to avoid
 # logging potentially large or sensitive query strings at INFO level.
 _QUERY_LOG_TRUNCATION_LIMIT = 100
 
 # Bug #881 Phase 1: max number of expanded aliases shown in the omni post-expansion log.
 _OMNI_LOG_MAX_ALIASES_SHOWN = 10
-
-# Modes that trigger memory retrieval alongside code search (Story #883).
-_MEMORY_SEMANTIC_MODES = frozenset({"semantic", "hybrid"})
 
 
 def _get_search_event_writer() -> "Optional[SearchEventLogWriter]":
@@ -214,7 +208,7 @@ def _compute_effective_limit(requested_limit: int, user: User) -> int:
     """Calculate over-fetch limit for access filtering (Story #300).
 
     Args:
-        requested_limit: pre-validated non-negative int from _coerce_int(default=10)
+        requested_limit: pre-validated non-negative int from coerce_int(default=10)
     """
     access_svc = _get_access_filtering_service()
     if access_svc and not access_svc.is_admin_user(user.username):
@@ -228,7 +222,7 @@ def _compute_rerank_limit(
     """Calculate overfetch limit when reranking is active (Story #653 AC3).
 
     Args:
-        requested_limit: pre-validated via _coerce_int
+        requested_limit: pre-validated via coerce_int
         effective_limit: pre-computed via _compute_effective_limit
     """
     if not params.get("rerank_query"):

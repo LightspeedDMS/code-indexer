@@ -59,6 +59,13 @@ _EXCEL_COLUMNS = [
     "evaluator_source_truncated",
 ]
 
+# Directory directly under golden-repos that holds cidx's exports. It is cidx's
+# own state, never a repository: the golden-repos backfill scan skips it.
+CIDX_EXPORTS_DIR = "cidx-exports"
+
+# Subdirectory of CIDX_EXPORTS_DIR that holds query-analytics exports
+_EXPORT_SUBDIR = "query-analytics"
+
 # Rows per store read (Bug #2106). An export reads every matching row in
 # batches of this size and streams them into the workbook, so memory stays
 # bounded by one batch however many rows match.
@@ -654,17 +661,15 @@ class QueryAnalyticsExportService:
         Raises ValueError if export_id is not a valid UUID (prevents path traversal).
         """
         _validate_export_id(export_id)
-        return (
-            Path(self._golden_repos_dir)
-            / "cidx-exports"
-            / "query-analytics"
-            / f"{export_id}.xlsx"
-        )
+        return self._export_dir() / f"{export_id}.xlsx"
 
     def ensure_export_dir(self) -> None:
         """Create the export directory if it does not exist."""
-        export_dir = Path(self._golden_repos_dir) / "cidx-exports" / "query-analytics"
-        export_dir.mkdir(parents=True, exist_ok=True)
+        self._export_dir().mkdir(parents=True, exist_ok=True)
+
+    def _export_dir(self) -> Path:
+        """The directory query-analytics exports are written to."""
+        return Path(self._golden_repos_dir) / CIDX_EXPORTS_DIR / _EXPORT_SUBDIR
 
     def build_filter_summary(self, filters: Dict[str, Any]) -> str:
         """Build a human-readable summary string from the applied filters."""

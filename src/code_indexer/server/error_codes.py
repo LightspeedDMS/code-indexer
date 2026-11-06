@@ -4692,6 +4692,18 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
         severity=Severity.WARNING,
         action="Verify the branch value is well-formed",
     ),
+    "SVC-REINDEX-001": ErrorDefinition(
+        code="SVC-REINDEX-001",
+        description="Reindex of an activated copy after a cidx write could not be enqueued",
+        severity=Severity.ERROR,
+        action="Check the background job manager and the copy's registration; run trigger_reindex",
+    ),
+    "SVC-REINDEX-002": ErrorDefinition(
+        code="SVC-REINDEX-002",
+        description="Deferred reindex after a cidx write gave up waiting for a busy reindex",
+        severity=Severity.ERROR,
+        action="Run trigger_reindex for the copy once the running reindex finishes",
+    ),
     "TELEM-GENERAL-009": ErrorDefinition(
         code="TELEM-GENERAL-009",
         description="TODO",
@@ -5287,6 +5299,19 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
         action=(
             "Check the startup log for the group access initialization "
             "failure (APP-GENERAL-014) and restart the server once it is fixed"
+        ),
+    ),
+    "QUERY-MIGRATE-015": ErrorDefinition(
+        code="QUERY-MIGRATE-015",
+        description=(
+            "SCIP query refused: repository access control is unavailable, so "
+            "access to SCIP indexes cannot be verified"
+        ),
+        severity=Severity.ERROR,
+        action=(
+            "Check the startup log for the group access initialization "
+            "failure (APP-GENERAL-014) and restart the server once it is fixed; "
+            "every SCIP query is refused until then"
         ),
     ),
     # Story #86: Migrated logger statements - REPO subsystem (repository management)

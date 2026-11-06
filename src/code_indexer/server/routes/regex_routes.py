@@ -43,6 +43,9 @@ from code_indexer.server.telemetry.correlation_bridge import (
 # Module-level import so test patches against
 # code_indexer.server.routes.regex_routes.RegexSearchService work correctly.
 from code_indexer.global_repos.regex_search import RegexSearchService
+from code_indexer.server.startup.ripgrep_backend_wiring import (
+    server_regex_target,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -265,6 +268,7 @@ async def _execute_single_search(
         api_metrics_service.increment_regex_search(username=user.username)
 
     repo_path = Path(repo_path_str)
+
     # Issue #1609: RegexSearchService.__init__ performs synchronous
     # filesystem calls (Path.resolve(), shutil.which()) that must never
     # run directly on the event-loop thread inside an `async def` (this
@@ -272,9 +276,13 @@ async def _execute_single_search(
     # call itself via anyio.to_thread.run_sync, mirroring the granular
     # per-call offload pattern already established elsewhere in this
     # search path (see regex_search.py's search() method).
-    service = await anyio.to_thread.run_sync(
-        functools.partial(RegexSearchService, repo_path)
-    )
+    def _new_service() -> RegexSearchService:
+        root, backend = server_regex_target(repo_path)
+        # The trigram index is this pod's index state for the alias target,
+        # even when ripgrep runs at the golden repo's base clone.
+        return RegexSearchService(root, ripgrep_backend=backend, trigram_root=repo_path)
+
+    service = await anyio.to_thread.run_sync(_new_service)
     # Story #2117: a search that ran on a resolved repository and failed is a
     # failure row (its exception's class); the error propagates.
     with recording_failure(

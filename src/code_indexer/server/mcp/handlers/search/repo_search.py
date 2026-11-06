@@ -13,13 +13,22 @@ preserved intentionally to avoid behavioral changes during extraction.
 Refactoring is tracked separately.
 """
 
+from cidx_sdk import SearchAugmentRequest
+from cidx_sdk.tool_args import coerce_float, coerce_int
+
+from code_indexer.server.features.search_augmenters import (
+    active_search_augmenters,
+    run_search_augmenters,
+    wants_query_vector,
+)
+
+from code_indexer.server.services.served_index_cache import reads_served_indexes
 import logging
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from code_indexer.server.auth.user_manager import User
-from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.deactivation_query_drain import (
     track_activated_repo_query,
 )
@@ -30,8 +39,6 @@ from code_indexer.server.telemetry.metrics_instrumentation import (
 
 from .. import _utils
 from .._utils import (
-    _coerce_float,
-    _coerce_int,
     _error_with_suggestions,
     _get_available_repos,
     _get_golden_repos_dir,
@@ -45,14 +52,13 @@ from ._shared import (
     _DEFAULT_MIN_SCORE,
     _DEFAULT_SEARCH_LIMIT,
     _DEFAULT_SNIPPET_LINES,
-    _MEMORY_SEMANTIC_MODES,
     _apply_rerank_and_filter,
     _compute_effective_limit,
     _compute_rerank_limit,
     _enrich_results_with_category,
     _load_category_map,
 )
-from .memory_retrieval import _compute_shared_query_vector, _run_memory_retrieval
+from .query_vector import _compute_shared_query_vector
 
 logger = logging.getLogger("code_indexer.server.mcp.handlers.search")
 
@@ -106,9 +112,29 @@ def _resolve_global_repo_target(repository_alias: str, user: User) -> tuple:
     # Bug #1315: fall back to the registry's own index_path when the alias
     # pointer file is missing/unreadable, mirroring MultiSearchService's
     # omni-path resolution so direct and omni queries behave identically.
+    from code_indexer.server.startup.content_backend_wiring import (
+        is_content_seam_delegated,
+    )
+
+    # EVO-69846: also bypass filesystem checks when the search backend is
+    # delegated -- a stateless pod has no local index files AND may have no
+    # repository checkout, so the Path.exists() guard would reject every
+    # search_code call before it reaches the delegated search backend.
+    def _is_search_seam_delegated() -> bool:
+        try:
+            from code_indexer.server import app as app_module
+
+            return getattr(app_module.app.state, "search_backend", None) is not None
+        except Exception:
+            return False
+
+    delegated = is_content_seam_delegated() or _is_search_seam_delegated()
     alias_manager = AliasManager(str(Path(golden_repos_dir) / "aliases"))
     target_path = resolve_alias_or_index_path(
-        alias_manager, alias_name=repository_alias, repo_entry=repo_entry
+        alias_manager,
+        alias_name=repository_alias,
+        repo_entry=repo_entry,
+        skip_fs_check=delegated,
     )
     if not target_path:
         err = _repo_lookup_error(
@@ -118,7 +144,7 @@ def _resolve_global_repo_target(repository_alias: str, user: User) -> tuple:
         )
         return None, None, err
 
-    if not Path(target_path).exists():
+    if not delegated and not Path(target_path).exists():
         from code_indexer.server.query.semantic_query_manager import (
             SearchRepositoryNotFoundError,
         )
@@ -146,7 +172,7 @@ def _build_search_kwargs(
         user_repos=user_repos,
         query_text=params["query_text"],
         limit=limit,
-        min_score=_coerce_float(params.get("min_score"), _DEFAULT_MIN_SCORE),
+        min_score=coerce_float(params.get("min_score"), _DEFAULT_MIN_SCORE),
         file_extensions=params.get("file_extensions"),
         language=params.get("language"),
         exclude_language=params.get("exclude_language"),
@@ -159,8 +185,8 @@ def _build_search_kwargs(
         at_commit=params.get("at_commit"),
         case_sensitive=params.get("case_sensitive", False),
         fuzzy=params.get("fuzzy", False),
-        edit_distance=_coerce_int(params.get("edit_distance"), _DEFAULT_EDIT_DISTANCE),
-        snippet_lines=_coerce_int(params.get("snippet_lines"), _DEFAULT_SNIPPET_LINES),
+        edit_distance=coerce_int(params.get("edit_distance"), _DEFAULT_EDIT_DISTANCE),
+        snippet_lines=coerce_int(params.get("snippet_lines"), _DEFAULT_SNIPPET_LINES),
         regex=params.get("regex", False),
         diff_type=params.get("diff_type"),
         author=params.get("author"),
@@ -312,6 +338,7 @@ def _build_provider_unavailable_response(
     )
 
 
+@reads_served_indexes
 def _search_global_repo(
     params: Dict[str, Any], user: User, repository_alias: str
 ) -> Dict[str, Any]:
@@ -331,7 +358,7 @@ def _search_global_repo(
         }
     ]
 
-    requested_limit = _coerce_int(params.get("limit"), _DEFAULT_SEARCH_LIMIT)
+    requested_limit = coerce_int(params.get("limit"), _DEFAULT_SEARCH_LIMIT)
     effective_limit = _compute_effective_limit(requested_limit, user)
     effective_limit = _compute_rerank_limit(params, requested_limit, effective_limit)
 
@@ -414,29 +441,30 @@ def _search_activated_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]
 
     Extracted from search_code activated-repo branch (_legacy.py lines 636-791).
 
-    Story #883 Phase C: when search_mode is semantic/hybrid and memory retrieval is
-    enabled, the Voyage embedding vector is computed ONCE here via
-    _compute_shared_query_vector and reused by both code search (via
-    precomputed_query_vector kwarg to query_user_repositories) and memory retrieval
-    (via query_vector kwarg to _run_memory_retrieval).  This guarantees exactly one
-    Voyage API call per semantic request regardless of whether memories are retrieved.
+    Story #883 Phase C: when a contributed search augmenter applies to the
+    search's mode (the memory feature's ``relevant_memories`` for
+    semantic/hybrid, while enabled), the Voyage embedding vector is computed
+    ONCE here via _compute_shared_query_vector and reused by both code search
+    (via precomputed_query_vector kwarg to query_user_repositories) and every
+    augmenter (``features/search_augmenters.py``). This guarantees exactly one
+    Voyage API call per semantic request regardless of whether a section is
+    added.
     """
-    requested_limit = _coerce_int(params.get("limit"), _DEFAULT_SEARCH_LIMIT)
+    requested_limit = coerce_int(params.get("limit"), _DEFAULT_SEARCH_LIMIT)
     effective_limit = _compute_effective_limit(requested_limit, user)
     effective_limit = _compute_rerank_limit(params, requested_limit, effective_limit)
 
-    # Story #883 Phase C: compute shared Voyage vector once for semantic/hybrid modes
-    # when memory retrieval is enabled.  The same vector is threaded through to both
-    # code search and memory retrieval so only one Voyage API call is made per request.
+    # Story #883 Phase C: compute the shared Voyage vector once when an active
+    # augmenter wants it. The same vector is threaded through to both code
+    # search and the augmenters so only one Voyage API call is made per request.
     search_mode = params.get("search_mode", "semantic")
-    config_service = get_config_service()
+    augmenters = active_search_augmenters(str(search_mode))
     shared_query_vector: Optional[List[float]] = None
-    if search_mode in _MEMORY_SEMANTIC_MODES:
-        mem_cfg = config_service.get_config().memory_retrieval_config
-        if mem_cfg.memory_retrieval_enabled:
+    if augmenters:
+        if wants_query_vector(augmenters):
             query_text = params.get("query_text", "") or ""
             # Story #1108 (S4): thread per-request cache bypass into the
-            # shared embedding call so both code search and memory retrieval
+            # shared embedding call so both code search and the augmenters
             # honour the bypass flag without a second Voyage API call.
             # Defect #1148 fix: _compute_shared_query_vector now returns (vector, digest).
             # The activated-repo path is single-repo (no mixed-config fan-out), so the
@@ -523,19 +551,23 @@ def _search_activated_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]
         for _ac4_key in ("preview_size_chars", "rows_capped"):
             if _ac4_key in rerank_meta:
                 qm[_ac4_key] = rerank_meta[_ac4_key]
-        # Story #883: parallel memory retrieval — reranker_status extracted here so
-        # _run_memory_retrieval receives a plain string, not a nested dict.
-        reranker_status: str = rerank_meta["reranker_status"]["status"]
-        # Story #883 Phase C: pass shared vector to avoid second Voyage API call
-        relevant_memories = _run_memory_retrieval(
-            params,
-            user,
-            config_service,
-            reranker_status,
-            query_vector=shared_query_vector,
-        )
-        if relevant_memories is not None:
-            qm["relevant_memories"] = relevant_memories
+        # Story #883: the augmenters' sections (the memory feature's
+        # relevant_memories), each given the shared vector so no second
+        # Voyage API call is made.
+        if augmenters:
+            qm.update(
+                run_search_augmenters(
+                    augmenters,
+                    SearchAugmentRequest(
+                        username=user.username,
+                        query_text=str(params.get("query_text") or ""),
+                        search_mode=str(search_mode),
+                        limit=requested_limit,
+                        query_vector=shared_query_vector or (),
+                        reranker_status=str(rerank_meta["reranker_status"]["status"]),
+                    ),
+                )
+            )
         # AC7 (Bug #1202): effective_search_mode and effective_query_strategy are
         # already in qm — they arrive via QueryMetadata.to_dict() in the
         # per-request result dict.  No singleton read-back needed here.

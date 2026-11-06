@@ -260,6 +260,34 @@ class GlobalReposPostgresBackend:
             logger.debug("Updated enable_scip=%s for repo: %s", enable_scip, alias_name)
         return updated
 
+    def update_index_path(self, alias_name: str, index_path: str) -> bool:
+        """
+        Repoint a repository's on-disk index_path (EVO-66808).
+
+        Targeted single-column update (NOT a register_repo upsert) so it never
+        resets last_refresh / enable_temporal / enable_scip / temporal_options.
+        Used by the golden-repo reconcile to heal a stale absolute index_path.
+
+        Args:
+            alias_name: Alias of the repository to update.
+            index_path: New on-disk index path.
+
+        Returns:
+            True if record was updated, False if not found.
+        """
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE global_repos SET index_path = %s WHERE alias_name = %s",
+                    (index_path, alias_name),
+                )
+                updated: bool = cur.rowcount > 0
+            conn.commit()
+
+        if updated:
+            logger.debug("Updated index_path=%s for repo: %s", index_path, alias_name)
+        return updated
+
     def update_next_refresh(self, alias_name: str, next_refresh: Optional[str]) -> bool:
         """
         Update the next_refresh timestamp (or clear it).

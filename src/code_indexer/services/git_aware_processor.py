@@ -4,18 +4,16 @@ Git-aware document processor that extends the base DocumentProcessor.
 
 import logging
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import TYPE_CHECKING, List, Dict, Any, Optional
 
 from code_indexer.config import Config
 from code_indexer.services.embedding_provider import EmbeddingProvider
 from code_indexer.indexing.processor import DocumentProcessor
 from code_indexer.services.file_identifier import FileIdentifier
 from code_indexer.services.git_detection import GitDetectionService
-from code_indexer.services.metadata_schema import (
-    GitAwareMetadataSchema,
-    MetadataValidator,
-)
-from code_indexer.services.vector_calculation_manager import VectorCalculationManager
+
+if TYPE_CHECKING:
+    from ..indexing.repo_manifest import RepoManifest
 
 logger = logging.getLogger(__name__)
 
@@ -28,10 +26,89 @@ class GitAwareDocumentProcessor(DocumentProcessor):
         config: Config,
         embedding_provider: EmbeddingProvider,
         vector_store_client: Any,  # FilesystemVectorStore (vector store backend)
+        content_backend: Optional[Any] = None,  # ContentBackend
+        git_backend: Optional[Any] = None,  # GitBackend, for HEAD's commit/branch
     ):
         super().__init__(config, embedding_provider, vector_store_client)
-        self.file_identifier = FileIdentifier(config.codebase_dir, config)
-        self.git_detection = GitDetectionService(config.codebase_dir, config)
+
+        # The content seam. None (the default) and a LOCAL backend both mean
+        # "read this container's disk", which is what every caller does today.
+        #
+        # The manifest is built ONLY for a delegated backend, and that is not a
+        # tuning choice. Building it asks the backend to hash every file, and the
+        # local backend hashes by reading -- so against local it would move the
+        # per-file hash reads to the front of the pass rather than remove them.
+        # Measured over a 20-file repository: 40 opens either way. Against a
+        # delegated backend the hashes arrive over its own paged call and those
+        # reads disappear: 20.
+        self.content_backend = content_backend
+        self.repo_manifest: Optional["RepoManifest"] = None
+        # True between begin_manifest_pass and end_manifest_pass. Lets a pass
+        # that may run inside another (the high-throughput pass, inside
+        # smart_index) join the open one instead of opening its own, so files
+        # are discovered and read against ONE snapshot. begin itself stays
+        # unconditional: it always rebuilds.
+        self.manifest_pass_open = False
+
+        # The git seam: on a pod that does not hold the repository, HEAD's commit
+        # and branch come from git-mcp -- otherwise every chunk and the index
+        # metadata record "unknown", and refresh re-indexes every cycle.
+        self.git_backend = git_backend
+        self.file_identifier = FileIdentifier(
+            config.codebase_dir, config, git_backend=git_backend
+        )
+        self.git_detection = GitDetectionService(
+            config.codebase_dir, config, git_backend=git_backend
+        )
+
+    def begin_manifest_pass(self) -> None:
+        """Build the manifest describing the repository as it is RIGHT NOW.
+
+        Called at the start of each indexing pass, never from ``__init__``. The
+        manifest is a snapshot, and an indexer outlives a pass: watch mode keeps
+        one for a whole session and the reprocess pass reuses the same instance.
+        Building it once per instance would serve the blob hash a file had before
+        it was edited, and because the point UUID is seeded from that hash the
+        new content would be written over the old version's ids.
+
+        A no-op unless a DELEGATED backend is configured. Against the local
+        backend the manifest is a measured wash -- building it reads every file,
+        which is the work it would save -- so it is never built there, and the
+        default path does no extra work at all.
+        """
+        self.manifest_pass_open = True
+        if self.content_backend is None or getattr(
+            self.content_backend, "is_local", True
+        ):
+            return
+
+        # Every step below is a remote call or depends on one, and the callers
+        # only reach their ``finally: end_manifest_pass()`` once this returns. A
+        # failure here must not leave the pass marked open -- a later standalone
+        # pass would then join it, find no manifest and read the local disk --
+        # nor leave a half-installed manifest serving stale hashes.
+        try:
+            from ..indexing.file_finder import attach_delegated_manifest
+
+            self.repo_manifest = attach_delegated_manifest(
+                self.file_finder, self.content_backend, self.config.codebase_dir
+            )
+            self.file_identifier.set_manifest(self.repo_manifest)
+        except BaseException:
+            # attach_delegated_manifest may have installed a manifest on the
+            # finder before failing; nothing may be left reading it.
+            self.file_finder.set_manifest(None)
+            self.end_manifest_pass()
+            raise
+
+    def end_manifest_pass(self) -> None:
+        """Drop the snapshot, so nothing outside a pass can read a stale hash."""
+        self.manifest_pass_open = False
+        if self.repo_manifest is None:
+            return
+        self.repo_manifest = None
+        self.file_identifier.set_manifest(None)
+        self.file_finder.set_manifest(None)
 
     def _normalize_path_for_storage(self, file_path: Path) -> str:
         """
@@ -60,160 +137,6 @@ class GitAwareDocumentProcessor(DocumentProcessor):
                 )
                 raise
         return str(file_path)
-
-    def process_file(self, file_path: Path) -> List[Dict[str, Any]]:
-        """Process a single file with git-aware metadata."""
-        # Use VectorCalculationManager to process single file
-        from .vector_calculation_manager import VectorCalculationManager
-
-        thread_count = self.config.voyage_ai.parallel_requests
-        with VectorCalculationManager(
-            self.embedding_provider, thread_count
-        ) as vector_manager:
-            return self.process_file_parallel(file_path, vector_manager)
-
-    def process_file_parallel(
-        self, file_path: Path, vector_manager: VectorCalculationManager
-    ) -> List[Dict[str, Any]]:
-        """Process a single file with git-aware metadata using parallel vector calculation."""
-        try:
-            # Step 1: File reading & chunking (main thread)
-            chunks = self.fixed_size_chunker.chunk_file(
-                file_path, repo_root=self.config.codebase_dir
-            )
-
-            if not chunks:
-                return []
-
-            # Get git-aware metadata (main thread)
-            file_metadata = self.file_identifier.get_file_metadata(file_path)
-
-            # Step 2: Submit vector calculation tasks to worker threads
-            chunk_futures = []
-            for chunk in chunks:
-                # Prepare comprehensive metadata for the chunk
-                chunk_metadata = {
-                    "chunk": chunk,
-                    "file_metadata": file_metadata,
-                    "file_path": str(file_path),
-                }
-
-                # Submit to vector calculation manager
-                future = vector_manager.submit_chunk(chunk["text"], chunk_metadata)
-                chunk_futures.append(future)
-
-            # Step 3: Collect results and create Filesystem points (main thread)
-            points = []
-            for future in chunk_futures:
-                try:
-                    vector_result = future.result(
-                        timeout=300
-                    )  # 5 minute timeout per chunk
-
-                    if vector_result.error:
-                        raise ValueError(
-                            f"Vector calculation failed: {vector_result.error}"
-                        )
-
-                    # Note: vector_result.embedding now uses batch processing internally
-
-                    # Reconstruct chunk and file metadata
-                    chunk = vector_result.metadata["chunk"]
-                    file_metadata = vector_result.metadata["file_metadata"]
-
-                    # Validate embedding dimensions
-                    if not self._validate_embedding(vector_result.embedding):
-                        raise ValueError(
-                            f"Invalid embedding dimensions for {file_path}"
-                        )
-
-                    # Create standardized git-aware metadata using schema
-                    metadata_info = None
-                    if file_metadata["git_available"]:
-                        metadata_info = {
-                            "commit_hash": file_metadata.get("commit_hash"),
-                            "branch": file_metadata.get("branch"),
-                            "git_hash": file_metadata.get("git_hash"),
-                        }
-                    else:
-                        # For non-git projects, pass filesystem metadata as git_metadata (will be added as filesystem fields)
-                        metadata_info = {
-                            "file_mtime": file_metadata.get("file_mtime"),
-                            "file_size": file_metadata.get("file_size"),
-                        }
-
-                    # Create payload using create_git_aware_metadata
-                    payload = GitAwareMetadataSchema.create_git_aware_metadata(
-                        path=self._normalize_path_for_storage(file_path),
-                        content=chunk["text"],
-                        language=chunk["file_extension"],
-                        file_size=file_path.stat().st_size,
-                        chunk_index=chunk["chunk_index"],
-                        total_chunks=chunk["total_chunks"],
-                        project_id=file_metadata["project_id"],
-                        file_hash=file_metadata["file_hash"],
-                        git_metadata=(
-                            metadata_info if file_metadata["git_available"] else None
-                        ),
-                        line_start=chunk.get("line_start"),
-                        line_end=chunk.get("line_end"),
-                        # Issue #2013: FileIdentifier's hash-read time. On this
-                        # (deprecated, uncalled) path get_file_metadata runs
-                        # AFTER chunking, so it does not precede the chunked
-                        # read: reconcile's racy-timestamp guarantee is only
-                        # claimed for the high-throughput path.
-                        indexed_timestamp=file_metadata.get("content_read_timestamp"),
-                    )
-
-                    # Manually add filesystem metadata for non-git projects
-                    if not file_metadata["git_available"] and metadata_info:
-                        if "file_mtime" in metadata_info:
-                            payload["filesystem_mtime"] = metadata_info["file_mtime"]
-                        if "file_size" in metadata_info:
-                            payload["filesystem_size"] = metadata_info["file_size"]
-
-                    # Validate metadata before creating point
-                    if not MetadataValidator.validate_point_payload(payload):
-                        # Log validation errors but continue processing
-                        validation_result = GitAwareMetadataSchema.validate_metadata(
-                            payload
-                        )
-                        print(
-                            f"Warning: Metadata validation failed for {file_path}: {validation_result['errors']}"
-                        )
-
-                    # Create unique point ID using our git-aware scheme
-                    point_id = self._create_point_id(
-                        file_metadata, chunk["chunk_index"]
-                    )
-
-                    # Add the unique identifier to payload for tracking/deduplication
-                    payload["point_id"] = point_id
-                    payload["unique_key"] = self._create_unique_key(
-                        file_metadata, chunk["chunk_index"]
-                    )
-
-                    # Create Filesystem point with the calculated embedding
-                    point = self.vector_store_client.create_point(
-                        point_id=point_id,
-                        vector=vector_result.embedding,
-                        payload=payload,
-                        embedding_model=self.embedding_provider.get_current_model(),
-                    )
-                    points.append(point)
-
-                except Exception as e:
-                    # Log the error but continue with other chunks
-                    import logging
-
-                    logger = logging.getLogger(__name__)
-                    logger.error(f"Failed to process chunk in {file_path}: {e}")
-                    raise  # Re-raise to fail the entire file if any chunk fails
-
-            return points
-
-        except Exception as e:
-            raise ValueError(f"Failed to process file {file_path}: {e}")
 
     def _create_point_id(self, file_metadata: Dict[str, Any], chunk_index: int) -> str:
         """Create deterministic UUID-based point ID.

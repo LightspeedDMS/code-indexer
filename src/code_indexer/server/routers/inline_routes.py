@@ -43,13 +43,11 @@ from ..mcp.protocol import mcp_router
 from ..global_routes.routes import router as global_routes_router
 from ..global_routes.git_settings import router as git_settings_router
 from ..routers.ssh_keys import router as ssh_keys_router
-from ..routers.scip_queries import router as scip_queries_router
 from ..routers.files import router as files_router
 from ..routers.git import router as git_router
 from ..routers.indexing import router as indexing_router
 from ..routers.cache import router as cache_router
 from ..routers.maintenance_router import router as maintenance_router
-from ..routers.memories import router as memories_router
 from ..routers.api_keys import router as api_keys_router
 from ..routers.diagnostics import router as diagnostics_router
 from ..routers.research_assistant import router as research_assistant_router
@@ -64,6 +62,8 @@ from ..routers.hnsw_orphan_sweep_admin import router as hnsw_orphan_sweep_admin_
 from ..routers.siem_delivery_admin import router as siem_delivery_admin_router
 from ..routers.embedding_stats_admin import router as embedding_stats_admin_router
 from ..routers.dedup_warnings_admin import router as dedup_warnings_admin_router
+from ..routers.metadata_outbox_admin import router as metadata_outbox_admin_router
+from ..routers.index_store_admin import router as index_store_admin_router
 from ..routers.llm_creds import router as llm_creds_router
 from ..routers.debug_routes import debug_router
 from ..routers.groups import (
@@ -73,9 +73,7 @@ from ..routers.groups import (
 )
 from ..routers.repo_categories import router as repo_categories_router
 from ..routes.multi_query_routes import router as multi_query_router
-from ..routes.scip_multi_routes import router as scip_multi_router
 from ..routes.reaper_routes import router as reaper_router  # Story #967
-from ..routes.xray_routes import router as xray_router  # Story #974
 from ..routes.regex_routes import router as regex_router  # Story #1011
 from ..web import (
     web_router,
@@ -85,7 +83,6 @@ from ..web import (
     init_session_manager,
 )
 from ..web.repo_category_routes import repo_category_web_router
-from ..web.dependency_map_routes import dependency_map_router
 from ..web.audit_log_routes import audit_log_web_router
 from ..web.siem_delivery_routes import siem_delivery_web_router
 from ..web.group_repo_access_routes import group_repo_access_web_router
@@ -120,7 +117,6 @@ def register_inline_routes(
     activated_repo_manager,
     repository_listing_manager,
     semantic_query_manager,
-    workspace_cleanup_service,
     jwt_manager,
     user_manager,
     refresh_token_manager,
@@ -148,7 +144,6 @@ def register_inline_routes(
         activated_repo_manager: ActivatedRepoManager instance
         repository_listing_manager: RepositoryListingManager instance
         semantic_query_manager: SemanticQueryManager instance
-        workspace_cleanup_service: WorkspaceCleanupService instance
         jwt_manager: JWTManager instance
         user_manager: UserManager instance
         refresh_token_manager: RefreshTokenManager instance
@@ -195,7 +190,6 @@ def register_inline_routes(
         user_manager=user_manager,
         golden_repo_manager=golden_repo_manager,
         background_job_manager=background_job_manager,
-        workspace_cleanup_service=workspace_cleanup_service,
         config_service=config_service,
         server_config=server_config,
         data_dir=data_dir,
@@ -253,14 +247,11 @@ def register_inline_routes(
     app.include_router(global_routes_router)
     app.include_router(git_settings_router, prefix="/api")
     app.include_router(ssh_keys_router)
-    app.include_router(scip_queries_router)
     app.include_router(files_router)
-    app.include_router(memories_router)
     app.include_router(git_router)
     app.include_router(indexing_router)
     app.include_router(cache_router)
     app.include_router(multi_query_router)
-    app.include_router(scip_multi_router)
     # TEMP: Commented for testing bug #751
     # app.include_router(cicd_router)
     app.include_router(groups_router)
@@ -283,9 +274,12 @@ def register_inline_routes(
     app.include_router(siem_delivery_admin_router)
     app.include_router(embedding_stats_admin_router)  # Story #1418 Phase 3
     app.include_router(dedup_warnings_admin_router)  # Story #1589
+    app.include_router(metadata_outbox_admin_router)  # content seam step 5a
+    app.include_router(index_store_admin_router)  # IndexStore rollout backfill
     app.include_router(debug_router)
     app.include_router(reaper_router, prefix="/api/admin")  # Story #967
-    app.include_router(xray_router)  # Story #974
+    # Story #974: X-Ray's REST routes are the cidx-xray feature's routers()
+    # contribution, mounted by server/features/web.py when enabled.
     app.include_router(regex_router)  # Story #1011
 
     # Mount Web Admin UI routes and static files
@@ -320,7 +314,6 @@ def register_inline_routes(
     app.include_router(repo_category_web_router, prefix="/admin", tags=["admin"])
 
     # Include dependency map router with /admin prefix (Story #212)
-    app.include_router(dependency_map_router, prefix="/admin", tags=["admin"])
 
     # Include the Audit Logs page router with /admin prefix
     app.include_router(audit_log_web_router, prefix="/admin", tags=["admin"])
@@ -331,18 +324,9 @@ def register_inline_routes(
     # Include the Groups repository-access bulk grant/revoke route with /admin prefix
     app.include_router(group_repo_access_web_router, prefix="/admin", tags=["admin"])
 
-    # Include wiki router (Stories #280-#283)
-    from ..wiki.routes import wiki_router
-
-    # NOTE: __file__ is in routers/, so use .parent.parent to reach server/ root
-    wiki_static_dir = PathLib(__file__).parent.parent / "wiki" / "static"
-    if wiki_static_dir.exists():
-        app.mount(
-            "/wiki/_static",
-            StaticFiles(directory=str(wiki_static_dir)),
-            name="wiki_static",
-        )
-    app.include_router(wiki_router, prefix="/wiki", tags=["wiki"])
+    # The wiki (/wiki, its static files and its admin actions) is the cidx-wiki
+    # feature's: the core mounts it from the feature's routers() when "wiki"
+    # is in enabled_features (docs/architecture/cidx-wiki.md).
 
     # Include user router with /user prefix for non-admin self-service
     app.include_router(user_router, prefix="/user", tags=["user"])

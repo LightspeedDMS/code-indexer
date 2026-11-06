@@ -7,7 +7,7 @@ golden_repos_dir/.locks/{alias}.lock.
 
 Lock file format:
     {
-        "owner": "dependency_map_service",
+        "owner": "langfuse_trace_sync",
         "pid": 12345,
         "acquired_at": "2026-02-19T10:00:00+00:00",
         "ttl_seconds": 3600
@@ -606,12 +606,12 @@ def describe_lock_holder(lock_manager: Any, alias: str) -> str:
     lock for *alias* (Bug #1842 AC4).
 
     Before this fix, contention diagnostics (meta_description_hook.py's
-    LifecycleLockUnavailableError text, dependency_map_service.py's
+    LifecycleLockUnavailableError text, the dependency-map feature's
     "held by another writer" skip logs) named only the FAILED CALLER's
     own hardcoded owner_name (e.g. "(owner='lifecycle_writer')")
     regardless of who actually held the lock -- actively misleading when
     the real holder was a different owner (e.g.
-    'dependency_map_service' running a real multi-domain Claude CLI
+    the dependency-map feature's service running a real multi-domain Claude CLI
     analysis). This helper reads the REAL current holder via
     ``lock_manager.get_lock_info(alias)`` and renders owner + hold
     duration (when available) instead.

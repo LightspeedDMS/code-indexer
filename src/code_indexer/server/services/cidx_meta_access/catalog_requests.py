@@ -95,8 +95,9 @@ def resolve_served_repository(
             return ServedRepository(None, alias, None)
         record = found if isinstance(found, Mapping) else None
 
-    if record is not None:
-        path = activated_repo_manager.get_activated_repo_path(username, alias)  # type: ignore[union-attr]
+    # A record is only ever read through the manager, so it is set here too.
+    if record is not None and activated_repo_manager is not None:
+        path = activated_repo_manager.get_activated_repo_path(username, alias)
         served = str(path) if path and Path(path).is_dir() else None
         catalog = _spelled_like_catalog(alias) or is_internal_meta_identity(
             activation_identities(record)

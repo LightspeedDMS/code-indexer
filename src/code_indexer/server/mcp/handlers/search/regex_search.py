@@ -22,6 +22,7 @@ from typing import Any, Dict, Optional
 
 import anyio.to_thread
 
+from cidx_sdk.tool_args import coerce_int
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.cache.handle_binding import reset_handle_binding
 from code_indexer.server.logging_utils import format_error_log
@@ -65,7 +66,6 @@ from .._utils import (
     CapBreach,
     cap_breach_response,
     _apply_regex_payload_truncation,
-    _coerce_int,
     _enforce_repo_count_cap,
     _enrich_with_wiki_url,
     _expand_wildcard_patterns,
@@ -324,7 +324,7 @@ async def _rerank_truncate_and_filter_regex_matches(
     if restricted is not None:
         matches = catalog_page(restricted, _effective_max_results(args))
 
-    regex_limit = _coerce_int(args.get("max_results"), len(matches))
+    regex_limit = coerce_int(args.get("max_results"), len(matches))
     rerank_kwargs = dict(
         results=matches,
         rerank_query=args.get("rerank_query"),
@@ -407,7 +407,7 @@ def _effective_max_results(args: Dict[str, Any]) -> int:
         1,
         min(
             _MAX_REGEX_MAX_RESULTS,
-            _coerce_int(args.get("max_results"), _DEFAULT_REGEX_MAX_RESULTS),
+            coerce_int(args.get("max_results"), _DEFAULT_REGEX_MAX_RESULTS),
         ),
     )
 
@@ -429,6 +429,9 @@ async def _execute_regex_search_impl(
         raw RegexSearchResult dataclass.
     """
     from code_indexer.global_repos.regex_search import RegexSearchService
+    from code_indexer.server.startup.ripgrep_backend_wiring import (
+        server_regex_target,
+    )
 
     config = get_config_service().get_config()
     search_limits = config.search_limits_config
@@ -438,7 +441,7 @@ async def _execute_regex_search_impl(
         0,
         min(
             _MAX_REGEX_CONTEXT_LINES,
-            _coerce_int(args.get("context_lines"), _DEFAULT_REGEX_CONTEXT_LINES),
+            coerce_int(args.get("context_lines"), _DEFAULT_REGEX_CONTEXT_LINES),
         ),
     )
 
@@ -449,18 +452,23 @@ async def _execute_regex_search_impl(
     # call itself via anyio.to_thread.run_sync, mirroring the granular
     # per-call offload pattern already established elsewhere in this
     # search path (see regex_search.py's search() method).
-    service = await anyio.to_thread.run_sync(
-        functools.partial(
-            RegexSearchService,
-            repo_path,
+    def _new_service() -> RegexSearchService:
+        root, backend = server_regex_target(repo_path)
+        return RegexSearchService(
+            root,
             subprocess_max_workers=subprocess_max_workers,
             # Issue #1601 Priority 9: thread the already-in-scope alias
             # through so the service's read-capped WARNING log surfaces the
             # real user-facing alias, not just the (possibly
             # versioned-snapshot) repo_path.
             alias=repository_alias,
+            ripgrep_backend=backend,
+            # The trigram index is this pod's index state for the alias
+            # target, even when ripgrep runs at the golden repo's base clone.
+            trigram_root=repo_path,
         )
-    )
+
+    service = await anyio.to_thread.run_sync(_new_service)
     search_result = await service.search(
         pattern=args["pattern"],
         path=args.get("path"),
@@ -558,6 +566,9 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
     regex_started = time.monotonic()
 
     from code_indexer.server.services.search_error_formatter import SearchErrorFormatter
+    from code_indexer.server.services.activated_copy_content import (
+        activated_copy_present,
+    )
 
     repository_alias, err = _validate_regex_args(args)
     if err is not None:
@@ -629,7 +640,12 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
             and _arm is not None
         ):
             resolved = _arm.get_activated_repo_path(user.username, repository_alias)
-            if resolved and not Path(resolved).exists():
+            # Content seam: a copy on workspace-mcp is searched there at this
+            # path (a missing copy fails there, loudly); this pod has nothing
+            # to stat, so the registry's record answers.
+            if resolved and not activated_copy_present(
+                _arm, user.username, repository_alias, resolved
+            ):
                 resolved = None
         else:
             golden_repos_dir = _get_golden_repos_dir()

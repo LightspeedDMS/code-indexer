@@ -19,6 +19,14 @@ from code_indexer.utils.never_indexed_paths import (
     never_indexed_reason,
 )
 
+from ..utils.blob_hash import git_blob_hashes
+from .git_head import (
+    UNKNOWN,
+    probe_backend_repository,
+    read_head_branch,
+    read_head_commit,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -50,7 +58,9 @@ class FileAnalysis:
 class GitTopologyService:
     """Advanced git topology analysis for smart incremental indexing."""
 
-    def __init__(self, codebase_dir: Path, config=None):
+    def __init__(
+        self, codebase_dir: Path, config=None, git_backend: Optional[Any] = None
+    ):
         """Initialize the git topology service.
 
         Args:
@@ -58,9 +68,17 @@ class GitTopologyService:
             config: Optional Config object. When provided, analyze_branch_change
                     filters files_to_reindex by file_extensions so binary files
                     (.jar, .zip, .exe, etc.) are excluded.
+            git_backend: the git seam (git-mcp) for a repository this machine
+                    does not hold. Whether the path is a repository, HEAD's
+                    branch and HEAD's commit are then asked of it -- the same
+                    questions FileIdentifier already asks it. None keeps local
+                    git, unchanged. Without it a pod with no repository volume
+                    decides "not a git repository" while the chunks it indexed
+                    say otherwise, and reconcile treats every file as modified.
         """
         self.codebase_dir = Path(codebase_dir)
         self.config = config
+        self._git_backend = git_backend
         self._git_available: Optional[bool] = None
         self._current_branch_cache: Optional[str] = None
         self._cache_timestamp: float = 0
@@ -69,6 +87,12 @@ class GitTopologyService:
     def is_git_available(self) -> bool:
         """Check if git is available and this is a git repository."""
         if self._git_available is not None:
+            return self._git_available
+
+        if self._git_backend is not None:
+            self._git_available, _ = probe_backend_repository(
+                self.codebase_dir, self._git_backend
+            )
             return self._git_available
 
         try:
@@ -100,6 +124,16 @@ class GitTopologyService:
 
         if not self.is_git_available():
             return None
+
+        if self._git_backend is not None:
+            backend_branch = read_head_branch(self.codebase_dir, self._git_backend)
+            # "unknown" is a failure, not a branch name: report no branch, as
+            # the local path does when git fails.
+            self._current_branch_cache = (
+                None if backend_branch == UNKNOWN else backend_branch
+            )
+            self._cache_timestamp = current_time
+            return self._current_branch_cache
 
         try:
             # Try to get current branch
@@ -156,6 +190,9 @@ class GitTopologyService:
 
     def _get_current_commit(self) -> Optional[str]:
         """Get current commit hash."""
+        if self._git_backend is not None:
+            commit = read_head_commit(self.codebase_dir, self._git_backend)
+            return None if commit == UNKNOWN else commit
         try:
             result = subprocess.run(
                 ["git", "rev-parse", "HEAD"],
@@ -456,141 +493,20 @@ class GitTopologyService:
             logger.warning(f"Failed to get branch ancestry for {branch}: {e}")
             return []
 
-    def batch_file_analysis(self, files: List[str]) -> Dict[str, FileAnalysis]:
-        """Analyze multiple files in batched git operations for performance."""
-        if not self.is_git_available() or not files:
-            return {}
-
-        start_time = time.time()
-        analysis = {}
-
-        # Batch git hash-object for all files
-        hashes = self._batch_git_hash_object(files)
-
-        # Batch git log for last modified info
-        modifications = self._batch_git_log_analysis(files)
-
-        # Batch file status checks
-        statuses = self._batch_git_status_analysis(files)
-
-        # Combine results
-        for file_path in files:
-            analysis[file_path] = FileAnalysis(
-                content_hash=hashes.get(file_path),
-                last_modified=modifications.get(file_path),
-                git_status=statuses.get(file_path),
-                working_directory_status=self._determine_working_dir_status(file_path),
-            )
-
-        analysis_time = time.time() - start_time
-        logger.debug(
-            f"Batch file analysis for {len(files)} files completed in {analysis_time:.3f}s"
-        )
-
-        return analysis
-
     def _batch_git_hash_object(self, files: List[str]) -> Dict[str, str]:
-        """Batch git hash-object operation for performance."""
+        """Blob-hash every file in the batch, in-process.
+
+        Replaces ``git hash-object --stdin-paths``. Beyond dropping the
+        subprocess, this is strictly more robust than the call it replaces: that
+        one discarded the WHOLE batch on a timeout, on a non-zero exit, or
+        whenever the output line count disagreed with the input count, so a
+        single unreadable file cost every hash in the batch. Here an unreadable
+        file is simply absent from the result. See utils/blob_hash.py for why
+        this needs no git and where the equivalence stops holding.
+        """
         if not files:
             return {}
-
-        try:
-            # Filter files that actually exist
-            existing_files = []
-            for file_path in files:
-                full_path = self.codebase_dir / file_path
-                if full_path.exists() and full_path.is_file():
-                    existing_files.append(file_path)
-
-            if not existing_files:
-                return {}
-
-            # Use --stdin-paths for batch processing
-            process = subprocess.run(
-                ["git", "hash-object", "--stdin-paths"],
-                input="\n".join(existing_files),
-                cwd=self.codebase_dir,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-
-            if process.returncode == 0:
-                hashes = process.stdout.strip().split("\n")
-                if len(hashes) == len(existing_files):
-                    return dict(zip(existing_files, hashes))
-
-            return {}
-
-        except (subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
-            logger.warning(f"Batch git hash-object failed: {e}")
-            return {}
-
-    def _batch_git_log_analysis(self, files: List[str]) -> Dict[str, str]:
-        """Batch git log analysis for last modification times."""
-        if not files:
-            return {}
-
-        try:
-            # Get last commit for each file in batch
-            result = subprocess.run(
-                ["git", "log", "--format=%H %ct", "--name-only", "-n", "1", "--"]
-                + files,
-                cwd=self.codebase_dir,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-
-            modifications = {}
-            if result.returncode == 0:
-                lines = result.stdout.strip().split("\n")
-                current_commit_time = None
-
-                for line in lines:
-                    line = line.strip()
-                    if not line:
-                        continue
-
-                    # Check if this is a commit line (hash + timestamp)
-                    parts = line.split()
-                    if len(parts) == 2 and all(
-                        c in "0123456789abcdef" for c in parts[0]
-                    ):
-                        current_commit_time = parts[1]
-                    elif current_commit_time and line in files:
-                        modifications[line] = current_commit_time
-
-            return modifications
-
-        except (subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
-            logger.warning(f"Batch git log analysis failed: {e}")
-            return {}
-
-    def _batch_git_status_analysis(self, files: List[str]) -> Dict[str, str]:
-        """Batch git status analysis for file states."""
-        try:
-            result = subprocess.run(
-                ["git", "status", "--porcelain"] + files,
-                cwd=self.codebase_dir,
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-
-            statuses = {}
-            if result.returncode == 0:
-                for line in result.stdout.strip().split("\n"):
-                    if line and len(line) > 3:
-                        status_code = line[:2]
-                        file_path = line[3:]
-                        statuses[file_path] = status_code.strip()
-
-            return statuses
-
-        except (subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
-            logger.warning(f"Batch git status analysis failed: {e}")
-            return {}
+        return git_blob_hashes(files, root=self.codebase_dir)
 
     def _determine_working_dir_status(self, file_path: str) -> Optional[str]:
         """Determine working directory status for a file."""

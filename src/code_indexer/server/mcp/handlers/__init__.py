@@ -33,10 +33,7 @@ from code_indexer.server.mcp.handlers._utils import (  # noqa: F401
     _apply_fts_payload_truncation,
     _apply_payload_truncation,
     _apply_regex_payload_truncation,
-    _apply_scip_payload_truncation,
     _apply_temporal_payload_truncation,
-    _coerce_float,
-    _coerce_int,
     _enrich_with_wiki_url,
     _error_with_suggestions,
     _expand_wildcard_patterns,
@@ -48,15 +45,12 @@ from code_indexer.server.mcp.handlers._utils import (  # noqa: F401
     _get_golden_repos_dir,
     _get_hnsw_health_service,
     _get_query_tracker,
-    _get_scip_audit_repository,
-    _get_scip_query_service,
     _get_temporal_status,
     _get_wiki_enabled_repos,
     _is_temporal_query,
     _list_global_repos,
     _mcp_response,
     _parse_json_string_array,
-    _validate_symbol_format,
 )
 
 import sys as _sys
@@ -123,12 +117,11 @@ class _ForwardingModule(_types.ModuleType):
                 legacy.__dict__[name] = value
             # Propagate into extracted domain submodules so that callers in
             # those modules also see the patched binding.  When a handler moves
-            # from _legacy.py to, say, scip.py, it imports helpers directly
-            # from _utils (e.g. `from ._utils import _get_scip_query_service`).
-            # Tests that patch "handlers._get_scip_query_service" must therefore
-            # also update the binding in each domain module where it is used.
+            # from _legacy.py to, say, guides.py, it imports helpers directly
+            # from _utils (e.g. `from ._utils import _mcp_response`).
+            # Tests that patch "handlers._mcp_response" must therefore also
+            # update the binding in each domain module where it is used.
             for _submod_name in (
-                "code_indexer.server.mcp.handlers.scip",
                 "code_indexer.server.mcp.handlers.guides",
                 "code_indexer.server.mcp.handlers.ssh_keys",
                 "code_indexer.server.mcp.handlers.pull_requests",
@@ -141,32 +134,21 @@ class _ForwardingModule(_types.ModuleType):
                 "code_indexer.server.mcp.handlers.search",
                 # Issue #1935: search.py was split into the search/ package;
                 # each child now bare-imports its own helpers from _utils
-                # (same pattern as scip.py, guides.py, etc. above), so each
+                # (same pattern as guides.py, ssh_keys.py, etc. above), so each
                 # must be registered here too or patch.object(handlers, ...)
                 # silently stops reaching the real call site.
                 "code_indexer.server.mcp.handlers.search._shared",
                 "code_indexer.server.mcp.handlers.search.omni",
-                "code_indexer.server.mcp.handlers.search.memory_retrieval",
+                "code_indexer.server.mcp.handlers.search.query_vector",
                 "code_indexer.server.mcp.handlers.search.repo_search",
                 "code_indexer.server.mcp.handlers.search.temporal_search",
                 "code_indexer.server.mcp.handlers.search.code_search",
                 "code_indexer.server.mcp.handlers.search.regex_search",
                 "code_indexer.server.mcp.handlers.search.cached_content",
-                "code_indexer.server.mcp.handlers.depmap",
-                "code_indexer.server.mcp.handlers.memory",
-                "code_indexer.server.mcp.handlers.xray",
-                # Issue #1935: xray.py was split into the xray/ package;
-                # each child bare-imports its own helpers from _utils (same
-                # pattern as search.* above), so each must be registered
-                # here too or patch.object(handlers, ...) silently stops
-                # reaching the real call site.
-                "code_indexer.server.mcp.handlers.xray._infra",
-                "code_indexer.server.mcp.handlers.xray._search",
-                "code_indexer.server.mcp.handlers.xray._explore",
-                "code_indexer.server.mcp.handlers.xray._dump_ast",
-                "code_indexer.server.mcp.handlers.xray._cached_payload",
-                "code_indexer.server.mcp.handlers.xray._store_pattern",
-                "code_indexer.server.mcp.handlers.xray._cancel_job",
+                # The generic tools that lived in the X-Ray package until it
+                # moved into the cidx-xray feature (modular plan phase 4c).
+                "code_indexer.server.mcp.handlers.cached_payload",
+                "code_indexer.server.mcp.handlers.cancel_job",
             ):
                 _submod = _sys.modules.get(_submod_name)
                 if (
@@ -194,27 +176,6 @@ from code_indexer.server.mcp.handlers.guides import (  # noqa: F401, E402
     get_tool_categories,
     handle_start_trace,
     handle_end_trace,
-    handle_wiki_article_analytics,
-    # Private helpers used by tests and external consumers
-    _get_wiki_cache_for_handler,
-    _wiki_analytics_filter_by_search,
-    _wiki_analytics_build_articles,
-)
-
-from code_indexer.server.mcp.handlers.scip import (  # noqa: F401, E402
-    # Public handlers extracted from _legacy (Story #496 scip step)
-    scip_definition,
-    scip_references,
-    scip_dependencies,
-    scip_dependents,
-    scip_impact,
-    scip_callchain,
-    scip_context,
-    get_scip_audit_log,
-    handle_scip_pr_history,
-    handle_scip_cleanup_history,
-    handle_scip_cleanup_workspaces,
-    handle_scip_cleanup_status,
 )
 
 from code_indexer.server.mcp.handlers._legacy import (  # noqa: F401, E402
@@ -335,7 +296,6 @@ from code_indexer.server.mcp.handlers.admin import (  # noqa: F401, E402
     handle_set_global_config,
     trigger_reindex,
     get_index_status,
-    handle_trigger_dependency_analysis,
     # Private helpers used by tests and external consumers
     _get_group_manager,
     _validate_group_id,
@@ -375,12 +335,6 @@ from code_indexer.server.mcp.handlers.search import (  # noqa: F401, E402
     _omni_regex_search,
 )
 
-from code_indexer.server.mcp.handlers.memory import (  # noqa: F401, E402
-    handle_create_memory,
-    handle_edit_memory,
-    handle_delete_memory,
-)
-
 from code_indexer.server.auth import dependencies  # noqa: F401, E402
 
 from code_indexer.server.mcp.handlers.cicd import (  # noqa: F401, E402
@@ -404,14 +358,6 @@ from code_indexer.server.mcp.handlers.cicd import (  # noqa: F401, E402
     handle_gitlab_ci_get_job_logs,
     handle_gitlab_ci_retry_pipeline,
     handle_gitlab_ci_cancel_pipeline,
-)
-
-from code_indexer.server.mcp.handlers.depmap import (  # noqa: F401, E402
-    depmap_find_consumers_handler,
-)
-
-from code_indexer.server.mcp.handlers.xray import (  # noqa: F401, E402
-    handle_xray_search,
 )
 
 # Re-export infrastructure symbols patched by tests via handlers.X

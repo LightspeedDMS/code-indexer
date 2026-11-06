@@ -17,8 +17,17 @@ from typing import Dict, Any, Optional
 
 from ..config import Config
 from ..utils.git_runner import run_git_command, is_git_repository
+from ..indexing.file_facts import ContentUnavailableError
+from ..indexing.repo_manifest import RepoManifest
+from ..utils.blob_hash import git_blob_hash, git_blob_hash_bytes
+from .git_head import probe_backend_repository, read_head_branch, read_head_commit
 
 logger = logging.getLogger(__name__)
+
+
+def _is_delegated_manifest(manifest: Optional[RepoManifest]) -> bool:
+    """Whether ``manifest`` came from a backend that does NOT read this disk."""
+    return manifest is not None and not manifest.backend_is_local
 
 
 class FileIdentifier:
@@ -30,22 +39,90 @@ class FileIdentifier:
     with non-git projects.
     """
 
-    def __init__(self, project_dir: Path, config: Optional[Config] = None):
+    def __init__(
+        self,
+        project_dir: Path,
+        config: Optional[Config] = None,
+        manifest: Optional["RepoManifest"] = None,
+        git_backend: Optional[Any] = None,
+    ):
         """
         Initialize FileIdentifier with project directory and optional configuration.
 
         Args:
             project_dir: Path to the project directory
             config: Optional project configuration for file filtering
+            manifest: a manifest of the repository taken at the start of this
+                indexing pass. When it can vouch for a file, the blob hash comes
+                from it and the file is NOT opened to hash it -- on the
+                golden-repos NFS mount that is one round trip per file removed.
+                None keeps the read, so every existing caller is unchanged.
+            git_backend: the git seam (git-mcp) for a repository this machine
+                does not hold. HEAD's branch and commit are asked of it, and the
+                repository counts as git-addressable. None keeps local git.
         """
+        self._manifest = manifest
+
         self.project_dir = project_dir
         self.config = config
-        self.git_available = self._detect_git()
+        # With a git backend the backend answers (below); probing local git
+        # first would fork `git rev-parse` against a path a delegated pod does
+        # not hold, only for the answer to be overwritten.
+        self.git_available = False if git_backend is not None else self._detect_git()
+        # A manifest supplies git blob hashes by construction, so a repository it
+        # can describe IS git-addressable whether or not this container can see a
+        # .git directory. Without this a delegated pod probes a path it has no
+        # mount for, decides "not a git repo", and never asks the manifest for
+        # the hashes it is holding -- found by running the seam on EKS, where
+        # every hash came back None while the backend was answering perfectly.
+        if manifest is not None:
+            self.git_available = True
         self._project_id: Optional[str] = None
         # Issue #676: Memoized per-run invariants — branch and commit hash do not
         # change during a single indexing run, so we fetch them once and cache.
         self._cached_branch: Optional[str] = None
         self._cached_commit_hash: Optional[str] = None
+        # Likewise a git backend: git-mcp answers for the repository whether or
+        # not this machine can see a .git directory -- but only for a path that
+        # IS a repository. The server stamps the backend on every spawn,
+        # including non-git sources (cidx-meta, local:// folders); treating one
+        # as git-addressable would switch its file signatures to git hashes and
+        # change its point ids. So the backend is asked -- and ONLY its explicit
+        # "not a git repository" makes the path non-git: a transient failure
+        # must not demote a real repository (that would change ITS point ids).
+        self._git_backend = git_backend
+        self._backend_repo = False
+        if git_backend is not None:
+            # The resolved commit is kept as this run's commit (same question),
+            # so a real repository pays no extra call.
+            self._backend_repo, self._cached_commit_hash = probe_backend_repository(
+                project_dir, git_backend
+            )
+            if manifest is None:
+                self.git_available = self._backend_repo
+
+    def set_manifest(self, manifest: Optional["RepoManifest"]) -> None:
+        """Point at the manifest for the CURRENT pass, or None for no manifest.
+
+        The manifest describes the repository as of when it was built, so its
+        lifetime has to be one pass. An indexer is reused -- watch mode holds one
+        for a whole session, and the reprocess pass runs on the same instance --
+        and a manifest held across passes would keep serving the blob hash a file
+        had before it was edited. The new bytes would then be chunked under the
+        old hash, and since the point UUID is seeded from that hash the chunks
+        would be written over the previous version's ids: silent
+        re-identification, which is the exact failure this value's own docstring
+        warns about.
+        """
+        self._manifest = manifest
+        # Same reason as in __init__: attaching a manifest makes the repository
+        # git-addressable, and detaching one restores the local probe's answer.
+        if manifest is not None:
+            self.git_available = True
+        elif self._git_backend is not None:
+            self.git_available = self._backend_repo
+        else:
+            self.git_available = self._detect_git()
 
     def _detect_git(self) -> bool:
         """
@@ -80,12 +157,23 @@ class FileIdentifier:
 
         if self.git_available:
             try:
-                # Try to get git remote origin URL
-                result = run_git_command(
-                    ["git", "remote", "get-url", "origin"],
-                    cwd=self.project_dir,
-                )
-                origin_url = result.stdout.strip()
+                # The origin URL, from the git seam when one is configured: on a
+                # pod without the repository local git has nothing to ask, and
+                # the directory-name fallback below would re-identify every
+                # chunk (the project id seeds each point id). Only git's own
+                # answer (CalledProcessError, e.g. no such remote) falls back; a
+                # transport failure propagates rather than silently do that.
+                if self._git_backend is not None:
+                    origin_url = str(
+                        self._git_backend.remote_get_url(
+                            str(self.project_dir), "origin"
+                        )
+                    ).strip()
+                else:
+                    origin_url = run_git_command(
+                        ["git", "remote", "get-url", "origin"],
+                        cwd=self.project_dir,
+                    ).stdout.strip()
 
                 # Extract repository name from URL
                 if origin_url:
@@ -98,13 +186,20 @@ class FileIdentifier:
                     return self._project_id
             except subprocess.CalledProcessError:
                 pass
+            except OSError:
+                # Locally: git missing or the cwd gone, as before. Through the
+                # seam an OSError is the transport (ConnectionError is one).
+                if self._git_backend is not None:
+                    raise
 
         # Fallback to directory name
         self._project_id = self.project_dir.name.lower().replace("_", "-")
         assert self._project_id is not None
         return self._project_id
 
-    def _get_file_content_hash(self, file_path: Path) -> str:
+    def _get_file_content_hash(
+        self, file_path: Path, content: Optional[bytes] = None
+    ) -> str:
         """
         Generate SHA256 hash of file content.
 
@@ -114,6 +209,11 @@ class FileIdentifier:
         Returns:
             SHA256 hash of file content with 'sha256:' prefix
         """
+        if content is not None:
+            # Already in hand: hashing it avoids opening the file again, and
+            # removes the window in which the file could change between the two
+            # reads and leave the two hashes describing different bytes.
+            return "sha256:" + hashlib.sha256(content).hexdigest()
         hasher = hashlib.sha256()
         try:
             with open(file_path, "rb") as f:
@@ -179,7 +279,12 @@ class FileIdentifier:
 
         return True
 
-    def get_file_metadata(self, file_path: Path) -> Dict[str, Any]:
+    def get_file_metadata(
+        self,
+        file_path: Path,
+        content: Optional[bytes] = None,
+        defer_content_hash: bool = False,
+    ) -> Dict[str, Any]:
         """
         Get comprehensive file metadata (git-aware or fallback).
 
@@ -194,21 +299,32 @@ class FileIdentifier:
         # Issue #2013: taken immediately BEFORE the content is read. Point
         # writers store it as `indexed_timestamp`, so reconcile's racy-
         # timestamp check covers the second the file was READ in (the points
-        # are written later, after the embedding round-trip).
+        # are written later, after the embedding round-trip). A deferred hash
+        # (below) is computed from a read that happens later still, so the
+        # timestamp precedes that read too.
         content_read_timestamp = time.time()
-        file_hash = self._get_file_content_hash(file_path)
 
         metadata = {
             "project_id": self.get_project_id(),
             "file_path": rel_path,
-            "file_hash": file_hash,
+            # The sha256 is the one value that cannot come from the manifest: it is
+            # a different algorithm, it is stored, and it is the point-UUID
+            # signature when git is unavailable. So it needs the bytes. Deferring
+            # it lets a caller that will read the file anyway compute it there,
+            # instead of this phase reading the whole file just to hash it.
+            # The deferring caller MUST fill it before the metadata is used.
+            "file_hash": (
+                None
+                if (content is None and defer_content_hash)
+                else self._get_file_content_hash(file_path, content)
+            ),
             "indexed_at": datetime.now(timezone.utc).isoformat() + "Z",
             "git_available": self.git_available,
             "content_read_timestamp": content_read_timestamp,
         }
 
         if self.git_available:
-            metadata.update(self._get_git_metadata(file_path))
+            metadata.update(self._get_git_metadata(file_path, content))
         else:
             metadata.update(self._get_filesystem_metadata(file_path))
 
@@ -217,9 +333,13 @@ class FileIdentifier:
     def _get_cached_branch(self) -> Optional[str]:
         """Return the current branch name, fetched exactly once per FileIdentifier instance.
 
+        Asked of the git backend when one was given (a pod that does not hold
+        the repository asks git-mcp), else of local git -- see
+        ``services.git_head``. A failure degrades to "unknown".
+
         Issue #676: the branch is invariant for the duration of an indexing run.
         After the first call the result is memoized; subsequent calls return the
-        cached value without spawning a subprocess.
+        cached value without asking again.
 
         Returns:
             Branch name string (e.g. "development"), a "detached-<sha>" synthetic
@@ -227,36 +347,7 @@ class FileIdentifier:
             when git is not available.
         """
         if self._cached_branch is None and self.git_available:
-            try:
-                result = run_git_command(
-                    ["git", "branch", "--show-current"],
-                    cwd=self.project_dir,
-                )
-                branch_name = result.stdout.strip()
-                if branch_name:
-                    self._cached_branch = branch_name
-                else:
-                    # Empty output means detached HEAD — derive synthetic name from short hash
-                    try:
-                        result = run_git_command(
-                            ["git", "rev-parse", "--short", "HEAD"],
-                            cwd=self.project_dir,
-                        )
-                        self._cached_branch = f"detached-{result.stdout.strip()}"
-                    except subprocess.CalledProcessError as exc:
-                        logger.debug(
-                            "Could not resolve detached HEAD short hash in %s: %s",
-                            self.project_dir,
-                            exc,
-                        )
-                        self._cached_branch = "unknown"
-            except subprocess.CalledProcessError as exc:
-                logger.debug(
-                    "git branch --show-current failed in %s: %s; falling back to 'unknown'",
-                    self.project_dir,
-                    exc,
-                )
-                self._cached_branch = "unknown"
+            self._cached_branch = read_head_branch(self.project_dir, self._git_backend)
         return self._cached_branch
 
     def _get_cached_commit_hash(self) -> Optional[str]:
@@ -264,38 +355,29 @@ class FileIdentifier:
 
         Issue #676: the commit hash is invariant for the duration of an indexing run.
         After the first call the result is memoized (including failure: stored as
-        "unknown") so subsequent calls never spawn a subprocess.
+        "unknown") so subsequent calls never ask again.
 
         Returns:
             Full 40-character commit hash string, "unknown" when the git command
             fails, or None when git is not available.
         """
         if self._cached_commit_hash is None and self.git_available:
-            try:
-                result = run_git_command(
-                    ["git", "rev-parse", "HEAD"],
-                    cwd=self.project_dir,
-                )
-                self._cached_commit_hash = result.stdout.strip()
-            except subprocess.CalledProcessError as exc:
-                # Memoize failure as "unknown" so subsequent calls skip the subprocess
-                logger.debug(
-                    "git rev-parse HEAD failed in %s: %s; memoizing as 'unknown'",
-                    self.project_dir,
-                    exc,
-                )
-                self._cached_commit_hash = "unknown"
+            self._cached_commit_hash = read_head_commit(
+                self.project_dir, self._git_backend
+            )
         return self._cached_commit_hash
 
-    def _get_git_metadata(self, file_path: Path) -> Dict[str, Any]:
+    def _get_git_metadata(
+        self, file_path: Path, content: Optional[bytes] = None
+    ) -> Dict[str, Any]:
         """
         Get git-specific metadata for a file.
 
-        Only ``git hash-object`` is invoked per file — it is legitimately per-file
-        because it computes the blob hash for the file's current on-disk content.
-        ``branch`` and ``commit_hash`` are invariant within an indexing run and
-        are returned from the memoized helpers ``_get_cached_branch`` and
-        ``_get_cached_commit_hash`` with no additional subprocess cost.
+        No subprocess runs here. The blob hash is the only genuinely per-file
+        value, and it is computed in-process from the file's bytes (see
+        ``utils/blob_hash``). ``branch`` and ``commit_hash`` are invariant within
+        an indexing run and come from the memoized helpers ``_get_cached_branch``
+        and ``_get_cached_commit_hash``.
 
         Args:
             file_path: Path to the file
@@ -309,16 +391,39 @@ class FileIdentifier:
             "commit_hash": self._get_cached_commit_hash(),
         }
 
-        try:
-            # git hash-object is legitimately per-file: computes blob hash for this file
-            result = run_git_command(
-                ["git", "hash-object", str(file_path)],
-                cwd=self.project_dir,
+        # The blob hash is a pure function of the file's bytes, so it is computed
+        # in-process rather than by forking git once per file. Returns None (hash
+        # left unset, caller falls back to file_hash) when the file cannot be
+        # read -- the same outcome the old non-zero git exit produced. See
+        # utils/blob_hash.py for the equivalence argument and its one limit.
+        # Order matters, cheapest first: bytes already in hand, then the
+        # manifest (no I/O at all), then finally reading the file.
+        #
+        # A manifest MISS is not an error and must not be treated as "no hash" --
+        # the file may have been added after the pass began, or be a symlink the
+        # manifest reports but never follows. Falling through to the read keeps
+        # the answer correct; trusting a None here would change the point UUID of
+        # every such chunk, silently.
+        #
+        # Except under a DELEGATED manifest: the repository is not on this
+        # machine, so the read finds nothing and would quietly hand back None --
+        # the same silent re-identification. That file fails loudly instead.
+        if content is not None:
+            git_metadata["git_hash"] = git_blob_hash_bytes(content)
+        else:
+            from_manifest = (
+                self._manifest.blob_sha(file_path)
+                if self._manifest is not None
+                else None
             )
-            git_metadata["git_hash"] = result.stdout.strip()
-        except subprocess.CalledProcessError:
-            # Blob hash unavailable (e.g. untracked file, git error) — leave as None
-            pass
+            if from_manifest is None and _is_delegated_manifest(self._manifest):
+                raise ContentUnavailableError(
+                    f"{file_path}: no blob hash in this pass's delegated manifest, "
+                    "and the repository is not on this machine to hash it"
+                )
+            git_metadata["git_hash"] = (
+                from_manifest if from_manifest is not None else git_blob_hash(file_path)
+            )
 
         return git_metadata
 
@@ -337,69 +442,6 @@ class FileIdentifier:
             return {"file_mtime": int(stat.st_mtime), "file_size": stat.st_size}
         except (OSError, IOError):
             return {"file_mtime": 0, "file_size": 0}
-
-    def get_current_files(self) -> Dict[str, Dict[str, Any]]:
-        """
-        Get all files that should be indexed in the current context.
-
-        For git repositories, this returns files tracked by git in the current branch.
-        For non-git projects, this returns all eligible files in the directory tree.
-
-        Returns:
-            Dictionary mapping file paths to their metadata
-        """
-        if self.git_available:
-            return self._get_git_tracked_files()
-        else:
-            return self._get_filesystem_files()
-
-    def _get_git_tracked_files(self) -> Dict[str, Dict[str, Any]]:
-        """
-        Get files tracked by git in the current HEAD.
-
-        Returns:
-            Dictionary mapping file paths to their metadata
-        """
-        files = {}
-
-        try:
-            result = run_git_command(
-                ["git", "ls-tree", "-r", "--name-only", "--full-tree", "HEAD"],
-                cwd=self.project_dir,
-            )
-
-            for file_path_str in result.stdout.strip().split("\n"):
-                if file_path_str and self._should_index_file(file_path_str):
-                    file_path = self.project_dir / file_path_str
-                    if file_path.exists():
-                        files[file_path_str] = self.get_file_metadata(file_path)
-
-        except subprocess.CalledProcessError:
-            # Fallback to filesystem if git command fails
-            return self._get_filesystem_files()
-
-        return files
-
-    def _get_filesystem_files(self) -> Dict[str, Dict[str, Any]]:
-        """
-        Get all indexable files from the filesystem recursively.
-
-        Returns:
-            Dictionary mapping file paths to their metadata
-        """
-        files = {}
-
-        for file_path in self.project_dir.rglob("*"):
-            if file_path.is_file():
-                try:
-                    rel_path = str(file_path.relative_to(self.project_dir))
-                    if self._should_index_file(rel_path):
-                        files[rel_path] = self.get_file_metadata(file_path)
-                except (ValueError, OSError):
-                    # Skip files that can't be processed
-                    continue
-
-        return files
 
     def get_file_signature(self, metadata: Dict[str, Any]) -> str:
         """

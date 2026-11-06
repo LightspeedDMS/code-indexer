@@ -1,13 +1,16 @@
 """Bootstrap cidx-meta git backup state."""
 
 from __future__ import annotations
+from code_indexer.utils.git_runner import run_git_command
 
 import subprocess
 from pathlib import Path
 from typing import Callable, Optional
 
 from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
-from code_indexer.server.utils.cancellable_subprocess import run_with_cancel
+from code_indexer.server.services.cidx_meta_content import (
+    refuse_backup_of_shared_content,
+)
 
 from .branch_detect import detect_default_branch
 from .paths import cidx_meta_is_git_repository
@@ -21,7 +24,6 @@ class BackupPushFailed(RuntimeError):
         from code_indexer.utils.credential_redaction import redact_command_output
 
         self.reason = reason
-        # ^ security git and the remote can echo a URL whose userinfo holds credentials
         super().__init__(
             f"backup push failed ({reason}): {redact_command_output(output, None)}"
         )
@@ -47,7 +49,7 @@ class CidxMetaBackupBootstrap:
     def _git(
         self, cidx_meta_path: str, *args: str, check: bool = True
     ) -> subprocess.CompletedProcess:
-        from .stall_detection import stall_detecting_git_argv, with_ssh_keepalive
+        from .stall_detection import with_ssh_keepalive
 
         env = with_ssh_keepalive(build_non_interactive_git_env())
         env.setdefault("GIT_AUTHOR_NAME", "cidx-meta-backup")
@@ -60,10 +62,16 @@ class CidxMetaBackupBootstrap:
         # an interactive editor in the non-interactive systemd job context
         # -- see CidxMetaBackupSync._git() for the active fix this mirrors.
         env.setdefault("GIT_EDITOR", "true")
-        return run_with_cancel(
-            stall_detecting_git_argv(*args),
-            self._cancel_check,
-            cwd=cidx_meta_path,
+        # EVO-64678: this helper runs arbitrary git (including commits) against
+        # cidx-meta with argv only known at runtime, so it goes through the seam
+        # chokepoint and lets is_mutating_git() classify each call rather than a
+        # static scan guessing. No invoker claims cidx-meta today, so behaviour is
+        # unchanged; the env below is merged on top of get_git_environment().
+        # Bug #2012: the owning job's cancel check terminates the git process.
+        return run_git_command(
+            ["git", *args],
+            cwd=Path(cidx_meta_path),
+            cancel_check=self._cancel_check,
             capture_output=True,
             text=True,
             env=env,
@@ -109,7 +117,12 @@ class CidxMetaBackupBootstrap:
             raise BackupPushFailed(push_failure_reason(stderr), stderr)
 
     def bootstrap(self, cidx_meta_path: str, remote_url: str) -> str:
-        """Initialize or re-point git backup state for cidx-meta."""
+        """Initialize or re-point git backup state for cidx-meta.
+
+        Refused (CidxMetaBackupUnsupportedError) under a delegated content
+        backend: this pod's directory is not cidx-meta's content there.
+        """
+        refuse_backup_of_shared_content(cidx_meta_path)
         branch = (
             detect_default_branch(cidx_meta_path, cancel_check=self._cancel_check)
             or "master"

@@ -9,10 +9,46 @@ can be safely cleaned up after alias swaps.
 import logging
 import threading
 from contextlib import contextmanager
-from typing import Dict, Set
+from typing import Callable, Dict, Optional, Set, Tuple
 
 
 logger = logging.getLogger(__name__)
+
+#: ``(hold, release)`` called with a path when this process's first query on
+#: it starts and its last one ends -- the served-index cache's cross-process
+#: reader locks (installed under a delegated IndexStore only; None otherwise,
+#: and then nothing here touches the filesystem).
+ReaderHooks = Tuple[Callable[[str], None], Callable[[str], None]]
+_reader_hooks: Optional[ReaderHooks] = None
+
+
+def set_reader_hooks(hooks: Optional[ReaderHooks]) -> None:
+    global _reader_hooks
+    _reader_hooks = hooks
+
+
+def _hold(path: str) -> bool:
+    """Called OUTSIDE the tracker lock (an eviction holding a reader lock may
+    be waiting for that lock). False when no reader lock was taken."""
+    hooks = _reader_hooks
+    if hooks is None:
+        return False
+    try:
+        hooks[0](path)
+        return True
+    except Exception as exc:
+        logger.warning("Could not take the reader lock of %s: %s", path, exc)
+        return False
+
+
+def _release(path: str) -> None:
+    hooks = _reader_hooks
+    if hooks is None:
+        return
+    try:
+        hooks[1](path)
+    except Exception as exc:
+        logger.warning("Could not release the reader lock of %s: %s", path, exc)
 
 
 class QueryTracker:
@@ -34,6 +70,8 @@ class QueryTracker:
         # admission checks), so a NEW query arriving after that point is
         # refused rather than racing the drain-then-rename sequence.
         self._quiescing: Set[str] = set()
+        # Paths whose reader lock this process holds (first query in, last out).
+        self._held: Set[str] = set()
 
     def mark_quiescing(self, path: str) -> None:
         """Mark ``path`` as quiescing (about to be destructively purged).
@@ -41,6 +79,16 @@ class QueryTracker:
         path once marked. Thread-safe."""
         with self._lock:
             self._quiescing.add(path)
+
+    def try_mark_quiescing(self, path: str) -> bool:
+        """Mark ``path`` quiescing unless it already is, atomically. True when
+        THIS call set the mark (so its caller -- and only its caller -- must
+        clear it); False when another purge already holds it. Thread-safe."""
+        with self._lock:
+            if path in self._quiescing:
+                return False
+            self._quiescing.add(path)
+            return True
 
     def clear_quiescing(self, path: str) -> None:
         """Clear the quiescing mark for ``path``. A no-op if ``path`` was
@@ -87,7 +135,15 @@ class QueryTracker:
                 f"Incremented ref count for {path}: {current} -> {current + 1} "
                 f"(atomic quiescing-gated admission)"
             )
-            return True
+        if current == 0:
+            self._took(path)
+        return True
+
+    def _took(self, path: str) -> None:
+        """This process's first query on ``path``: take its reader lock."""
+        if _hold(path):
+            with self._lock:
+                self._held.add(path)
 
     def increment_ref(self, index_path: str) -> None:
         """
@@ -106,6 +162,8 @@ class QueryTracker:
             logger.debug(
                 f"Incremented ref count for {index_path}: {current} -> {current + 1}"
             )
+        if current == 0:
+            self._took(index_path)
 
     def decrement_ref(self, index_path: str) -> None:
         """
@@ -134,12 +192,17 @@ class QueryTracker:
             self._ref_counts[index_path] = new_count
 
             # Clean up zero entries to keep dict small
+            release = False
             if new_count == 0:
                 del self._ref_counts[index_path]
+                release = index_path in self._held
+                self._held.discard(index_path)
 
             logger.debug(
                 f"Decremented ref count for {index_path}: {current} -> {new_count}"
             )
+        if release:
+            _release(index_path)
 
     def get_ref_count(self, index_path: str) -> int:
         """

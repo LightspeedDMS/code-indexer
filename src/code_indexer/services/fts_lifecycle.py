@@ -40,6 +40,8 @@ from typing import (
     Tuple,
 )
 
+from code_indexer.utils.index_store import index_root
+
 from .fts_file_documents import (
     FileFtsDocuments,
     ensure_fts_index_not_empty,
@@ -52,6 +54,7 @@ from .fts_file_documents import (
 if TYPE_CHECKING:
     from ..config import Config
     from .tantivy_index_manager import TantivyIndexManager
+    from ..indexing.repo_manifest import RepoManifest
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +74,7 @@ class FtsRebuildIncompleteError(FtsIndexError):
 
 def fts_index_dir_for_repo(repo_root: Path) -> Path:
     """THE location of a repository's FTS index (CLI, daemon and server)."""
-    return Path(repo_root) / ".code-indexer" / "tantivy_index"
+    return index_root(repo_root) / "tantivy_index"
 
 
 def fts_index_dir(config: "Config") -> Path:
@@ -175,9 +178,11 @@ def _add_files(
 ) -> Tuple[int, List[FailedFile]]:
     indexed = 0
     failed: List[FailedFile] = []
-    for file_path in files:
+    for file_path, file_documents, error in documents.iter_documents(files):
         try:
-            for document in documents.for_file(file_path):
+            if file_documents is None:
+                raise ValueError(error)
+            for document in file_documents:
                 fts_manager.add_document(document)
         except Exception as e:
             logger.error(f"FTS rebuild could not index {file_path}: {e}")
@@ -194,10 +199,15 @@ def bootstrap_fts_from_disk(
     config: "Config",
     files: Iterable[Path],
     progress_callback: Optional[Callable[..., Any]] = None,
+    *,
+    backend: Optional[Any] = None,
+    manifest: Optional["RepoManifest"] = None,
 ) -> List[FailedFile]:
     """Fill a new or rebuilt index with every file's chunk-level documents
     (reads and chunks only, no embedding). Returns the files it could not
-    index, for `finish_fts_run`'s per-file rule."""
+    index, for `finish_fts_run`'s per-file rule. `backend`/`manifest`: the
+    pass's delegated content backend and manifest (see FileFtsDocuments);
+    None reads the local disk."""
     if progress_callback:
         progress_callback(
             0,
@@ -206,7 +216,10 @@ def bootstrap_fts_from_disk(
             info="FTS index is new - scanning all files to build full-text index...",
         )
     indexed, failed = _add_files(
-        fts_manager, FileFtsDocuments(config), files, lambda f, e: None
+        fts_manager,
+        FileFtsDocuments(config, backend=backend, manifest=manifest),
+        files,
+        lambda f, e: None,
     )
     if progress_callback:
         # Nothing is committed yet; the committed document count is
@@ -221,14 +234,18 @@ def bootstrap_fts_from_disk(
 
 
 def _replace_from_disk(
-    fts_manager: "TantivyIndexManager", config: "Config", files: Iterable[Path]
+    fts_manager: "TantivyIndexManager",
+    config: "Config",
+    files: Iterable[Path],
+    documents: Optional[FileFtsDocuments] = None,
 ) -> List[FailedFile]:
     """Replace each file's FTS documents with its current chunks read from
     disk (no embedding). Returns the files that still could not be indexed;
     an index-level error (RuntimeError) propagates."""
     from .fts_file_documents import FtsReplaceError
 
-    documents = FileFtsDocuments(config)
+    if documents is None:
+        documents = FileFtsDocuments(config)
     failed: List[FailedFile] = []
     for file_path in files:
         try:
@@ -284,8 +301,14 @@ def finish_fts_run(
     retry_files: Iterable[Path] = (),
     unknown_failures: int = 0,
     progress_callback: Optional[Callable[..., Any]] = None,
+    backend: Optional[Any] = None,
+    manifest: Optional["RepoManifest"] = None,
 ) -> Optional[str]:
     """Complete, commit and settle the run's FTS index.
+
+    `backend`/`manifest`: the pass's delegated content backend and manifest;
+    the retry and the empty-index check then read through it, never the
+    local disk (see FileFtsDocuments). None reads the local disk.
 
     `failed_files`: files already found unindexable (a bootstrap's).
     `retry_files`: files whose documents the run may lack -- their
@@ -307,13 +330,16 @@ def finish_fts_run(
         FtsRebuildIncompleteError: files are missing and nothing is indexed.
     """
     index_dir = fts_index_dir(config)
+    documents = FileFtsDocuments(config, backend=backend, manifest=manifest)
     # Keyed by path: a file failing in the bootstrap AND the retry is one
     # missing file (its first error is kept); one the retry indexed is not
     # missing at all.
     missing_by_path = {Path(path): error for path, error in failed_files}
     if not run_raised:
         retried = [Path(path) for path in retry_files]
-        retry_failures = dict(_replace_from_disk(fts_manager, config, retried))
+        retry_failures = dict(
+            _replace_from_disk(fts_manager, config, retried, documents)
+        )
         for path in retried:
             if path in retry_failures:
                 missing_by_path.setdefault(path, retry_failures[path])
@@ -336,7 +362,7 @@ def finish_fts_run(
         progress_callback(0, 0, Path(""), info=message)
     ensure_fts_index_not_empty(
         committed,
-        FileFtsDocuments(config).files_with_documents(source_files),
+        documents.files_with_documents(source_files),
         index_dir,
     )
     warning = _settle_fts_content(
@@ -428,6 +454,9 @@ def rebuild_fts_index(
     config: "Config",
     files: Iterable[Path],
     on_file: Callable[[Path, Optional[str]], None],
+    *,
+    backend: Optional[Any] = None,
+    manifest: Optional["RepoManifest"] = None,
 ) -> FtsRebuildResult:
     """`--rebuild-fts-index`: rebuild the FTS index from scratch, with
     exactly normal indexing's chunk-level documents and no embedding, under
@@ -442,9 +471,15 @@ def rebuild_fts_index(
         FtsIndexError: the committed index cannot be read.
         FtsIndexEmptyError: no document, although files would get some.
         FtsRebuildIncompleteError: files are missing and nothing is indexed.
+
+    `backend`/`manifest`: a delegated content backend and its manifest
+    (`cidx index --rebuild-fts-index --content-backend=delegated`): every
+    file is read through it, never the local disk. None reads the disk.
     """
     from .indexing_lock import create_indexing_lock
     from .tantivy_index_manager import TantivyIndexManager
+
+    documents = FileFtsDocuments(config, backend=backend, manifest=manifest)
 
     index_dir = fts_index_dir(config)
     lock = create_indexing_lock(index_dir.parent)
@@ -456,9 +491,7 @@ def rebuild_fts_index(
         fts_manager = TantivyIndexManager(index_dir)
         fts_manager.initialize_index(create_new=True)
         try:
-            indexed, failed = _add_files(
-                fts_manager, FileFtsDocuments(config), files, on_file
-            )
+            indexed, failed = _add_files(fts_manager, documents, files, on_file)
             fts_manager.commit()
         finally:
             fts_manager.close()
@@ -466,7 +499,7 @@ def rebuild_fts_index(
         committed = committed_document_count(index_dir)
         ensure_fts_index_not_empty(
             committed,
-            FileFtsDocuments(config).files_with_documents(files),
+            documents.files_with_documents(files),
             index_dir,
         )
         warning = _settle_fts_content(

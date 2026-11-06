@@ -70,7 +70,9 @@ _SELF_TRACKING_TOOLS = frozenset(
 # a golden alias, causing false "Access denied" for the rightful owner.
 _OWNER_ENFORCED_TOOLS: frozenset = frozenset({"deactivate_repository"})
 
-# depmap_find_consumers and depmap_get_repo_domains identify a single repo
+# depmap_find_consumers and depmap_get_repo_domains (the cidx-depmap feature's
+# tools: registered only where "depmap" is enabled; elsewhere these names match
+# no tool) identify a single repo
 # via a `repo_name` parameter, distinct from the generic alias-param names
 # scanned below. Mapped PER TOOL, never globally: manage_group_repos ALSO
 # takes a top-level `repo_name` (its single-repo 'remove' action) with
@@ -242,17 +244,32 @@ _HANDLER_TIMEOUT_OVERRIDES: Dict[str, int] = {
 #   deliberately runs synchronously, not via BackgroundJobManager), that
 #   discarded result is unrecoverable. Every value above 60 in the tool's
 #   advertised 10..600s range would otherwise be unreachable in practice.
+#
+# Feature tools (X-Ray's xray_search, xray_explore and analyze_graph, above)
+# are no longer listed here: a feature declares the same property on its
+# ToolContribution (manages_own_timeout, SDK 0.5), read through
+# _tool_manages_own_timeout below.
 _ASYNC_DISPATCH_TIMEOUT_EXEMPT_TOOLS = frozenset(
     {
         "regex_search",
-        "xray_search",
-        "xray_explore",
         "gh_actions_search_logs",
         "gitlab_ci_search_logs",
         "ci_search_logs",
-        "analyze_graph",
     }
 )
+
+
+def _tool_manages_own_timeout(tool_name: str) -> bool:
+    """Whether *tool_name* is exempt from the generic dispatch timeout: a
+    core tool in :data:`_ASYNC_DISPATCH_TIMEOUT_EXEMPT_TOOLS`, or a feature
+    tool whose contribution declares ``manages_own_timeout``."""
+    if tool_name in _ASYNC_DISPATCH_TIMEOUT_EXEMPT_TOOLS:
+        return True
+    from code_indexer.server.features.dispatch_policy import (
+        feature_tool_manages_own_timeout,
+    )
+
+    return feature_tool_manages_own_timeout(tool_name)
 
 
 def _resolve_handler_timeout(tool_name: str) -> int:
@@ -519,7 +536,7 @@ async def _invoke_handler(
     )
 
     if is_async:
-        if tool_name in _ASYNC_DISPATCH_TIMEOUT_EXEMPT_TOOLS:
+        if _tool_manages_own_timeout(tool_name):
             # Story #1491 AC6 code-review fix: regex_search's
             # _omni_regex_search loops repos SEQUENTIALLY, each bounded by
             # its own search_limits_config.timeout_seconds subprocess
@@ -571,7 +588,7 @@ async def _invoke_handler(
         # worker thread, mirroring the identical pattern already used at
         # semantic_query_manager.py:1942 and multi_search_service.py:236.
         ctx = contextvars.copy_context()
-        if tool_name in _ASYNC_DISPATCH_TIMEOUT_EXEMPT_TOOLS:
+        if _tool_manages_own_timeout(tool_name):
             # Story #1491 AC2: the exemption is a property of the TOOL, not of
             # the dispatch branch. regex_search became sync-dispatched so its
             # synchronous work leaves the event loop; that offload must not
@@ -1462,7 +1479,13 @@ async def mcp_endpoint(
                     logger.debug("Cookie token refresh skipped: %s", _refresh_err)
 
         body = await request.json()
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "mcp_endpoint: swallowed %s: %s",
+            type(exc).__name__,
+            exc,
+            exc_info=True,
+        )
         # Parse error - return JSON-RPC error
         return create_jsonrpc_error(-32700, "Parse error: Invalid JSON", None)
 
@@ -1509,18 +1532,15 @@ async def sse_event_generator():
     yield {"data": "connected"}
 
 
-def get_optional_user(
+async def get_optional_user(
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ) -> Optional[User]:
     """
     Optional user dependency that returns None for unauthenticated requests.
 
-    Wraps get_current_user() to handle authentication failures gracefully
-    instead of raising HTTPException.
-
-    Used for endpoints that need to distinguish between authenticated
-    and unauthenticated requests (e.g., MCP SSE endpoint per RFC 9728).
+    Uses the same auth chain as POST /mcp (get_current_user_for_mcp) so
+    gateway identity_forward JWTs are accepted on GET /mcp SSE too.
 
     Args:
         request: HTTP request object for cookie extraction
@@ -1532,9 +1552,8 @@ def get_optional_user(
     from fastapi import HTTPException
 
     try:
-        return get_current_user(request, credentials)
+        return await get_current_user_for_mcp(request)
     except HTTPException:
-        # Authentication failed - return None to indicate unauthenticated
         return None
 
 

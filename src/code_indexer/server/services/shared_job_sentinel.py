@@ -3,6 +3,14 @@ Cluster-safe shared-storage sentinel for dep-map re-entrancy protection (Story #
 
 Atomic O_CREAT|O_EXCL lock files on NFS-shared cidx-meta directory prevent
 duplicate dep-map analysis jobs across cluster nodes.
+
+Under a delegated content backend the sentinel directory (inside cidx-meta) is
+shared content behind workspace-mcp, not this pod's disk. The same protocol
+then runs on the content writer's compare-and-swap: a claim is a write that
+must not find the file (``expected_blob_sha=None``), a stale replacement and a
+release are conditional on the exact bytes read. That is the same cluster-wide
+atomicity O_EXCL gives on NFS -- and stricter for the stale replace, which on
+the local disk is an unconditional overwrite.
 """
 
 import json
@@ -14,6 +22,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+
+from code_indexer.server.services import cidx_meta_content
 
 __all__ = [
     "SentinelInfo",
@@ -69,10 +79,12 @@ class SharedJobSentinel:
     """
 
     def __init__(self, sentinel_dir: Path, stale_timeout_seconds: int) -> None:
-        """Initialise sentinel; creates sentinel_dir if missing."""
+        """Initialise sentinel; creates sentinel_dir if missing (on this disk)."""
         self._sentinel_dir = Path(sentinel_dir)
         self._stale_timeout_seconds = stale_timeout_seconds
-        self._sentinel_dir.mkdir(parents=True, exist_ok=True)
+        self._shared = cidx_meta_content.shared_cidx_meta_for(self._sentinel_dir)
+        if self._shared is None:
+            self._sentinel_dir.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
     # Public API
@@ -101,6 +113,11 @@ class SharedJobSentinel:
             "started_at": now_iso,
         }
         payload_bytes = json.dumps(payload).encode()
+
+        if self._shared is not None:
+            return self._try_claim_shared(
+                sentinel_path, payload_bytes, op_type, job_id, node_id, now_iso
+            )
 
         try:
             fd = os.open(
@@ -165,6 +182,9 @@ class SharedJobSentinel:
             return
 
         sentinel_path = self._sentinel_dir / f"_active_{op_type}.lock"
+        if self._shared is not None:
+            self._release_shared(sentinel_path, op_type, expected_job_id)
+            return
         try:
             os.unlink(str(sentinel_path))
         except FileNotFoundError:
@@ -188,7 +208,11 @@ class SharedJobSentinel:
         last_exc: Optional[Exception] = None
         for attempt in range(_READ_ACTIVE_MAX_RETRIES):
             try:
-                raw = sentinel_path.read_text(encoding="utf-8")
+                raw = (
+                    self._shared.read_text(sentinel_path)
+                    if self._shared is not None
+                    else sentinel_path.read_text(encoding="utf-8")
+                )
             except FileNotFoundError:
                 return None
             try:
@@ -226,6 +250,78 @@ class SharedJobSentinel:
     # Private helpers
     # ------------------------------------------------------------------
 
+    def _try_claim_shared(
+        self,
+        sentinel_path: Path,
+        payload_bytes: bytes,
+        op_type: str,
+        job_id: str,
+        node_id: str,
+        now_iso: str,
+    ) -> ClaimResult:
+        """try_claim on shared content: create-if-absent, then CAS-replace a
+        stale holder. Losing either race returns the winner as active."""
+        assert self._shared is not None
+        info = SentinelInfo(
+            op_type=op_type,
+            job_id=job_id,
+            node_id=node_id,
+            started_at=datetime.fromisoformat(now_iso),
+        )
+        try:
+            self._shared.put(sentinel_path, payload_bytes, expected=None)
+            return ClaimResult(success=True, active=info)
+        except cidx_meta_content.CidxMetaConflictError:
+            pass
+        try:
+            raw, sha = self._shared.read_with_sha(sentinel_path)
+        except FileNotFoundError:
+            # Released between our create and our read: one more create only.
+            try:
+                self._shared.put(sentinel_path, payload_bytes, expected=None)
+                return ClaimResult(success=True, active=info)
+            except cidx_meta_content.CidxMetaConflictError:
+                return ClaimResult(success=False, active=self.read_active(op_type))
+        existing = _parse(raw)
+        if existing is None or self.is_stale(existing, self._stale_timeout_seconds):
+            try:
+                self._shared.put(sentinel_path, payload_bytes, expected=sha)
+                return ClaimResult(success=True, active=info, replaced_stale=True)
+            except cidx_meta_content.CidxMetaConflictError:
+                return ClaimResult(success=False, active=self.read_active(op_type))
+        return ClaimResult(success=False, active=existing)
+
+    def _release_shared(
+        self, sentinel_path: Path, op_type: str, expected_job_id: str
+    ) -> None:
+        """release on shared content: delete only the exact bytes that name
+        *expected_job_id* (a holder that replaced us in between is kept)."""
+        assert self._shared is not None
+        try:
+            raw, sha = self._shared.read_with_sha(sentinel_path)
+        except FileNotFoundError:
+            logger.warning(
+                "SharedJobSentinel.release: sentinel file already gone for op_type=%r",
+                op_type,
+            )
+            return
+        existing = _parse(raw)
+        if existing is None or existing.job_id != expected_job_id:
+            logger.warning(
+                "SharedJobSentinel.release: sentinel not owned by "
+                "expected_job_id=%r, NOT releasing",
+                expected_job_id,
+            )
+            return
+        try:
+            self._shared.delete(sentinel_path, expected=sha)
+        except cidx_meta_content.CidxMetaConflictError:
+            logger.warning(
+                "SharedJobSentinel.release: sentinel for op_type=%r changed "
+                "while releasing; kept",
+                op_type,
+            )
+
     def _force_replace(self, sentinel_path: Path, payload: dict) -> None:
         """Atomically overwrite sentinel_path with payload via tempfile + os.replace."""
         tmp_name = str(sentinel_path) + f".tmp.{uuid.uuid4().hex}"
@@ -244,3 +340,17 @@ class SharedJobSentinel:
             except OSError:
                 pass
             raise
+
+
+def _parse(raw: bytes) -> Optional[SentinelInfo]:
+    """A sentinel's payload, or None when it does not parse."""
+    try:
+        data = json.loads(raw)
+        return SentinelInfo(
+            op_type=data["op_type"],
+            job_id=data["job_id"],
+            node_id=data["node_id"],
+            started_at=datetime.fromisoformat(data["started_at"]),
+        )
+    except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+        return None
