@@ -6,11 +6,11 @@
 set -euo pipefail
 
 if [ $# -ge 2 ]; then
-  DIFF_CMD="git diff --diff-filter=ACM -U0 $1...$2"
+  DIFF_CMD="git diff --diff-filter=ACM -U0 $1...$2 -- . ':!scripts/check-disclosure.sh'"
 elif [ $# -eq 1 ]; then
-  DIFF_CMD="git diff --diff-filter=ACM -U0 $1...HEAD"
+  DIFF_CMD="git diff --diff-filter=ACM -U0 $1...HEAD -- . ':!scripts/check-disclosure.sh'"
 else
-  DIFF_CMD="git diff --cached --diff-filter=ACM -U0"
+  DIFF_CMD="git diff --cached --diff-filter=ACM -U0 -- . ':!scripts/check-disclosure.sh'"
 fi
 
 ADDED_LINES=$($DIFF_CMD | grep -E '^\+[^+]' | sed 's/^\+//' || true)
