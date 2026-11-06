@@ -158,10 +158,12 @@ pub(crate) fn apply_compile_memory_limit(command: &mut std::process::Command, li
         command.pre_exec(move || {
             let mut current = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
             if libc::getrlimit(libc::RLIMIT_DATA, &mut current) == 0 {
-                let soft = if current.rlim_max == libc::RLIM_INFINITY {
+                // Clamp to rlim_cur (not rlim_max): a sandbox should
+                // never raise an inherited soft limit, only lower it.
+                let soft = if current.rlim_cur == libc::RLIM_INFINITY {
                     requested
                 } else {
-                    requested.min(current.rlim_max)
+                    requested.min(current.rlim_cur)
                 };
                 let wanted = libc::rlimit { rlim_cur: soft, rlim_max: current.rlim_max };
                 let _ = libc::setrlimit(libc::RLIMIT_DATA, &wanted);
@@ -182,15 +184,14 @@ type SpawnedRustcChild = (Child, i32, Receiver<Vec<u8>>, Receiver<Vec<u8>>);
 /// Extracted out of `run_rustc_with_timeout` (mechanical split, no logic
 /// change) -- see that function's doc comment for the full rationale
 /// (process-group isolation, no bare `.output()`).
-fn spawn_rustc_child(mut command: std::process::Command) -> Result<SpawnedRustcChild, CompileError> {
+fn spawn_rustc_child(compile_limit: Option<u64>, mut command: std::process::Command) -> Result<SpawnedRustcChild, CompileError> {
     use std::os::unix::process::CommandExt;
 
     command.process_group(0);
     crate::child_group_reaper::die_with_parent(&mut command);
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
-    let limit = parse_compile_rlimit_data(std::env::var(COMPILE_RLIMIT_DATA_ENV).ok().as_deref());
-    apply_compile_memory_limit(&mut command, limit);
+    apply_compile_memory_limit(&mut command, compile_limit);
 
     let mut child = command.spawn().map_err(|e| CompileError {
         message: format!("Failed to invoke rustc: {}", e),
@@ -275,7 +276,10 @@ pub(crate) fn run_rustc_with_timeout(
     command: std::process::Command,
     timeout: std::time::Duration,
 ) -> Result<(bool, Vec<u8>, Vec<u8>), CompileError> {
-    let (mut child, pid, stdout_rx, stderr_rx) = spawn_rustc_child(command)?;
+    let compile_limit = parse_compile_rlimit_data(
+        std::env::var(COMPILE_RLIMIT_DATA_ENV).ok().as_deref(),
+    );
+    let (mut child, pid, stdout_rx, stderr_rx) = spawn_rustc_child(compile_limit, command)?;
     let mut tracked = crate::child_group_reaper::TrackedGroup::track(pid);
     let start = Instant::now();
     let polled = poll_rustc_until_done(&mut child, pid, start, timeout);
@@ -292,9 +296,9 @@ pub(crate) fn run_rustc_with_timeout(
 mod compile_memory_limit_tests {
     use super::*;
 
-    /// 1 GiB: the cidx default, so a concurrent real compile elsewhere in this
-    /// test binary that happens to inherit it is unaffected.
-    const LIMIT_BYTES: u64 = 1024 * 1024 * 1024;
+    /// 64 MiB: low enough to stay below any CI hard limit, high enough to
+    /// not interfere with a concurrent compile.
+    const LIMIT_BYTES: u64 = 64 * 1024 * 1024;
 
     fn ulimit_data_kib() -> std::process::Command {
         let mut command = std::process::Command::new("sh");
@@ -334,19 +338,18 @@ mod compile_memory_limit_tests {
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), inherited_data_kib());
     }
 
-    /// The real spawn path: what cidx sets in xray-cli's environment must be
-    /// the RLIMIT_DATA the rustc child starts with.
+    /// spawn_rustc_child forwards the compile limit to the child process
+    /// without touching process-global state (no env mutation = no data race).
     #[test]
-    fn run_rustc_with_timeout_applies_the_limit_from_the_environment() {
-        let previous = std::env::var_os(COMPILE_RLIMIT_DATA_ENV);
-        std::env::set_var(COMPILE_RLIMIT_DATA_ENV, LIMIT_BYTES.to_string());
-        let result = run_rustc_with_timeout(ulimit_data_kib(), std::time::Duration::from_secs(10));
-        match previous {
-            Some(value) => std::env::set_var(COMPILE_RLIMIT_DATA_ENV, value),
-            None => std::env::remove_var(COMPILE_RLIMIT_DATA_ENV),
-        }
-        let (success, stdout, _stderr) = result.expect("sh must run");
-        assert!(success);
-        assert_eq!(String::from_utf8_lossy(&stdout).trim(), (LIMIT_BYTES / 1024).to_string());
+    fn spawn_rustc_child_forwards_the_compile_limit() {
+        let (mut child, _pid, stdout_rx, _stderr_rx) =
+            spawn_rustc_child(Some(LIMIT_BYTES), ulimit_data_kib())
+                .expect("sh must run");
+        let _ = child.wait();
+        let stdout = stdout_rx.recv().unwrap_or_default();
+        assert_eq!(
+            String::from_utf8_lossy(&stdout).trim(),
+            (LIMIT_BYTES / 1024).to_string()
+        );
     }
 }
