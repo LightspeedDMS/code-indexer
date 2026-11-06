@@ -22,6 +22,7 @@ Trust is deliberately narrow:
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any, List, Optional
@@ -68,6 +69,8 @@ class GatewayJwtValidator:
             raise ValueError("issuer is required")
         if not audience:
             raise ValueError("audience is required")
+        if not jwks_uri or not jwks_uri.startswith("https://"):
+            raise ValueError("jwks_uri must be a non-empty https:// URL")
         self._issuer = issuer
         self._audience = audience
         self._username_claim = username_claim
@@ -78,13 +81,14 @@ class GatewayJwtValidator:
         # for tests. Constructed lazily-but-eagerly here so a bad jwks_uri surfaces at
         # wiring time, not on the first request.
         self._jwks_client = jwks_client or jwt.PyJWKClient(
-            jwks_uri, cache_jwk_set=True, lifespan=300
+            jwks_uri, cache_jwk_set=True, lifespan=300, timeout=5
         )
         # Rate-limit JWKS key-fetch failures: an unknown kid in a forged token
         # triggers a JWKS refetch -- without a cooldown, an attacker can amplify
         # requests against the JWKS endpoint by sending tokens with random kids.
         self._jwks_fetch_cooldown = jwks_fetch_cooldown
-        self._last_jwks_error: float = 0.0
+        self._kid_errors: dict = {}
+        self._kid_errors_lock = threading.Lock()
 
     def claims_this_issuer(self, token: str) -> bool:
         """Return True iff the token's UNVERIFIED ``iss`` equals our gateway issuer.
@@ -107,17 +111,30 @@ class GatewayJwtValidator:
                 required claim (``exp``/``iss``/``sub``) is missing.
         """
         try:
-            # Rate-limit JWKS key-fetch errors so forged tokens with random kids
-            # cannot amplify requests against the JWKS endpoint.
+            try:
+                unverified_header = jwt.get_unverified_header(token)
+            except Exception as exc:
+                raise GatewayTokenError(str(exc)) from exc
+            kid = unverified_header.get("kid")
+            if not kid:
+                raise GatewayTokenError("missing kid header")
             now = time.monotonic()
-            if now - self._last_jwks_error < self._jwks_fetch_cooldown:
-                raise GatewayTokenError("JWKS fetch rate-limited; retry later")
+            with self._kid_errors_lock:
+                if now - self._kid_errors.get(kid, 0.0) < self._jwks_fetch_cooldown:
+                    raise GatewayTokenError(
+                        "JWKS fetch rate-limited for this key; retry later"
+                    )
             try:
                 signing_key = self._jwks_client.get_signing_key_from_jwt(token).key
             except GatewayTokenError:
                 raise
             except Exception:
-                self._last_jwks_error = time.monotonic()
+                with self._kid_errors_lock:
+                    self._kid_errors[kid] = time.monotonic()
+                    cutoff = now - self._jwks_fetch_cooldown * 2
+                    self._kid_errors = {
+                        k: v for k, v in self._kid_errors.items() if v > cutoff
+                    }
                 raise
 
             claims = jwt.decode(
