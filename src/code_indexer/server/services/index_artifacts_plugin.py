@@ -1,0 +1,59 @@
+"""
+Pluggable index-artifact client: the service that holds published indexes.
+
+The fourth seam to use ``backend_plugin_loader``, after git, content and
+ripgrep. Under ``index_store_backend='delegated'`` a built index is published
+to, and checked out from, an artifact service (workspace-mcp's index store);
+this module resolves the client for it. With no plugin configured nothing is
+returned and the caller keeps the local store, so an existing deployment is
+unaffected.
+
+The contract
+------------
+A plugin is a zero-argument FACTORY callable returning an object with
+``current_version(alias)``, ``publish(alias, base_version, source_dir)`` and
+``checkout(alias, dest_dir, version=None)`` (see ``DelegatedIndexStore``).
+Removing a golden repo also needs ``delete_alias(alias) -> int`` (every
+published version of the alias; cidx-content-backend >= 0.9.0); a client
+without it fails that removal loudly rather than leave the versions behind.
+
+Selection (first match wins)
+----------------------------
+1. ``CIDX_INDEX_ARTIFACTS`` env var, as ``"package.module:factory"``.
+2. An entry point in the ``code_indexer.index_artifacts`` group.
+3. Nothing -- the caller uses the local store.
+
+Misconfiguration fails LOUD (``IndexArtifactsPluginError``): a pod without the
+repository volume keeps its built index on scratch space, and a silent fallback
+to the local store would never publish it anywhere a restart could recover.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Optional
+
+from cidx_sdk.entry_points import INDEX_ARTIFACTS_ENTRY_POINT_GROUP
+from cidx_sdk.seams.errors import IndexArtifactsPluginError as IndexArtifactsPluginError
+
+from code_indexer.server.services.backend_plugin_loader import BackendPluginResolver
+
+ENV_VAR = "CIDX_INDEX_ARTIFACTS"
+ENTRY_POINT_GROUP = INDEX_ARTIFACTS_ENTRY_POINT_GROUP
+
+
+_resolver = BackendPluginResolver(
+    env_var=ENV_VAR,
+    entry_point_group=ENTRY_POINT_GROUP,
+    error_type=IndexArtifactsPluginError,
+    seam_name="index artifacts",
+)
+
+
+def resolve_index_artifacts() -> Optional[Any]:
+    """Instantiate the configured index-artifact client, or None if none is."""
+    return _resolver.resolve()
+
+
+def reset_cache() -> None:
+    """Clear the resolved plugin. For tests."""
+    _resolver.reset_cache()
