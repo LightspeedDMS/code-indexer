@@ -179,47 +179,14 @@ pub extern "C" fn xray_rustc_version_len() -> u64 {
 }
 "#;
 
-/// The evaluator is compiled into the SAME module as these preamble
-/// constants, so every name the preamble imports is reachable from user
-/// evaluator code as `crate::<name>` -- with no `std` segment anywhere in
-/// the path for `validator.rs`'s forbidden-module check to see. The
-/// validator rejects `std::process::Command`; it cannot reject
-/// `crate::Command`, because the only thing that makes `crate::Command`
-/// dangerous is what the preamble happens to import.
-///
-/// Today the preamble imports `Arc`, `RefCell` and `PhantomData`, all
-/// harmless, so this is latent rather than live. Nothing guarded it: adding
-/// one `use std::process::Command;` here opened a sandbox escape silently --
-/// the full `xray-core` suite stays green with `std::process::Command` and
-/// `std::fs` imported into the evaluator's module (748 passed).
-///
-/// These tests are that guard. They do NOT weaken the preamble; they pin it,
-/// so a new import is a deliberate, reviewed act rather than an invisible
-/// one.
+/// Invariant: preamble constants may import only the reviewed bindings
+/// listed in ALLOWED_IMPORTS. Evaluator code shares the preamble's module
+/// scope, so any name imported here is reachable from evaluator code.
+/// These tests enforce the invariant: a new import must be added to
+/// ALLOWED_IMPORTS with a safety rationale before the suite passes.
 #[cfg(test)]
 mod import_allowlist_tests {
-    use super::{EPILOGUE, PREAMBLE};
-    use crate::compiler::graph_preamble::{
-        GRAPH_EPILOGUE, GRAPH_PREAMBLE_EXTRA_1, GRAPH_PREAMBLE_EXTRA_2,
-        GRAPH_PREAMBLE_EXTRA_3, GRAPH_PREAMBLE_EXTRA_4, GRAPH_PREAMBLE_EXTRA_5,
-        GRAPH_PREAMBLE_EXTRA_6, GRAPH_REFINE_EPILOGUE,
-    };
-
-    /// Every constant whose text is concatenated into an evaluator's
-    /// compiled source by `assemble.rs`. A new one added there must be
-    /// added here too, or it is unguarded.
-    const ASSEMBLED_INTO_EVERY_EVALUATOR: &[(&str, &str)] = &[
-        ("PREAMBLE", PREAMBLE),
-        ("EPILOGUE", EPILOGUE),
-        ("GRAPH_PREAMBLE_EXTRA_1", GRAPH_PREAMBLE_EXTRA_1),
-        ("GRAPH_PREAMBLE_EXTRA_2", GRAPH_PREAMBLE_EXTRA_2),
-        ("GRAPH_PREAMBLE_EXTRA_3", GRAPH_PREAMBLE_EXTRA_3),
-        ("GRAPH_PREAMBLE_EXTRA_4", GRAPH_PREAMBLE_EXTRA_4),
-        ("GRAPH_PREAMBLE_EXTRA_5", GRAPH_PREAMBLE_EXTRA_5),
-        ("GRAPH_PREAMBLE_EXTRA_6", GRAPH_PREAMBLE_EXTRA_6),
-        ("GRAPH_EPILOGUE", GRAPH_EPILOGUE),
-        ("GRAPH_REFINE_EPILOGUE", GRAPH_REFINE_EPILOGUE),
-    ];
+    use crate::compiler::assemble::ASSEMBLED_PARTS;
 
     /// The ONLY imports an evaluator's module may contain, as exact
     /// normalised statements.
@@ -236,6 +203,14 @@ mod import_allowlist_tests {
     ///                  interior mutability; worst case is a panic.
     ///   PhantomData -- a zero-sized lifetime marker on GraphHandle. Cannot
     ///                  do anything at all at runtime.
+    ///   debug_log   -- appends to a thread-local Vec inside the preamble's
+    ///                  own xray_host_debug_log module; no I/O.
+    ///   FactsHandle, GraphHandle
+    ///               -- opaque accessor handles defined in the preamble's
+    ///                  own xray_host_handles module; method dispatch only.
+    ///   DeclarationKind, EdgeReason, SymbolId, UserFact, Visibility
+    ///               -- data types from the evaluator's parent module;
+    ///                  no methods that perform I/O.
     ///
     /// Anything that performs I/O, spawns a process, loads a library,
     /// touches the filesystem, opens a socket, or reaches the environment
@@ -245,6 +220,11 @@ mod import_allowlist_tests {
         "use std::sync::Arc;",
         "use std::cell::RefCell;",
         "use std::marker::PhantomData;",
+        // Preamble-internal modules: these re-export items defined
+        // within the preamble itself, not std capabilities.
+        "use xray_host_debug_log::debug_log;",
+        "pub use xray_host_handles::{FactsHandle, GraphHandle};",
+        "use super::{DeclarationKind, EdgeReason, SymbolId, UserFact, Visibility};",
     ];
 
     /// Collapse runs of whitespace so formatting can never hide a statement
@@ -288,26 +268,19 @@ mod import_allowlist_tests {
 
     #[test]
     fn preamble_imports_stay_inside_the_allowlist() {
-        for (name, source) in ASSEMBLED_INTO_EVERY_EVALUATOR {
+        for (name, source) in ASSEMBLED_PARTS {
             for statement in import_statements(source) {
                 assert!(
                     ALLOWED_IMPORTS.contains(&statement.as_str()),
                     "{name} imports `{statement}`, which is not on the \
                      evaluator import allowlist.\n\n\
-                     User evaluator code is compiled into the SAME module as \
-                     this preamble, so anything imported here is reachable \
-                     from an evaluator as `crate::<name>` -- a path with no \
-                     `std` segment for validator.rs's forbidden-module check \
-                     to match on. Adding an import here therefore hands every \
-                     evaluator that capability, whatever the validator says.\n\n\
-                     If this import really is needed AND is safe to expose to \
-                     arbitrary evaluator code, add the exact statement to \
-                     ALLOWED_IMPORTS in this file together with the reason it \
-                     cannot be used to reach the filesystem, the network, the \
-                     environment, another process or the dynamic linker. If it \
-                     is not safe to expose, it does not belong in the preamble \
-                     at all -- put it in xray-core's own code, which is not \
-                     concatenated into the evaluator."
+                     Evaluator code shares this module's scope, so anything \
+                     imported here is reachable from evaluator code. Add the \
+                     exact statement to ALLOWED_IMPORTS with a rationale that \
+                     it cannot reach the filesystem, network, environment, \
+                     another process or the dynamic linker. If it is not safe \
+                     to expose, it does not belong in the preamble -- put it \
+                     in xray-core's own code instead."
                 );
             }
         }
@@ -315,7 +288,7 @@ mod import_allowlist_tests {
 
     #[test]
     fn every_allowlisted_import_is_actually_present() {
-        let present: Vec<String> = ASSEMBLED_INTO_EVERY_EVALUATOR
+        let present: Vec<String> = ASSEMBLED_PARTS
             .iter()
             .flat_map(|(_, source)| import_statements(source))
             .collect();
