@@ -16,6 +16,7 @@ import re
 import pytest
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
+from tests.unit.server._depmap_feature import depmap_service_installed
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -48,7 +49,10 @@ def _bypass_elevation(app, router):
 def app():
     """Create FastAPI app with elevation bypassed for dependency-map routes."""
     from code_indexer.server.app import app as _app
-    from code_indexer.server.web.dependency_map_routes import dependency_map_router
+    from tests.unit.server._depmap_feature import ensure_depmap_routes
+
+    ensure_depmap_routes(_app)
+    from cidx_depmap.server.web.routes import dependency_map_router
 
     original_overrides = dict(_app.dependency_overrides)
     _bypass_elevation(_app, dependency_map_router)
@@ -195,7 +199,7 @@ class TestJobStatusPartialEndpoint:
         cache.get_cached.return_value = {
             "result_json": json.dumps({"health": "Healthy", "color": "GREEN"})
         }
-        _ROUTES = "code_indexer.server.web.dependency_map_routes"
+        _ROUTES = "cidx_depmap.server.web.routes"
 
         with patch(f"{_ROUTES}._get_dashboard_cache_backend", return_value=cache):
             response = client.get(
@@ -570,20 +574,17 @@ class TestConfigServiceWiring:
                 return_value=mock_config_service,
             ),
             patch(
-                "code_indexer.server.services.dependency_map_dashboard_service"
+                "cidx_depmap.server.dependency_map_dashboard_service"
                 ".DependencyMapDashboardService.__init__",
                 capturing_dashboard_service_init,
             ),
-            patch(
-                "code_indexer.server.web.dependency_map_routes._get_dep_map_service_from_state",
-                return_value=None,
-            ),
+            depmap_service_installed(None),
             patch(
                 "code_indexer.server.storage.sqlite_backends.DependencyMapTrackingBackend.__init__",
                 return_value=None,
             ),
         ):
-            from code_indexer.server.web.dependency_map_routes import (
+            from cidx_depmap.server.web.routes import (
                 _get_dashboard_service,
             )
 
@@ -592,7 +593,9 @@ class TestConfigServiceWiring:
         assert "config_manager" in captured, (
             "_get_dashboard_service() did not construct DependencyMapDashboardService"
         )
-        assert captured["config_manager"] is mock_config_service, (
+        # The feature's view of the config service (its dependency-map keys
+        # come from the depmap section, modular phase 4g) wraps the service.
+        assert captured["config_manager"]._config_service is mock_config_service, (
             "config_manager argument must be config_service (ConfigService), "
             "not config_service.config_manager (ServerConfigManager). "
             "This guards against AttributeError: 'ServerConfigManager' object has "
@@ -704,7 +707,7 @@ def _call_get_known_repo_names(server_dir):
         "code_indexer.server.services.config_service.get_config_service",
         return_value=mock_config_service,
     ):
-        from code_indexer.server.web.dependency_map_routes import _get_known_repo_names
+        from cidx_depmap.server.web.routes import _get_known_repo_names
 
         return _get_known_repo_names()
 
@@ -800,7 +803,7 @@ def _make_fake_dep_map_service(repo_list=None, enrich_adds_fields=True):
     from types import SimpleNamespace
     from unittest.mock import MagicMock
 
-    from code_indexer.server.utils.config_manager import ClaudeIntegrationConfig
+    from tests.unit.server._depmap_feature import depmap_claude_config
 
     if repo_list is None:
         repo_list = [
@@ -858,7 +861,7 @@ def _make_fake_dep_map_service(repo_list=None, enrich_adds_fields=True):
 
     fake_config_manager = MagicMock()
     fake_config_manager.get_claude_integration_config.return_value = (
-        ClaudeIntegrationConfig()
+        depmap_claude_config()
     )
 
     service = SimpleNamespace(
@@ -883,7 +886,7 @@ class TestBuildDomainAnalyzerCapturesRepoList:
         When executor calls analyzer(out_dir, domain, domain_list, []),
         the closure must use the captured repo_list (not []).
         """
-        from code_indexer.server.web.dependency_map_routes import _build_domain_analyzer
+        from cidx_depmap.server.web.routes import _build_domain_analyzer
 
         expected_repos = [
             {
@@ -928,7 +931,7 @@ class TestBuildDomainAnalyzerCapturesRepoList:
         Confirms executor passing [] is overridden by captured list.
         Tests the 'effective_repo_list = captured if not repo_list else repo_list' logic.
         """
-        from code_indexer.server.web.dependency_map_routes import _build_domain_analyzer
+        from cidx_depmap.server.web.routes import _build_domain_analyzer
 
         service, captured_calls = _make_fake_dep_map_service()
 
@@ -949,7 +952,7 @@ class TestBuildDomainAnalyzerCapturesRepoList:
         If caller passes a non-empty repo_list, it should be used as-is
         (the 'effective_repo_list = captured if not repo_list else repo_list' branch).
         """
-        from code_indexer.server.web.dependency_map_routes import _build_domain_analyzer
+        from cidx_depmap.server.web.routes import _build_domain_analyzer
 
         service, captured_calls = _make_fake_dep_map_service()
         caller_repo_list = [
@@ -987,7 +990,7 @@ class TestBuildDomainAnalyzerPreviousDomainDir:
         previous_domain_dir passed to run_pass_2_per_domain must be output_dir,
         not None.
         """
-        from code_indexer.server.web.dependency_map_routes import _build_domain_analyzer
+        from cidx_depmap.server.web.routes import _build_domain_analyzer
 
         service, captured_calls = _make_fake_dep_map_service()
         output_dir = tmp_path
@@ -1013,7 +1016,7 @@ class TestBuildDomainAnalyzerPreviousDomainDir:
         same directory used as previous_domain_dir -- it contains the existing
         broken analysis that Claude should improve on.
         """
-        from code_indexer.server.web.dependency_map_routes import _build_domain_analyzer
+        from cidx_depmap.server.web.routes import _build_domain_analyzer
 
         service, captured_calls = _make_fake_dep_map_service()
 

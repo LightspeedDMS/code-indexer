@@ -157,10 +157,10 @@ class TestModuleSplitImports:
     def test_all_four_modules_importable(self) -> None:
         """dep_map_mcp_parser, dep_map_parser_hygiene, dep_map_parser_tables,
         dep_map_parser_graph are all importable without error."""
-        from code_indexer.server.services import dep_map_mcp_parser
+        from cidx_depmap.server import dep_map_mcp_parser
         from code_indexer.server.services import dep_map_parser_hygiene
         from code_indexer.server.services import dep_map_parser_tables
-        from code_indexer.server.services import dep_map_parser_graph
+        from cidx_depmap.server import dep_map_parser_graph
 
         for mod in (
             dep_map_mcp_parser,
@@ -201,10 +201,10 @@ class TestModuleLineCounts:
     def test_all_modules_under_500_lines(self) -> None:
         """dep_map_mcp_parser, dep_map_parser_hygiene, dep_map_parser_tables,
         dep_map_parser_graph each have ≤500 lines."""
-        import code_indexer.server.services.dep_map_mcp_parser as m1
+        import cidx_depmap.server.dep_map_mcp_parser as m1
         import code_indexer.server.services.dep_map_parser_hygiene as m2
         import code_indexer.server.services.dep_map_parser_tables as m3
-        import code_indexer.server.services.dep_map_parser_graph as m4
+        import cidx_depmap.server.dep_map_parser_graph as m4
 
         for mod in (m1, m2, m3, m4):
             lines = len(Path(mod.__file__).read_text(encoding="utf-8").splitlines())

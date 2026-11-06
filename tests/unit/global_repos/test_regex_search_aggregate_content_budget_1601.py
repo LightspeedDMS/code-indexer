@@ -33,6 +33,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 import code_indexer.global_repos.regex_search as regex_search_module
+from .conftest import executor_target
 from code_indexer.global_repos.regex_search import RegexSearchService
 
 # Reduced test budget (patched onto the module constant, read at call
@@ -101,7 +102,7 @@ class TestAggregateResultContentBudget:
 
         with (
             patch(
-                "code_indexer.global_repos.regex_search.SubprocessExecutor",
+                "code_indexer.server.services.subprocess_executor.SubprocessExecutor",
                 return_value=mock_executor,
             ),
             patch.object(
@@ -138,7 +139,7 @@ class TestAggregateResultContentBudget:
         mock_executor = _mock_executor_copying_from(str(source_path))
 
         with patch(
-            "code_indexer.global_repos.regex_search.SubprocessExecutor",
+            "code_indexer.server.services.subprocess_executor.SubprocessExecutor",
             return_value=mock_executor,
         ):
             result = await service.search(pattern="x+", max_results=100)
@@ -160,9 +161,7 @@ def _write_many_grep_match_lines(
 
 def _build_grep_service(tmp_path) -> RegexSearchService:
     with patch("code_indexer.global_repos.regex_search.shutil.which") as mock_which:
-        mock_which.side_effect = lambda cmd: (
-            "/usr/bin/grep" if cmd == "grep" else None
-        )
+        mock_which.side_effect = lambda cmd: "/usr/bin/grep" if cmd == "grep" else None
         return RegexSearchService(tmp_path)
 
 
@@ -181,7 +180,7 @@ class TestAggregateResultContentBudgetGrepEngine:
 
         with (
             patch(
-                "code_indexer.global_repos.regex_search.SubprocessExecutor",
+                executor_target("grep"),
                 return_value=mock_executor,
             ),
             patch.object(

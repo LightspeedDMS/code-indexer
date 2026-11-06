@@ -72,10 +72,10 @@ from pathlib import Path
 
 import pytest
 
-from code_indexer.scip.database.migration import get_scip_db_version
-from code_indexer.scip.database.schema import DatabaseManager
-from code_indexer.scip.query.backends import DatabaseBackend
-from code_indexer.scip.query.primitives import QueryResult, SCIPQueryEngine
+from cidx_scip.database.migration import get_scip_db_version
+from cidx_scip.database.schema import DatabaseManager
+from cidx_scip.query.backends import DatabaseBackend
+from cidx_scip.query.primitives import QueryResult, SCIPQueryEngine
 
 # Story #609 schema version written by DatabaseBackend._ensure_migration_complete
 # once the required indexes exist (see src/code_indexer/scip/database/migration.py).

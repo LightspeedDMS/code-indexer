@@ -22,6 +22,7 @@ from typing import IO, List, Optional
 import httpx
 
 from tests.e2e._stub_systemd_unit import write_stub_systemd_unit
+from tests.e2e.helpers import E2E_ENABLED_FEATURES
 from tests.fixtures.secops_sidecar.harness import REPO_ROOT, find_free_port
 
 READY_TIMEOUT_SECONDS = 90.0
@@ -52,6 +53,7 @@ class RestartableServer:
                     "port": self.port,
                     "fault_injection_enabled": True,
                     "fault_injection_nonprod_ack": True,
+                    "enabled_features": E2E_ENABLED_FEATURES,
                 }
             ),
             encoding="utf-8",

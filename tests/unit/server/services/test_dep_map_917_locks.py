@@ -22,7 +22,7 @@ import time
 
 import pytest
 
-from code_indexer.server.services.dep_map_repair_phase37 import (
+from cidx_depmap.server.dep_map_repair_phase37 import (
     Action,
     acquire_domain_lock,
     get_domain_file_lock,

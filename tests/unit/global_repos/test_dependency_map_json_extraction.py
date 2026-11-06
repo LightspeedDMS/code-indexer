@@ -13,7 +13,7 @@ Tests the _extract_json method's ability to handle:
 
 import pytest
 
-from code_indexer.global_repos.dependency_map_analyzer import DependencyMapAnalyzer
+from cidx_depmap.server.dependency_map_analyzer import DependencyMapAnalyzer
 
 
 class TestJsonExtraction:

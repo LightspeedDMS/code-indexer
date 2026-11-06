@@ -11,7 +11,7 @@ suite proves distinctness by VALUE, not merely by enum member count.
 
 from __future__ import annotations
 
-from code_indexer.server.services.xray_graph_governor.status import (
+from cidx_xray.server.graph_governor.status import (
     GraphBuildAbortStatus,
     GraphBuildPhase,
 )

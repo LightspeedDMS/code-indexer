@@ -89,13 +89,17 @@ def _client(rec: Recorder, router: Any) -> Any:
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
+    from cidx_scip.server.route_auth import current_caller
     from code_indexer.server.auth.dependencies import get_current_user
 
     app = FastAPI()
     app.include_router(router)
     app.state.search_event_log_writer = rec.writer
     app.state.access_filtering_service = SimpleNamespace(is_admin_user=lambda u: True)
+    # Core routes take the caller from get_current_user; the scip feature's
+    # from the request state the core sets (route_auth.current_caller).
     app.dependency_overrides[get_current_user] = lambda: make_user("gina")
+    app.dependency_overrides[current_caller] = lambda: make_user("gina")
     return TestClient(app)
 
 
@@ -244,8 +248,8 @@ def _scip_repos(tmp_path: Path) -> None:
 
 
 def _multi_scip(rec: Recorder, tmp_path: Path, failing_step: str = "") -> Any:
-    from code_indexer.server.multi.scip_multi_service import SCIPMultiService
-    from code_indexer.server.routes import scip_multi_routes
+    from cidx_scip.server.multi_service import SCIPMultiService
+    from cidx_scip.server import multi_routes as scip_multi_routes
 
     _scip_repos(tmp_path)
     service = SCIPMultiService(max_workers=2)
@@ -292,7 +296,7 @@ class TestMultiScip:
         response = _multi_scip(
             rec,
             tmp_path,
-            "code_indexer.server.multi.scip_multi_service.SCIPMultiMetadata",
+            "cidx_scip.server.multi_service.SCIPMultiMetadata",
         )
         assert response.status_code == 500, response.text
 

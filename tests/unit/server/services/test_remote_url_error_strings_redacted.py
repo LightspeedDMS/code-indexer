@@ -158,3 +158,26 @@ def test_add_golden_repo_inaccessible_error_redacts_userinfo(tmp_path: Path) -> 
         )
     message = str(raised.value)
     _assert_redacted(message)
+
+
+def test_validate_git_repository_warns_with_the_backend_error_redacted(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """EVO-64616: the reason ls-remote failed (e.g. git-mcp refusing a paged
+    answer) is logged at WARNING -- the caller only says "inaccessible"."""
+    manager = GoldenRepoManager(data_dir=str(tmp_path / "data"))
+
+    class PagedBackend:
+        owns_credentials = True
+
+        def ls_remote(self, url: str, **kw: object) -> bool:
+            raise subprocess.CalledProcessError(
+                1, "git-mcp", stderr=f"paginated result for {ORIGIN}"
+            )
+
+    setattr(manager, "_git_backend", PagedBackend())
+    with caplog.at_level(logging.DEBUG):
+        assert manager._validate_git_repository(ORIGIN) is False
+    warned = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("CalledProcessError" in r.getMessage() for r in warned)
+    assert SECRET not in caplog.text, caplog.text

@@ -16,10 +16,9 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from code_indexer.server.utils.html_sanitizer import HtmlAllowlist
-from code_indexer.server.wiki.wiki_cache import WikiCache
+from cidx_wiki.server.wiki_cache import WikiCache
 
-from code_indexer.server.wiki.routes import (
+from cidx_wiki.server.routes import (
     _reset_wiki_cache,
     get_current_user_hybrid,
     get_wiki_user_hybrid,
@@ -157,7 +156,7 @@ class TestArticleRendersInert:
     def test_unsanitised_cached_row_is_sanitised_on_serve(self, repo_dir: Path) -> None:
         """A cache row holding raw HTML (rendered by a server that did not
         sanitise) is still served inert."""
-        from code_indexer.server.wiki import routes as wiki_routes
+        from cidx_wiki.server import routes as wiki_routes
 
         page = repo_dir / "page.md"
         page.write_text(f"# Page\n\n{BODY_START}\n\nplain\n\n{BODY_END}\n")
@@ -309,16 +308,16 @@ class TestTargetLinksCarryNoopener:
 def sanitiser_calls(monkeypatch: pytest.MonkeyPatch) -> List[int]:
     """Records the size of every HTML string the wiki sanitises, delegating
     to the real sanitiser."""
-    from code_indexer.server.wiki import wiki_service
+    from cidx_wiki.server import wiki_service
 
-    real = wiki_service.sanitize_html
+    real = wiki_service.sanitize_article_html
     calls: List[int] = []
 
-    def recording(html: str, allowlist: HtmlAllowlist) -> str:
+    def recording(html: str) -> str:
         calls.append(len(html))
-        return real(html, allowlist)
+        return real(html)
 
-    monkeypatch.setattr(wiki_service, "sanitize_html", recording)
+    monkeypatch.setattr(wiki_service, "sanitize_article_html", recording)
     return calls
 
 
@@ -362,7 +361,7 @@ class TestSanitisedPageCache:
     def test_invalidation_re_renders(
         self, repo_dir: Path, sanitiser_calls: List[int], user_wiki: bool
     ) -> None:
-        from code_indexer.server.wiki import routes as wiki_routes
+        from cidx_wiki.server import routes as wiki_routes
 
         (repo_dir / "page.md").write_text(ACTIVE_CONTENT_ARTICLE)
         client = TestClient(_make_app(repo_dir, admin_viewer=user_wiki))

@@ -42,10 +42,10 @@ def _invoke_local_callchain(tmp_path, monkeypatch, engine, args):
 
     with (
         patch(
-            "code_indexer.scip.query.primitives.SCIPQueryEngine",
+            "cidx_scip.query.primitives.SCIPQueryEngine",
             return_value=engine,
         ),
-        patch("code_indexer.scip.status.StatusTracker") as mock_tracker_cls,
+        patch("cidx_scip.status.StatusTracker") as mock_tracker_cls,
     ):
         mock_tracker = Mock()
         mock_status = Mock()
@@ -53,7 +53,7 @@ def _invoke_local_callchain(tmp_path, monkeypatch, engine, args):
         mock_tracker.load.return_value = mock_status
         mock_tracker_cls.return_value = mock_tracker
 
-        from code_indexer.cli_scip import scip_callchain
+        from cidx_scip.cli import scip_callchain
 
         runner = click.testing.CliRunner()
         return runner.invoke(scip_callchain, args)
@@ -97,7 +97,7 @@ class TestLocalCallchainTimeoutHandling:
         self, tmp_path, monkeypatch
     ):
         """Sanity: the happy path (no timeout) still exits 0 and finds chains."""
-        from code_indexer.scip.query.backends import CallChain
+        from cidx_scip.query.backends import CallChain
 
         engine = _make_mock_engine()
         engine.trace_call_chain.return_value = [
@@ -143,7 +143,7 @@ class TestRemoteCallchainTimeoutHandling:
     def test_exits_nonzero_when_errors_present(self, results):
         """A per-repo error (e.g. a timeout) must exit 1 regardless of
         whether other repos returned partial chains."""
-        from code_indexer.cli_scip import _display_callchain_results
+        from cidx_scip.cli import _display_callchain_results
 
         result = {
             "results": results,
@@ -155,7 +155,7 @@ class TestRemoteCallchainTimeoutHandling:
         assert exc_info.value.code == 1
 
     def test_exits_zero_on_success_no_errors(self):
-        from code_indexer.cli_scip import _display_callchain_results
+        from cidx_scip.cli import _display_callchain_results
 
         result = {
             "results": {"good-repo": [{"path": [{"symbol": "main"}]}]},
@@ -167,7 +167,7 @@ class TestRemoteCallchainTimeoutHandling:
         assert exc_info.value.code == 0
 
     def test_exits_zero_when_no_chains_and_no_errors(self):
-        from code_indexer.cli_scip import _display_callchain_results
+        from cidx_scip.cli import _display_callchain_results
 
         result: dict = {"results": {}, "errors": {}}
 
@@ -280,7 +280,7 @@ class TestCallchainMaxDepthValidation:
 
     def test_local_max_depth_within_cap_still_succeeds(self, tmp_path, monkeypatch):
         """Sanity: a valid --max-depth (e.g. 2) is unaffected."""
-        from code_indexer.scip.query.backends import CallChain
+        from cidx_scip.query.backends import CallChain
 
         engine = _make_mock_engine()
         engine.trace_call_chain.return_value = [
@@ -300,7 +300,7 @@ class TestCallchainDocstringConsistency:
     contradict the --max-depth option's own advertised [1, 3] cap."""
 
     def test_all_documented_max_depth_examples_within_advertised_cap(self):
-        from code_indexer.cli_scip import scip_callchain
+        from cidx_scip.cli import scip_callchain
 
         max_depth_option = [p for p in scip_callchain.params if p.name == "max_depth"][
             0

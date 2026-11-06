@@ -28,6 +28,7 @@ import ast
 from pathlib import Path
 from typing import Iterable, List, Set
 
+import cidx_xray
 import code_indexer
 from test_account_audit_wiring import (
     _AUDITED_ENTRY_POINTS as _ACCOUNT_ENTRY_POINTS,
@@ -41,6 +42,9 @@ from test_repo_config_audit_wiring import (
 )
 
 _PACKAGE = Path(code_indexer.__file__).parent
+#: The core and the in-tree feature packages (an audited entry point may
+#: live in a feature, e.g. X-Ray's pattern store).
+_PACKAGES = (_PACKAGE, Path(cidx_xray.__file__).parent)
 _SERVER = _PACKAGE / "server"
 _MFA_PRIMITIVES = frozenset({"activate_mfa", "generate_recovery_codes"})
 _MFA_ENTRY_POINTS = frozenset(
@@ -129,20 +133,22 @@ def test_the_mfa_scan_covers_the_mfa_doors() -> None:
 
 def test_no_audited_entry_point_has_an_admin_or_actor_default() -> None:
     offenders: List[str] = []
-    for path in sorted(_PACKAGE.rglob("*.py")):
-        offenders.extend(
-            _default_violations(
-                path.read_text(), _AUDITED, path.relative_to(_PACKAGE).as_posix()
+    for package in _PACKAGES:
+        for path in sorted(package.rglob("*.py")):
+            offenders.extend(
+                _default_violations(
+                    path.read_text(), _AUDITED, path.relative_to(package).as_posix()
+                )
             )
-        )
     assert offenders == []
 
 
 def test_every_listed_entry_point_is_defined_somewhere() -> None:
     """The name list is not stale: each audited entry point still exists."""
     defined: Set[str] = set()
-    for path in _PACKAGE.rglob("*.py"):
-        defined |= _all_function_names(path.read_text())
+    for package in _PACKAGES:
+        for path in package.rglob("*.py"):
+            defined |= _all_function_names(path.read_text())
     assert sorted(_AUDITED - defined) == []
 
 

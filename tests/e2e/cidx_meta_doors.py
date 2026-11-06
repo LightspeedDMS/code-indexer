@@ -73,7 +73,7 @@ CORRELATION_HEADER = "X-Correlation-ID"
 # claimed when a wiki door's own request logged it (a copy logged off the
 # request thread names no resource and is left to the log audit).
 WIKI_FRONT_MATTER_LOG = exact(
-    "code_indexer.server.wiki.wiki_service",
+    "cidx_wiki.server.wiki_service",
     "Failed to parse front matter, treating as plain content",
 )
 

@@ -179,7 +179,7 @@ def _make_dashboard_service(commit_hashes_value):
     Create a DependencyMapDashboardService with a mock tracking backend
     returning the given commit_hashes_value.
     """
-    from code_indexer.server.services.dependency_map_dashboard_service import (
+    from cidx_depmap.server.dependency_map_dashboard_service import (
         DependencyMapDashboardService,
     )
     from unittest.mock import Mock

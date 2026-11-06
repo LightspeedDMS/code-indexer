@@ -20,14 +20,17 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from code_indexer.server.wiki.wiki_cache import WikiCache
-from code_indexer.server.wiki.wiki_service import WikiService
-from code_indexer.server.wiki.routes import (
+from cidx_wiki.server.wiki_cache import WikiCache
+from cidx_wiki.server.wiki_service import WikiService
+from cidx_wiki.server.routes import (
     wiki_router,
     get_wiki_user_hybrid,
     get_current_user_hybrid,
 )
-from tests.unit.server.wiki.wiki_test_helpers import make_aliases_dir
+from tests.unit.server.wiki.wiki_test_helpers import (
+    app_golden_repos_dir,
+    make_aliases_dir,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -63,7 +66,7 @@ def _make_user(username):
 
 def _make_app(actual_repo_path, db_path, authenticated_user=None):
     """Build a FastAPI test app with wiki router and minimal app state."""
-    from code_indexer.server.wiki.routes import _reset_wiki_cache
+    from cidx_wiki.server.routes import _reset_wiki_cache
 
     _reset_wiki_cache()
 
@@ -78,8 +81,7 @@ def _make_app(actual_repo_path, db_path, authenticated_user=None):
     app.state.golden_repo_manager.get_wiki_enabled.return_value = True
     app.state.golden_repo_manager.db_path = db_path
 
-    golden_repos_dir = Path(actual_repo_path).parent / "golden-repos-test-meta"
-    golden_repos_dir.mkdir(parents=True, exist_ok=True)
+    golden_repos_dir = app_golden_repos_dir(app)
     make_aliases_dir(str(golden_repos_dir), "test-repo", actual_repo_path)
     app.state.golden_repo_manager.golden_repos_dir = str(golden_repos_dir)
 

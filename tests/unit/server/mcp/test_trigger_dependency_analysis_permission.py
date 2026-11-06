@@ -12,12 +12,13 @@ def test_trigger_dependency_analysis_has_manage_golden_repos_permission():
     # Arrange
     tool_doc_path = (
         Path(__file__).parent.parent.parent.parent.parent
+        / "packages"
+        / "features"
+        / "cidx-depmap"
         / "src"
-        / "code_indexer"
+        / "cidx_depmap"
         / "server"
-        / "mcp"
         / "tool_docs"
-        / "repos"
         / "trigger_dependency_analysis.md"
     )
 
@@ -50,12 +51,13 @@ def test_trigger_dependency_analysis_doc_mentions_correct_permission():
     # Arrange
     tool_doc_path = (
         Path(__file__).parent.parent.parent.parent.parent
+        / "packages"
+        / "features"
+        / "cidx-depmap"
         / "src"
-        / "code_indexer"
+        / "cidx_depmap"
         / "server"
-        / "mcp"
         / "tool_docs"
-        / "repos"
         / "trigger_dependency_analysis.md"
     )
 

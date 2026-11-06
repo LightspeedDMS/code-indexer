@@ -27,12 +27,12 @@ class TestAC3SignatureDefaults:
     """_compute_hub_domains exposes inspectable defaults: top_n=5, by='total_degree'."""
 
     def test_compute_hub_domains_importable(self) -> None:
-        from code_indexer.server.mcp.handlers.depmap import _compute_hub_domains
+        from cidx_depmap.server.mcp.handlers import _compute_hub_domains
 
         assert callable(_compute_hub_domains)
 
     def test_top_n_default_is_5(self) -> None:
-        from code_indexer.server.mcp.handlers.depmap import _compute_hub_domains
+        from cidx_depmap.server.mcp.handlers import _compute_hub_domains
 
         sig = inspect.signature(_compute_hub_domains)
         param = sig.parameters.get("top_n")
@@ -40,7 +40,7 @@ class TestAC3SignatureDefaults:
         assert param.default == 5, f"top_n default expected 5, got {param.default!r}"
 
     def test_by_default_is_total_degree(self) -> None:
-        from code_indexer.server.mcp.handlers.depmap import _compute_hub_domains
+        from cidx_depmap.server.mcp.handlers import _compute_hub_domains
 
         sig = inspect.signature(_compute_hub_domains)
         param = sig.parameters.get("by")

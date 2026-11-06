@@ -113,7 +113,7 @@ def make_lock_observer(
 
     This is deterministic: it observes lock state at call time, no timing dependence.
     """
-    from code_indexer.server.services.dep_map_repair_phase37 import get_domain_file_lock
+    from cidx_depmap.server.dep_map_repair_phase37 import get_domain_file_lock
 
     lock = get_domain_file_lock(domain_name)
     lock_was_held: List[bool] = []

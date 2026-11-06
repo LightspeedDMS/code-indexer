@@ -26,7 +26,7 @@ Test inventory (8 tests):
 from pathlib import Path
 from typing import Any, Dict, List
 
-from code_indexer.global_repos.dependency_map_analyzer import (
+from cidx_depmap.server.dependency_map_analyzer import (
     DependencyMapAnalyzer,
 )
 

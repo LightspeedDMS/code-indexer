@@ -519,7 +519,7 @@ class TestBackfillJournalRouteHeaders:
         from code_indexer.server.services.backfill_journal_service import (
             BackfillJournalService,
         )
-        from code_indexer.server.web.dependency_map_routes import (
+        from cidx_depmap.server.web.routes import (
             _backfill_journal_headers_from_service,
         )
 
@@ -540,7 +540,7 @@ class TestBackfillJournalRouteHeaders:
             BackfillJournalService,
             BACKFILL_GRACE_SECONDS,
         )
-        from code_indexer.server.web.dependency_map_routes import (
+        from cidx_depmap.server.web.routes import (
             _backfill_journal_headers_from_service,
         )
 
@@ -567,7 +567,7 @@ class TestBackfillJournalRouteHeaders:
         from code_indexer.server.services.backfill_journal_service import (
             BackfillJournalService,
         )
-        from code_indexer.server.web.dependency_map_routes import (
+        from cidx_depmap.server.web.routes import (
             _backfill_journal_headers_from_service,
         )
 
@@ -585,7 +585,7 @@ class TestBackfillJournalRouteHeaders:
         from code_indexer.server.services.backfill_journal_service import (
             BackfillJournalService,
         )
-        from code_indexer.server.web.dependency_map_routes import (
+        from cidx_depmap.server.web.routes import (
             _backfill_journal_headers_from_service,
         )
 
@@ -602,7 +602,7 @@ class TestBackfillJournalRouteHeaders:
         from code_indexer.server.services.backfill_journal_service import (
             BackfillJournalService,
         )
-        from code_indexer.server.web.dependency_map_routes import (
+        from cidx_depmap.server.web.routes import (
             _backfill_journal_headers_from_service,
         )
 
@@ -622,7 +622,7 @@ class TestBackfillJournalRouteHeaders:
         from code_indexer.server.services.backfill_journal_service import (
             BackfillJournalService,
         )
-        from code_indexer.server.web.dependency_map_routes import (
+        from cidx_depmap.server.web.routes import (
             _backfill_journal_headers_from_service,
         )
 

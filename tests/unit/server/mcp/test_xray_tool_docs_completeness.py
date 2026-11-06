@@ -11,20 +11,14 @@ from pathlib import Path
 
 import yaml
 import pytest
+from cidx_xray.feature import TOOL_DOCS_DIR as TOOL_DOCS_IN_WHEEL
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-TOOL_DOCS_DIR = (
-    Path(__file__).parent.parent.parent.parent.parent
-    / "src"
-    / "code_indexer"
-    / "server"
-    / "mcp"
-    / "tool_docs"
-    / "search"
-)
+# Phase 4c: X-Ray's tool docs ship inside the cidx-xray feature's wheel.
+TOOL_DOCS_DIR = TOOL_DOCS_IN_WHEEL
 
 XRAY_MD = TOOL_DOCS_DIR / "xray_search.md"
 XRAY_EXPLORE_MD = TOOL_DOCS_DIR / "xray_explore.md"
@@ -448,17 +442,17 @@ def test_xray_explore_md_evaluation_errors_clarifies_no_job_failure(
 
 
 def test_tool_registry_has_both_xray_tools():
-    import sys
-    import io
+    """Phase 4c: the core installs the feature's tools into TOOL_REGISTRY
+    (server/features/tools.py) when "xray" is enabled; both are among them."""
+    from cidx_xray.feature import make_feature
 
-    sys.stderr = io.StringIO()
-    try:
-        from code_indexer.server.mcp.tools import TOOL_REGISTRY
-    finally:
-        sys.stderr = sys.__stderr__
+    from code_indexer.server.features.tools import _prepare
 
-    assert "xray_search" in TOOL_REGISTRY, "TOOL_REGISTRY must contain xray_search"
-    assert "xray_explore" in TOOL_REGISTRY, "TOOL_REGISTRY must contain xray_explore"
+    registry = {
+        tool.name: _prepare("xray", tool, set())[1] for tool in make_feature().tools()
+    }
+    assert "xray_search" in registry, "TOOL_REGISTRY must contain xray_search"
+    assert "xray_explore" in registry, "TOOL_REGISTRY must contain xray_explore"
 
 
 # ---------------------------------------------------------------------------
@@ -586,7 +580,7 @@ def test_xray_md_await_seconds_prose_matches_real_handler_max(
     "up to 120 seconds" self-contradicts the same document and would
     mislead a caller into requesting a window the server rejects.
     """
-    from code_indexer.server.mcp.handlers.xray import _AWAIT_SECONDS_MAX
+    from cidx_xray.server.mcp.xray import _AWAIT_SECONDS_MAX
 
     _frontmatter, body = xray_frontmatter_and_body
     stale_claim = "up to 120 seconds"

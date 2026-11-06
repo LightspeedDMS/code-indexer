@@ -43,11 +43,21 @@ def mock_git_service():
 
 
 @pytest.fixture
-def mock_repo_manager():
+def repo_path(tmp_path: Path) -> Path:
+    """A real activated working copy: the handlers refuse a path without
+    ``.git`` (``_resolve_git_repo_path``). A fixed /tmp path made these tests
+    pass only on a machine that happened to have /tmp/test-repo/.git."""
+    path = tmp_path / "test-repo"
+    (path / ".git").mkdir(parents=True)
+    return path
+
+
+@pytest.fixture
+def mock_repo_manager(repo_path: Path):
     """Create mock ActivatedRepoManager."""
     with patch("code_indexer.server.mcp.handlers.ActivatedRepoManager") as MockClass:
         mock_instance = MockClass.return_value
-        mock_instance.get_activated_repo_path.return_value = Path("/tmp/test-repo")
+        mock_instance.get_activated_repo_path.return_value = repo_path
         yield mock_instance
 
 
@@ -80,7 +90,9 @@ class TestGitBranchListHandler:
         assert data["success"] is True
         assert len(data["branches"]) == 3
         assert data["branches"][0]["current"] is True
-        mock_git_service.git_branch_list.assert_called_once_with(Path("/tmp/test-repo"))
+        mock_git_service.git_branch_list.assert_called_once_with(
+            mock_repo_manager.get_activated_repo_path.return_value
+        )
 
     def test_git_branch_list_missing_repository(self, mock_user):
         """Test git branch list with missing repository_alias parameter."""
@@ -118,7 +130,7 @@ class TestGitBranchCreateHandler:
         assert data["success"] is True
         assert data["branch_name"] == "feature-new"
         mock_git_service.git_branch_create.assert_called_once_with(
-            Path("/tmp/test-repo"), "feature-new"
+            mock_repo_manager.get_activated_repo_path.return_value, "feature-new"
         )
 
     def test_git_branch_create_already_exists(
@@ -185,7 +197,7 @@ class TestGitBranchSwitchHandler:
         assert data["success"] is True
         assert data["branch_name"] == "feature-x"
         mock_git_service.git_branch_switch.assert_called_once_with(
-            Path("/tmp/test-repo"), "feature-x"
+            mock_repo_manager.get_activated_repo_path.return_value, "feature-x"
         )
 
     def test_git_branch_switch_nonexistent(
@@ -285,7 +297,7 @@ class TestGitBranchDeleteHandler:
         assert data["success"] is True
         assert data["deleted_branch"] == "old-feature"
         mock_git_service.git_branch_delete.assert_called_once_with(
-            Path("/tmp/test-repo"),
+            mock_repo_manager.get_activated_repo_path.return_value,
             "old-feature",
             confirmation_token="DEL123",
             username="testadmin",

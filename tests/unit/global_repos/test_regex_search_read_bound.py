@@ -25,6 +25,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from .conftest import FakeRipgrepBackend
+
 from code_indexer.global_repos.regex_search import (
     RegexSearchService,
     _BoundedLineReader,
@@ -112,11 +114,14 @@ async def _run_capped_search(service, tmp_path, num_lines: int, label: str):
         "fixture must genuinely exceed the ceiling for this test to be discriminating"
     )
     with patch.object(regex_search_module, "_MAX_READ_BYTES", _TEST_BYTE_CEILING):
-        mock_executor = _mock_success_executor_copying_from(str(source_path))
-        with patch(
-            "code_indexer.global_repos.regex_search.SubprocessExecutor",
-            return_value=mock_executor,
-        ):
+        # Seam: the backend writes the oversized synthetic output into the
+        # service's own temp file. The cap under test is the READER's
+        # (_MAX_READ_BYTES), so nothing about the executor needs mocking.
+        def _copy_source(_backend, output_file_path):
+            shutil.copyfile(str(source_path), output_file_path)
+
+        service._ripgrep_backend = FakeRipgrepBackend(on_run=_copy_source)
+        if True:
             matches, total = await service._search_ripgrep(
                 pattern="func",
                 search_path=tmp_path,
@@ -319,7 +324,7 @@ class TestRegexSearchResultContract:
             mock_executor = _mock_success_executor_copying_from(str(source_path))
             with patch.object(regex_search_module, "_MAX_READ_BYTES", byte_ceiling):
                 with patch(
-                    "code_indexer.global_repos.regex_search.SubprocessExecutor",
+                    "code_indexer.server.services.subprocess_executor.SubprocessExecutor",
                     return_value=mock_executor,
                 ):
                     return await service.search(pattern="func", max_results=max_results)

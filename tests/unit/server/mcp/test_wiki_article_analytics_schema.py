@@ -14,14 +14,16 @@ from pathlib import Path
 
 # Derive tool doc path relative to this test file (portable across environments)
 _TESTS_ROOT = Path(__file__).resolve().parent.parent.parent.parent.parent
+# The tool doc ships in the cidx-wiki feature's wheel (modular phase 4e).
 TOOL_DOC_PATH = (
     _TESTS_ROOT
+    / "packages"
+    / "features"
+    / "cidx-wiki"
     / "src"
-    / "code_indexer"
+    / "cidx_wiki"
     / "server"
-    / "mcp"
     / "tool_docs"
-    / "search"
     / "wiki_article_analytics.md"
 )
 
@@ -160,27 +162,33 @@ class TestToolDocFile:
 
 
 class TestHandlerRegistry:
-    """AC6: HANDLER_REGISTRY must contain wiki_article_analytics entry."""
+    """AC6: HANDLER_REGISTRY has wiki_article_analytics while the wiki feature
+    is installed (modular phase 4e: the feature contributes it)."""
 
     def test_handler_registry_contains_wiki_article_analytics(self):
         """AC6: HANDLER_REGISTRY must have wiki_article_analytics key."""
         from code_indexer.server.mcp.handlers import HANDLER_REGISTRY
+        from tests.unit.server._wiki_feature import wiki_tools_installed
 
-        assert "wiki_article_analytics" in HANDLER_REGISTRY, (
-            "HANDLER_REGISTRY must contain 'wiki_article_analytics' entry"
-        )
+        with wiki_tools_installed():
+            assert "wiki_article_analytics" in HANDLER_REGISTRY, (
+                "HANDLER_REGISTRY must contain 'wiki_article_analytics' entry"
+            )
+        assert "wiki_article_analytics" not in HANDLER_REGISTRY
 
     def test_handler_registry_entry_is_callable(self):
         """AC6: The registered handler must be callable."""
         from code_indexer.server.mcp.handlers import HANDLER_REGISTRY
+        from tests.unit.server._wiki_feature import wiki_tools_installed
 
-        handler = HANDLER_REGISTRY.get("wiki_article_analytics")
-        assert callable(handler), "wiki_article_analytics handler must be callable"
+        with wiki_tools_installed():
+            handler = HANDLER_REGISTRY.get("wiki_article_analytics")
+            assert callable(handler), "wiki_article_analytics handler must be callable"
 
     def test_handler_function_exists_in_module(self):
-        """AC6: handle_wiki_article_analytics function must exist in handlers module."""
-        from code_indexer.server.mcp import handlers
+        """AC6: handle_wiki_article_analytics lives in the feature's MCP module."""
+        from cidx_wiki.server.mcp import analytics
 
-        assert hasattr(handlers, "handle_wiki_article_analytics"), (
-            "handlers module must have handle_wiki_article_analytics function"
+        assert hasattr(analytics, "handle_wiki_article_analytics"), (
+            "cidx_wiki.server.mcp.analytics must have handle_wiki_article_analytics"
         )

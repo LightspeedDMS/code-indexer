@@ -21,6 +21,7 @@ import inspect
 from pathlib import Path
 
 import pytest
+from tests.unit.server._depmap_feature import install_depmap_service
 
 
 class TestEnsureDepMapOutputDirHelper:
@@ -29,7 +30,7 @@ class TestEnsureDepMapOutputDirHelper:
     def test_creates_directory_when_missing(self, tmp_path):
         """Calling the helper on a never-before-visited golden-repos dir creates
         cidx-meta/dependency-map/ on disk (real filesystem, no mocking)."""
-        from code_indexer.server.startup.lifespan import _ensure_dep_map_output_dir
+        from cidx_depmap.server.lifecycle import _ensure_dep_map_output_dir
 
         golden_repos_dir = tmp_path / "golden-repos"
         expected = golden_repos_dir / "cidx-meta" / "dependency-map"
@@ -46,7 +47,7 @@ class TestEnsureDepMapOutputDirHelper:
     def test_idempotent_when_directory_already_exists(self, tmp_path):
         """Calling the helper twice (e.g. across restarts) must not raise and
         must not disturb existing contents (parents=True, exist_ok=True)."""
-        from code_indexer.server.startup.lifespan import _ensure_dep_map_output_dir
+        from cidx_depmap.server.lifecycle import _ensure_dep_map_output_dir
 
         golden_repos_dir = tmp_path / "golden-repos"
         dep_map_dir = golden_repos_dir / "cidx-meta" / "dependency-map"
@@ -64,7 +65,7 @@ class TestEnsureDepMapOutputDirHelper:
         """golden_repos_dir in lifespan.py is a Path, but the helper should also
         tolerate a plain str (defensive: matches the loose typing used
         throughout the surrounding startup code)."""
-        from code_indexer.server.startup.lifespan import _ensure_dep_map_output_dir
+        from cidx_depmap.server.lifecycle import _ensure_dep_map_output_dir
 
         golden_repos_dir_str = str(tmp_path / "golden-repos")
         expected = Path(golden_repos_dir_str) / "cidx-meta" / "dependency-map"
@@ -81,7 +82,7 @@ class TestLifespanWiresEagerCreationBeforeStaleSentinelCheck:
     never-before-visited node."""
 
     def test_ensure_helper_called_in_make_lifespan(self):
-        from code_indexer.server.startup.lifespan import make_lifespan
+        from cidx_depmap.server.lifecycle import _start_service as make_lifespan
 
         source = inspect.getsource(make_lifespan)
         assert "_ensure_dep_map_output_dir(" in source, (
@@ -90,11 +91,11 @@ class TestLifespanWiresEagerCreationBeforeStaleSentinelCheck:
         )
 
     def test_ensure_helper_called_before_stale_sentinel_exists_check(self):
-        from code_indexer.server.startup.lifespan import make_lifespan
+        from cidx_depmap.server.lifecycle import _start_service as make_lifespan
 
         source = inspect.getsource(make_lifespan)
         ensure_pos = source.find("_ensure_dep_map_output_dir(")
-        stale_check_pos = source.find("if _dep_map_dir.exists():")
+        stale_check_pos = source.find("_dep_map_dir.exists():")
 
         assert ensure_pos != -1, "_ensure_dep_map_output_dir(...) call not found"
         assert stale_check_pos != -1, "stale-sentinel .exists() check not found"
@@ -120,7 +121,6 @@ def _patch_dep_map_output_dir_collaborators(monkeypatch, golden_repos_dir: Path)
     run unmodified, and directory existence is checked against the real
     filesystem via tmp_path.
     """
-    from code_indexer.server.web import dependency_map_routes
     import code_indexer.server.services.config_service as config_service_module
 
     class _FakeDepMapService:
@@ -138,11 +138,7 @@ def _patch_dep_map_output_dir_collaborators(monkeypatch, golden_repos_dir: Path)
     class _FakeConfigService:
         config_manager = _FakeConfigManager()
 
-    monkeypatch.setattr(
-        dependency_map_routes,
-        "_get_dep_map_service_from_state",
-        lambda: _FakeDepMapService(),
-    )
+    install_depmap_service(monkeypatch, _FakeDepMapService())
     monkeypatch.setattr(
         config_service_module,
         "get_config_service",
@@ -161,7 +157,7 @@ class TestBug1621ReproductionThroughRealRoutePath:
         """Reproduces the bug precondition: on a never-before-visited node
         (directory not yet on disk), the dashboard cache backend -- and thus
         job submission -- is unavailable."""
-        from code_indexer.server.web import dependency_map_routes
+        from cidx_depmap.server.web import routes as dependency_map_routes
 
         golden_repos_dir = tmp_path / "golden-repos"
         _patch_dep_map_output_dir_collaborators(monkeypatch, golden_repos_dir)
@@ -177,8 +173,8 @@ class TestBug1621ReproductionThroughRealRoutePath:
         here by calling the real _ensure_dep_map_output_dir helper, exactly as
         make_lifespan now does), the very first request sees a usable
         directory -- no more "infrastructure unavailable" on first load."""
-        from code_indexer.server.web import dependency_map_routes
-        from code_indexer.server.startup.lifespan import _ensure_dep_map_output_dir
+        from cidx_depmap.server.web import routes as dependency_map_routes
+        from cidx_depmap.server.lifecycle import _ensure_dep_map_output_dir
 
         golden_repos_dir = tmp_path / "golden-repos"
         _patch_dep_map_output_dir_collaborators(monkeypatch, golden_repos_dir)

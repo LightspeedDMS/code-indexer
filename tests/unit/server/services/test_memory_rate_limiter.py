@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from code_indexer.server.services.memory_rate_limiter import (
+from cidx_memory.server.memory_rate_limiter import (
     MemoryRateLimiter,
     RateLimitConfig,
 )

@@ -4,14 +4,14 @@ import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from code_indexer.scip.query.composites import (
+from cidx_scip.query.composites import (
     analyze_impact,
     get_smart_context,
     ImpactAnalysisResult,
     SmartContextResult,
     MAX_TRAVERSAL_DEPTH,
 )
-from code_indexer.scip.query.primitives import SCIPQueryEngine, QueryResult
+from cidx_scip.query.primitives import SCIPQueryEngine, QueryResult
 
 
 @pytest.fixture
@@ -83,7 +83,7 @@ class TestAnalyzeImpactFunctionality:
 
         Fix: Include depth in returned QueryResult objects.
         """
-        from code_indexer.scip.query.primitives import SCIPQueryEngine
+        from cidx_scip.query.primitives import SCIPQueryEngine
 
         # Use real engine with test fixture
         engine = SCIPQueryEngine(scip_fixture_path)
@@ -117,8 +117,8 @@ class TestAnalyzeImpactFunctionality:
 
         Fix: Call get_dependents once with full depth, process all returned results.
         """
-        from code_indexer.scip.query.composites import _bfs_traverse_dependents
-        from code_indexer.scip.query.primitives import SCIPQueryEngine
+        from cidx_scip.query.composites import _bfs_traverse_dependents
+        from cidx_scip.query.primitives import SCIPQueryEngine
         from unittest.mock import patch
 
         scip_dir = scip_fixture_path.parent
@@ -167,7 +167,7 @@ class TestAnalyzeImpactFunctionality:
 
         Fix: Pass depth parameter to get_dependents() to use database's CTE-based traversal.
         """
-        from code_indexer.scip.query.composites import _bfs_traverse_dependents
+        from cidx_scip.query.composites import _bfs_traverse_dependents
         from unittest.mock import MagicMock, patch
 
         # Create a real temporary .scip.db file with non-zero content so
@@ -179,9 +179,7 @@ class TestAnalyzeImpactFunctionality:
         mock_engine = MagicMock()
         mock_engine.get_dependents.return_value = []  # Empty results for simplicity
 
-        with patch(
-            "code_indexer.scip.query.composites.SCIPQueryEngine"
-        ) as mock_engine_class:
+        with patch("cidx_scip.query.composites.SCIPQueryEngine") as mock_engine_class:
             mock_engine_class.return_value = mock_engine
 
             # Mock glob to return the real temp file path
@@ -257,7 +255,7 @@ class TestAnalyzeImpactFunctionality:
         This test compares analyze_impact() against direct get_dependents() call
         to ensure filtering logic doesn't remove valid results.
         """
-        from code_indexer.scip.query.primitives import SCIPQueryEngine
+        from cidx_scip.query.primitives import SCIPQueryEngine
 
         symbol = "StatusTracker"
         depth = 1
@@ -298,7 +296,7 @@ class TestExcludeIncludeFilters:
 
         This test verifies PathLib's match() method correctly handles glob patterns.
         """
-        from code_indexer.scip.query.composites import _bfs_traverse_dependents
+        from cidx_scip.query.composites import _bfs_traverse_dependents
         from unittest.mock import MagicMock, patch
 
         # Create a real temporary .scip.db file with non-zero content so
@@ -339,9 +337,7 @@ class TestExcludeIncludeFilters:
         ]
 
         # Mock the SCIPQueryEngine
-        with patch(
-            "code_indexer.scip.query.composites.SCIPQueryEngine"
-        ) as mock_engine_class:
+        with patch("cidx_scip.query.composites.SCIPQueryEngine") as mock_engine_class:
             mock_engine = MagicMock()
             mock_engine.get_dependents.return_value = mock_dependents
             mock_engine_class.return_value = mock_engine
@@ -383,7 +379,7 @@ class TestMatchesGlobPatternHelper:
 
     def test_empty_pattern_returns_false(self):
         """Should return False gracefully when pattern is empty string."""
-        from code_indexer.scip.query.composites import _matches_glob_pattern
+        from cidx_scip.query.composites import _matches_glob_pattern
 
         # Empty pattern should not match anything
         assert _matches_glob_pattern("tests/unit/test_foo.py", "") is False
@@ -392,7 +388,7 @@ class TestMatchesGlobPatternHelper:
 
     def test_catch_all_pattern_matches_multi_level_paths(self):
         """Should match paths with at least one directory level for catch-all pattern '*/*'."""
-        from code_indexer.scip.query.composites import _matches_glob_pattern
+        from cidx_scip.query.composites import _matches_glob_pattern
 
         # Catch-all pattern should match paths with directory structure
         assert _matches_glob_pattern("tests/test_foo.py", "*/*") is True
@@ -404,7 +400,7 @@ class TestMatchesGlobPatternHelper:
 
     def test_single_file_path_no_directory(self):
         """Should correctly handle single file paths without directory."""
-        from code_indexer.scip.query.composites import _matches_glob_pattern
+        from cidx_scip.query.composites import _matches_glob_pattern
 
         # Single file should NOT match directory-based patterns
         assert _matches_glob_pattern("file.py", "*/tests/*") is False
@@ -416,7 +412,7 @@ class TestMatchesGlobPatternHelper:
 
     def test_invalid_path_input_returns_false(self):
         """Should handle invalid path inputs gracefully."""
-        from code_indexer.scip.query.composites import _matches_glob_pattern
+        from cidx_scip.query.composites import _matches_glob_pattern
 
         # Invalid path types should return False (defensive programming)
         # Note: PurePath is quite permissive, so extreme cases needed
@@ -424,7 +420,7 @@ class TestMatchesGlobPatternHelper:
 
     def test_invalid_pattern_input_returns_false(self):
         """Should handle invalid pattern inputs gracefully."""
-        from code_indexer.scip.query.composites import _matches_glob_pattern
+        from cidx_scip.query.composites import _matches_glob_pattern
 
         # Invalid glob patterns should return False
         # PurePath.match() can raise ValueError for invalid patterns
@@ -440,7 +436,7 @@ class TestTraceCallChain:
     def test_trace_call_chains_skips_empty_database_file(self, tmp_path, caplog):
         """Should skip empty database files without warnings."""
         import logging
-        from code_indexer.scip.query.composites import trace_call_chain
+        from cidx_scip.query.composites import trace_call_chain
 
         # Create directory with empty .scip.db file
         scip_dir = tmp_path / "scip"
@@ -475,7 +471,7 @@ class TestTraceCallChain:
     ):
         """Should catch exception and log warning for invalid but non-empty database files."""
         import logging
-        from code_indexer.scip.query.composites import trace_call_chain
+        from cidx_scip.query.composites import trace_call_chain
 
         # Create directory with invalid .scip.db file
         scip_dir = tmp_path / "scip"
@@ -580,11 +576,11 @@ class TestGetSmartContext:
         with (
             patch.object(Path, "glob", side_effect=fresh_glob),
             patch(
-                "code_indexer.scip.query.composites.SCIPQueryEngine",
+                "cidx_scip.query.composites.SCIPQueryEngine",
                 return_value=mock_engine,
             ),
             patch(
-                "code_indexer.scip.query.composites.analyze_impact",
+                "cidx_scip.query.composites.analyze_impact",
                 return_value=mock_impact,
             ),
         ):
@@ -610,7 +606,7 @@ class TestTraceCallChainMaxDepthValidation:
 
         Fix: MAX_CALL_CHAIN_DEPTH should equal 10 to match backend validation.
         """
-        from code_indexer.scip.query.composites import MAX_CALL_CHAIN_DEPTH
+        from cidx_scip.query.composites import MAX_CALL_CHAIN_DEPTH
 
         # Backend (database/queries.py lines 174, 285) validates: 1 <= max_depth <= 10
         BACKEND_MAX_DEPTH = 10
@@ -630,7 +626,7 @@ class TestTraceCallChainMaxDepthValidation:
 
         Fix: Change MAX_CALL_CHAIN_DEPTH from 20 to 10 to align with backend.
         """
-        from code_indexer.scip.query.composites import trace_call_chain
+        from cidx_scip.query.composites import trace_call_chain
 
         # This should NOT raise ValueError - should clamp to 10 internally
         # Currently FAILS because MAX_CALL_CHAIN_DEPTH=20 allows 15 through,
@@ -653,12 +649,10 @@ class TestAnalyzeImpactEarlyOut:
     def test_no_definition_skips_bfs(self, tmp_path):
         with (
             patch(
-                "code_indexer.scip.query.composites._find_target_definition",
+                "cidx_scip.query.composites._find_target_definition",
                 return_value=None,
             ),
-            patch(
-                "code_indexer.scip.query.composites._bfs_traverse_dependents"
-            ) as mock_bfs,
+            patch("cidx_scip.query.composites._bfs_traverse_dependents") as mock_bfs,
         ):
             result = analyze_impact("DoesNotExist", tmp_path, depth=3)
 
@@ -671,11 +665,11 @@ class TestAnalyzeImpactEarlyOut:
         sentinel_loc = MagicMock()
         with (
             patch(
-                "code_indexer.scip.query.composites._find_target_definition",
+                "cidx_scip.query.composites._find_target_definition",
                 return_value=sentinel_loc,
             ),
             patch(
-                "code_indexer.scip.query.composites._bfs_traverse_dependents",
+                "cidx_scip.query.composites._bfs_traverse_dependents",
                 return_value=[],
             ) as mock_bfs,
         ):

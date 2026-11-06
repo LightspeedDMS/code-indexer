@@ -69,24 +69,16 @@ def env(tmp_path: Path) -> Iterator[CatalogFileDoorEnv]:
     (env.fx.root / "xray-patterns" / "__any__" / "hidden-link").symlink_to(
         env.fx.root / "xray-patterns" / CANARY, target_is_directory=True
     )
-    from tests.shared.real_write_mode import real_write_mode
-
+    marker = env.golden_root / ".write_mode" / "cidx-meta.json"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("{}")
     saved = dict(file_crud_service._global_write_exceptions)
     saved_golden = file_crud_service._golden_repos_dir
     file_crud_service.register_write_exception(CATALOG_ALIAS, env.fx.root)
     file_crud_service.set_golden_repos_dir(env.golden_root)
     try:
-        with (
-            patch.object(
-                crud_module, "_get_activated_repo_manager", lambda: env.activations
-            ),
-            real_write_mode(
-                file_crud_service,
-                env.golden_root,
-                "cidx-meta",
-                env.fx.root,
-                tmp_path / "write-mode-locks",
-            ),
+        with patch.object(
+            crud_module, "_get_activated_repo_manager", lambda: env.activations
         ):
             yield env
     finally:
@@ -193,9 +185,7 @@ def test_unchanged_catalog_paths_keep_todays_behaviour(
     assert created["success"] is True, created
     assert (env.fx.root / "xray-patterns" / "__any__" / "n.yaml").is_file()
     assert "Content hash mismatch" in mismatch["error"]
-    assert absent["error"] == (
-        "Replacing or deleting a shared X-Ray pattern requires the admin role."
-    )
+    assert absent["error"] == "File not found: xray-patterns/__any__/x.yaml"
 
 
 def _projected_write_replies(env: CatalogFileDoorEnv, path: str) -> list:

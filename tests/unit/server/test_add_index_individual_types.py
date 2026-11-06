@@ -11,6 +11,8 @@ TDD Approach: Tests written FIRST to define expected behavior, then implementati
 import pytest
 from unittest.mock import MagicMock
 
+from tests.unit.server._scip_feature import scip_pipeline_installed
+
 
 @pytest.fixture
 def manager_with_repo(tmp_path):
@@ -49,11 +51,23 @@ class TestValidIndexTypesBackend:
             f"job-{index_type}"
         )
 
-        job_id = manager_with_repo.add_index_to_golden_repo(
-            alias="test-repo", index_type=index_type, submitter_username="admin"
-        )
+        # scip is the scip feature's index type (modular phase 4d): valid while
+        # its index builder is installed, as with "scip" enabled.
+        with scip_pipeline_installed():
+            job_id = manager_with_repo.add_index_to_golden_repo(
+                alias="test-repo", index_type=index_type, submitter_username="admin"
+            )
 
         assert job_id == f"job-{index_type}"
+
+    def test_scip_is_refused_without_the_scip_feature(self, manager_with_repo):
+        """No enabled feature builds SCIP indexes: an unknown index type."""
+        with pytest.raises(ValueError) as exc_info:
+            manager_with_repo.add_index_to_golden_repo(
+                alias="test-repo", index_type="scip", submitter_username="admin"
+            )
+
+        assert "invalid index_type: scip" in str(exc_info.value).lower()
 
     def test_semantic_fts_combined_type_not_valid(self, manager_with_repo):
         """AC: Backend rejects 'semantic_fts' combined type (removed)."""

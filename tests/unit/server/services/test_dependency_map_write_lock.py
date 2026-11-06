@@ -22,7 +22,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from code_indexer.server.services.dependency_map_service import DependencyMapService
+from cidx_depmap.server.dependency_map_service import DependencyMapService
 
 
 def _make_service(refresh_scheduler=None):
@@ -401,10 +401,10 @@ class TestLifecyclePreflightSkip:
 
         with (
             patch(
-                "code_indexer.server.services.dependency_map_service.LifecycleFleetScanner"
+                "cidx_depmap.server.dependency_map_service.LifecycleFleetScanner"
             ) as mock_scanner_cls,
             patch(
-                "code_indexer.server.services.dependency_map_service.LifecycleBatchRunner"
+                "cidx_depmap.server.dependency_map_service.LifecycleBatchRunner"
             ) as mock_runner_cls,
         ):
             result = getattr(service, method_name)()
@@ -434,10 +434,10 @@ class TestLifecyclePreflightSkip:
         # LifecycleBatchRunner.run() is reached and can raise.
         with (
             patch(
-                "code_indexer.server.services.dependency_map_service.LifecycleFleetScanner"
+                "cidx_depmap.server.dependency_map_service.LifecycleFleetScanner"
             ) as mock_scanner_cls,
             patch(
-                "code_indexer.server.services.dependency_map_service.LifecycleBatchRunner"
+                "cidx_depmap.server.dependency_map_service.LifecycleBatchRunner"
             ) as mock_runner_cls,
         ):
             mock_scanner_cls.return_value.find_broken_or_missing.return_value = [

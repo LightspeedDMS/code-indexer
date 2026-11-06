@@ -30,6 +30,7 @@ from tests.unit.server.services.search_event_recording_harness import (
     make_user,
     recorder,
 )
+from tests.unit.server.app_state_patch import patch_app_state
 
 _KINDS = [
     "sqlite",
@@ -528,8 +529,8 @@ def app_writer(monkeypatch, tmp_path):
     from code_indexer.server import app as app_package
 
     def _install(writer: Any) -> None:
-        monkeypatch.setattr(
-            app_package.app.state, "search_event_log_writer", writer, raising=False
+        patch_app_state(
+            monkeypatch, app_package.app.state, "search_event_log_writer", writer
         )
 
     return _install

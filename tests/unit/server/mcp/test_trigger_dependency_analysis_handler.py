@@ -2,7 +2,8 @@
 Unit tests for trigger_dependency_analysis handler implementation.
 
 Tests Bug 2 and Bug 3 fixes:
-- Bug 2: Handler should access dependency_map_service from app.state
+- Bug 2: Handler should access the running service (the feature's slot
+  ``runtime.SERVICE`` since the service left app.state), not a module global
 - Bug 2: Handler should load config via ServerConfigManager, not app_module.config
 - Bug 3: Handler should not import non-existent get_golden_repo_manager function
 """
@@ -11,8 +12,9 @@ import json
 import pytest
 from unittest.mock import Mock, patch
 from datetime import datetime, timezone
-from code_indexer.server.mcp.handlers import handle_trigger_dependency_analysis
+from cidx_depmap.server.mcp.trigger import handle_trigger_dependency_analysis
 from code_indexer.server.auth.user_manager import User, UserRole
+from tests.unit.server._depmap_feature import depmap_service_installed
 
 
 def unwrap_mcp_response(mcp_response):
@@ -32,8 +34,8 @@ def admin_user():
 
 
 @pytest.fixture
-def mock_app_state():
-    """Mock app.state with dependency_map_service."""
+def mock_dep_map_service():
+    """The running dependency-map service."""
     mock_service = Mock()
     mock_service.is_available.return_value = True
     mock_service.run_full_analysis = Mock()
@@ -42,15 +44,12 @@ def mock_app_state():
     return mock_service
 
 
-def test_handler_accesses_dependency_map_service_from_app_state(
-    admin_user, mock_app_state
+def test_handler_accesses_the_running_dependency_map_service(
+    admin_user, mock_dep_map_service
 ):
-    """Test that handler gets dependency_map_service from app.state, not module level."""
+    """Test that handler gets the running service from the feature's slot."""
     # Arrange
-    with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app_module:
-        # Set up app.state (correct pattern)
-        mock_app_module.app.state.dependency_map_service = mock_app_state
-
+    with depmap_service_installed(mock_dep_map_service):
         # Mock config loading via get_config_service (actual pattern used by handler)
         with patch(
             "code_indexer.server.services.config_service.get_config_service"
@@ -65,17 +64,15 @@ def test_handler_accesses_dependency_map_service_from_app_state(
             )
             result = unwrap_mcp_response(mcp_result)
 
-    # Assert - service was accessed from app.state
+    # Assert - the running service was used
     assert result["success"] is True
     assert "job_id" in result
 
 
-def test_handler_loads_config_via_config_service(admin_user, mock_app_state):
+def test_handler_loads_config_via_config_service(admin_user, mock_dep_map_service):
     """Test that handler loads config via get_config_service, not ServerConfigManager."""
     # Arrange
-    with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app_module:
-        mock_app_module.app.state.dependency_map_service = mock_app_state
-
+    with depmap_service_installed(mock_dep_map_service):
         # Mock get_config_service (actual pattern used by handler)
         with patch(
             "code_indexer.server.services.config_service.get_config_service"
@@ -96,12 +93,10 @@ def test_handler_loads_config_via_config_service(admin_user, mock_app_state):
             mock_cs_instance.get_config.assert_called_once()
 
 
-def test_handler_returns_error_when_feature_disabled(admin_user, mock_app_state):
+def test_handler_returns_error_when_feature_disabled(admin_user, mock_dep_map_service):
     """Test that handler checks dependency_map_enabled from config."""
     # Arrange
-    with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app_module:
-        mock_app_module.app.state.dependency_map_service = mock_app_state
-
+    with depmap_service_installed(mock_dep_map_service):
         with patch(
             "code_indexer.server.services.config_service.get_config_service"
         ) as mock_get_cs:
@@ -123,12 +118,9 @@ def test_handler_returns_error_when_feature_disabled(admin_user, mock_app_state)
 
 
 def test_handler_returns_error_when_service_unavailable(admin_user):
-    """Test that handler handles missing dependency_map_service gracefully."""
+    """Test that handler handles a service that did not start gracefully."""
     # Arrange
-    with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app_module:
-        # Service not available on app.state
-        mock_app_module.app.state.dependency_map_service = None
-
+    with depmap_service_installed(None):
         # Must mock get_config_service so config check passes before service check
         with patch(
             "code_indexer.server.services.config_service.get_config_service"

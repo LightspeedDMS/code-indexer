@@ -7,6 +7,8 @@ GOAL: Test RegexSearchService init and error handling
 """
 
 import pytest
+
+from .conftest import FakeRipgrepBackend
 import json
 import shutil
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1169,35 +1171,27 @@ class TestRipgrepInternalDirectoryExclusion:
         code_indexer_dir.mkdir()
         (code_indexer_dir / "index.json").write_text('{"test": "data"}')
 
-        with patch(
-            "code_indexer.global_repos.regex_search.SubprocessExecutor"
-        ) as mock_executor_class:
-            mock_executor = MagicMock()
-            mock_executor_class.return_value = mock_executor
-
-            # Mock successful execution
-            mock_result = MagicMock()
-            mock_result.timed_out = False
-            mock_result.status = "success"
-            mock_executor.execute_with_limits = AsyncMock(return_value=mock_result)
-
-            with patch("builtins.open", create=True) as mock_open:
-                mock_open.return_value.__enter__.return_value.read.return_value = ""
-
-                await ripgrep_service._search_ripgrep(
-                    pattern="test",
-                    search_path=test_repo,
-                    include_patterns=None,
-                    exclude_patterns=None,
-                    case_sensitive=True,
-                    context_lines=0,
-                    max_results=100,
-                    timeout_seconds=10,
-                )
+        # Seam: script the ripgrep backend instead of substituting
+        # SubprocessExecutor inside regex_search and patching builtins.open.
+        ripgrep_service._ripgrep_backend = FakeRipgrepBackend(
+            exit_code=0,
+            stderr_output="",
+            is_error=False,
+        )
+        await ripgrep_service._search_ripgrep(
+            pattern="test",
+            search_path=test_repo,
+            include_patterns=None,
+            exclude_patterns=None,
+            case_sensitive=True,
+            context_lines=0,
+            max_results=100,
+            timeout_seconds=10,
+        )
 
         # Verify command includes .code-indexer exclusion
-        call_args = mock_executor.execute_with_limits.call_args
-        cmd = call_args.kwargs["command"]
+        # The argv now reaches the backend rather than the executor.
+        cmd = ripgrep_service._ripgrep_backend.argv
 
         # Should have -g !.code-indexer/** in command
         assert "-g" in cmd, "Command should have -g flags"
@@ -1211,35 +1205,27 @@ class TestRipgrepInternalDirectoryExclusion:
         git_dir.mkdir()
         (git_dir / "config").write_text("[core]\n    repositoryformatversion = 0\n")
 
-        with patch(
-            "code_indexer.global_repos.regex_search.SubprocessExecutor"
-        ) as mock_executor_class:
-            mock_executor = MagicMock()
-            mock_executor_class.return_value = mock_executor
-
-            # Mock successful execution
-            mock_result = MagicMock()
-            mock_result.timed_out = False
-            mock_result.status = "success"
-            mock_executor.execute_with_limits = AsyncMock(return_value=mock_result)
-
-            with patch("builtins.open", create=True) as mock_open:
-                mock_open.return_value.__enter__.return_value.read.return_value = ""
-
-                await ripgrep_service._search_ripgrep(
-                    pattern="core",
-                    search_path=test_repo,
-                    include_patterns=None,
-                    exclude_patterns=None,
-                    case_sensitive=True,
-                    context_lines=0,
-                    max_results=100,
-                    timeout_seconds=10,
-                )
+        # Seam: script the ripgrep backend instead of substituting
+        # SubprocessExecutor inside regex_search and patching builtins.open.
+        ripgrep_service._ripgrep_backend = FakeRipgrepBackend(
+            exit_code=0,
+            stderr_output="",
+            is_error=False,
+        )
+        await ripgrep_service._search_ripgrep(
+            pattern="core",
+            search_path=test_repo,
+            include_patterns=None,
+            exclude_patterns=None,
+            case_sensitive=True,
+            context_lines=0,
+            max_results=100,
+            timeout_seconds=10,
+        )
 
         # Verify command includes .git exclusion
-        call_args = mock_executor.execute_with_limits.call_args
-        cmd = call_args.kwargs["command"]
+        # The argv now reaches the backend rather than the executor.
+        cmd = ripgrep_service._ripgrep_backend.argv
 
         # Should have -g !.git/** in command
         assert "-g" in cmd, "Command should have -g flags"
@@ -1248,20 +1234,10 @@ class TestRipgrepInternalDirectoryExclusion:
     @pytest.mark.asyncio
     async def test_timeout_error_includes_context(self, ripgrep_service, test_repo):
         """Test that TimeoutError includes pattern and path context (Bug #159)."""
-        from unittest.mock import AsyncMock
-
-        with patch(
-            "code_indexer.global_repos.regex_search.SubprocessExecutor"
-        ) as mock_executor_class:
-            mock_executor = MagicMock()
-            mock_executor_class.return_value = mock_executor
-
-            # Mock timeout with AsyncMock
-            mock_result = MagicMock()
-            mock_result.timed_out = True
-            mock_result.timeout_seconds = 30
-            mock_executor.execute_with_limits = AsyncMock(return_value=mock_result)
-
+        # Seam: the backend reports the timeout. The service must still raise a
+        # TimeoutError naming the pattern and path (Bug #159).
+        ripgrep_service._ripgrep_backend = FakeRipgrepBackend(timed_out=True)
+        if True:
             with pytest.raises(TimeoutError) as exc_info:
                 await ripgrep_service._search_ripgrep(
                     pattern="test_pattern",
@@ -1549,6 +1525,7 @@ class TestGrepInternalDirectoryExclusion:
                 )
 
         # Verify command includes .code-indexer exclusion
+        # grep still runs through SubprocessExecutor at regex_search scope.
         call_args = mock_executor.execute_with_limits.call_args
         cmd = call_args.kwargs["command"]
 
@@ -1591,6 +1568,7 @@ class TestGrepInternalDirectoryExclusion:
                 )
 
         # Verify command includes .git exclusion
+        # grep still runs through SubprocessExecutor at regex_search scope.
         call_args = mock_executor.execute_with_limits.call_args
         cmd = call_args.kwargs["command"]
 

@@ -1,9 +1,24 @@
-"""Unit tests for SCIP query execution in web routes."""
+"""Unit tests for SCIP query execution in web routes.
+
+The query page's ``scip`` search mode is the cidx-scip feature's
+(``web_query_modes()``, modular phase 4d); every test runs with it installed,
+as on a server with "scip" enabled.
+"""
 
 from contextlib import contextmanager
+from typing import Iterator
 
 import pytest
 from unittest.mock import patch, MagicMock
+
+from tests.unit.server._scip_feature import scip_pipeline_installed
+
+
+@pytest.fixture(autouse=True)
+def _scip_query_mode() -> Iterator[None]:
+    with scip_pipeline_installed():
+        yield
+
 
 # Test-only fixture values (not real credentials/limits) shared by the
 # query_submit() SCIP-mode test helpers below.
@@ -94,7 +109,7 @@ def _patch_query_submit_env(mock_session, tmp_path, mock_engine):
             ],
         ),
         patch(
-            "code_indexer.scip.query.primitives.SCIPQueryEngine",
+            "cidx_scip.query.primitives.SCIPQueryEngine",
             return_value=mock_engine,
         ),
         patch(
@@ -204,7 +219,7 @@ class TestSCIPQueryExecution:
         """query_submit() should execute SCIP definition search when search_mode='scip' and type='definition'."""
         from code_indexer.server.web.routes import query_submit
         from fastapi import Request
-        from code_indexer.scip.query.primitives import QueryResult
+        from cidx_scip.query.primitives import QueryResult
 
         # Create mock request
         request = MagicMock(spec=Request)
@@ -246,9 +261,7 @@ class TestSCIPQueryExecution:
                     }
                 ],
             ),
-            patch(
-                "code_indexer.scip.query.primitives.SCIPQueryEngine"
-            ) as mock_engine_class,
+            patch("cidx_scip.query.primitives.SCIPQueryEngine") as mock_engine_class,
             patch(
                 "code_indexer.server.web.routes._create_query_page_response"
             ) as mock_response,
@@ -375,7 +388,7 @@ class TestSCIPQueryExecution:
         """query_submit() should support all SCIP query types: definition, references, dependencies, dependents."""
         from code_indexer.server.web.routes import query_submit
         from fastapi import Request
-        from code_indexer.scip.query.primitives import QueryResult
+        from cidx_scip.query.primitives import QueryResult
 
         # Create mock request
         request = MagicMock(spec=Request)
@@ -417,7 +430,7 @@ class TestSCIPQueryExecution:
                     ],
                 ),
                 patch(
-                    "code_indexer.scip.query.primitives.SCIPQueryEngine"
+                    "cidx_scip.query.primitives.SCIPQueryEngine"
                 ) as mock_engine_class,
                 patch("code_indexer.server.web.routes._create_query_page_response"),
                 patch("code_indexer.server.web.routes._add_to_query_history"),
@@ -498,9 +511,7 @@ class TestSCIPQueryExecution:
                     }
                 ],
             ),
-            patch(
-                "code_indexer.scip.query.primitives.SCIPQueryEngine"
-            ) as mock_engine_class,
+            patch("cidx_scip.query.primitives.SCIPQueryEngine") as mock_engine_class,
             patch(
                 "code_indexer.server.web.routes._create_query_page_response"
             ) as mock_response,
@@ -580,9 +591,7 @@ class TestSCIPQueryExecution:
                     }
                 ],
             ),
-            patch(
-                "code_indexer.scip.query.primitives.SCIPQueryEngine"
-            ) as mock_engine_class,
+            patch("cidx_scip.query.primitives.SCIPQueryEngine") as mock_engine_class,
             patch(
                 "code_indexer.server.web.routes._create_query_page_response"
             ) as mock_response,
@@ -671,9 +680,7 @@ class TestSCIPQueryExecution:
                     }
                 ],
             ),
-            patch(
-                "code_indexer.scip.query.primitives.SCIPQueryEngine"
-            ) as mock_engine_class,
+            patch("cidx_scip.query.primitives.SCIPQueryEngine") as mock_engine_class,
             patch(
                 "code_indexer.server.web.routes._create_query_page_response"
             ) as mock_response,
@@ -727,7 +734,7 @@ class TestSCIPQueryExecution:
         """query_submit() should execute SCIP impact analysis when scip_query_type='impact'."""
         from code_indexer.server.web.routes import query_submit
         from fastapi import Request
-        from code_indexer.scip.query.composites import (
+        from cidx_scip.query.composites import (
             ImpactAnalysisResult,
             AffectedSymbol,
         )
@@ -778,7 +785,7 @@ class TestSCIPQueryExecution:
                 ],
             ),
             patch(
-                "code_indexer.scip.query.composites.analyze_impact",
+                "cidx_scip.query.composites.analyze_impact",
                 return_value=mock_result,
             ) as mock_impact,
             patch(
@@ -818,7 +825,7 @@ class TestSCIPQueryExecution:
         """query_submit() should trace call chains when scip_query_type='callchain'."""
         from code_indexer.server.web.routes import query_submit
         from fastapi import Request
-        from code_indexer.scip.query.backends import CallChain
+        from cidx_scip.query.backends import CallChain
 
         request = MagicMock(spec=Request)
         request.cookies = {}
@@ -846,9 +853,7 @@ class TestSCIPQueryExecution:
                     }
                 ],
             ),
-            patch(
-                "code_indexer.scip.query.primitives.SCIPQueryEngine"
-            ) as mock_engine_class,
+            patch("cidx_scip.query.primitives.SCIPQueryEngine") as mock_engine_class,
             patch(
                 "code_indexer.server.web.routes._create_query_page_response"
             ) as mock_response,
@@ -908,21 +913,21 @@ class TestSCIPQueryExecution:
         assert not call_args[1].get("results")
 
     def test_execute_scip_query_callchain_timeout_reports_error(self, tmp_path):
-        """`_execute_scip_query()` (the multi-repo web-query helper) must
-        also report a clear error when its callchain query times out,
-        mirroring query_submit's single-repo callchain branch fix."""
-        from code_indexer.server.web.routes import _execute_scip_query
+        """`_execute_scip_query()` (the SCIP mode's query helper, the
+        cidx-scip feature's) must also report a clear error when its
+        callchain query times out."""
+        from cidx_scip.server.web.query_page import _execute_scip_query
 
         _make_scip_dir(tmp_path)
         mock_engine = MagicMock()
         mock_engine.trace_call_chain.side_effect = _fake_trace_call_chain_timeout
 
         with patch(
-            "code_indexer.scip.query.primitives.SCIPQueryEngine",
+            "cidx_scip.query.primitives.SCIPQueryEngine",
             return_value=mock_engine,
         ):
             results, error_message, failure = _execute_scip_query(
-                target_repo={"path": str(tmp_path), "is_global": False},
+                repo_path=str(tmp_path),
                 user_alias="test-repo",
                 query_text="main UserService",
                 scip_query_type="callchain",
@@ -1007,7 +1012,7 @@ class TestSCIPQueryExecution:
         """query_submit() should get smart context when scip_query_type='context'."""
         from code_indexer.server.web.routes import query_submit
         from fastapi import Request
-        from code_indexer.scip.query.composites import SmartContextResult, ContextFile
+        from cidx_scip.query.composites import SmartContextResult, ContextFile
         from pathlib import Path as PathLib
 
         request = MagicMock(spec=Request)
@@ -1054,7 +1059,7 @@ class TestSCIPQueryExecution:
                 ],
             ),
             patch(
-                "code_indexer.scip.query.composites.get_smart_context",
+                "cidx_scip.query.composites.get_smart_context",
                 return_value=mock_result,
             ) as mock_context,
             patch(

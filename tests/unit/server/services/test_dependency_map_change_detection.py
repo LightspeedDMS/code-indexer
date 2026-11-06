@@ -8,6 +8,7 @@ Tests change detection via commit hash comparison and affected domain identifica
 - Affected domain identification from _index.md parsing
 """
 
+from tests.unit.server._depmap_feature import depmap_claude_config
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,8 +16,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from code_indexer.server.services.dependency_map_service import DependencyMapService
-from code_indexer.server.utils.config_manager import ClaudeIntegrationConfig
+from cidx_depmap.server.dependency_map_service import DependencyMapService
 
 
 @pytest.fixture
@@ -149,7 +149,7 @@ def dependency_map_service(
 ):
     """Create DependencyMapService instance."""
     config_manager = Mock()
-    config = ClaudeIntegrationConfig(
+    config = depmap_claude_config(
         dependency_map_enabled=True,
         dependency_map_interval_hours=24,
     )
@@ -239,7 +239,7 @@ class TestChangeDetection:
         )
 
         config_manager = Mock()
-        config = ClaudeIntegrationConfig(dependency_map_enabled=True)
+        config = depmap_claude_config(dependency_map_enabled=True)
         config_manager.get_claude_integration_config.return_value = config
 
         service = DependencyMapService(

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from code_indexer.server.services.xray_graph_governor.cache_proxy import (
+from cidx_xray.server.graph_governor.cache_proxy import (
     GraphWireFileHandle,
     XrayGraphCacheProxy,
 )
@@ -158,14 +158,14 @@ class TestXrayGraphCacheProcessSingleton:
     """
 
     def teardown_method(self) -> None:
-        from code_indexer.server.services.xray_graph_governor.cache_proxy import (
+        from cidx_xray.server.graph_governor.cache_proxy import (
             clear_xray_graph_cache,
         )
 
         clear_xray_graph_cache()
 
     def test_get_returns_none_before_any_set(self) -> None:
-        from code_indexer.server.services.xray_graph_governor.cache_proxy import (
+        from cidx_xray.server.graph_governor.cache_proxy import (
             clear_xray_graph_cache,
             get_xray_graph_cache,
         )
@@ -181,7 +181,7 @@ class TestXrayGraphCacheProcessSingleton:
     def test_set_then_get_returns_the_same_instance_and_clear_resets_to_none(
         self,
     ) -> None:
-        from code_indexer.server.services.xray_graph_governor.cache_proxy import (
+        from cidx_xray.server.graph_governor.cache_proxy import (
             XrayGraphCacheProxy,
             clear_xray_graph_cache,
             get_xray_graph_cache,

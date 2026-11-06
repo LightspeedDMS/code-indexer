@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from fastapi.testclient import TestClient
+from code_indexer.server.utils.route_table import iter_routes
 
 
 _ELEVATION_QUALNAME = "require_elevation.<locals>._check"
@@ -29,7 +30,7 @@ def _build_client(monkeypatch, config_service, ssh_key_manager, bootstrap):
     )
 
     # Bypass require_elevation() dependencies so tests don't need TOTP setup.
-    for route in routes.web_router.routes:
+    for route_path, route in iter_routes(routes.web_router.routes):
         if not isinstance(route, APIRoute):
             continue
         for dep in route.dependencies or []:

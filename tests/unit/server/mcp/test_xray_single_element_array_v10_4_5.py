@@ -86,7 +86,7 @@ async def _invoke_handler(handler_name: str, repo_alias: Any) -> Dict[str, Any]:
     Does NOT mock any internal helpers (_submit_xray_explore_omni) so the
     real branching logic is exercised.
     """
-    import code_indexer.server.mcp.handlers.xray as _xray_module
+    import cidx_xray.server.mcp.xray as _xray_module
 
     handler = getattr(_xray_module, handler_name)
 

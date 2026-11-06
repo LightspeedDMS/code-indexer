@@ -47,7 +47,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from code_indexer.server.auth.user_manager import User, UserRole
-from code_indexer.server.services.xray_pattern_service import XrayPatternService
+from cidx_xray.server.pattern_service import XrayPatternService
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -133,46 +133,50 @@ def _patched_xray_env(
     with (
         patch("code_indexer.server.mcp.handlers._utils.app_module", mock_app),
         patch(
-            "code_indexer.server.mcp.handlers.xray._search._resolve_repo_path",
+            "cidx_xray.server.mcp.xray._search._resolve_repo_path",
             return_value=_FAKE_REPO_PATH,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
+            "cidx_xray.server.mcp.xray._explore._resolve_repo_path",
             return_value=_FAKE_REPO_PATH,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._search._get_background_job_manager",
+            "cidx_xray.server.mcp.xray._search._get_background_job_manager",
             return_value=mock_bjm,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._explore._get_background_job_manager",
+            "cidx_xray.server.mcp.xray._explore._get_background_job_manager",
             return_value=mock_bjm,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._search._get_job_tracker",
+            "cidx_xray.server.mcp.xray._search._get_job_tracker",
             return_value=mock_jt,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._explore._get_job_tracker",
+            "cidx_xray.server.mcp.xray._explore._get_job_tracker",
             return_value=mock_jt,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._search._get_xray_executor",
+            "cidx_xray.server.mcp.xray._search._get_xray_executor",
             return_value=mock_xe,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._explore._get_xray_executor",
+            "cidx_xray.server.mcp.xray._infra._get_xray_executor",
             return_value=mock_xe,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._infra._get_cidx_meta_path",
+            "cidx_xray.server.mcp.xray._explore._get_xray_executor",
+            return_value=mock_xe,
+        ),
+        patch(
+            "cidx_xray.server.mcp.xray._infra._get_cidx_meta_path",
             return_value=cidx_meta,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._search.validate_rust_evaluator"
+            "cidx_xray.server.mcp.xray._search.validate_rust_evaluator"
         ) as mock_validate,
         patch(
-            "code_indexer.server.mcp.handlers.xray._explore.validate_rust_evaluator"
+            "cidx_xray.server.mcp.xray._explore.validate_rust_evaluator"
         ) as mock_validate_explore,
         patch("asyncio.get_running_loop") as mock_loop,
     ):
@@ -239,7 +243,7 @@ class TestBug1423CrashReproduction:
         Original bug: raised
         TypeError: unsupported operand type(s) for /: 'PosixPath' and 'list'
         """
-        from code_indexer.server.mcp.handlers.xray import handle_xray_search
+        from cidx_xray.server.mcp.xray import handle_xray_search
 
         cidx_meta = _make_cidx_meta(tmp_path)
         _store_deep_nesting_pattern(cidx_meta)
@@ -274,7 +278,7 @@ class TestBug1423CrashReproduction:
         self, tmp_path: Path
     ) -> None:
         """Row 6: xray_explore + list (2 repos) + pattern_name must not crash."""
-        from code_indexer.server.mcp.handlers.xray import handle_xray_explore
+        from cidx_xray.server.mcp.xray import handle_xray_explore
 
         cidx_meta = _make_cidx_meta(tmp_path)
         _store_deep_nesting_pattern(cidx_meta)
@@ -313,7 +317,7 @@ class TestBug1423CrashReproduction:
         Single-element list collapses to the single-repo response shape
         ({"job_id": ...}), per the v10.4.5 Defect 5 ergonomic behavior.
         """
-        from code_indexer.server.mcp.handlers.xray import handle_xray_search
+        from cidx_xray.server.mcp.xray import handle_xray_search
 
         cidx_meta = _make_cidx_meta(tmp_path)
         _store_deep_nesting_pattern(cidx_meta)
@@ -356,7 +360,7 @@ class TestBug1423RegressionAlreadyWorkingCombinations:
         self, tmp_path: Path
     ) -> None:
         """Row 1: xray_search + single string alias + inline evaluator_code."""
-        from code_indexer.server.mcp.handlers.xray import handle_xray_search
+        from cidx_xray.server.mcp.xray import handle_xray_search
 
         cidx_meta = _make_cidx_meta(tmp_path)
         user = _make_user()
@@ -384,7 +388,7 @@ class TestBug1423RegressionAlreadyWorkingCombinations:
         self, tmp_path: Path
     ) -> None:
         """Row 2: xray_explore + single string alias + inline evaluator_code."""
-        from code_indexer.server.mcp.handlers.xray import handle_xray_explore
+        from cidx_xray.server.mcp.xray import handle_xray_explore
 
         cidx_meta = _make_cidx_meta(tmp_path)
         user = _make_user()
@@ -412,7 +416,7 @@ class TestBug1423RegressionAlreadyWorkingCombinations:
         self, tmp_path: Path
     ) -> None:
         """Row 3: xray_search + list (2 repos) + inline evaluator_code."""
-        from code_indexer.server.mcp.handlers.xray import handle_xray_search
+        from cidx_xray.server.mcp.xray import handle_xray_search
 
         cidx_meta = _make_cidx_meta(tmp_path)
         user = _make_user()
@@ -439,7 +443,7 @@ class TestBug1423RegressionAlreadyWorkingCombinations:
     @pytest.mark.asyncio
     async def test_row4_search_single_string_pattern_name(self, tmp_path: Path) -> None:
         """Row 4: xray_search + single string alias + pattern_name."""
-        from code_indexer.server.mcp.handlers.xray import handle_xray_search
+        from cidx_xray.server.mcp.xray import handle_xray_search
 
         cidx_meta = _make_cidx_meta(tmp_path)
         _store_deep_nesting_pattern(cidx_meta)

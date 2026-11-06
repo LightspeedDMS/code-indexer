@@ -47,7 +47,9 @@ def _parse_response(result: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _import_handler():
-    from code_indexer.server.mcp.handlers.xray import handle_cidx_fetch_cached_payload
+    from code_indexer.server.mcp.handlers.cached_payload import (
+        handle_cidx_fetch_cached_payload,
+    )
 
     return handle_cidx_fetch_cached_payload
 
@@ -58,9 +60,7 @@ def _call(params: Dict[str, Any], cache: Any) -> Dict[str, Any]:
     mock_app_module = MagicMock()
     mock_app_module.app = mock_app
 
-    with patch(
-        "code_indexer.server.mcp.handlers.xray._utils.app_module", mock_app_module
-    ):
+    with patch("code_indexer.server.mcp.handlers._utils.app_module", mock_app_module):
         handler = _import_handler()
         result = handler(params, _make_user())
     return _parse_response(result)

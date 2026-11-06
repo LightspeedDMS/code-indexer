@@ -16,6 +16,13 @@ open-source repository).
 
 from __future__ import annotations
 
+import pytest as _pytest
+
+from tests.unit.server._depmap_feature import (
+    depmap_service_installed,
+    depmap_service_reading,
+    depmap_tools_installed,
+)
 import json
 import tempfile
 from datetime import datetime, timezone
@@ -78,8 +85,8 @@ def _build_access_service(
 
 def _indexed_app_state(tmp_path: Path, repo_name: str) -> Mock:
     """A minimal but real on-disk dependency-map layout with repo_name
-    indexed, read the same way the handlers read it:
-    app.state.dependency_map_service.cidx_meta_read_path."""
+    indexed under tmp_path -- the running service's cidx_meta_read_path in
+    :func:`_dispatch` -- and the app state the access projection reads."""
     dep_map_dir = tmp_path / "dependency-map"
     dep_map_dir.mkdir(parents=True, exist_ok=True)
     (dep_map_dir / "_domains.json").write_text(
@@ -106,14 +113,18 @@ async def _dispatch(
     user: User,
     access_service: Optional[AccessFilteringService],
     app_state: Optional[Mock] = None,
+    read_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Call handle_tools_call() for real -- TOOL_REGISTRY/HANDLER_REGISTRY
-    are the actual production registries, never stubs."""
+    are the actual production registries, never stubs. With *read_path* the
+    dependency map's service runs over the map under it."""
     if app_state is None:
         app_state = Mock()
     app_state.access_filtering_service = access_service
 
+    service = None if read_path is None else depmap_service_reading(read_path)
     with (
+        depmap_service_installed(service),
         patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module,
         patch(
             "code_indexer.server.services.langfuse_service.get_langfuse_service",
@@ -164,7 +175,12 @@ class TestDepmapFindConsumersFrontDoor:
         state = _indexed_app_state(tmp_path, "example-repo")
 
         result = await _dispatch(
-            self.TOOL, {"repo_name": "example-repo"}, user, access_service, state
+            self.TOOL,
+            {"repo_name": "example-repo"},
+            user,
+            access_service,
+            state,
+            tmp_path,
         )
 
         data = _parse_response(result)
@@ -179,7 +195,12 @@ class TestDepmapFindConsumersFrontDoor:
         state = _indexed_app_state(tmp_path, "example-repo")
 
         result = await _dispatch(
-            self.TOOL, {"repo_name": "example-repo"}, admin, access_service, state
+            self.TOOL,
+            {"repo_name": "example-repo"},
+            admin,
+            access_service,
+            state,
+            tmp_path,
         )
 
         data = _parse_response(result)
@@ -265,7 +286,12 @@ class TestDepmapGetRepoDomainsFrontDoor:
         state = _indexed_app_state(tmp_path, "example-repo")
 
         result = await _dispatch(
-            self.TOOL, {"repo_name": "example-repo"}, user, access_service, state
+            self.TOOL,
+            {"repo_name": "example-repo"},
+            user,
+            access_service,
+            state,
+            tmp_path,
         )
 
         data = _parse_response(result)
@@ -280,7 +306,12 @@ class TestDepmapGetRepoDomainsFrontDoor:
         state = _indexed_app_state(tmp_path, "example-repo")
 
         result = await _dispatch(
-            self.TOOL, {"repo_name": "example-repo"}, admin, access_service, state
+            self.TOOL,
+            {"repo_name": "example-repo"},
+            admin,
+            access_service,
+            state,
+            tmp_path,
         )
 
         data = _parse_response(result)
@@ -328,3 +359,11 @@ class TestDepmapGetRepoDomainsFrontDoor:
             await _dispatch(self.TOOL, {"repo_name": "example-repo"}, user, None)
 
         assert "access control service unavailable" in str(exc_info.value).lower()
+
+
+@_pytest.fixture(autouse=True)
+def _depmap_tools():
+    """The dependency map's MCP tools are the cidx-depmap feature's (modular
+    phase 4g): registered as on a server with "depmap" enabled."""
+    with depmap_tools_installed():
+        yield

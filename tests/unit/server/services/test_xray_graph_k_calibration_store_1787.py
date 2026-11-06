@@ -7,14 +7,14 @@ already uses) -- no mocking of the store under test.
 
 from __future__ import annotations
 
-from code_indexer.server.services.xray_graph_governor.k_calibration_store import (
+from cidx_xray.testing import sqlite_k_calibration_backend
+from cidx_xray.server.graph_governor.k_calibration_store import (
     KCalibrationSample,
-    SqliteKCalibrationBackend,
 )
 
 
 def test_record_sample_then_get_k_returns_the_observed_multiplier(tmp_path):
-    backend = SqliteKCalibrationBackend(str(tmp_path / "k_calibration.db"))
+    backend = sqlite_k_calibration_backend(str(tmp_path / "k_calibration.db"))
 
     backend.record_sample(
         KCalibrationSample(
@@ -36,7 +36,7 @@ def test_multiple_samples_return_the_max_not_the_average():
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         db_path = os.path.join(tmp_dir, "k_calibration.db")
-        backend = SqliteKCalibrationBackend(db_path)
+        backend = sqlite_k_calibration_backend(db_path)
         backend.record_sample(
             KCalibrationSample(
                 language="java",
@@ -64,7 +64,7 @@ def test_multiple_samples_return_the_max_not_the_average():
 
 
 def test_get_k_returns_none_for_a_language_with_no_recorded_samples(tmp_path):
-    backend = SqliteKCalibrationBackend(str(tmp_path / "k_calibration.db"))
+    backend = sqlite_k_calibration_backend(str(tmp_path / "k_calibration.db"))
 
     assert backend.get_k("cobol") is None
 
@@ -73,7 +73,7 @@ def test_a_fresh_instance_reads_samples_recorded_by_a_different_instance(tmp_pat
     """Proves genuine SQLite persistence -- not an in-process cache --
     matching this project's 'faithful DB' testing convention."""
     db_path = str(tmp_path / "k_calibration.db")
-    writer = SqliteKCalibrationBackend(db_path)
+    writer = sqlite_k_calibration_backend(db_path)
     writer.record_sample(
         KCalibrationSample(
             language="java",
@@ -85,5 +85,5 @@ def test_a_fresh_instance_reads_samples_recorded_by_a_different_instance(tmp_pat
         )
     )
 
-    reader = SqliteKCalibrationBackend(db_path)
+    reader = sqlite_k_calibration_backend(db_path)
     assert reader.get_k("java") == 19.0

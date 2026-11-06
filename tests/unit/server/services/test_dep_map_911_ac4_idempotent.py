@@ -99,7 +99,7 @@ def test_second_call_does_not_add_duplicate_row(idempotent_setup):
 
 def test_find_existing_incoming_row_detects_present_row(idempotent_setup):
     """find_existing_incoming_row returns True when the mirror row already exists."""
-    from code_indexer.server.services.dep_map_repair_garbage_domain import (
+    from cidx_depmap.server.dep_map_repair_garbage_domain import (
         find_existing_incoming_row,
     )
 
@@ -115,7 +115,7 @@ def test_find_existing_incoming_row_detects_present_row(idempotent_setup):
 
 def test_find_existing_incoming_row_returns_false_when_absent():
     """find_existing_incoming_row returns False for a row that has not been inserted."""
-    from code_indexer.server.services.dep_map_repair_garbage_domain import (
+    from cidx_depmap.server.dep_map_repair_garbage_domain import (
         find_existing_incoming_row,
     )
 

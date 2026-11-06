@@ -48,7 +48,7 @@ from code_indexer.server.storage.sqlite_backends import (
 from code_indexer.server.storage.filesystem_backends import (
     FilesystemDashboardCacheBackend,
 )
-from code_indexer.server.web.dependency_map_routes import _submit_dashboard_job
+from cidx_depmap.server.web.routes import _submit_dashboard_job
 
 _TERMINAL_STATUSES = ("completed", "failed", "cancelled")
 _POLL_TIMEOUT_SECONDS = 10.0

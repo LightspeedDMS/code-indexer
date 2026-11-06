@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from code_indexer.server.repositories.golden_repo_manager import GoldenRepoManager
+from tests.unit.server.app_state_patch import patch_app_state
 
 
 def _make_manager(tmp_path, snapshot_manager=None):
@@ -78,8 +79,8 @@ class TestChangeBranchSwapGate:
         scheduler.cleanup_manager = cm
         lifecycle = MagicMock()
         lifecycle.refresh_scheduler = scheduler
-        monkeypatch.setattr(
-            app_module.app.state, "global_lifecycle_manager", lifecycle, raising=False
+        patch_app_state(
+            monkeypatch, app_module.app.state, "global_lifecycle_manager", lifecycle
         )
         return cm
 

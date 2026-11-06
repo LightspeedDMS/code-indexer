@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
+from code_indexer.server.utils.route_table import iter_routes
 
 
 # Closure __qualname__ produced by require_elevation() factory — same identifier
@@ -43,7 +44,7 @@ def _bypass_elevation(app, router):
     Required because CI has no TOTP setup; tests that verify route behaviour
     after elevation use this helper to simulate an active elevation window.
     """
-    for route in router.routes:
+    for route_path, route in iter_routes(router.routes):
         if not isinstance(route, APIRoute):
             continue
         for dep in route.dependencies or []:
@@ -113,10 +114,10 @@ class TestUsersListPartialElevationGate:
         from code_indexer.server.web.routes import web_router
 
         target = None
-        for route in web_router.routes:
+        for route_path, route in iter_routes(web_router.routes):
             if not isinstance(route, APIRoute):
                 continue
-            if route.path == "/partials/users-list" and "GET" in (route.methods or []):
+            if route_path == "/partials/users-list" and "GET" in (route.methods or []):
                 target = route
                 break
 

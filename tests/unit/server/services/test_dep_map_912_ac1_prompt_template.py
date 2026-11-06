@@ -17,9 +17,12 @@ import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent.parent.parent.parent
-PROMPTS_DIR = REPO_ROOT / "src" / "code_indexer" / "server" / "mcp" / "prompts"
+PROMPTS_DIR = REPO_ROOT / "packages/features/cidx-depmap/src/cidx_depmap/server/prompts"
 TEMPLATE_PATH = PROMPTS_DIR / "bidirectional_mismatch_audit.md"
-PRODUCTION_SRC_DIR = REPO_ROOT / "src" / "code_indexer"
+PRODUCTION_SRC_DIRS = (
+    REPO_ROOT / "src" / "code_indexer",
+    REPO_ROOT / "packages/features/cidx-depmap/src/cidx_depmap",
+)
 
 REQUIRED_PLACEHOLDERS = [
     "source_domain",
@@ -84,7 +87,7 @@ def test_no_inline_duplicate_in_production_src():
     Scans src/code_indexer/**/*.py — production source only (no tests).
     Detects accidental copy-paste of the prompt body into a Python file.
     """
-    for py_file in PRODUCTION_SRC_DIR.rglob("*.py"):
+    for py_file in (f for d in PRODUCTION_SRC_DIRS for f in d.rglob("*.py")):
         text = py_file.read_text(encoding="utf-8", errors="replace")
         assert _UNIQUE_HEADER not in text, (
             f"Inline duplicate of prompt header found in {py_file} — "

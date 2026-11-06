@@ -32,6 +32,7 @@ import pytest
 from _audit_front_doors import DoorsEnv, front_door_env
 from _audit_repos_support import EXAMPLE_ALIAS
 from code_indexer.server.auth.user_manager import User, UserRole
+from tests.unit.server._depmap_feature import depmap_tools_installed
 
 _ADMIN_ROLE_REQUIRED = {
     "success": False,
@@ -269,7 +270,10 @@ def test_granted_non_admin_is_refused_by_the_handler(env, case) -> None:
     tool, arguments, check = _CASES[case]
     args = arguments()
     user = _grant(tool)
-    assert _call(user, tool, args) == _ADMIN_ROLE_REQUIRED
+    # trigger_dependency_analysis is the cidx-depmap feature's tool: present
+    # as on a server with "depmap" enabled, not left over by another test.
+    with depmap_tools_installed():
+        assert _call(user, tool, args) == _ADMIN_ROLE_REQUIRED
     check(env)
 
 

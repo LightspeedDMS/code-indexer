@@ -52,10 +52,10 @@ class TestSCIPVerificationStderr:
 
         return mock_result
 
-    @patch("code_indexer.scip.database.schema.DatabaseManager")
-    @patch("code_indexer.scip.database.verify.SCIPDatabaseVerifier")
-    @patch("code_indexer.scip.status.StatusTracker")
-    @patch("code_indexer.scip.generator.SCIPGenerator")
+    @patch("cidx_scip.database.schema.DatabaseManager")
+    @patch("cidx_scip.database.verify.SCIPDatabaseVerifier")
+    @patch("cidx_scip.status.StatusTracker")
+    @patch("cidx_scip.generator.SCIPGenerator")
     def test_verification_errors_go_to_stderr(
         self,
         mock_generator_cls,
@@ -98,9 +98,12 @@ class TestSCIPVerificationStderr:
         mock_verifier_cls.return_value = mock_verifier
 
         # Invoke the command
-        from code_indexer.cli_scip import scip_generate
+        from cidx_scip.cli import scip_generate
 
-        runner = click.testing.CliRunner(mix_stderr=False)
+        # Click >= 8.2 always captures stderr apart from stdout (the
+        # ``mix_stderr`` switch was removed): result.stdout and result.stderr
+        # are each one stream, so the split below is still what is checked.
+        runner = click.testing.CliRunner()
         result = runner.invoke(scip_generate, [])
 
         # Assertions

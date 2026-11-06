@@ -23,6 +23,7 @@ import pytest
 
 from code_indexer.global_repos import refresh_scheduler
 from code_indexer.global_repos.git_error_classifier import GitFetchError
+from code_indexer.server.storage.shared.git_backend import local_git_backend
 from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
 from code_indexer.server.git.git_subprocess_env import (
     build_non_interactive_git_env,
@@ -157,12 +158,15 @@ def test_refresh_fails_before_any_network_call_when_stored_urls_cannot_be_saniti
     master = _clone_with_stored_userinfo(remote, tmp_path)
     config = master / ".git" / "config"
     argv_log.clear()
-    config.chmod(0)
+    # The stored URLs cannot be read: an unparsable config. (Not chmod 0 --
+    # root, as a CI runner is, reads the file anyway.)
+    stored = config.read_text()
+    config.write_text(stored + "[remote\n")
     try:
         with pytest.raises(RuntimeError) as raised:
             refresh_scheduler._git_pull_updater_for(str(master), remote, None).update()
     finally:
-        config.chmod(0o644)
+        config.write_text(stored)
 
     assert "credential-free" in str(raised.value)
     assert _network_calls(argv_log) == []
@@ -252,6 +256,9 @@ def test_reclone_stores_no_credentials(
     master = tmp_path / "golden-repos" / "repo"
     master.mkdir(parents=True)
     scheduler = object.__new__(RefreshScheduler)
+    # EVO-64678: the re-clone runs through the scheduler's git seam; the local
+    # backend is what __init__ installs by default.
+    scheduler._git_backend = local_git_backend()
 
     assert scheduler._attempt_reclone("repo-global", remote, str(master)) is True
 

@@ -42,7 +42,7 @@ def make_journal_entry(**overrides: Any):
             f"Allowed fields: {sorted(_OVERRIDEABLE_JOURNAL_FIELDS)}"
         )
 
-    from code_indexer.server.services.dep_map_repair_executor import JournalEntry
+    from cidx_depmap.server.dep_map_repair_executor import JournalEntry
 
     defaults: Dict[str, Any] = dict(
         anomaly_type="SELF_LOOP",

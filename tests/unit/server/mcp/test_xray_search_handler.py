@@ -24,7 +24,7 @@ from typing import Any, Dict, Generator, Optional, cast
 from unittest.mock import MagicMock, patch
 
 from code_indexer.server.auth.user_manager import User, UserRole
-from code_indexer.server.mcp.handlers.xray import _AWAIT_SECONDS_MAX
+from cidx_xray.server.mcp.xray import _AWAIT_SECONDS_MAX
 
 
 def _make_resolved_future(result: dict) -> "asyncio.Future":
@@ -69,23 +69,27 @@ def _xray_single_repo_env(
     with (
         patch("code_indexer.server.mcp.handlers._utils.app_module", mock_app),
         patch(
-            "code_indexer.server.mcp.handlers.xray._search._resolve_repo_path",
+            "cidx_xray.server.mcp.xray._search._resolve_repo_path",
             return_value="/fake/repo/path",
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._search._get_background_job_manager",
+            "cidx_xray.server.mcp.xray._search._get_background_job_manager",
             return_value=mock_bjm,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._search._get_job_tracker",
+            "cidx_xray.server.mcp.xray._search._get_job_tracker",
             return_value=mock_jt,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._search._get_xray_executor",
+            "cidx_xray.server.mcp.xray._search._get_xray_executor",
             return_value=mock_exec,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._search.validate_rust_evaluator"
+            "cidx_xray.server.mcp.xray._infra._get_xray_executor",
+            return_value=mock_exec,
+        ),
+        patch(
+            "cidx_xray.server.mcp.xray._search.validate_rust_evaluator"
         ) as mock_validate,
         patch("asyncio.get_running_loop", return_value=loop_instance),
     ):
@@ -122,7 +126,7 @@ VALID_PARAMS: Dict[str, Any] = {
 
 
 def _import_handler():
-    from code_indexer.server.mcp.handlers.xray import handle_xray_search
+    from cidx_xray.server.mcp.xray import handle_xray_search
 
     return handle_xray_search
 
@@ -209,11 +213,11 @@ class TestXraySearchHandlerPreFlightValidation:
                 MagicMock(activated_repo_manager=None, golden_repo_manager=None),
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray._search._resolve_repo_path",
+                "cidx_xray.server.mcp.xray._search._resolve_repo_path",
                 return_value="/some/path",
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray._search._get_background_job_manager",
+                "cidx_xray.server.mcp.xray._search._get_background_job_manager",
                 return_value=MagicMock(),
             ),
         ):
@@ -238,11 +242,11 @@ class TestXraySearchHandlerPreFlightValidation:
                 MagicMock(activated_repo_manager=None, golden_repo_manager=None),
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray._search._resolve_repo_path",
+                "cidx_xray.server.mcp.xray._search._resolve_repo_path",
                 return_value="/some/path",
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray._search._get_background_job_manager",
+                "cidx_xray.server.mcp.xray._search._get_background_job_manager",
                 return_value=mock_bjm,
             ),
         ):
@@ -277,7 +281,7 @@ class TestXraySearchHandlerParamValidation:
         params = {**VALID_PARAMS, "timeout_seconds": 5}
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._search._resolve_repo_path",
+            "cidx_xray.server.mcp.xray._search._resolve_repo_path",
             return_value="/some/path",
         ):
             handler = _import_handler()
@@ -292,7 +296,7 @@ class TestXraySearchHandlerParamValidation:
         params = {**VALID_PARAMS, "timeout_seconds": 900}
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._search._resolve_repo_path",
+            "cidx_xray.server.mcp.xray._search._resolve_repo_path",
             return_value="/some/path",
         ):
             handler = _import_handler()
@@ -391,7 +395,7 @@ class TestXraySearchHandlerRepoResolution:
         user = _make_user(UserRole.NORMAL_USER)
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._search._resolve_repo_path",
+            "cidx_xray.server.mcp.xray._search._resolve_repo_path",
             return_value=None,
         ):
             handler = _import_handler()
@@ -425,11 +429,11 @@ class TestXraySearchHandlerTruncation:
         with (
             _xray_single_repo_env() as (mock_bjm, mock_jt, mock_exec, mock_loop),
             patch(
-                "code_indexer.server.mcp.handlers.xray._search._truncate_xray_result",
+                "cidx_xray.server.mcp.xray._search._truncate_xray_result",
                 return_value=truncated_result,
             ) as mock_truncate,
             patch(
-                "code_indexer.xray.search_engine.XRaySearchEngine",
+                "cidx_xray.search_engine.XRaySearchEngine",
                 return_value=MagicMock(run=MagicMock(return_value=engine_result)),
             ),
         ):
@@ -792,7 +796,7 @@ class TestXraySearchHandlerRenamedParams:
         with (
             _xray_single_repo_env() as (mock_bjm, mock_jt, mock_exec, mock_loop),
             patch(
-                "code_indexer.xray.search_engine.XRaySearchEngine.run",
+                "cidx_xray.search_engine.XRaySearchEngine.run",
                 side_effect=lambda **kw: captured_kwargs.update(kw)
                 or {
                     "matches": [],
@@ -855,7 +859,7 @@ class TestXraySearchHandlerMaxResults:
         with (
             _xray_single_repo_env() as (mock_bjm, mock_jt, mock_exec, mock_loop),
             patch(
-                "code_indexer.xray.search_engine.XRaySearchEngine.run",
+                "cidx_xray.search_engine.XRaySearchEngine.run",
                 side_effect=lambda **kw: captured_kwargs.update(kw)
                 or {
                     "matches": [],
@@ -908,7 +912,7 @@ class TestXraySearchHandlerNewParams:
         with (
             _xray_single_repo_env() as (mock_bjm, mock_jt, mock_exec, mock_loop),
             patch(
-                "code_indexer.xray.search_engine.XRaySearchEngine.run",
+                "cidx_xray.search_engine.XRaySearchEngine.run",
                 side_effect=lambda **kw: captured.update(kw)
                 or {
                     "matches": [],
@@ -1058,8 +1062,8 @@ class TestXraySearchHandlerOutputEnvelope:
 
     def test_engine_produces_line_content_field(self):
         """XRaySearchEngine uses 'line_content', not 'code_snippet', in the match envelope."""
-        from code_indexer.xray import search_engine as _search_engine_module
-        from code_indexer.xray.search_engine import XRaySearchEngine
+        from cidx_xray import search_engine as _search_engine_module
+        from cidx_xray.search_engine import XRaySearchEngine
 
         import inspect
 
@@ -1094,7 +1098,7 @@ class TestXraySearchHandlerOmni:
         """Run handle_xray_search with given repository_alias and path map."""
         import json as _json
 
-        from code_indexer.server.mcp.handlers.xray import handle_xray_search
+        from cidx_xray.server.mcp.xray import handle_xray_search
 
         user = _make_user(UserRole.NORMAL_USER)
         if isinstance(alias_value, list):
@@ -1136,23 +1140,27 @@ class TestXraySearchHandlerOmni:
         with (
             patch("code_indexer.server.mcp.handlers._utils.app_module", mock_app),
             patch(
-                "code_indexer.server.mcp.handlers.xray._search._resolve_repo_path",
+                "cidx_xray.server.mcp.xray._search._resolve_repo_path",
                 side_effect=fake_resolve,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray._search._get_background_job_manager",
+                "cidx_xray.server.mcp.xray._search._get_background_job_manager",
                 return_value=mock_bjm,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray._search._get_job_tracker",
+                "cidx_xray.server.mcp.xray._search._get_job_tracker",
                 return_value=mock_jt,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray._search._get_xray_executor",
+                "cidx_xray.server.mcp.xray._search._get_xray_executor",
                 return_value=mock_exec,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray._search.validate_rust_evaluator"
+                "cidx_xray.server.mcp.xray._infra._get_xray_executor",
+                return_value=mock_exec,
+            ),
+            patch(
+                "cidx_xray.server.mcp.xray._search.validate_rust_evaluator"
             ) as mock_validate,
             patch("asyncio.get_running_loop", return_value=loop_instance),
         ):
@@ -1224,7 +1232,7 @@ class TestXraySearchHandlerDefaultEvaluator:
         with (
             _xray_single_repo_env() as (mock_bjm, mock_jt, mock_exec, mock_loop),
             patch(
-                "code_indexer.xray.search_engine.XRaySearchEngine.run",
+                "cidx_xray.search_engine.XRaySearchEngine.run",
                 side_effect=lambda **kw: captured.update(kw)
                 or {
                     "matches": [],
@@ -1268,7 +1276,7 @@ class TestXraySearchHandlerDefaultEvaluator:
 
     async def test_omitted_evaluator_code_default_passes_sandbox_validation(self):
         """Default evaluator must pass validate_rust_evaluator() — not crash at preflight."""
-        from code_indexer.xray.sandbox import validate_rust_evaluator
+        from cidx_xray.sandbox import validate_rust_evaluator
 
         params = {
             "repository_alias": "myrepo-global",

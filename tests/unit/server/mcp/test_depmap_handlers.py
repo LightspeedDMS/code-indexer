@@ -5,12 +5,14 @@ Tests: fresh path read per call, success with anomalies, missing path failure,
 handler registered in HANDLER_REGISTRY.
 """
 
+from tests.unit.server._depmap_feature import depmap_tools_installed
 import json
 from pathlib import Path
 from typing import Any, Dict
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from code_indexer.server.auth.user_manager import User, UserRole
+from tests.unit.server._depmap_feature import depmap_service_reading, depmap_started
 
 
 # ---------------------------------------------------------------------------
@@ -25,24 +27,25 @@ def _make_user() -> User:
     return user
 
 
-def _make_app_state(read_path: Path) -> MagicMock:
-    """Build a mock app state whose dependency_map_service.cidx_meta_read_path
-    returns read_path. access_filtering_service.is_admin_user() is set
-    explicitly to True rather than left as an implicit truthy attribute of
-    a bare MagicMock, so this double's behavior is stated, not incidental."""
+def _running_service(read_path: Path) -> Any:
+    """The running dependency-map service, its map under *read_path*."""
+    return depmap_service_reading(read_path)
+
+
+def _admin_app_state() -> MagicMock:
+    """A mock app state for the access projection.
+    access_filtering_service.is_admin_user() is set explicitly to True rather
+    than left as an implicit truthy attribute of a bare MagicMock, so this
+    double's behavior is stated, not incidental."""
     state = MagicMock()
-    state.dependency_map_service.cidx_meta_read_path = read_path
     state.access_filtering_service.is_admin_user.return_value = True
     return state
 
 
-def _call_handler(params: dict, app_state: MagicMock) -> Any:
-    from code_indexer.server.mcp.handlers.depmap import depmap_find_consumers_handler
+def _call_handler(params: dict, service: Any) -> Any:
+    from cidx_depmap.server.mcp.handlers import depmap_find_consumers_handler
 
-    with patch(
-        "code_indexer.server.mcp.handlers.depmap._utils.app_module.app.state",
-        app_state,
-    ):
+    with depmap_started(service, _admin_app_state()):
         return depmap_find_consumers_handler(params, _make_user())
 
 
@@ -71,11 +74,10 @@ def test_handler_reads_path_fresh_each_call(tmp_path: Path) -> None:
             call_count += 1
             return tmp_path
 
-    state = MagicMock()
-    state.dependency_map_service = _TrackingService()
+    service = _TrackingService()
 
-    _call_handler({"repo_name": "any-repo"}, state)
-    _call_handler({"repo_name": "any-repo"}, state)
+    _call_handler({"repo_name": "any-repo"}, service)
+    _call_handler({"repo_name": "any-repo"}, service)
 
     assert call_count == 2, (
         f"Expected cidx_meta_read_path accessed once per call (total 2), got {call_count}"
@@ -99,7 +101,7 @@ def test_handler_surfaces_anomalies_when_domain_file_malformed(tmp_path: Path) -
         "---\nname: [unclosed\nbroken: :\n---\n# bad\n", encoding="utf-8"
     )
 
-    result = _call_handler({"repo_name": "repo-b"}, _make_app_state(tmp_path))
+    result = _call_handler({"repo_name": "repo-b"}, _running_service(tmp_path))
     data = _parse_response(result)
 
     # Story #888: repo-b is indexed but no consumers found → repo_has_no_consumers
@@ -112,9 +114,9 @@ def test_handler_surfaces_anomalies_when_domain_file_malformed(tmp_path: Path) -
 
 def test_handler_returns_success_false_when_path_missing(tmp_path: Path) -> None:
     """When dep_map_path does not exist, handler returns success=false with error."""
-    state = _make_app_state(tmp_path / "no-such-dir")
+    service = _running_service(tmp_path / "no-such-dir")
 
-    result = _call_handler({"repo_name": "any-repo"}, state)
+    result = _call_handler({"repo_name": "any-repo"}, service)
     data = _parse_response(result)
 
     assert data["success"] is False
@@ -162,8 +164,8 @@ def _write_domain_md_s2(
     (dep_map_dir / f"{domain_name}.md").write_text(content, encoding="utf-8")
 
 
-def _make_tracking_state(base_path: Path):
-    """Return (state, counter) where state.dependency_map_service.cidx_meta_read_path
+def _make_tracking_service(base_path: Path):
+    """Return (service, counter) where service.cidx_meta_read_path
     returns base_path and increments counter on every access."""
     counter = {"count": 0}
 
@@ -173,32 +175,25 @@ def _make_tracking_state(base_path: Path):
             counter["count"] += 1
             return base_path
 
-    state = MagicMock()
-    state.dependency_map_service = _TrackingService()
-    return state, counter
+    service = _TrackingService()
+    return service, counter
 
 
-def _call_repo_domains_handler(params: dict, app_state: MagicMock) -> Any:
-    """Call depmap_get_repo_domains_handler with a patched app state."""
-    from code_indexer.server.mcp.handlers.depmap import depmap_get_repo_domains_handler
+def _call_repo_domains_handler(params: dict, service: Any) -> Any:
+    """Call depmap_get_repo_domains_handler with the dependency map started."""
+    from cidx_depmap.server.mcp.handlers import depmap_get_repo_domains_handler
 
-    with patch(
-        "code_indexer.server.mcp.handlers.depmap._utils.app_module.app.state",
-        app_state,
-    ):
+    with depmap_started(service, _admin_app_state()):
         return depmap_get_repo_domains_handler(params, _make_user())
 
 
-def _call_domain_summary_handler(params: dict, app_state: MagicMock) -> Any:
-    """Call depmap_get_domain_summary_handler with a patched app state."""
-    from code_indexer.server.mcp.handlers.depmap import (
+def _call_domain_summary_handler(params: dict, service: Any) -> Any:
+    """Call depmap_get_domain_summary_handler with the dependency map started."""
+    from cidx_depmap.server.mcp.handlers import (
         depmap_get_domain_summary_handler,
     )
 
-    with patch(
-        "code_indexer.server.mcp.handlers.depmap._utils.app_module.app.state",
-        app_state,
-    ):
+    with depmap_started(service, _admin_app_state()):
         return depmap_get_domain_summary_handler(params, _make_user())
 
 
@@ -218,7 +213,7 @@ def test_get_repo_domains_handler_returns_success_shape(tmp_path: Path) -> None:
     _write_domain_md_s2(dep_map_dir, "dom-a", "my-repo", "Core service")
 
     result = _call_repo_domains_handler(
-        {"repo_name": "my-repo"}, _make_app_state(tmp_path)
+        {"repo_name": "my-repo"}, _running_service(tmp_path)
     )
     data = _parse_response(result)
 
@@ -235,7 +230,7 @@ def test_get_repo_domains_handler_missing_path_returns_success_false(
 ) -> None:
     """When dep_map_path does not exist, handler returns success=false with error."""
     result = _call_repo_domains_handler(
-        {"repo_name": "any-repo"}, _make_app_state(tmp_path / "no-such-dir")
+        {"repo_name": "any-repo"}, _running_service(tmp_path / "no-such-dir")
     )
     data = _parse_response(result)
 
@@ -251,9 +246,9 @@ def test_get_repo_domains_handler_reads_path_fresh_each_call(tmp_path: Path) -> 
     dep_map_dir.mkdir()
     _write_domains_json_s2(dep_map_dir, [])
 
-    state, counter = _make_tracking_state(tmp_path)
-    _call_repo_domains_handler({"repo_name": "x"}, state)
-    _call_repo_domains_handler({"repo_name": "x"}, state)
+    service, counter = _make_tracking_service(tmp_path)
+    _call_repo_domains_handler({"repo_name": "x"}, service)
+    _call_repo_domains_handler({"repo_name": "x"}, service)
 
     assert counter["count"] == 2, (
         f"Expected cidx_meta_read_path accessed once per call (total 2), got {counter['count']}"
@@ -290,7 +285,7 @@ def test_get_domain_summary_handler_returns_success_shape(tmp_path: Path) -> Non
     _write_domain_md_s2(dep_map_dir, "my-domain", "repo-x", "Core service")
 
     result = _call_domain_summary_handler(
-        {"domain_name": "my-domain"}, _make_app_state(tmp_path)
+        {"domain_name": "my-domain"}, _running_service(tmp_path)
     )
     data = _parse_response(result)
 
@@ -310,7 +305,7 @@ def test_get_domain_summary_handler_missing_path_returns_success_false(
 ) -> None:
     """When dep_map_path does not exist, handler returns success=false with error."""
     result = _call_domain_summary_handler(
-        {"domain_name": "any-domain"}, _make_app_state(tmp_path / "no-such-dir")
+        {"domain_name": "any-domain"}, _running_service(tmp_path / "no-such-dir")
     )
     data = _parse_response(result)
 
@@ -326,9 +321,9 @@ def test_get_domain_summary_handler_reads_path_fresh_each_call(tmp_path: Path) -
     dep_map_dir.mkdir()
     _write_domains_json_s2(dep_map_dir, [])
 
-    state, counter = _make_tracking_state(tmp_path)
-    _call_domain_summary_handler({"domain_name": "x"}, state)
-    _call_domain_summary_handler({"domain_name": "x"}, state)
+    service, counter = _make_tracking_service(tmp_path)
+    _call_domain_summary_handler({"domain_name": "x"}, service)
+    _call_domain_summary_handler({"domain_name": "x"}, service)
 
     assert counter["count"] == 2, (
         f"Expected cidx_meta_read_path accessed once per call (total 2), got {counter['count']}"
@@ -349,14 +344,11 @@ def test_get_domain_summary_handler_registered_in_registry() -> None:
 import pytest as _pytest  # noqa: E402
 
 
-def _call_stale_domains_handler(params: dict, app_state: MagicMock) -> Any:
-    """Call depmap_get_stale_domains_handler with a patched app state."""
-    from code_indexer.server.mcp.handlers.depmap import depmap_get_stale_domains_handler
+def _call_stale_domains_handler(params: dict, service: Any) -> Any:
+    """Call depmap_get_stale_domains_handler with the dependency map started."""
+    from cidx_depmap.server.mcp.handlers import depmap_get_stale_domains_handler
 
-    with patch(
-        "code_indexer.server.mcp.handlers.depmap._utils.app_module.app.state",
-        app_state,
-    ):
+    with depmap_started(service, _admin_app_state()):
         return depmap_get_stale_domains_handler(params, _make_user())
 
 
@@ -374,7 +366,7 @@ def test_get_stale_domains_handler_rejects_negative_threshold(
 ) -> None:
     """Handler returns success=false with error message when days_threshold is negative."""
     result = _call_stale_domains_handler(
-        {"days_threshold": -1}, _make_app_state(stale_domains_dep_map)
+        {"days_threshold": -1}, _running_service(stale_domains_dep_map)
     )
     data = _parse_response(result)
 
@@ -389,7 +381,7 @@ def test_get_stale_domains_handler_rejects_non_integer_threshold(
 ) -> None:
     """Handler returns success=false with error message when days_threshold is not an integer."""
     result = _call_stale_domains_handler(
-        {"days_threshold": "thirty"}, _make_app_state(stale_domains_dep_map)
+        {"days_threshold": "thirty"}, _running_service(stale_domains_dep_map)
     )
     data = _parse_response(result)
 
@@ -427,7 +419,7 @@ def test_get_stale_domains_handler_rejects_doc_documented_non_integer_types(
       (b) doc drift (doc promises more than code delivers).
     """
     result = _call_stale_domains_handler(
-        {"days_threshold": bad_value}, _make_app_state(stale_domains_dep_map)
+        {"days_threshold": bad_value}, _running_service(stale_domains_dep_map)
     )
     data = _parse_response(result)
 
@@ -443,9 +435,9 @@ def test_get_stale_domains_handler_reads_path_fresh_each_call(
     stale_domains_dep_map: Path,
 ) -> None:
     """cidx_meta_read_path is accessed once per handler invocation (no caching)."""
-    state, counter = _make_tracking_state(stale_domains_dep_map)
-    _call_stale_domains_handler({"days_threshold": 0}, state)
-    _call_stale_domains_handler({"days_threshold": 0}, state)
+    service, counter = _make_tracking_service(stale_domains_dep_map)
+    _call_stale_domains_handler({"days_threshold": 0}, service)
+    _call_stale_domains_handler({"days_threshold": 0}, service)
 
     assert counter["count"] == 2, (
         f"Expected cidx_meta_read_path accessed once per call (total 2), got {counter['count']}"
@@ -464,20 +456,17 @@ def test_get_stale_domains_handler_registered_in_registry() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _call_cross_domain_graph_handler(params: dict, app_state: MagicMock) -> Any:
-    """Call depmap_get_cross_domain_graph_handler with a patched app state.
+def _call_cross_domain_graph_handler(params: dict, service: Any) -> Any:
+    """Call depmap_get_cross_domain_graph_handler with the dependency map started.
 
     Pattern is identical to _call_stale_domains_handler (line ~341) and all
     other handler call helpers in this file.
     """
-    from code_indexer.server.mcp.handlers.depmap import (
+    from cidx_depmap.server.mcp.handlers import (
         depmap_get_cross_domain_graph_handler,
     )
 
-    with patch(
-        "code_indexer.server.mcp.handlers.depmap._utils.app_module.app.state",
-        app_state,
-    ):
+    with depmap_started(service, _admin_app_state()):
         return depmap_get_cross_domain_graph_handler(params, _make_user())
 
 
@@ -536,7 +525,7 @@ def test_get_cross_domain_graph_handler_returns_success_shape(tmp_path: Path) ->
     dep_map_dir.mkdir()
     _write_cross_domain_fixture(dep_map_dir)
 
-    result = _call_cross_domain_graph_handler({}, _make_app_state(tmp_path))
+    result = _call_cross_domain_graph_handler({}, _running_service(tmp_path))
     data = _parse_response(result)
 
     assert data["success"] is True
@@ -555,7 +544,7 @@ def test_get_cross_domain_graph_handler_missing_path_returns_success_false(
 ) -> None:
     """When dep_map_path does not exist, handler returns success=false with error."""
     result = _call_cross_domain_graph_handler(
-        {}, _make_app_state(tmp_path / "no-such-dir")
+        {}, _running_service(tmp_path / "no-such-dir")
     )
     data = _parse_response(result)
 
@@ -580,7 +569,7 @@ def test_get_cross_domain_graph_handler_propagates_anomalies(tmp_path: Path) -> 
         encoding="utf-8",
     )
 
-    result = _call_cross_domain_graph_handler({}, _make_app_state(tmp_path))
+    result = _call_cross_domain_graph_handler({}, _running_service(tmp_path))
     data = _parse_response(result)
 
     assert data["success"] is True
@@ -595,7 +584,7 @@ def test_get_cross_domain_graph_handler_response_is_json_serializable(
     dep_map_dir.mkdir()
     _write_cross_domain_fixture(dep_map_dir)
 
-    result = _call_cross_domain_graph_handler({}, _make_app_state(tmp_path))
+    result = _call_cross_domain_graph_handler({}, _running_service(tmp_path))
     data = _parse_response(result)
 
     # json.dumps raises TypeError for non-serializable types (e.g. datetime, set)
@@ -608,3 +597,11 @@ def test_get_cross_domain_graph_handler_registered_in_registry() -> None:
     from code_indexer.server.mcp.handlers import HANDLER_REGISTRY
 
     assert "depmap_get_cross_domain_graph" in HANDLER_REGISTRY
+
+
+@_pytest.fixture(autouse=True)
+def _depmap_tools():
+    """The dependency map's MCP tools are the cidx-depmap feature's (modular
+    phase 4g): registered as on a server with "depmap" enabled."""
+    with depmap_tools_installed():
+        yield

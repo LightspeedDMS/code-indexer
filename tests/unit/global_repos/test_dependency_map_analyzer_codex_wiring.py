@@ -25,7 +25,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from code_indexer.global_repos.dependency_map_analyzer import DependencyMapAnalyzer
+from cidx_depmap.server.dependency_map_analyzer import DependencyMapAnalyzer
 from code_indexer.server.services.mcp_self_registration_service import (
     MCPSelfRegistrationService,
 )
@@ -123,7 +123,7 @@ def _build_dispatcher_with_codex_enabled(tmp_path: Path, real_mcp_singleton):
 
     with (
         patch(
-            "code_indexer.global_repos.dependency_map_analyzer.get_config_service"
+            "cidx_depmap.server.dependency_map_analyzer.get_config_service"
         ) as mock_get_cfg_dma,
         patch.dict("os.environ", {"CODEX_HOME": _FAKE_CODEX_HOME}),
     ):
@@ -208,7 +208,7 @@ class TestPass2DispatcherCodexAuthHeaderProviderAbsentWhenDisabled:
         config = _make_mock_config(codex_enabled=False)
 
         with patch(
-            "code_indexer.global_repos.dependency_map_analyzer.get_config_service"
+            "cidx_depmap.server.dependency_map_analyzer.get_config_service"
         ) as mock_get_cfg:
             mock_svc = MagicMock()
             mock_svc.get_config.return_value = config
@@ -235,7 +235,7 @@ class TestPass2DispatcherCodexAuthHeaderProviderAbsentWhenDisabled:
 
         with (
             patch(
-                "code_indexer.global_repos.dependency_map_analyzer.get_config_service"
+                "cidx_depmap.server.dependency_map_analyzer.get_config_service"
             ) as mock_get_cfg,
             patch.dict("os.environ", env_without_codex_home, clear=True),
         ):

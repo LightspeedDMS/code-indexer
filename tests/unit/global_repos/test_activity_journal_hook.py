@@ -29,9 +29,9 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
-from code_indexer.global_repos.dependency_map_analyzer import DependencyMapAnalyzer
+from cidx_depmap.server.dependency_map_analyzer import DependencyMapAnalyzer
 
-_SUBPROCESS_PATH = "code_indexer.global_repos.dependency_map_analyzer.subprocess.run"
+_SUBPROCESS_PATH = "cidx_depmap.server.dependency_map_analyzer.subprocess.run"
 
 
 # ---------------------------------------------------------------------------

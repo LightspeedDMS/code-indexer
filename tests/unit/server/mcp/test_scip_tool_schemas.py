@@ -7,9 +7,20 @@ Validates that all 7 SCIP tools have repository_alias parameter exposed
 in their inputSchema with correct type definition.
 """
 
+from typing import Iterator
+
 import pytest
 
 from code_indexer.server.mcp.tools import TOOL_REGISTRY
+from tests.unit.server._scip_feature import scip_tools_installed
+
+
+@pytest.fixture(autouse=True)
+def _scip_tools() -> Iterator[None]:
+    """The SCIP tools are the cidx-scip feature's (modular phase 4d): in the
+    registry as an app built with "scip" enabled has them."""
+    with scip_tools_installed():
+        yield
 
 
 # All 7 SCIP tools that need repository_alias parameter
@@ -174,7 +185,7 @@ class TestSCIPCallchainMaxDepthSchema:
     """
 
     def test_max_depth_default_is_3(self):
-        from code_indexer.server.mcp.handlers.scip import _MAX_CALLCHAIN_DEPTH
+        from cidx_scip.server.mcp.scip import _MAX_CALLCHAIN_DEPTH
 
         max_depth_schema = TOOL_REGISTRY["scip_callchain"]["inputSchema"]["properties"][
             "max_depth"
@@ -186,7 +197,7 @@ class TestSCIPCallchainMaxDepthSchema:
         )
 
     def test_max_depth_description_documents_cap_of_3(self):
-        from code_indexer.server.mcp.handlers.scip import _MAX_CALLCHAIN_DEPTH
+        from cidx_scip.server.mcp.scip import _MAX_CALLCHAIN_DEPTH
 
         max_depth_schema = TOOL_REGISTRY["scip_callchain"]["inputSchema"]["properties"][
             "max_depth"
@@ -210,7 +221,7 @@ class TestSCIPCallchainMaxDepthSchema:
         rejected at runtime by the handler. Mirrors the minimum/maximum
         pattern already used by search/search_code.md's edit_distance field.
         """
-        from code_indexer.server.mcp.handlers.scip import _MAX_CALLCHAIN_DEPTH
+        from cidx_scip.server.mcp.scip import _MAX_CALLCHAIN_DEPTH
 
         max_depth_schema = TOOL_REGISTRY["scip_callchain"]["inputSchema"]["properties"][
             "max_depth"

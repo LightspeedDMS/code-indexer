@@ -39,7 +39,9 @@ def _parse_response(result: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _import_handler():
-    from code_indexer.server.mcp.handlers.xray import handle_cidx_fetch_cached_payload
+    from code_indexer.server.mcp.handlers.cached_payload import (
+        handle_cidx_fetch_cached_payload,
+    )
 
     return handle_cidx_fetch_cached_payload
 
@@ -77,7 +79,7 @@ class TestCidxFetchCachedPayloadValidHandle:
         params = {"cache_handle": "abc123-uuid-handle"}
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._utils.app_module", mock_app_module
+            "code_indexer.server.mcp.handlers._utils.app_module", mock_app_module
         ):
             handler = _import_handler()
             result = handler(params, user)
@@ -108,7 +110,7 @@ class TestCidxFetchCachedPayloadValidHandle:
         params = {"cache_handle": "my-handle-xyz"}
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._utils.app_module", mock_app_module
+            "code_indexer.server.mcp.handlers._utils.app_module", mock_app_module
         ):
             handler = _import_handler()
             handler(params, user)
@@ -148,7 +150,7 @@ class TestCidxFetchCachedPayloadInvalidHandle:
         params = {"cache_handle": "expired-handle-xyz"}
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._utils.app_module", mock_app_module
+            "code_indexer.server.mcp.handlers._utils.app_module", mock_app_module
         ):
             handler = _import_handler()
             result = handler(params, user)
@@ -167,7 +169,7 @@ class TestCidxFetchCachedPayloadInvalidHandle:
         params: Dict[str, Any] = {}  # no cache_handle
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._utils.app_module", mock_app_module
+            "code_indexer.server.mcp.handlers._utils.app_module", mock_app_module
         ):
             handler = _import_handler()
             result = handler(params, user)
@@ -241,7 +243,7 @@ class TestXrayTruncationMessageNamesTool:
 
     def test_truncation_message_names_cidx_fetch_cached_payload(self, tmp_path):
         """When result is truncated, cache_handle message references cidx_fetch_cached_payload."""
-        from code_indexer.server.mcp.handlers.xray import _truncate_xray_result
+        from cidx_xray.server.mcp.xray import _truncate_xray_result
 
         # Build a large enough payload to trigger truncation
         large_matches = [
@@ -270,7 +272,7 @@ class TestXrayTruncationMessageNamesTool:
             mock_app_module.app = mock_app
 
             with patch(
-                "code_indexer.server.mcp.handlers.xray._utils.app_module",
+                "code_indexer.server.mcp.handlers._utils.app_module",
                 mock_app_module,
             ):
                 truncated = _truncate_xray_result(result)
@@ -286,7 +288,7 @@ class TestXrayTruncationMessageNamesTool:
 
     def test_truncation_message_included_in_truncated_result(self, tmp_path):
         """Truncated result includes a fetch_tool_hint field naming cidx_fetch_cached_payload."""
-        from code_indexer.server.mcp.handlers.xray import _truncate_xray_result
+        from cidx_xray.server.mcp.xray import _truncate_xray_result
 
         large_matches = [
             {"file_path": f"f{i}.py", "code_snippet": "y" * 200} for i in range(15)
@@ -308,7 +310,7 @@ class TestXrayTruncationMessageNamesTool:
             mock_app_module.app = mock_app
 
             with patch(
-                "code_indexer.server.mcp.handlers.xray._utils.app_module",
+                "code_indexer.server.mcp.handlers._utils.app_module",
                 mock_app_module,
             ):
                 truncated = _truncate_xray_result(result)

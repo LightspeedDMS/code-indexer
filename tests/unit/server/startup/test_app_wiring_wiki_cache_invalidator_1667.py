@@ -1,5 +1,7 @@
 """
-Tests for Bug #1667 fix: wire the orphaned WikiCacheInvalidator singleton.
+Tests for Bug #1667 fix: wire the orphaned WikiCacheInvalidator singleton
+(since modular phase 4e by the cidx-wiki feature's on_startup, through the
+core's repository_events).
 
 Before this fix, `wiki_cache_invalidator.wiki_cache` was never set anywhere
 in production. Three live call sites (mcp/handlers/git_write.py,
@@ -24,32 +26,70 @@ actually deletes cache rows once wired.
 
 import inspect
 import sqlite3
+from typing import Any, cast
+from unittest.mock import patch
 
+from code_indexer.server.features import repository_events
+from code_indexer.server.features.repository_events import (
+    CoreRepositoryEventsCapability,
+)
 from code_indexer.server.startup import app_wiring
-from code_indexer.server.wiki.wiki_cache import WikiCache
-from code_indexer.server.wiki.wiki_cache_invalidator import WikiCacheInvalidator
+from cidx_wiki.server.wiki_cache import WikiCache
+from cidx_wiki.server.wiki_cache_invalidator import WikiCacheInvalidator
 
 
-class TestAppWiringWiresWikiCacheInvalidator:
-    """Structural verification that create_fastapi_app wires the invalidator."""
+class TestFeatureStartupWiresWikiCacheInvalidator:
+    """The wiki feature's on_startup subscribes the invalidator to the core's
+    repository_events (modular phase 4e; formerly app_wiring set its cache):
+    a file or git write the core announces drops the shared cache rows."""
 
-    def test_app_wiring_source_references_wiki_cache_invalidator(self) -> None:
+    def _started(self, cache: WikiCache) -> Any:
+        from cidx_wiki.server import lifecycle
+
+        class _Context:
+            def has_capability(self, name: str) -> bool:
+                return name == "repository_events"
+
+            def capability(self, name: str) -> object:
+                return CoreRepositoryEventsCapability()
+
+        started = lifecycle.WikiRuntime()
+        with patch.object(lifecycle, "_shared_wiki_cache", return_value=cache):
+            started.start(cast(Any, _Context()))
+        return started
+
+    def test_startup_subscribes_and_shutdown_unsubscribes(self, tmp_path) -> None:
+        before = repository_events.subscriber_count()
+        started = self._started(WikiCache(str(tmp_path / "w.db")))
+        try:
+            assert repository_events.subscriber_count() == before + 1
+        finally:
+            started.stop()
+        assert repository_events.subscriber_count() == before
+
+    def test_announced_markdown_change_drops_the_shared_rows(self, tmp_path) -> None:
+        db_path = str(tmp_path / "w.db")
+        cache = WikiCache(db_path)
+        cache.ensure_tables()
+        cache.put_sidebar("example-repo", [{"name": "x"}], tmp_path)
+        started = self._started(cache)
+        try:
+            with patch(
+                "cidx_wiki.server.lifecycle._shared_wiki_cache", return_value=cache
+            ):
+                repository_events.publish_content_changed("example-repo", "a.md")
+        finally:
+            started.stop()
+        with sqlite3.connect(db_path) as conn:
+            rows = conn.execute(
+                "SELECT COUNT(*) FROM wiki_sidebar_cache WHERE repo_alias=?",
+                ("example-repo",),
+            ).fetchone()
+        assert rows[0] == 0
+
+    def test_app_wiring_no_longer_names_the_wiki(self) -> None:
         source = inspect.getsource(app_wiring)
-        assert "wiki_cache_invalidator" in source
-
-    def test_app_wiring_calls_set_wiki_cache(self) -> None:
-        source = inspect.getsource(app_wiring.create_fastapi_app)
-        assert "wiki_cache_invalidator.set_wiki_cache(" in source
-
-    def test_wiring_falls_back_to_none_backend_when_registry_absent(self) -> None:
-        """Solo/SQLite mode may have backend_registry=None -- the wiring must
-        guard against that and pass storage_backend=None (WikiCache's own
-        SQLite fallback), never crash on a None.wiki_cache attribute access."""
-        source = inspect.getsource(app_wiring.create_fastapi_app)
-        assert (
-            "backend_registry.wiki_cache if backend_registry is not None else None"
-            in source
-        )
+        assert "wiki_cache_invalidator" not in source
 
 
 class TestWikiCacheInvalidatorRealRoundTrip:

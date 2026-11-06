@@ -23,7 +23,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import List, Tuple
 
-from code_indexer.server.services.dep_map_repair_executor import DryRunReport
+from cidx_depmap.server.dep_map_repair_executor import DryRunReport
 
 _REQUIRED_KEYS = {
     "mode",
@@ -136,7 +136,7 @@ def test_verdict_counts_use_NA_not_underscore() -> None:
 
     Regression guard for schema vocabulary drift identified in Codex cycle-2 review.
     """
-    from code_indexer.server.services.dep_map_repair_executor import (
+    from cidx_depmap.server.dep_map_repair_executor import (
         DepMapRepairExecutor,
     )
 
@@ -162,13 +162,13 @@ def test_would_be_writes_operation_label_is_remapped_outgoing_row(
     'remapped_outgoing_row' as the GARBAGE_DOMAIN_REJECTED operation label.
     """
     import json
-    from code_indexer.server.services.dep_map_repair_executor import (
+    from cidx_depmap.server.dep_map_repair_executor import (
         DepMapRepairExecutor,
     )
-    from code_indexer.server.services.dep_map_health_detector import (
+    from cidx_depmap.server.dep_map_health_detector import (
         DepMapHealthDetector,
     )
-    from code_indexer.server.services.dep_map_index_regenerator import IndexRegenerator
+    from cidx_depmap.server.dep_map_index_regenerator import IndexRegenerator
 
     output_dir = tmp_path / "dependency-map"
     output_dir.mkdir()

@@ -27,12 +27,13 @@ from unittest.mock import patch
 import pytest
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
+from tests.unit.server._depmap_feature import depmap_service_installed
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-_ROUTES = "code_indexer.server.web.dependency_map_routes"
+_ROUTES = "cidx_depmap.server.web.routes"
 _TRIGGER_ENDPOINT = "/admin/dependency-map/trigger"
 _STATUS_ENDPOINT = "/admin/partials/depmap-job-status"
 
@@ -107,7 +108,7 @@ class FakeDepMapServiceRaisesOnRun:
     """Dep-map service that raises AnalysisAlreadyRunningError from run_*."""
 
     def __init__(self) -> None:
-        from code_indexer.server.services.dependency_map_service import (
+        from cidx_depmap.server.dependency_map_service import (
             AnalysisAlreadyRunningError,
         )
 
@@ -257,6 +258,9 @@ class FakeDashboardService:
 @pytest.fixture(scope="module")
 def app():
     from code_indexer.server.app import app as _app
+    from tests.unit.server._depmap_feature import ensure_depmap_routes
+
+    ensure_depmap_routes(_app)
 
     return _app
 
@@ -264,30 +268,24 @@ def app():
 @pytest.fixture(scope="module")
 def client(app):
     """TestClient with admin session cookie pre-set."""
-    from code_indexer.server.web.dependency_map_routes import dependency_map_router
+    from cidx_depmap.server.web.routes import dependency_map_router
 
     _bypass_elevation(app, dependency_map_router)
 
     # Bug #1675: `with TestClient(app)` runs the REAL FastAPI lifespan, which
-    # wires app.state.dependency_map_service to a genuine DependencyMapService
-    # bound to this machine's actual golden-repos dir -- the SAME directory
-    # the live local cidx-server.service continuously appends real activity
-    # journal entries to. Lifespan shutdown stops the scheduler thread but
-    # never resets the app.state attribute, so the stale real service (and
-    # its real, ever-growing _activity.md) leaks into every test file that
-    # runs afterward in the same pytest session and reads
-    # app.state.dependency_map_service (e.g. test_depmap_activity_journal_
-    # endpoint.py's "no active journal" tests). Save/restore the pre-existing
-    # value so this fixture never permanently overwrites shared app state.
+    # may start a genuine DependencyMapService bound to this machine's actual
+    # golden-repos dir (the SAME directory the live local cidx-server.service
+    # appends real activity journal entries to) and install it in the
+    # feature's slot (``runtime.SERVICE``). Lifespan shutdown empties the slot;
+    # the fixture also brings back the slot's previous content so this
+    # module-scoped fixture never leaks a service into later tests.
     #
     # NOTE (Bug #1694): this `client` fixture is MODULE-scoped, so its setup
-    # (and the `with TestClient(app)` lifespan entry above) runs BEFORE
-    # conftest.py's tree-wide `_snapshot_restore_shared_app_state` autouse
-    # fixture takes its snapshot for the first test in this module -- that
-    # fixture's snapshot/restore does NOT cover this leak. This per-file
-    # save/restore patch is still required and is NOT redundant with #1694.
-    original_dependency_map_service = getattr(app.state, "dependency_map_service", None)
-    try:
+    # runs BEFORE conftest.py's tree-wide `_snapshot_restore_shared_app_state`
+    # autouse fixture takes its snapshot for the first test in this module --
+    # that fixture's snapshot/restore does NOT cover this leak (and it covers
+    # app.state only, not the feature's slot).
+    with depmap_service_installed(None):
         with TestClient(app) as tc:
             login_page = tc.get("/login")
             assert login_page.status_code == _HTTP_OK
@@ -306,8 +304,6 @@ def client(app):
             assert resp.status_code == _HTTP_REDIRECT
             tc.cookies.set("session", resp.cookies["session"])
             yield tc
-    finally:
-        app.state.dependency_map_service = original_dependency_map_service
 
 
 # ---------------------------------------------------------------------------
@@ -324,7 +320,7 @@ class TestFilesystemCacheBackendWiredInRoute:
         from code_indexer.server.storage.filesystem_backends import (
             FilesystemDashboardCacheBackend,
         )
-        from code_indexer.server.web.dependency_map_routes import (
+        from cidx_depmap.server.web.routes import (
             _get_dashboard_cache_backend,
         )
 
@@ -341,7 +337,7 @@ class TestFilesystemCacheBackendWiredInRoute:
     def test_cache_backend_returns_none_when_dep_map_dir_is_none(self) -> None:
         """When _get_dep_map_output_dir returns None, _get_dashboard_cache_backend
         returns None (no crash)."""
-        from code_indexer.server.web.dependency_map_routes import (
+        from cidx_depmap.server.web.routes import (
             _get_dashboard_cache_backend,
         )
 
@@ -363,7 +359,7 @@ class TestTriggerDepMap409WhenSentinelHeld:
         """When dep_map_service.is_available() returns False, POST returns 409."""
         svc = FakeDepMapService(available=False)
 
-        with patch(f"{_ROUTES}._get_dep_map_service_from_state", return_value=svc):
+        with depmap_service_installed(svc):
             resp = client.post(
                 _TRIGGER_ENDPOINT,
                 data={"mode": "full"},
@@ -379,7 +375,7 @@ class TestTriggerDepMap409WhenSentinelHeld:
         """
         svc = FakeDepMapService(available=False)
 
-        with patch(f"{_ROUTES}._get_dep_map_service_from_state", return_value=svc):
+        with depmap_service_installed(svc):
             resp = client.post(
                 _TRIGGER_ENDPOINT,
                 data={"mode": "full"},
@@ -394,7 +390,7 @@ class TestTriggerDepMap409WhenSentinelHeld:
         """When dep_map_service.is_available() returns True, POST returns 202."""
         svc = FakeDepMapService(available=True)
 
-        with patch(f"{_ROUTES}._get_dep_map_service_from_state", return_value=svc):
+        with depmap_service_installed(svc):
             resp = client.post(
                 _TRIGGER_ENDPOINT,
                 data={"mode": "full"},
@@ -406,7 +402,7 @@ class TestTriggerDepMap409WhenSentinelHeld:
         """When 409 pre-flight fires, run_full_analysis is never called."""
         svc = FakeDepMapService(available=False)
 
-        with patch(f"{_ROUTES}._get_dep_map_service_from_state", return_value=svc):
+        with depmap_service_installed(svc):
             client.post(_TRIGGER_ENDPOINT, data={"mode": "full"})
 
         assert not svc.full_called
@@ -433,7 +429,7 @@ class TestTriggerDepMapExceptionNarrowing:
 
     def test_analysis_already_running_error_is_importable(self) -> None:
         """AnalysisAlreadyRunningError must be importable (production code uses it)."""
-        from code_indexer.server.services.dependency_map_service import (
+        from cidx_depmap.server.dependency_map_service import (
             AnalysisAlreadyRunningError,
         )
 
@@ -478,7 +474,7 @@ class TestTriggerDepMapExceptionNarrowing:
                     info_logged.append(record.getMessage())
 
         handler = CapturingHandler()
-        logger = logging.getLogger("code_indexer.server.web.dependency_map_routes")
+        logger = logging.getLogger("cidx_depmap.server.web.routes")
         logger.addHandler(handler)
         try:
             thread_done = threading.Event()
@@ -496,7 +492,7 @@ class TestTriggerDepMapExceptionNarrowing:
                 self_thread._target = wrapper
                 original_thread_start(self_thread)
 
-            with patch(f"{_ROUTES}._get_dep_map_service_from_state", return_value=svc):
+            with depmap_service_installed(svc):
                 with patch.object(threading.Thread, "start", patched_start):
                     client.post(_TRIGGER_ENDPOINT, data={"mode": "full"})
                     thread_done.wait(timeout=5)
@@ -530,7 +526,7 @@ class TestSubmitDashboardJobRepoAlias:
         from code_indexer.server.storage.filesystem_backends import (
             FilesystemDashboardCacheBackend,
         )
-        from code_indexer.server.web.dependency_map_routes import _submit_dashboard_job
+        from cidx_depmap.server.web.routes import _submit_dashboard_job
 
         cache_dir = tmp_path / "dep-map"
         cache_dir.mkdir()
@@ -749,7 +745,7 @@ class TestMcpTriggerDependencyAnalysisSentinel:
         """
         from datetime import datetime, timezone
 
-        from code_indexer.server.mcp.handlers.admin import (
+        from cidx_depmap.server.mcp.trigger import (
             handle_trigger_dependency_analysis,
         )
         from code_indexer.server.auth.user_manager import User
@@ -765,9 +761,6 @@ class TestMcpTriggerDependencyAnalysisSentinel:
         mock_config_service = MagicMock()
         mock_config_service.get_config.return_value = mock_config
 
-        mock_app_state = MagicMock()
-        mock_app_state.dependency_map_service = svc
-
         # Build a minimal user with all required fields
         user = User(
             username="admin",
@@ -779,10 +772,7 @@ class TestMcpTriggerDependencyAnalysisSentinel:
 
         with (
             patch(_CONFIG_SVC, return_value=mock_config_service),
-            patch(
-                f"{_MCP_HANDLER}._utils.app_module.app.state",
-                mock_app_state,
-            ),
+            depmap_service_installed(svc),
         ):
             try:
                 result = handle_trigger_dependency_analysis({"mode": "full"}, user)
@@ -809,7 +799,7 @@ class TestMcpTriggerDependencyAnalysisSentinel:
         """
         from datetime import datetime, timezone
 
-        from code_indexer.server.mcp.handlers.admin import (
+        from cidx_depmap.server.mcp.trigger import (
             handle_trigger_dependency_analysis,
         )
         from code_indexer.server.auth.user_manager import User
@@ -826,9 +816,6 @@ class TestMcpTriggerDependencyAnalysisSentinel:
         mock_config_svc = MagicMock()
         mock_config_svc.get_config.return_value = mock_server_config
 
-        mock_app_state = MagicMock()
-        mock_app_state.dependency_map_service = svc
-
         # User requires password_hash and created_at
         user = User(
             username="admin",
@@ -843,10 +830,7 @@ class TestMcpTriggerDependencyAnalysisSentinel:
 
         with (
             patch(_CONFIG_SVC, return_value=mock_config_svc),
-            patch(
-                f"{_MCP_HANDLER}._utils.app_module.app.state",
-                mock_app_state,
-            ),
+            depmap_service_installed(svc),
         ):
             result = handle_trigger_dependency_analysis({"mode": "full"}, user)
 

@@ -321,7 +321,7 @@ def test_xray_explore_json_output(tmp_path: Path):
     )
     runner = CliRunner()
     with patch(
-        "code_indexer.xray.rust_backend.RustNativeBackend.run_batch",
+        "cidx_xray.rust_backend.RustNativeBackend.run_batch",
         side_effect=_mock_run_batch,
     ):
         result = invoke_xray_explore(
@@ -420,7 +420,7 @@ def test_xray_explore_ast_renderer_hierarchical(tmp_path: Path):
     )
     runner = CliRunner()
     with patch(
-        "code_indexer.xray.rust_backend.RustNativeBackend.run_batch",
+        "cidx_xray.rust_backend.RustNativeBackend.run_batch",
         side_effect=_mock_run_batch,
     ):
         result = invoke_xray_explore(
@@ -451,7 +451,7 @@ def test_xray_explore_ast_renderer_shows_truncated_sentinel(tmp_path: Path):
     )
     runner = CliRunner()
     with patch(
-        "code_indexer.xray.rust_backend.RustNativeBackend.run_batch",
+        "cidx_xray.rust_backend.RustNativeBackend.run_batch",
         side_effect=_mock_run_batch,
     ):
         result = invoke_xray_explore(

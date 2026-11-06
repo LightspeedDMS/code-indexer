@@ -40,6 +40,7 @@ from code_indexer.server.routers.inline_query import register_query_routes
 from code_indexer.server.services import config_service as cfg_service_module
 from code_indexer.server.services import memory_governor as mg
 from code_indexer.server.services.config_service import ConfigService
+from code_indexer.server.utils.config_manager import BackgroundJobsConfig, ServerConfig
 
 _WATERMARK_PCT = 80.0
 _RED_MIN_DWELL_SECONDS = 17.3
@@ -73,35 +74,35 @@ class _StubGovernor:
         self.increment_calls += 1
 
 
-class _StubBackgroundJobsConfig:
-    job_admission_memory_max_used_pct = _WATERMARK_PCT
-    # B1 fix (kill switch, code review remediation): check_query_admission()
-    # now reads this flag before consulting the governor at all. Must be
-    # True here so this stub keeps behaving like the gate enabled by
-    # default in production -- omitting it would raise AttributeError on
-    # the real check_query_admission() call, which its own outer
-    # try/except turns into an unintended fail-open (allowed=True) on
-    # every DENIED test in this file.
-    job_admission_memory_gate_enabled = True
-
-
-class _StubServerConfig:
-    background_jobs_config = _StubBackgroundJobsConfig()
+def _stub_server_config() -> ServerConfig:
+    """A real ServerConfig with the admission gate enabled at the test
+    watermark. B1 fix (kill switch, code review remediation):
+    check_query_admission() reads job_admission_memory_gate_enabled before
+    consulting the governor at all; it must be True so the gate behaves as it
+    does by default in production -- otherwise check_query_admission()'s outer
+    try/except would turn every DENIED test here into a fail-open."""
+    return ServerConfig(
+        server_dir="/nonexistent-test-server-dir",
+        background_jobs_config=BackgroundJobsConfig(
+            job_admission_memory_max_used_pct=_WATERMARK_PCT,
+            job_admission_memory_gate_enabled=True,
+        ),
+    )
 
 
 class _StubConfigService(ConfigService):
-    """Subclasses the real ConfigService (rather than a bare object +
-    `type: ignore`) so set_config_service()'s ConfigService-typed parameter
+    """Subclasses the real ConfigService (rather than a bare object) so set_config_service()'s ConfigService-typed parameter
     is satisfied without suppressing type checking. __init__ is
     deliberately NOT called (no filesystem/DB bootstrap needed) -- only
     get_config() is overridden, which is all check_query_admission() reads.
     """
 
-    def __init__(self) -> None:  # noqa: super-init-not-called -- see docstring
+    def __init__(self) -> None:
+        # Deliberately skips ConfigService.__init__ -- see the class docstring.
         pass
 
-    def get_config(self) -> _StubServerConfig:  # type: ignore[override]
-        return _StubServerConfig()
+    def get_config(self) -> ServerConfig:
+        return _stub_server_config()
 
 
 @pytest.fixture(autouse=True)

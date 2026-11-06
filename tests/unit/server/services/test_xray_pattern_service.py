@@ -86,7 +86,7 @@ def _make_cidx_meta(tmp_path: Path) -> Path:
 
 
 def _import_service():
-    from code_indexer.server.services.xray_pattern_service import XrayPatternService
+    from cidx_xray.server.pattern_service import XrayPatternService
 
     return XrayPatternService
 

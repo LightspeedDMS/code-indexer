@@ -116,7 +116,7 @@ def _make_large_result(n_matches: int = 20) -> Dict[str, Any]:
 
 
 def _import_helper():
-    from code_indexer.server.mcp.handlers.xray import _truncate_xray_result
+    from cidx_xray.server.mcp.xray import _truncate_xray_result
 
     return _truncate_xray_result
 

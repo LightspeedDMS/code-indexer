@@ -23,9 +23,10 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
 import pytest
+from fastapi.testclient import TestClient
 from pydantic import BaseModel, Field
 
-from code_indexer.server.wiki.routes import _reset_wiki_cache
+from cidx_wiki.server.routes import _reset_wiki_cache
 from tests.unit.server.query.query_repo_access_env import (
     ADMIN,
     GRANTED_REPO,
@@ -63,6 +64,15 @@ WIKI: Dict[str, Probe] = {
 BULK_SYNC_STATUS: Probe = ("GET", "/api/repos/sync-status", {}, 200)
 LISTING: Probe = ("GET", "/api/repos", {}, 200)
 STATUS_SUMMARY: Probe = ("GET", "/api/repos/status", {}, 200)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def wiki_mounted(client: TestClient) -> None:
+    """The wiki is the cidx-wiki feature (modular phase 4e): its routes are
+    mounted the way a server with "wiki" enabled mounts them."""
+    from tests.unit.server._wiki_feature import mount_wiki_routes
+
+    mount_wiki_routes(getattr(client, "app"))
 
 
 @pytest.fixture(autouse=True)

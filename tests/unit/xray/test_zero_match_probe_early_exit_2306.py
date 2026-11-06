@@ -11,7 +11,7 @@ _SMALL_READ_CEILING = 4096
 @pytest.fixture
 def engine():
     pytest.importorskip("tree_sitter_languages", reason="xray extras not installed")
-    from code_indexer.xray.search_engine import XRaySearchEngine
+    from cidx_xray.search_engine import XRaySearchEngine
 
     return XRaySearchEngine()
 

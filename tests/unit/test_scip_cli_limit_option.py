@@ -42,19 +42,19 @@ class TestDefinitionLimit:
             for i in range(5)
         ]
 
-        with patch("code_indexer.scip.query.SCIPQueryEngine") as mock_engine_cls:
+        with patch("cidx_scip.query.SCIPQueryEngine") as mock_engine_cls:
             mock_engine = Mock()
             mock_engine.find_definition.return_value = mock_results
             mock_engine_cls.return_value = mock_engine
 
-            with patch("code_indexer.scip.status.StatusTracker") as mock_tracker_cls:
+            with patch("cidx_scip.status.StatusTracker") as mock_tracker_cls:
                 mock_tracker = Mock()
                 mock_status = Mock()
                 mock_status.projects = {"test": "project"}
                 mock_tracker.load.return_value = mock_status
                 mock_tracker_cls.return_value = mock_tracker
 
-                from code_indexer.cli_scip import scip_definition
+                from cidx_scip.cli import scip_definition
 
                 runner = click.testing.CliRunner()
                 result = runner.invoke(
@@ -85,19 +85,19 @@ class TestDefinitionLimit:
             for i in range(10)
         ]
 
-        with patch("code_indexer.scip.query.SCIPQueryEngine") as mock_engine_cls:
+        with patch("cidx_scip.query.SCIPQueryEngine") as mock_engine_cls:
             mock_engine = Mock()
             mock_engine.find_definition.return_value = mock_results
             mock_engine_cls.return_value = mock_engine
 
-            with patch("code_indexer.scip.status.StatusTracker") as mock_tracker_cls:
+            with patch("cidx_scip.status.StatusTracker") as mock_tracker_cls:
                 mock_tracker = Mock()
                 mock_status = Mock()
                 mock_status.projects = {"test": "project"}
                 mock_tracker.load.return_value = mock_status
                 mock_tracker_cls.return_value = mock_tracker
 
-                from code_indexer.cli_scip import scip_definition
+                from cidx_scip.cli import scip_definition
 
                 runner = click.testing.CliRunner()
                 result = runner.invoke(
@@ -115,7 +115,7 @@ class TestDefinitionLimit:
 
     def test_definition_default_limit_is_zero(self, mock_scip_environment):
         """Test that definition command has default limit=0 (unlimited)."""
-        from code_indexer.cli_scip import scip_definition
+        from cidx_scip.cli import scip_definition
 
         # Check the option definition
         limit_option = [p for p in scip_definition.params if p.name == "limit"]
@@ -128,7 +128,7 @@ class TestReferencesLimit:
 
     def test_references_default_limit_is_zero(self, mock_scip_environment):
         """Test that references command has default limit=0 (unlimited)."""
-        from code_indexer.cli_scip import scip_references
+        from cidx_scip.cli import scip_references
 
         # Check the option definition
         limit_option = [p for p in scip_references.params if p.name == "limit"]
@@ -150,19 +150,19 @@ class TestReferencesLimit:
             for i in range(8)
         ]
 
-        with patch("code_indexer.scip.query.SCIPQueryEngine") as mock_engine_cls:
+        with patch("cidx_scip.query.SCIPQueryEngine") as mock_engine_cls:
             mock_engine = Mock()
             mock_engine.find_references.return_value = mock_results
             mock_engine_cls.return_value = mock_engine
 
-            with patch("code_indexer.scip.status.StatusTracker") as mock_tracker_cls:
+            with patch("cidx_scip.status.StatusTracker") as mock_tracker_cls:
                 mock_tracker = Mock()
                 mock_status = Mock()
                 mock_status.projects = {"test": "project"}
                 mock_tracker.load.return_value = mock_status
                 mock_tracker_cls.return_value = mock_tracker
 
-                from code_indexer.cli_scip import scip_references
+                from cidx_scip.cli import scip_references
 
                 runner = click.testing.CliRunner()
                 result = runner.invoke(
@@ -197,19 +197,19 @@ class TestDependenciesLimit:
             for i in range(6)
         ]
 
-        with patch("code_indexer.scip.query.SCIPQueryEngine") as mock_engine_cls:
+        with patch("cidx_scip.query.SCIPQueryEngine") as mock_engine_cls:
             mock_engine = Mock()
             mock_engine.get_dependencies.return_value = mock_results
             mock_engine_cls.return_value = mock_engine
 
-            with patch("code_indexer.scip.status.StatusTracker") as mock_tracker_cls:
+            with patch("cidx_scip.status.StatusTracker") as mock_tracker_cls:
                 mock_tracker = Mock()
                 mock_status = Mock()
                 mock_status.projects = {"test": "project"}
                 mock_tracker.load.return_value = mock_status
                 mock_tracker_cls.return_value = mock_tracker
 
-                from code_indexer.cli_scip import scip_dependencies
+                from cidx_scip.cli import scip_dependencies
 
                 runner = click.testing.CliRunner()
                 result = runner.invoke(
@@ -227,7 +227,7 @@ class TestDependenciesLimit:
 
     def test_dependencies_default_limit_is_zero(self, mock_scip_environment):
         """Test that dependencies command has default limit=0 (unlimited)."""
-        from code_indexer.cli_scip import scip_dependencies
+        from cidx_scip.cli import scip_dependencies
 
         # Check the option definition
         limit_option = [p for p in scip_dependencies.params if p.name == "limit"]
@@ -253,19 +253,19 @@ class TestDependentsLimit:
             for i in range(7)
         ]
 
-        with patch("code_indexer.scip.query.SCIPQueryEngine") as mock_engine_cls:
+        with patch("cidx_scip.query.SCIPQueryEngine") as mock_engine_cls:
             mock_engine = Mock()
             mock_engine.get_dependents.return_value = mock_results
             mock_engine_cls.return_value = mock_engine
 
-            with patch("code_indexer.scip.status.StatusTracker") as mock_tracker_cls:
+            with patch("cidx_scip.status.StatusTracker") as mock_tracker_cls:
                 mock_tracker = Mock()
                 mock_status = Mock()
                 mock_status.projects = {"test": "project"}
                 mock_tracker.load.return_value = mock_status
                 mock_tracker_cls.return_value = mock_tracker
 
-                from code_indexer.cli_scip import scip_dependents
+                from cidx_scip.cli import scip_dependents
 
                 runner = click.testing.CliRunner()
                 result = runner.invoke(scip_dependents, ["UserRepo", "--limit", "0"])
@@ -281,7 +281,7 @@ class TestDependentsLimit:
 
     def test_dependents_default_limit_is_zero(self, mock_scip_environment):
         """Test that dependents command has default limit=0 (unlimited)."""
-        from code_indexer.cli_scip import scip_dependents
+        from cidx_scip.cli import scip_dependents
 
         # Check the option definition
         limit_option = [p for p in scip_dependents.params if p.name == "limit"]
@@ -312,17 +312,17 @@ class TestImpactLimit:
         ]
         mock_impact_result.affected_symbols = mock_results
 
-        with patch("code_indexer.scip.query.composites.analyze_impact") as mock_analyze:
+        with patch("cidx_scip.query.composites.analyze_impact") as mock_analyze:
             mock_analyze.return_value = mock_impact_result
 
-            with patch("code_indexer.scip.status.StatusTracker") as mock_tracker_cls:
+            with patch("cidx_scip.status.StatusTracker") as mock_tracker_cls:
                 mock_tracker = Mock()
                 mock_status = Mock()
                 mock_status.projects = {"test": "project"}
                 mock_tracker.load.return_value = mock_status
                 mock_tracker_cls.return_value = mock_tracker
 
-                from code_indexer.cli_scip import scip_impact
+                from cidx_scip.cli import scip_impact
 
                 runner = click.testing.CliRunner()
                 result = runner.invoke(scip_impact, ["validate_token", "--limit", "0"])
@@ -338,7 +338,7 @@ class TestImpactLimit:
 
     def test_impact_default_limit_is_zero(self, mock_scip_environment):
         """Test that impact command has default limit=0 (unlimited)."""
-        from code_indexer.cli_scip import scip_impact
+        from cidx_scip.cli import scip_impact
 
         # Check the option definition
         limit_option = [p for p in scip_impact.params if p.name == "limit"]
@@ -351,7 +351,7 @@ class TestCallchainLimit:
 
     def test_callchain_default_limit_is_zero(self, mock_scip_environment):
         """Test that callchain command has default limit=0 (unlimited)."""
-        from code_indexer.cli_scip import scip_callchain
+        from cidx_scip.cli import scip_callchain
 
         # Check the option definition
         limit_option = [p for p in scip_callchain.params if p.name == "limit"]
@@ -364,7 +364,7 @@ class TestContextLimit:
 
     def test_context_default_limit_is_zero(self, mock_scip_environment):
         """Test that context command has default limit=0 (unlimited)."""
-        from code_indexer.cli_scip import scip_context
+        from cidx_scip.cli import scip_context
 
         # Check the option definition
         limit_option = [p for p in scip_context.params if p.name == "limit"]

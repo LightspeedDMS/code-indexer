@@ -20,7 +20,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from code_indexer.server.services.dependency_map_service import DependencyMapService
+from cidx_depmap.server.dependency_map_service import DependencyMapService
 
 
 def _make_service(golden_repos_dir: str, refresh_scheduler=None):
@@ -229,7 +229,7 @@ class TestOriginalExceptionNotMasked:
             ):
                 # Patch shutil.rmtree to raise inside the finally cleanup path
                 with patch(
-                    "code_indexer.server.services.dependency_map_service.shutil.rmtree",
+                    "cidx_depmap.server.dependency_map_service.shutil.rmtree",
                     side_effect=OSError("cannot delete staging dir"),
                 ):
                     # The original RuntimeError must propagate, not the OSError

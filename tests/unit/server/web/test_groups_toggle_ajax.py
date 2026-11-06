@@ -22,13 +22,14 @@ from fastapi.testclient import TestClient
 from code_indexer.server.services.group_access_manager import (
     GroupAccessManager,
 )
+from code_indexer.server.utils.route_table import iter_routes
 
 _ELEVATION_QUALNAME = "require_elevation.<locals>._check"
 
 
 def _bypass_elevation(app, router):
     """Override all require_elevation deps so tests can call routes without TOTP setup."""
-    for route in router.routes:
+    for route_path, route in iter_routes(router.routes):
         if not isinstance(route, APIRoute):
             continue
         for dep in route.dependencies or []:

@@ -77,10 +77,9 @@ def app():
     behavior is covered separately by test_xray_routes_repo_authz.py.
     """
     from fastapi import FastAPI, HTTPException, status
-    from code_indexer.server.routes.xray_routes import router as xray_router
+    from tests.unit.server._xray_feature import mount_xray_routes
 
-    test_app = FastAPI()
-    test_app.include_router(xray_router)
+    test_app = mount_xray_routes(FastAPI())
 
     def _unauthenticated():
         raise HTTPException(
@@ -112,7 +111,7 @@ def _xray_batch_access_filtering_bypass():
     mock_access_service = MagicMock()
     mock_access_service.is_admin_user.return_value = True
     with patch(
-        "code_indexer.server.mcp.handlers.xray_batch._get_access_filtering_service",
+        "cidx_xray.server.mcp.xray_batch._get_access_filtering_service",
         return_value=mock_access_service,
     ):
         yield
@@ -126,7 +125,7 @@ def _xray_batch_access_filtering_bypass():
 def _patch_repo_found(path: str = "/some/repo/path"):
     """Patch _resolve_repo_path to return a valid path."""
     return patch(
-        "code_indexer.server.routes.xray_routes._resolve_repo_path",
+        "cidx_xray.server.routes._resolve_repo_path",
         return_value=path,
     )
 
@@ -134,7 +133,7 @@ def _patch_repo_found(path: str = "/some/repo/path"):
 def _patch_repo_not_found():
     """Patch _resolve_repo_path to return None (alias not found)."""
     return patch(
-        "code_indexer.server.routes.xray_routes._resolve_repo_path",
+        "cidx_xray.server.routes._resolve_repo_path",
         return_value=None,
     )
 
@@ -144,7 +143,7 @@ def _patch_bjm(job_id: str = "test-job-id"):
     mock_bjm = MagicMock()
     mock_bjm.submit_job.return_value = job_id
     return patch(
-        "code_indexer.server.routes.xray_routes._get_background_job_manager",
+        "cidx_xray.server.routes._get_background_job_manager",
         return_value=mock_bjm,
     ), mock_bjm
 
@@ -555,7 +554,7 @@ def _store_test_finder_pattern(cidx_meta: Path, name: str = "test-finder-1812") 
     and falling back to the default evaluator produces a different pattern
     value here, which the parity test's equality/marker assertions catch.
     """
-    from code_indexer.server.services.xray_pattern_service import XrayPatternService
+    from cidx_xray.server.pattern_service import XrayPatternService
 
     pattern_yaml = (
         f"name: {name}\n"
@@ -578,7 +577,7 @@ def _store_test_finder_pattern(cidx_meta: Path, name: str = "test-finder-1812") 
 def _patch_cidx_meta_1812(cidx_meta: Path):
     """Patch the cidx-meta path resolver used by handlers.xray._infra._resolve_evaluator_code."""
     return patch(
-        "code_indexer.server.mcp.handlers.xray._infra._get_cidx_meta_path",
+        "cidx_xray.server.mcp.xray._infra._get_cidx_meta_path",
         return_value=cidx_meta,
     )
 
@@ -759,7 +758,7 @@ def _build_parity_repo(tmp_path: Path) -> Path:
 
 def _resolve_mcp_side_evaluator_code(cidx_meta: Path) -> str:
     """Resolve evaluator_code via the exact function handle_xray_search calls."""
-    from code_indexer.server.mcp.handlers.xray import _resolve_evaluator_code
+    from cidx_xray.server.mcp.xray import _resolve_evaluator_code
 
     with _patch_cidx_meta_1812(cidx_meta):
         evaluator_code, err = _resolve_evaluator_code(
@@ -794,7 +793,7 @@ def _run_rest_side_job(app, client, cidx_meta: Path, repo_dir: Path) -> Dict[str
         with (
             _patch_repo_found(str(repo_dir)),
             patch(
-                "code_indexer.server.routes.xray_routes._get_background_job_manager",
+                "cidx_xray.server.routes._get_background_job_manager",
                 return_value=mock_bjm,
             ),
             _patch_cidx_meta_1812(cidx_meta),
@@ -822,7 +821,7 @@ class TestPatternNameParity:
         DIFFERENT pattern value here -- both the equality check and the
         explicit marker assertions below would then fail.
         """
-        from code_indexer.xray.search_engine import XRaySearchEngine
+        from cidx_xray.search_engine import XRaySearchEngine
 
         cidx_meta = _make_cidx_meta_1812(tmp_path)
         _store_test_finder_pattern(cidx_meta)
@@ -882,28 +881,28 @@ def _patch_batch_bjm(job_id: str = "batch-job-id"):
     mock_bjm = MagicMock()
     mock_bjm.submit_job.return_value = job_id
     return patch(
-        "code_indexer.server.mcp.handlers.xray_batch._get_background_job_manager",
+        "cidx_xray.server.mcp.xray_batch._get_background_job_manager",
         return_value=mock_bjm,
     ), mock_bjm
 
 
 def _patch_batch_repo_found(path: str = "/some/repo/path"):
     return patch(
-        "code_indexer.server.mcp.handlers.xray_batch._resolve_repo_path",
+        "cidx_xray.server.mcp.xray_batch._resolve_repo_path",
         return_value=path,
     )
 
 
 def _patch_batch_repo_not_found():
     return patch(
-        "code_indexer.server.mcp.handlers.xray_batch._resolve_repo_path",
+        "cidx_xray.server.mcp.xray_batch._resolve_repo_path",
         return_value=None,
     )
 
 
 def _patch_batch_arm_grm():
     return patch(
-        "code_indexer.server.mcp.handlers.xray_batch._get_arm_and_grm",
+        "cidx_xray.server.mcp.xray_batch._get_arm_and_grm",
         return_value=(None, None),
     )
 
@@ -912,7 +911,7 @@ def _patch_batch_cidx_meta():
     from pathlib import Path
 
     return patch(
-        "code_indexer.server.mcp.handlers.xray_batch._get_cidx_meta_path",
+        "cidx_xray.server.mcp.xray_batch._get_cidx_meta_path",
         return_value=Path("/cidx-meta"),
     )
 
@@ -1007,8 +1006,11 @@ class TestXrayBatchRestEndpoint:
         finally:
             app.dependency_overrides.clear()
 
+        # Phase 4c: the core checks the route's required permission
+        # (query_repos) before the feature's handler runs, with the 403 every
+        # feature route answers.
         assert resp.status_code == 403
-        assert _batch_err_code(resp.json()) == "auth_required"
+        assert resp.json()["detail"] == "Insufficient permissions: query_repos required"
 
     # ------------------------------------------------------------------
     # Validation: 422 for structural errors
@@ -1221,7 +1223,7 @@ class TestXrayBatchRestEndpoint:
             # The route imports handle_xray_search_batch locally at call time,
             # so patch it in the xray_batch module namespace.
             with patch(
-                "code_indexer.server.mcp.handlers.xray_batch.handle_xray_search_batch",
+                "cidx_xray.server.mcp.xray_batch.handle_xray_search_batch",
                 return_value=mcp_envelope,
             ):
                 resp = client.post("/api/xray/search/batch", json=body)

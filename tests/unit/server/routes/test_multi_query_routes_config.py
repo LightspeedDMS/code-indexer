@@ -125,7 +125,7 @@ class TestSCIPMultiServiceConfig:
 
     def test_scip_multi_service_accepts_config_values(self):
         """SCIPMultiService should accept max_workers and timeout from config."""
-        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+        from cidx_scip.server.multi_service import SCIPMultiService
 
         service = SCIPMultiService(max_workers=4, query_timeout_seconds=60)
 
@@ -134,7 +134,7 @@ class TestSCIPMultiServiceConfig:
 
     def test_scip_multi_service_default_values_match_config_defaults(self):
         """SCIPMultiService defaults should match MultiSearchLimitsConfig defaults."""
-        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+        from cidx_scip.server.multi_service import SCIPMultiService
 
         service = SCIPMultiService()
 

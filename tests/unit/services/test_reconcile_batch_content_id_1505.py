@@ -610,13 +610,10 @@ class TestReconcileWorkingDirDirtyUnaffected:
         # exactly like before this change (working_dir identity scheme).
         assert "a.py" in result["changed_files"]
 
-    def test_dirty_file_content_id_uses_its_working_blob(self, tmp_path):
-        """Directly verify `_get_effective_content_id_for_reconcile` produces
-        the blob id of a dirty file's WORKING content. Story #2121: in a git
-        repository the indexer stores every file, an uncommitted edit
-        included, under `git hash-object` of its working content
-        (`git_blob_hash`), so the reconcile derives the same id; an mtime/size
-        id never matched it and re-planned the edit on every reconcile."""
+    def test_dirty_file_content_id_uses_working_blob_hash(self, tmp_path):
+        """A dirty file's reconcile id is the blob hash of its WORKING bytes --
+        the hash FileIdentifier indexed it under -- never the HEAD blob hash
+        (see test_reconcile_working_dir_content_id.py)."""
         root = tmp_path / "repo"
         root.mkdir()
         _init_repo(root)
@@ -633,13 +630,7 @@ class TestReconcileWorkingDirDirtyUnaffected:
 
         content_id = indexer._get_effective_content_id_for_reconcile("a.py")
 
-        working_blob = subprocess.run(
-            ["git", "hash-object", "a.py"],
-            cwd=root,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
+        working_blob = _git(root, "hash-object", "a.py")
         assert content_id == f"a.py:blob:{working_blob}"
         assert working_blob != head_blob
 
@@ -777,7 +768,7 @@ class TestReconcileEdgeCaseGracefulFallback:
 # `"working_dir" in str(point.get("id", ""))` check was dead code against
 # real persisted data. These tests use a REALISTIC persisted point shape
 # (a real uuid5 id, and the exact payload keys
-# `high_throughput_processor.py`'s `_create_vector_point` actually writes
+# `file_chunking_manager.py`'s `_create_vector_point` actually writes
 # for a non-git-available file: `filesystem_mtime`/`filesystem_size`, no
 # `git_blob_hash`/`git_commit_hash`), never the synthetic
 # `a.py:working_dir:0` id shape the earlier tests in this file used.

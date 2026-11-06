@@ -27,7 +27,7 @@ import subprocess
 from pathlib import Path
 from typing import Dict, Tuple
 
-from code_indexer.server.services.dep_map_repair_bidirectional import (
+from cidx_depmap.server.dep_map_repair_bidirectional import (
     CitationLine,
     EdgeAuditVerdict,
     run_verification_gate,

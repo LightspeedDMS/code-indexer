@@ -50,7 +50,6 @@ class TestRestartRequiredFieldsPreExistingEntriesPreserved:
             "scip_multi_max_workers",
             "max_concurrent_background_jobs",
             "subprocess_max_workers",
-            "dependency_map_enabled",
             "workers",
             "log_level",
         ]
@@ -103,8 +102,6 @@ class TestRestartRequiredFieldsModerateExtension:
             "api_key",
             "lcp_url",
             "lcp_vendor",
-            # scip_cleanup.scip_workspace_retention_days
-            "scip_workspace_retention_days",
             # server.coalesce_k_min/coalesce_k_max
             "coalesce_k_min",
             "coalesce_k_max",
@@ -113,11 +110,6 @@ class TestRestartRequiredFieldsModerateExtension:
             # multi_search timeout fields (NOT *_max_workers)
             "multi_search_timeout_seconds",
             "scip_multi_timeout_seconds",
-            # scip.* limit/depth fields
-            "scip_reference_limit",
-            "scip_dependency_depth",
-            "scip_callchain_max_depth",
-            "scip_callchain_limit",
             # claude_cli.scheduled_catchup_*
             "scheduled_catchup_enabled",
             "scheduled_catchup_interval_minutes",
@@ -132,6 +124,35 @@ class TestRestartRequiredFieldsModerateExtension:
             "Bug #1399 item 6: RESTART_REQUIRED_FIELDS is missing these "
             f"MODERATE-classified fields: {missing!r}"
         )
+
+
+class TestFeatureKeysCarryTheirOwnRestartNote:
+    """A feature's startup-read keys left RESTART_REQUIRED_FIELDS with the
+    feature: its ConfigKey.restart_required puts the note on the generic
+    Feature Settings block (dependency_map_enabled, the SCIP limits and the
+    SCIP workspace retention)."""
+
+    def test_feature_keys_are_restart_required_in_their_sections(self):
+        from cidx_depmap.config import DEPMAP_CONFIG_SECTION
+        from cidx_scip.config import SCIP_CONFIG_SECTION
+
+        from code_indexer.server.web.routes import RESTART_REQUIRED_FIELDS
+
+        flagged = {
+            key.name
+            for section in (DEPMAP_CONFIG_SECTION, SCIP_CONFIG_SECTION)
+            for key in section.keys
+            if key.restart_required
+        }
+        assert flagged == {
+            "dependency_map_enabled",
+            "scip_workspace_retention_days",
+            "scip_reference_limit",
+            "scip_dependency_depth",
+            "scip_callchain_max_depth",
+            "scip_callchain_limit",
+        }
+        assert not flagged & set(RESTART_REQUIRED_FIELDS)
 
 
 # ---------------------------------------------------------------------------

@@ -8,6 +8,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from code_indexer.config import Config
+from code_indexer.services.chunk_coverage import (
+    CHUNK_COVERAGE_KEY,
+    CHUNK_COVERAGE_VERSION,
+)
 from code_indexer.services.smart_indexer import SmartIndexer
 
 
@@ -215,6 +219,8 @@ class TestFtsBootstrap:
         meta["current_file_index"] = 0
         # Watermark tells incremental path this commit is already indexed.
         meta["branch_commit_watermarks"] = {current_branch: head_commit}
+        # EVO-64616: an index already checked for files missing chunks.
+        meta[CHUNK_COVERAGE_KEY] = CHUNK_COVERAGE_VERSION
         indexer.progressive_metadata._save_metadata()
 
     def test_populate_fts_called_when_create_new_fts_and_nothing_to_index(

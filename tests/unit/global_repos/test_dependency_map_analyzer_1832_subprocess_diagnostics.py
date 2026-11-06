@@ -26,7 +26,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from code_indexer.global_repos.dependency_map_analyzer import DependencyMapAnalyzer
+from cidx_depmap.server.dependency_map_analyzer import DependencyMapAnalyzer
 
 _DISCRIMINATING_STDOUT = "Error: model overloaded, please retry the request"
 
@@ -34,7 +34,7 @@ _DISCRIMINATING_STDOUT = "Error: model overloaded, please retry the request"
 @pytest.fixture(autouse=True)
 def _isolate_verification_semaphore():
     with patch(
-        "code_indexer.global_repos.dependency_map_analyzer._get_verification_semaphore",
+        "cidx_depmap.server.dependency_map_analyzer._get_verification_semaphore",
         side_effect=lambda max_concurrent: threading.Semaphore(max_concurrent),
     ):
         yield

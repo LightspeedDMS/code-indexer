@@ -25,6 +25,7 @@ from code_indexer.global_repos.cleanup_manager import CleanupManager
 from code_indexer.global_repos.query_tracker import QueryTracker
 from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
 from code_indexer.services.progress_subprocess_runner import IndexingCancelledError
+from tests.unit.server._scip_feature import scip_pipeline_installed
 
 CHILD_SLEEP_SECONDS = 120
 CANCEL_BOUND_SECONDS = 10.0
@@ -180,8 +181,20 @@ def test_temporal_index_child_is_stopped_on_cancel(
     assert_group_stopped(pid_file, elapsed)
 
 
+@pytest.fixture
+def scip_index_type() -> Iterator[None]:
+    """The scip index type, as the enabled cidx-scip feature contributes it
+    (the pipeline runs `cidx scip generate` only through its builder)."""
+    with scip_pipeline_installed():
+        yield
+
+
 def test_scip_child_is_stopped_on_cancel(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pid_file: Path, source_repo: Path
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pid_file: Path,
+    source_repo: Path,
+    scip_index_type: None,
 ) -> None:
     install_fake_cidx(tmp_path, monkeypatch, "scip generate", pid_file)
     scheduler = make_scheduler(
@@ -443,7 +456,11 @@ def test_cancel_during_snapshot_creation_never_swaps_alias(
 
 
 def test_no_cancel_check_keeps_scip_behaviour(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pid_file: Path, source_repo: Path
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pid_file: Path,
+    source_repo: Path,
+    scip_index_type: None,
 ) -> None:
     """Regression guard: with no cancel check every step still runs to
     completion (the fake cidx exits 0 for every step here)."""

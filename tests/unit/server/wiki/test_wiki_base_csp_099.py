@@ -15,7 +15,8 @@ from tests.unit.server.wiki.test_wiki_root_template import _make_app
 _SCRIPT_TAG = re.compile(r"<script\b([^>]*)>(.*?)</script>", re.DOTALL | re.IGNORECASE)
 _THEME_SCRIPT_SRC = "/wiki/_static/wiki-theme.js"
 _WIKI_STATIC_DIR = (
-    Path(__file__).resolve().parents[4] / "src/code_indexer/server/wiki/static"
+    Path(__file__).resolve().parents[4]
+    / "packages/features/cidx-wiki/src/cidx_wiki/server/static"
 )
 
 

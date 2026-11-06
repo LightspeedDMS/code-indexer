@@ -18,7 +18,7 @@ from typing import Any, Dict, List
 
 import pytest
 
-from code_indexer.server.services.dep_map_health_detector import DepMapHealthDetector
+from cidx_depmap.server.dep_map_health_detector import DepMapHealthDetector
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -101,10 +101,10 @@ def _detector() -> DepMapHealthDetector:
 
 
 def _repair_executor(domain_analyzer=None):
-    from code_indexer.server.services.dep_map_repair_executor import (
+    from cidx_depmap.server.dep_map_repair_executor import (
         DepMapRepairExecutor,
     )
-    from code_indexer.server.services.dep_map_index_regenerator import IndexRegenerator
+    from cidx_depmap.server.dep_map_index_regenerator import IndexRegenerator
 
     return DepMapRepairExecutor(
         health_detector=_detector(),

@@ -26,6 +26,7 @@ from tests.unit.server.query.catalog_search_env import (
     dump,
 )
 from tests.unit.server.query.extension_filter_env_2047 import ranked_store_search
+from tests.unit.server.app_state_patch import patch_app_state
 
 pytestmark = pytest.mark.timeout(90)
 _JOB_POLL_SECONDS = 30.0
@@ -127,10 +128,7 @@ def test_rest_catalog_handles_are_bound_and_projected(
         assert CANARY not in env.app.state.payload_cache.retrieve_full(handle).lower()
 
 
-@pytest.mark.parametrize(
-    "search_type",
-    ["semantic", "fts", pytest.param("regex", marks=pytest.mark.slow)],
-)
+@pytest.mark.parametrize("search_type", ["semantic", "fts", "regex"])
 def test_multi_query_catalog_rows_are_projected(
     client: TestClient, search_type: str
 ) -> None:
@@ -202,7 +200,7 @@ def test_query_is_refused_without_the_access_service(
     monkeypatch: pytest.MonkeyPatch,
     mode: str,
 ) -> None:
-    monkeypatch.setattr(env.app.state, "access_filtering_service", None)
+    patch_app_state(monkeypatch, env.app.state, "access_filtering_service", None)
     response = client.post(
         "/api/query",
         json={

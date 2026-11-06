@@ -282,7 +282,7 @@ def test_xray_async_gate_refuses_unjudgeable_shapes(
 ) -> None:
     import asyncio
 
-    from code_indexer.server.mcp.handlers.xray import _catalog_guard
+    from cidx_xray.server.mcp.xray import _catalog_guard
 
     monkeypatch.setattr(
         _catalog_guard, "xray_access_service", lambda: fx.access_service

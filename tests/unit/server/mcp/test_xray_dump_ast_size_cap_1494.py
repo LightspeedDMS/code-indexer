@@ -30,7 +30,7 @@ from typing import Any, Dict, cast
 from unittest.mock import patch
 
 from code_indexer.server.auth.user_manager import User, UserRole
-from code_indexer.server.mcp.handlers import xray as xray_handlers
+from cidx_xray.server.mcp import xray as xray_handlers
 
 _HUGE_FILE_FUNCTION_INDEX = 0
 _HUGE_FILE_REPEAT_COUNT = 40000
@@ -82,7 +82,7 @@ class TestXrayDumpAstSizeCap:
         params = {"repository_alias": "myrepo-global", "file_path": "small.py"}
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._dump_ast._resolve_repo_path",
+            "cidx_xray.server.mcp.xray._dump_ast._resolve_repo_path",
             return_value=str(tmp_path),
         ):
             result = xray_handlers.handle_xray_dump_ast(params, user)
@@ -109,7 +109,7 @@ class TestXrayDumpAstSizeCap:
         params = {"repository_alias": "myrepo-global", "file_path": "big.py"}
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._dump_ast._resolve_repo_path",
+            "cidx_xray.server.mcp.xray._dump_ast._resolve_repo_path",
             return_value=str(tmp_path),
         ):
             result = xray_handlers.handle_xray_dump_ast(params, user)
@@ -141,7 +141,7 @@ class TestXrayDumpAstSizeCap:
         params = {"repository_alias": "myrepo-global", "file_path": "huge.py"}
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._dump_ast._resolve_repo_path",
+            "cidx_xray.server.mcp.xray._dump_ast._resolve_repo_path",
             return_value=str(tmp_path),
         ):
             start = time.perf_counter()
@@ -183,7 +183,7 @@ class TestXrayDumpAstSizeCap:
         }
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._dump_ast._resolve_repo_path",
+            "cidx_xray.server.mcp.xray._dump_ast._resolve_repo_path",
             return_value=str(tmp_path),
         ):
             start = time.perf_counter()

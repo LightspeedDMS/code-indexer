@@ -157,7 +157,7 @@ class TestAnomalyToDictHandlesAggregates:
         Without the fix: AttributeError because AnomalyAggregate has no .file attribute.
         After the fix: returns a well-formed dict suitable for JSON serialization.
         """
-        from code_indexer.server.mcp.handlers.depmap import _anomaly_to_dict
+        from cidx_depmap.server.mcp.handlers import _anomaly_to_dict
         from code_indexer.server.services.dep_map_parser_hygiene import (
             AnomalyAggregate,
             AnomalyEntry,

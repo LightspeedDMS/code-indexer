@@ -25,12 +25,13 @@ from code_indexer.server.repositories.activated_repo_manager import (
     ActivatedRepoManager,
 )
 from code_indexer.server.services.access_filtering_service import _ActivationSource
-from code_indexer.server.wiki.wiki_cache import WikiCache
-from code_indexer.server.wiki.routes import (
+from cidx_wiki.server.wiki_cache import WikiCache
+from cidx_wiki.server.routes import (
     wiki_router,
     get_current_user_hybrid,
     get_wiki_user_hybrid,
 )
+from tests.unit.server.wiki.wiki_test_helpers import app_golden_repos_dir
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +77,7 @@ def _make_user_wiki_app(
     viewer_username: Optional[str] = None,
 ):
     """Build a minimal FastAPI test app with wiki_router for user wiki tests."""
-    from code_indexer.server.wiki.routes import _reset_wiki_cache
+    from cidx_wiki.server.routes import _reset_wiki_cache
 
     _reset_wiki_cache()
 
@@ -94,9 +95,8 @@ def _make_user_wiki_app(
     app.state.golden_repo_manager = MagicMock()
     app.state.golden_repo_manager.db_path = _db_path
     app.state.golden_repo_manager.get_wiki_enabled.return_value = False
-    app.state.golden_repo_manager.golden_repos_dir = tempfile.mkdtemp(suffix="-golden")
-    (Path(app.state.golden_repo_manager.golden_repos_dir) / "aliases").mkdir(
-        parents=True, exist_ok=True
+    app.state.golden_repo_manager.golden_repos_dir = str(
+        app_golden_repos_dir(app, suffix="-golden")
     )
 
     # Access filtering service mock. The owner's activation ``alias`` was
@@ -446,7 +446,9 @@ class TestUserWikiWebToggle:
 
     def test_wiki_toggle_endpoint_exists_in_web_routes(self):
         """The toggle route must be registered in web_router."""
-        from code_indexer.server.web.routes import web_router
+        # The wiki's admin actions are the cidx-wiki feature's (phase 4e),
+        # mounted under /admin like the core's web routes.
+        from cidx_wiki.server.admin_routes import web_router
 
         paths = [r.path for r in web_router.routes]
         assert any("activated-repos" in p and "wiki-toggle" in p for p in paths), (

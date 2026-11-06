@@ -27,8 +27,8 @@ from tests.unit.server.services.test_dep_map_917_builders import (
 
 def test_self_loop_production_path_acquires_lock(tmp_path, monkeypatch):
     """_repair_one_self_loop holds the domain lock at the atomic_write_text call site."""
-    import code_indexer.server.services.dep_map_repair_phase37 as phase37_mod
-    from code_indexer.server.services.dep_map_repair_phase37 import (
+    import cidx_depmap.server.dep_map_repair_phase37 as phase37_mod
+    from cidx_depmap.server.dep_map_repair_phase37 import (
         _repair_one_self_loop,
     )
 
@@ -61,11 +61,11 @@ def test_malformed_yaml_production_path_acquires_lock(tmp_path, monkeypatch):
     within the same lock scope, so observing lock state at journal-append entry
     correctly reflects whether the lock was held during the write.
     """
-    import code_indexer.server.services.dep_map_repair_malformed_yaml as malformed_mod
-    from code_indexer.server.services.dep_map_repair_malformed_yaml import (
+    import cidx_depmap.server.dep_map_repair_malformed_yaml as malformed_mod
+    from cidx_depmap.server.dep_map_repair_malformed_yaml import (
         repair_single_malformed_yaml_anomaly,
     )
-    from code_indexer.server.services.dep_map_repair_phase37 import (
+    from cidx_depmap.server.dep_map_repair_phase37 import (
         build_and_append_malformed_yaml_journal_entry as real_journal_fn,
     )
 
@@ -117,12 +117,12 @@ def test_malformed_yaml_production_path_acquires_lock(tmp_path, monkeypatch):
 
 def test_garbage_domain_production_path_acquires_lock(tmp_path, monkeypatch):
     """_execute_unique_rewrite holds the source domain lock at the atomic_write_text call."""
-    import code_indexer.server.services.dep_map_repair_phase37 as phase37_mod
-    from code_indexer.server.services.dep_map_repair_garbage_domain import (
+    import cidx_depmap.server.dep_map_repair_phase37 as phase37_mod
+    from cidx_depmap.server.dep_map_repair_garbage_domain import (
         build_inverted_repo_index,
         repair_one_garbage_domain_anomaly,
     )
-    from code_indexer.server.services.dep_map_repair_phase37 import (
+    from cidx_depmap.server.dep_map_repair_phase37 import (
         Action,
         JournalEntry,
         RepairJournal,

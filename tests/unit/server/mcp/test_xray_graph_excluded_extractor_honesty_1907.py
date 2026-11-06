@@ -37,14 +37,14 @@ from unittest.mock import patch
 import pytest
 
 from code_indexer.server.auth.user_manager import User, UserRole
-from code_indexer.server.mcp.handlers.xray_graph import _collect_graph_candidate_files
-from code_indexer.xray.rust_backend import _XRAY_CLI_DEFAULT
+from cidx_xray.server.mcp.xray_graph import _collect_graph_candidate_files
+from cidx_xray.rust_backend import resolve_xray_cli_path
 
 
 def _require_xray_cli_binary() -> None:
-    if not _XRAY_CLI_DEFAULT.exists():
+    if not resolve_xray_cli_path().exists():
         pytest.skip(
-            f"xray-cli binary not built at {_XRAY_CLI_DEFAULT}; "
+            f"xray-cli binary not built at {resolve_xray_cli_path()}; "
             "run 'cargo build --release' inside rust/ to enable this test."
         )
 
@@ -63,7 +63,7 @@ def _parse_response(result: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _import_handler():
-    from code_indexer.server.mcp.handlers.xray_graph import handle_analyze_graph
+    from cidx_xray.server.mcp.xray_graph import handle_analyze_graph
 
     return handle_analyze_graph
 
@@ -158,7 +158,7 @@ async def test_unscoped_analysis_correctly_resolves_the_cross_language_edge(
 
     handler = _import_handler()
     with patch(
-        "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path",
+        "cidx_xray.server.mcp.xray_graph._resolve_repo_path",
         return_value=str(repo_root),
     ):
         result = await handler(
@@ -205,7 +205,7 @@ async def test_excluding_kotlin_via_include_patterns_is_honest_about_the_gap(
 
     handler = _import_handler()
     with patch(
-        "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path",
+        "cidx_xray.server.mcp.xray_graph._resolve_repo_path",
         return_value=str(repo_root),
     ):
         result = await handler(
@@ -274,7 +274,7 @@ async def test_excluding_a_file_with_no_extractor_never_downgrades_completeness(
 
     handler = _import_handler()
     with patch(
-        "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path",
+        "cidx_xray.server.mcp.xray_graph._resolve_repo_path",
         return_value=str(repo_root),
     ):
         result = await handler(

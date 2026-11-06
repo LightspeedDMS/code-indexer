@@ -391,10 +391,19 @@ class TestWikiAnalyticsSearchFilter:
     """wiki_article_analytics names a golden wiki; its search filter reads
     that golden repository, never the caller's activation of the name."""
 
+    @pytest.fixture(autouse=True)
+    def _wiki_tool(self) -> Iterator[None]:
+        """The tool is the cidx-wiki feature's (modular phase 4e), installed
+        as a server with "wiki" enabled installs it."""
+        from tests.unit.server._wiki_feature import wiki_tools_installed
+
+        with wiki_tools_installed():
+            yield
+
     def _wiki_views(self, env: QueryAccessEnv) -> List[str]:
         """Enable the wiki on GRANTED_REPO_2 and record a view per article
         the search boundary returns for it; the article paths."""
-        from code_indexer.server.wiki.wiki_cache import WikiCache
+        from cidx_wiki.server.wiki_cache import WikiCache
 
         env.golden_repo_manager.set_wiki_enabled(GRANTED_REPO_2, True)
         cache = WikiCache(env.golden_repo_manager.db_path)

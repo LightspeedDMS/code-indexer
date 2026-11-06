@@ -3,9 +3,17 @@
 import sqlite3
 from pathlib import Path
 from unittest.mock import Mock, patch
-from code_indexer.scip.generator import SCIPGenerator
-from code_indexer.scip.discovery import DiscoveredProject
-from code_indexer.scip.indexers.base import IndexerResult, IndexerStatus
+from cidx_scip.generator import SCIPGenerator
+from cidx_scip.discovery import DiscoveredProject
+from cidx_scip.indexers.base import IndexerResult, IndexerStatus
+
+
+def _written(scip_file: Path) -> Path:
+    """The index.scip a real indexer writes on success: present on disk, so the
+    generator's "success without index.scip is FAILED" rule is satisfied."""
+    scip_file.parent.mkdir(parents=True, exist_ok=True)
+    scip_file.touch()
+    return scip_file
 
 
 class TestSCIPGenerator:
@@ -13,7 +21,7 @@ class TestSCIPGenerator:
 
     def _create_test_scip_file(self, scip_file_path):
         """Create a minimal valid SCIP protobuf for testing."""
-        from code_indexer.scip.protobuf import scip_pb2
+        from cidx_scip.protobuf import scip_pb2
 
         scip_file_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -63,10 +71,10 @@ class TestSCIPGenerator:
         assert generator.repo_root == tmp_path
         assert generator.scip_dir == tmp_path / ".code-indexer" / "scip"
 
-    @patch("code_indexer.scip.generator.DatabaseManager")
-    @patch("code_indexer.scip.generator.SCIPDatabaseBuilder")
-    @patch("code_indexer.scip.generator.ProjectDiscovery")
-    @patch("code_indexer.scip.generator.JavaIndexer")
+    @patch("cidx_scip.generator.DatabaseManager")
+    @patch("cidx_scip.generator.SCIPDatabaseBuilder")
+    @patch("cidx_scip.generator.ProjectDiscovery")
+    @patch("cidx_scip.generator.JavaIndexer")
     def test_generate_single_project_success(
         self, mock_java_indexer, mock_discovery, mock_builder, mock_db_manager, tmp_path
     ):
@@ -87,7 +95,9 @@ class TestSCIPGenerator:
         mock_indexer_instance.generate.return_value = IndexerResult(
             status=IndexerStatus.SUCCESS,
             duration_seconds=2.5,
-            output_file=tmp_path / ".code-indexer" / "scip" / "backend" / "index.scip",
+            output_file=_written(
+                tmp_path / ".code-indexer" / "scip" / "backend" / "index.scip"
+            ),
             stdout="Success",
             stderr="",
             exit_code=0,
@@ -110,11 +120,11 @@ class TestSCIPGenerator:
         assert result.failed_projects == 0
         assert result.is_complete_success()
 
-    @patch("code_indexer.scip.generator.DatabaseManager")
-    @patch("code_indexer.scip.generator.SCIPDatabaseBuilder")
-    @patch("code_indexer.scip.generator.ProjectDiscovery")
-    @patch("code_indexer.scip.generator.JavaIndexer")
-    @patch("code_indexer.scip.generator.TypeScriptIndexer")
+    @patch("cidx_scip.generator.DatabaseManager")
+    @patch("cidx_scip.generator.SCIPDatabaseBuilder")
+    @patch("cidx_scip.generator.ProjectDiscovery")
+    @patch("cidx_scip.generator.JavaIndexer")
+    @patch("cidx_scip.generator.TypeScriptIndexer")
     def test_generate_multiple_projects_partial_success(
         self,
         mock_ts_indexer,
@@ -150,7 +160,9 @@ class TestSCIPGenerator:
         mock_java_instance.generate.return_value = IndexerResult(
             status=IndexerStatus.SUCCESS,
             duration_seconds=2.5,
-            output_file=tmp_path / ".code-indexer" / "scip" / "backend" / "index.scip",
+            output_file=_written(
+                tmp_path / ".code-indexer" / "scip" / "backend" / "index.scip"
+            ),
             stdout="Success",
             stderr="",
             exit_code=0,
@@ -187,7 +199,7 @@ class TestSCIPGenerator:
         assert not result.is_complete_success()
         assert not result.is_complete_failure()
 
-    @patch("code_indexer.scip.generator.ProjectDiscovery")
+    @patch("cidx_scip.generator.ProjectDiscovery")
     def test_generate_no_projects_found(self, mock_discovery, tmp_path):
         """Test generation when no projects are discovered."""
         # Arrange
@@ -204,10 +216,10 @@ class TestSCIPGenerator:
         assert result.successful_projects == 0
         assert result.failed_projects == 0
 
-    @patch("code_indexer.scip.generator.DatabaseManager")
-    @patch("code_indexer.scip.generator.SCIPDatabaseBuilder")
-    @patch("code_indexer.scip.generator.ProjectDiscovery")
-    @patch("code_indexer.scip.generator.PythonIndexer")
+    @patch("cidx_scip.generator.DatabaseManager")
+    @patch("cidx_scip.generator.SCIPDatabaseBuilder")
+    @patch("cidx_scip.generator.ProjectDiscovery")
+    @patch("cidx_scip.generator.PythonIndexer")
     def test_generate_with_progress_callback(
         self,
         mock_python_indexer,
@@ -233,11 +245,9 @@ class TestSCIPGenerator:
         mock_indexer_instance.generate.return_value = IndexerResult(
             status=IndexerStatus.SUCCESS,
             duration_seconds=1.5,
-            output_file=tmp_path
-            / ".code-indexer"
-            / "scip"
-            / "python-lib"
-            / "index.scip",
+            output_file=_written(
+                tmp_path / ".code-indexer" / "scip" / "python-lib" / "index.scip"
+            ),
             stdout="Done",
             stderr="",
             exit_code=0,
@@ -260,8 +270,8 @@ class TestSCIPGenerator:
         assert progress_callback.called
         assert result.successful_projects == 1
 
-    @patch("code_indexer.scip.generator.ProjectDiscovery")
-    @patch("code_indexer.scip.generator.JavaIndexer")
+    @patch("cidx_scip.generator.ProjectDiscovery")
+    @patch("cidx_scip.generator.JavaIndexer")
     def test_generate_creates_database_alongside_protobuf(
         self, mock_java_indexer, mock_discovery, tmp_path
     ):
@@ -301,9 +311,9 @@ class TestSCIPGenerator:
         self._assert_database_has_required_tables(db_file)
         assert result.successful_projects == 1
 
-    @patch("code_indexer.scip.generator.ProjectDiscovery")
-    @patch("code_indexer.scip.generator.JavaIndexer")
-    @patch("code_indexer.scip.generator.DatabaseManager")
+    @patch("cidx_scip.generator.ProjectDiscovery")
+    @patch("cidx_scip.generator.JavaIndexer")
+    @patch("cidx_scip.generator.DatabaseManager")
     def test_database_build_failure_marks_generation_as_failed(
         self, mock_db_manager, mock_java_indexer, mock_discovery, tmp_path
     ):
@@ -363,8 +373,8 @@ class TestSCIPGenerator:
         assert project_result.indexer_result.status == IndexerStatus.FAILED
         assert "Database build failed" in project_result.indexer_result.stderr
 
-    @patch("code_indexer.scip.generator.ProjectDiscovery")
-    @patch("code_indexer.scip.generator.JavaIndexer")
+    @patch("cidx_scip.generator.ProjectDiscovery")
+    @patch("cidx_scip.generator.JavaIndexer")
     def test_generate_deletes_existing_database(
         self, mock_java_indexer, mock_discovery, tmp_path
     ):
@@ -415,7 +425,7 @@ class TestSCIPGenerator:
             assert count_v1 > 0, "First generation should populate database"
 
         # Second generation with DIFFERENT data (more symbols)
-        from code_indexer.scip.protobuf import scip_pb2
+        from cidx_scip.protobuf import scip_pb2
 
         index = scip_pb2.Index()
         doc = index.documents.add()
@@ -453,10 +463,10 @@ class TestSCIPGenerator:
 class TestSCIPRebuild:
     """Test SCIP rebuild functionality for targeted regeneration."""
 
-    @patch("code_indexer.scip.generator.DatabaseManager")
-    @patch("code_indexer.scip.generator.SCIPDatabaseBuilder")
-    @patch("code_indexer.scip.status.StatusTracker")
-    @patch("code_indexer.scip.generator.JavaIndexer")
+    @patch("cidx_scip.generator.DatabaseManager")
+    @patch("cidx_scip.generator.SCIPDatabaseBuilder")
+    @patch("cidx_scip.status.StatusTracker")
+    @patch("cidx_scip.generator.JavaIndexer")
     def test_rebuild_single_project_success(
         self,
         mock_java_indexer,
@@ -466,7 +476,7 @@ class TestSCIPRebuild:
         tmp_path,
     ):
         """Test rebuilding a single failed project successfully."""
-        from code_indexer.scip.status import (
+        from cidx_scip.status import (
             GenerationStatus,
             ProjectStatus,
             OverallStatus,
@@ -510,7 +520,9 @@ class TestSCIPRebuild:
         mock_indexer_instance.generate.return_value = IndexerResult(
             status=IndexerStatus.SUCCESS,
             duration_seconds=3.0,
-            output_file=tmp_path / ".code-indexer" / "scip" / "backend" / "index.scip",
+            output_file=_written(
+                tmp_path / ".code-indexer" / "scip" / "backend" / "index.scip"
+            ),
             stdout="Success",
             stderr="",
             exit_code=0,
@@ -535,11 +547,11 @@ class TestSCIPRebuild:
         # Frontend should NOT be regenerated
         assert "frontend" not in rebuild_result
 
-    @patch("code_indexer.scip.generator.DatabaseManager")
-    @patch("code_indexer.scip.generator.SCIPDatabaseBuilder")
-    @patch("code_indexer.scip.status.StatusTracker")
-    @patch("code_indexer.scip.generator.JavaIndexer")
-    @patch("code_indexer.scip.generator.TypeScriptIndexer")
+    @patch("cidx_scip.generator.DatabaseManager")
+    @patch("cidx_scip.generator.SCIPDatabaseBuilder")
+    @patch("cidx_scip.status.StatusTracker")
+    @patch("cidx_scip.generator.JavaIndexer")
+    @patch("cidx_scip.generator.TypeScriptIndexer")
     def test_rebuild_failed_only_flag(
         self,
         mock_ts_indexer,
@@ -550,7 +562,7 @@ class TestSCIPRebuild:
         tmp_path,
     ):
         """Test --failed flag rebuilds only failed projects."""
-        from code_indexer.scip.status import (
+        from cidx_scip.status import (
             GenerationStatus,
             ProjectStatus,
             OverallStatus,
@@ -607,7 +619,9 @@ class TestSCIPRebuild:
         mock_java_instance.generate.return_value = IndexerResult(
             status=IndexerStatus.SUCCESS,
             duration_seconds=3.0,
-            output_file=tmp_path / ".code-indexer" / "scip" / "backend" / "index.scip",
+            output_file=_written(
+                tmp_path / ".code-indexer" / "scip" / "backend" / "index.scip"
+            ),
             stdout="Success",
             stderr="",
             exit_code=0,
@@ -618,7 +632,9 @@ class TestSCIPRebuild:
         mock_ts_instance.generate.return_value = IndexerResult(
             status=IndexerStatus.SUCCESS,
             duration_seconds=2.5,
-            output_file=tmp_path / ".code-indexer" / "scip" / "api" / "index.scip",
+            output_file=_written(
+                tmp_path / ".code-indexer" / "scip" / "api" / "index.scip"
+            ),
             stdout="Success",
             stderr="",
             exit_code=0,
@@ -643,10 +659,10 @@ class TestSCIPRebuild:
         assert rebuild_result["backend"].status == OverallStatus.SUCCESS
         assert rebuild_result["api"].status == OverallStatus.SUCCESS
 
-    @patch("code_indexer.scip.generator.DatabaseManager")
-    @patch("code_indexer.scip.generator.SCIPDatabaseBuilder")
-    @patch("code_indexer.scip.status.StatusTracker")
-    @patch("code_indexer.scip.generator.TypeScriptIndexer")
+    @patch("cidx_scip.generator.DatabaseManager")
+    @patch("cidx_scip.generator.SCIPDatabaseBuilder")
+    @patch("cidx_scip.status.StatusTracker")
+    @patch("cidx_scip.generator.TypeScriptIndexer")
     def test_rebuild_force_flag_on_successful_project(
         self,
         mock_ts_indexer,
@@ -656,7 +672,7 @@ class TestSCIPRebuild:
         tmp_path,
     ):
         """Test --force flag allows rebuilding successful projects."""
-        from code_indexer.scip.status import (
+        from cidx_scip.status import (
             GenerationStatus,
             ProjectStatus,
             OverallStatus,
@@ -691,7 +707,9 @@ class TestSCIPRebuild:
         mock_ts_instance.generate.return_value = IndexerResult(
             status=IndexerStatus.SUCCESS,
             duration_seconds=2.2,
-            output_file=tmp_path / ".code-indexer" / "scip" / "frontend" / "index.scip",
+            output_file=_written(
+                tmp_path / ".code-indexer" / "scip" / "frontend" / "index.scip"
+            ),
             stdout="Success",
             stderr="",
             exit_code=0,
@@ -726,11 +744,11 @@ class TestSCIPRebuild:
         assert rebuild_result["frontend"].duration_seconds == 2.2
         assert mock_ts_instance.generate.called
 
-    @patch("code_indexer.scip.generator.DatabaseManager")
-    @patch("code_indexer.scip.generator.SCIPDatabaseBuilder")
-    @patch("code_indexer.scip.status.StatusTracker")
-    @patch("code_indexer.scip.generator.JavaIndexer")
-    @patch("code_indexer.scip.generator.TypeScriptIndexer")
+    @patch("cidx_scip.generator.DatabaseManager")
+    @patch("cidx_scip.generator.SCIPDatabaseBuilder")
+    @patch("cidx_scip.status.StatusTracker")
+    @patch("cidx_scip.generator.JavaIndexer")
+    @patch("cidx_scip.generator.TypeScriptIndexer")
     def test_rebuild_multiple_projects(
         self,
         mock_ts_indexer,
@@ -741,7 +759,7 @@ class TestSCIPRebuild:
         tmp_path,
     ):
         """Test rebuilding multiple specific projects."""
-        from code_indexer.scip.status import (
+        from cidx_scip.status import (
             GenerationStatus,
             ProjectStatus,
             OverallStatus,
@@ -783,7 +801,9 @@ class TestSCIPRebuild:
         mock_java_instance.generate.return_value = IndexerResult(
             status=IndexerStatus.SUCCESS,
             duration_seconds=3.0,
-            output_file=tmp_path / ".code-indexer" / "scip" / "backend" / "index.scip",
+            output_file=_written(
+                tmp_path / ".code-indexer" / "scip" / "backend" / "index.scip"
+            ),
             stdout="Success",
             stderr="",
             exit_code=0,
@@ -794,7 +814,9 @@ class TestSCIPRebuild:
         mock_ts_instance.generate.return_value = IndexerResult(
             status=IndexerStatus.SUCCESS,
             duration_seconds=2.5,
-            output_file=tmp_path / ".code-indexer" / "scip" / "api" / "index.scip",
+            output_file=_written(
+                tmp_path / ".code-indexer" / "scip" / "api" / "index.scip"
+            ),
             stdout="Success",
             stderr="",
             exit_code=0,
@@ -821,9 +843,9 @@ class TestSCIPRebuild:
         saved_status = mock_tracker_instance.save.call_args[0][0]
         assert saved_status.overall_status == OverallStatus.SUCCESS
 
-    @patch("code_indexer.scip.status.StatusTracker")
-    @patch("code_indexer.scip.generator.JavaIndexer")
-    @patch("code_indexer.scip.generator.DatabaseManager")
+    @patch("cidx_scip.status.StatusTracker")
+    @patch("cidx_scip.generator.JavaIndexer")
+    @patch("cidx_scip.generator.DatabaseManager")
     def test_rebuild_database_build_failure_marks_rebuild_as_failed(
         self, mock_db_manager, mock_java_indexer, mock_status_tracker, tmp_path
     ):
@@ -832,7 +854,7 @@ class TestSCIPRebuild:
         Per Anti-Fallback Foundation #2: "We value graceful failure over forceful success."
         Database is the PRIMARY deliverable - if it fails during rebuild, rebuild must fail.
         """
-        from code_indexer.scip.status import (
+        from cidx_scip.status import (
             GenerationStatus,
             ProjectStatus,
             OverallStatus,
@@ -861,7 +883,9 @@ class TestSCIPRebuild:
         mock_status_tracker.return_value = mock_tracker_instance
 
         # Indexer succeeds (protobuf generated)
-        scip_file = tmp_path / ".code-indexer" / "scip" / "backend" / "index.scip"
+        scip_file = _written(
+            tmp_path / ".code-indexer" / "scip" / "backend" / "index.scip"
+        )
         mock_indexer_instance = Mock()
         mock_indexer_instance.generate.return_value = IndexerResult(
             status=IndexerStatus.SUCCESS,

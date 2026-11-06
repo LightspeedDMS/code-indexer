@@ -6,7 +6,7 @@ loudly and immediately at the CLI layer, BEFORE branching into local/remote
 mode or reaching the deep engine layer. `impact --depth` had no equivalent
 client-side guard: an out-of-range value (including negative/zero, which
 had NO lower-bound check anywhere) silently reached
-`code_indexer.scip.query.composites.analyze_impact`, whose own
+`cidx_scip.query.composites.analyze_impact`, whose own
 `depth = min(depth, MAX_TRAVERSAL_DEPTH)` line only clamped the upper
 bound with no user-visible message.
 """
@@ -41,17 +41,17 @@ def _invoke_impact(depth):
     """Invoke the local-mode `scip impact` CLI command with a mocked
     analyze_impact composite and status tracker, returning (CliRunner
     result, mock analyze_impact)."""
-    from code_indexer.cli_scip import scip_impact
+    from cidx_scip.cli import scip_impact
 
     mock_result = Mock(total_affected=0, affected_symbols=[], affected_files=[])
 
     with (
         patch(
-            "code_indexer.scip.query.composites.analyze_impact",
+            "cidx_scip.query.composites.analyze_impact",
             return_value=mock_result,
         ) as mock_analyze,
         patch(
-            "code_indexer.scip.status.StatusTracker",
+            "cidx_scip.status.StatusTracker",
             return_value=_mock_status_tracker(),
         ),
     ):

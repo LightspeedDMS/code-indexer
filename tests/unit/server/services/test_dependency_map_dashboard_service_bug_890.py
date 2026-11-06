@@ -5,6 +5,7 @@ Tests that _get_current_commit reads from provider-suffixed metadata-voyage-ai.j
 and that None commit (no readable metadata) produces CHANGED, not OK (sentinel tautology fix).
 """
 
+from tests.unit.server._depmap_feature import depmap_claude_config
 import json
 from pathlib import Path
 from typing import Optional
@@ -12,10 +13,9 @@ from unittest.mock import Mock
 
 import pytest
 
-from code_indexer.server.services.dependency_map_dashboard_service import (
+from cidx_depmap.server.dependency_map_dashboard_service import (
     DependencyMapDashboardService,
 )
-from code_indexer.server.utils.config_manager import ClaudeIntegrationConfig
 
 
 @pytest.fixture
@@ -40,7 +40,7 @@ def _make_tracking_backend(commit_hashes_json: Optional[str] = None):
 
 
 def _make_service(commit_hashes_json: Optional[str] = None, dep_map_service=None):
-    config = ClaudeIntegrationConfig(
+    config = depmap_claude_config(
         dependency_map_enabled=True,
         dependency_map_interval_hours=24,
     )

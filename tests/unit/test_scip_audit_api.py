@@ -9,7 +9,7 @@ import pytest
 import json
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
-from code_indexer.server.mcp.handlers import get_scip_audit_log
+from cidx_scip.server.mcp.scip import get_scip_audit_log
 from code_indexer.server.auth.user_manager import User, UserRole
 
 
@@ -42,12 +42,12 @@ class TestSCIPAuditLogAPI:
 
         Production code resolves the repository via the lazy
         ``_get_scip_audit_repository()`` getter (see
-        ``server/mcp/handlers/_utils.py``), not a bare module-level
+        ``cidx_scip/server/mcp/_common.py``), not a bare module-level
         ``scip_audit_repository`` attribute (that name no longer exists --
         Bug #1688). Patch the getter itself so it returns our mock repo.
         """
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_audit_repository"
+            "cidx_scip.server.mcp.scip._get_scip_audit_repository"
         ) as mock_get_repo:
             mock_repo = MagicMock()
             mock_get_repo.return_value = mock_repo

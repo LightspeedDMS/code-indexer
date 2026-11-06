@@ -5,6 +5,8 @@ Import this module's helpers in each focused test module to avoid duplication.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 # ---------------------------------------------------------------------------
 # Byte-size helpers
 # ---------------------------------------------------------------------------
@@ -142,6 +144,9 @@ class FakeMemoryReaders:
         host_total: int = DEFAULT_HOST_TOTAL,
         host_used: int = DEFAULT_HOST_USED,
         pswpin: int = 0,
+        cgroup_v2_inactive_file: int | None = None,
+        cgroup_v1_inactive_file: int | None = None,
+        host_available: int | None = None,
     ) -> None:
         self.cgroup_v2_max = cgroup_v2_max
         self.cgroup_v2_current = cgroup_v2_current
@@ -150,6 +155,11 @@ class FakeMemoryReaders:
         self.host_total = host_total
         self.host_used = host_used
         self.pswpin = pswpin
+        # memory.stat inactive_file / total_inactive_file (None: no memory.stat)
+        self.cgroup_v2_inactive_file = cgroup_v2_inactive_file
+        self.cgroup_v1_inactive_file = cgroup_v1_inactive_file
+        # psutil's available (None: a reader that reports only used)
+        self.host_available = host_available
 
     def read_cgroup_v2_max(self) -> str:
         if self.cgroup_v2_max is None:
@@ -171,13 +181,20 @@ class FakeMemoryReaders:
             raise FileNotFoundError("cgroup v1 not available")
         return int(self.cgroup_v1_usage)
 
-    def read_host_memory(self) -> object:
-        class _Vm:
-            pass
+    def read_cgroup_v2_inactive_file(self) -> int:
+        if self.cgroup_v2_inactive_file is None:
+            raise FileNotFoundError("memory.stat not available")
+        return self.cgroup_v2_inactive_file
 
-        vm = _Vm()
-        vm.total = self.host_total  # type: ignore[attr-defined]
-        vm.used = self.host_used  # type: ignore[attr-defined]
+    def read_cgroup_v1_inactive_file(self) -> int:
+        if self.cgroup_v1_inactive_file is None:
+            raise FileNotFoundError("memory.stat not available")
+        return self.cgroup_v1_inactive_file
+
+    def read_host_memory(self) -> object:
+        vm = SimpleNamespace(total=self.host_total, used=self.host_used)
+        if self.host_available is not None:
+            vm.available = self.host_available
         return vm
 
     def read_pswpin(self) -> int:

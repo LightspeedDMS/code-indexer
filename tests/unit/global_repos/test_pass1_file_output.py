@@ -15,7 +15,7 @@ import json
 
 import pytest
 
-from code_indexer.global_repos.dependency_map_analyzer import DependencyMapAnalyzer
+from cidx_depmap.server.dependency_map_analyzer import DependencyMapAnalyzer
 
 
 # ─── Fixtures ───────────────────────────────────────────────────────────────
@@ -387,7 +387,7 @@ class TestPass1StdoutFallback:
         analyzer._invoke_pass1_dispatcher = fake_invoke
 
         with caplog.at_level(
-            logging.WARNING, logger="code_indexer.global_repos.dependency_map_analyzer"
+            logging.WARNING, logger="cidx_depmap.server.dependency_map_analyzer"
         ):
             analyzer.run_pass_1_synthesis(staging_dir, repo_list, max_turns=10)
 
@@ -423,7 +423,7 @@ class TestPass1StdoutFallback:
         analyzer._invoke_pass1_dispatcher = fake_invoke
 
         with caplog.at_level(
-            logging.INFO, logger="code_indexer.global_repos.dependency_map_analyzer"
+            logging.INFO, logger="cidx_depmap.server.dependency_map_analyzer"
         ):
             analyzer.run_pass_1_synthesis(staging_dir, repo_list, max_turns=10)
 

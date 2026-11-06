@@ -136,7 +136,7 @@ def _truncate_with_cache(
     singleton, invokes `_truncate_graph_result`, and closes the cache --
     factored out so every test below states only what varies (the result
     fixture and the budget)."""
-    from code_indexer.server.mcp.handlers.xray_graph import _truncate_graph_result
+    from cidx_xray.server.mcp.xray_graph import _truncate_graph_result
 
     cache = _make_real_cache(tmp_path, max_fetch_size_chars=budget_chars)
     try:
@@ -225,7 +225,7 @@ class TestTruncateGraphResultCacheUnavailable:
     def test_cache_unavailable_bounds_a_large_result(self) -> None:
         """Bug #1928 round 3 (P3, Codex): a large result must be BOUNDED
         when the cache is unavailable, never returned in full."""
-        from code_indexer.server.mcp.handlers.xray_graph import (
+        from cidx_xray.server.mcp.xray_graph import (
             _truncate_graph_result,
         )
 

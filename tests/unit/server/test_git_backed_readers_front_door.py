@@ -16,7 +16,7 @@ import json
 import shutil
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterator, List
 
 import pytest
 from fastapi.testclient import TestClient
@@ -37,6 +37,8 @@ from tests.unit.server.repo_url_userinfo_env import (  # noqa: F401 - fixtures
     golden_clone_path,
     mcp_call,
 )
+
+from tests.unit.server._scip_feature import scip_tools_installed
 
 EXTRA_LINKS = ("abs.py", "chain.py", "sub/x.py")
 GIT_BACKED = (*GIT_FILE_LINKS, *EXTRA_LINKS)
@@ -82,7 +84,7 @@ def _assert_hidden(body: str) -> None:
 def scip_db(clone: Path) -> Path:
     if shutil.which("scip-python") is None:
         pytest.skip("scip-python is not installed")
-    from code_indexer.scip.generator import SCIPGenerator
+    from cidx_scip.generator import SCIPGenerator
 
     result = SCIPGenerator(clone).generate()
     assert result.successful_projects >= 1, result
@@ -98,9 +100,17 @@ def test_scip_generation_stores_no_git_backed_document(scip_db: Path) -> None:
     assert not paths & set(GIT_BACKED), paths
 
 
+@pytest.fixture
+def scip_tools() -> Iterator[None]:
+    """The SCIP MCP tools are the cidx-scip feature's (modular phase 4d):
+    installed as a server with "scip" enabled installs them."""
+    with scip_tools_installed():
+        yield
+
+
 @pytest.mark.parametrize("tool", ["scip_definition", "scip_references", "scip_context"])
 def test_scip_queries_never_return_git_backed_content(
-    client: TestClient, app: Any, scip_db: Path, tool: str
+    client: TestClient, app: Any, scip_db: Path, tool: str, scip_tools: None
 ) -> None:
     body = _body(client, app, tool, {"symbol": "url", "repository_alias": GLOBAL_ALIAS})
     _assert_hidden(body)
@@ -116,7 +126,7 @@ def test_scip_queries_never_return_git_backed_content(
 def test_scip_source_reader_refuses_git_backed_files(
     clone: Path, scip_db: Path
 ) -> None:
-    from code_indexer.scip.query.backends import DatabaseBackend
+    from cidx_scip.query.backends import DatabaseBackend
 
     backend = DatabaseBackend(scip_db, project_root=str(clone))
     for name in GIT_BACKED:

@@ -16,7 +16,7 @@ Verifies that parse_audit_verdict:
 import pytest
 
 # Import under test (will fail until module is created)
-from code_indexer.server.services.dep_map_repair_bidirectional import (
+from cidx_depmap.server.dep_map_repair_bidirectional import (
     CitationLine,
     EdgeAuditVerdict,
     parse_audit_verdict,

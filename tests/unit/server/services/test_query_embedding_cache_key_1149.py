@@ -20,6 +20,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+from code_indexer.server.utils.route_table import iter_routes
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -897,7 +898,9 @@ class TestScenario7AdminCacheSampleReadout:
         """A REST/web endpoint for admin cache sample is registered."""
         from code_indexer.server.web.routes import web_router
 
-        route_paths = [route.path for route in web_router.routes]  # type: ignore[attr-defined]
+        route_paths = [
+            route_path for route_path, route in iter_routes(web_router.routes)
+        ]
         # Check that the cache sample route exists
         matching = [p for p in route_paths if "cache" in p and "sample" in p]
         assert len(matching) >= 1, (
@@ -910,9 +913,10 @@ class TestScenario7AdminCacheSampleReadout:
         # We verify the route exists (already tested) and that the handler calls
         # _require_admin_session — structural test via source inspection.
         import inspect
-        from code_indexer.server.web import routes as routes_module
+        from code_indexer.server.web.pages import dashboard as routes_module
 
-        # Find the cache sample handler
+        # Find the cache sample handler (web/pages/dashboard.py since web/routes.py
+        # was split)
         source = inspect.getsource(routes_module)
         assert "cache-sample" in source or "cache_sample" in source, (
             "Cache sample endpoint must be defined in routes"

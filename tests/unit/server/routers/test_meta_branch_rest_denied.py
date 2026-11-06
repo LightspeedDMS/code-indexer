@@ -16,7 +16,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Awaitable, Callable, Dict, Iterator, List, Optional
+from typing import Any, Awaitable, Callable, Dict, Iterator, List, Optional, cast
 
 import pytest
 from fastapi import FastAPI, Request, Response
@@ -426,7 +426,7 @@ def test_v2_branch_listing_judges_the_activation_it_selects(
     state.access_filtering_service = AccessFilteringService(
         fx.group_manager,
         memories_dir=fx.root / "memories",
-        activated_repo_manager=_ActivationSource(server.arm),  # type: ignore[arg-type]
+        activated_repo_manager=cast(Any, _ActivationSource(server.arm)),
     )
     try:
         response = _get(server, f"/api/repositories/{ALPHA}/branches", RESTRICTED_USER)

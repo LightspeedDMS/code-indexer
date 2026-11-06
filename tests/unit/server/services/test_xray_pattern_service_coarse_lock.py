@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 import pytest
 
-from code_indexer.server.services.xray_pattern_service import XrayPatternService
+from cidx_xray.server.pattern_service import XrayPatternService
 
 # ---------------------------------------------------------------------------
 # Shared test fixture data
@@ -71,6 +71,7 @@ class FakeScheduler:
     def get_lock_info(self, alias: str) -> Optional[dict]:
         held = self._is_locked or not self._acquire_returns
         return {"owner": self._holder} if held else None
+
 
     def release_write_lock(self, alias: str, owner: str) -> bool:
         self.release_write_lock_calls.append((alias, owner))
@@ -252,7 +253,7 @@ def test_store_pattern_does_not_release_when_piggybacking(
 
     # The staged catalog writer's fsync fails, as on a full disk.
     with patch(
-        "code_indexer.global_repos.catalog_staged_write.os.fsync",
+        "cidx_xray.server.pattern_service.Path.write_text",
         side_effect=OSError("disk full"),
     ):
         with pytest.raises(OSError, match="disk full"):

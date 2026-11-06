@@ -10,6 +10,8 @@ All tests use mocked GitOperationsService to avoid real git operations.
 """
 
 import json
+import shutil
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import cast
@@ -56,10 +58,47 @@ def _extract_response_data(mcp_response: dict) -> dict:
     return cast(dict, json.loads(content["text"]))
 
 
+@pytest.fixture
+def push_repo(tmp_path: Path) -> str:
+    """A real working copy whose stored origin carries a credential: git_push
+    makes the stored URL credential-free (local git) before it resolves the
+    remote, so a path that is not a repository fails the push -- the
+    /tmp/test-repo these tests used to pass made every push fail."""
+    if shutil.which("git") is None:
+        pytest.skip("git is required")
+    repo = tmp_path / "test-repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(
+        [
+            "git",
+            "remote",
+            "add",
+            "origin",
+            "https://user:secret@github.com/owner/repo.git",
+        ],
+        cwd=repo,
+        check=True,
+    )
+    return str(repo)
+
+
+def _stored_origin(repo: str) -> str:
+    return subprocess.run(
+        ["git", "remote", "get-url", "origin"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+
 class TestGitPushHandler:
     """Test git_push MCP handler (F4: Remote Operations)."""
 
-    def test_git_push_success(self, mock_user, mock_git_service, mock_repo_manager):
+    def test_git_push_success(
+        self, mock_user, mock_git_service, mock_repo_manager, push_repo
+    ):
         """Test successful git push operation."""
         mock_credential = {
             "token": "ghp_test123",
@@ -79,7 +118,7 @@ class TestGitPushHandler:
                 "code_indexer.server.mcp.handlers._get_pat_credential_for_remote"
             ) as mock_get_pat,
         ):
-            mock_resolve.return_value = ("/tmp/test-repo", None)
+            mock_resolve.return_value = (push_repo, None)
             mock_get_pat.return_value = (
                 mock_credential,
                 "https://github.com/owner/repo.git",
@@ -97,9 +136,11 @@ class TestGitPushHandler:
 
             assert data["success"] is True
             assert data["pushed_commits"] == 3
+            # the stored origin no longer holds the credential
+            assert _stored_origin(push_repo) == "https://github.com/owner/repo.git"
 
     def test_git_push_authentication_error(
-        self, mock_user, mock_git_service, mock_repo_manager
+        self, mock_user, mock_git_service, mock_repo_manager, push_repo
     ):
         """Test git push with authentication error."""
         mock_credential = {
@@ -123,7 +164,7 @@ class TestGitPushHandler:
                 "code_indexer.server.mcp.handlers._get_pat_credential_for_remote"
             ) as mock_get_pat,
         ):
-            mock_resolve.return_value = ("/tmp/test-repo", None)
+            mock_resolve.return_value = (push_repo, None)
             mock_get_pat.return_value = (
                 mock_credential,
                 "https://github.com/owner/repo.git",
@@ -144,7 +185,7 @@ class TestGitPushHandler:
             assert "Authentication failed" in data["stderr"]
 
     def test_git_push_network_error(
-        self, mock_user, mock_git_service, mock_repo_manager
+        self, mock_user, mock_git_service, mock_repo_manager, push_repo
     ):
         """Test git push with network connectivity error."""
         mock_credential = {
@@ -168,7 +209,7 @@ class TestGitPushHandler:
                 "code_indexer.server.mcp.handlers._get_pat_credential_for_remote"
             ) as mock_get_pat,
         ):
-            mock_resolve.return_value = ("/tmp/test-repo", None)
+            mock_resolve.return_value = (push_repo, None)
             mock_get_pat.return_value = (
                 mock_credential,
                 "https://github.com/owner/repo.git",

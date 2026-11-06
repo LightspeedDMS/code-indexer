@@ -16,6 +16,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
+from code_indexer.server.utils.route_table import iter_routes
 
 # Issue #1677: this file was marked pytest.mark.slow with no file-specific
 # rationale, which silently excluded it from server-fast-automation.sh's
@@ -44,7 +45,7 @@ _ELEVATION_QUALNAME = "require_elevation.<locals>._check"
 
 def _bypass_elevation(app, router):
     """Override all require_elevation deps so tests can call routes without TOTP setup."""
-    for route in router.routes:
+    for route_path, route in iter_routes(router.routes):
         if not isinstance(route, APIRoute):
             continue
         for dep in route.dependencies or []:

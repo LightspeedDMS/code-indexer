@@ -33,7 +33,7 @@ def test_configure_credential_encrypts_off_the_event_loop(tmp_path: Path) -> Non
         threads.append(threading.current_thread())
         return real_gate()
 
-    mgr._cipher.v2_writes_allowed = recording_gate  # type: ignore[method-assign]
+    setattr(mgr._cipher, "v2_writes_allowed", recording_gate)
 
     async def run() -> threading.Thread:
         with mock.patch(

@@ -95,7 +95,7 @@ def test_ci_log_search_stops_within_its_budget(forge: str) -> None:
 
 def test_xray_filename_driver_stops_within_its_walk_budget(tmp_path: Path) -> None:
     pytest.importorskip("tree_sitter_languages", reason="xray extras not installed")
-    from code_indexer.xray.search_engine import XRayPhase1TimeoutError, XRaySearchEngine
+    from cidx_xray.search_engine import XRayPhase1TimeoutError, XRaySearchEngine
 
     for n in range(3):
         (tmp_path / f"{SLOW_NAME}{n}.py").write_text("x = 1\n")

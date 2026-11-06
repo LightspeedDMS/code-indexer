@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Optional
 from unittest.mock import MagicMock
 
-from code_indexer.server.services.dependency_map_service import DependencyMapService
+from cidx_depmap.server.dependency_map_service import DependencyMapService
 
 
 def _invoke_helper(

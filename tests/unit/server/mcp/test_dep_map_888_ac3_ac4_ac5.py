@@ -15,9 +15,10 @@ AC5: handler-layer dual-write helper writes both canonical AND deprecated-alias 
 import json
 from pathlib import Path
 from typing import Any, Dict, cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from code_indexer.server.auth.user_manager import User, UserRole
+from tests.unit.server._depmap_feature import depmap_service_reading, depmap_started
 
 
 # ---------------------------------------------------------------------------
@@ -32,10 +33,8 @@ def _make_user() -> User:
     return user
 
 
-def _make_app_state(read_path: Path) -> MagicMock:
-    state = MagicMock()
-    state.dependency_map_service.cidx_meta_read_path = read_path
-    return state
+def _running_service(read_path: Path) -> Any:
+    return depmap_service_reading(read_path)
 
 
 def _parse_response(result: Any) -> Dict[str, Any]:
@@ -43,47 +42,35 @@ def _parse_response(result: Any) -> Dict[str, Any]:
     return cast(Dict[str, Any], json.loads(result["content"][0]["text"]))
 
 
-def _call_find_consumers(params: dict, app_state: MagicMock) -> Any:
-    from code_indexer.server.mcp.handlers.depmap import depmap_find_consumers_handler
+def _call_find_consumers(params: dict, service: Any) -> Any:
+    from cidx_depmap.server.mcp.handlers import depmap_find_consumers_handler
 
-    with patch(
-        "code_indexer.server.mcp.handlers.depmap._utils.app_module.app.state",
-        app_state,
-    ):
+    with depmap_started(service, MagicMock()):
         return depmap_find_consumers_handler(params, _make_user())
 
 
-def _call_get_repo_domains(params: dict, app_state: MagicMock) -> Any:
-    from code_indexer.server.mcp.handlers.depmap import depmap_get_repo_domains_handler
+def _call_get_repo_domains(params: dict, service: Any) -> Any:
+    from cidx_depmap.server.mcp.handlers import depmap_get_repo_domains_handler
 
-    with patch(
-        "code_indexer.server.mcp.handlers.depmap._utils.app_module.app.state",
-        app_state,
-    ):
+    with depmap_started(service, MagicMock()):
         return depmap_get_repo_domains_handler(params, _make_user())
 
 
-def _call_get_domain_summary(params: dict, app_state: MagicMock) -> Any:
-    from code_indexer.server.mcp.handlers.depmap import (
+def _call_get_domain_summary(params: dict, service: Any) -> Any:
+    from cidx_depmap.server.mcp.handlers import (
         depmap_get_domain_summary_handler,
     )
 
-    with patch(
-        "code_indexer.server.mcp.handlers.depmap._utils.app_module.app.state",
-        app_state,
-    ):
+    with depmap_started(service, MagicMock()):
         return depmap_get_domain_summary_handler(params, _make_user())
 
 
-def _call_get_cross_domain_graph(params: dict, app_state: MagicMock) -> Any:
-    from code_indexer.server.mcp.handlers.depmap import (
+def _call_get_cross_domain_graph(params: dict, service: Any) -> Any:
+    from cidx_depmap.server.mcp.handlers import (
         depmap_get_cross_domain_graph_handler,
     )
 
-    with patch(
-        "code_indexer.server.mcp.handlers.depmap._utils.app_module.app.state",
-        app_state,
-    ):
+    with depmap_started(service, MagicMock()):
         return depmap_get_cross_domain_graph_handler(params, _make_user())
 
 
@@ -199,7 +186,7 @@ class TestAC3CanonicalFieldNames:
         """find_consumers consumer entries use 'domain' key (not 'domain_name')."""
         root = _make_dep_map_with_consumer(tmp_path, "target-repo")
         result = _call_find_consumers(
-            {"repo_name": "target-repo"}, _make_app_state(root)
+            {"repo_name": "target-repo"}, _running_service(root)
         )
         data = _parse_response(result)
         assert data["success"] is True
@@ -215,7 +202,7 @@ class TestAC3CanonicalFieldNames:
         """find_consumers consumer entries use 'repo' key (not 'consuming_repo')."""
         root = _make_dep_map_with_consumer(tmp_path, "target-repo")
         result = _call_find_consumers(
-            {"repo_name": "target-repo"}, _make_app_state(root)
+            {"repo_name": "target-repo"}, _running_service(root)
         )
         data = _parse_response(result)
         assert data["success"] is True
@@ -230,7 +217,9 @@ class TestAC3CanonicalFieldNames:
     ) -> None:
         """get_repo_domains domain entries use 'domain' key (not 'domain_name')."""
         root = _make_dep_map_with_repo_in_domain(tmp_path, "my-repo", "my-domain")
-        result = _call_get_repo_domains({"repo_name": "my-repo"}, _make_app_state(root))
+        result = _call_get_repo_domains(
+            {"repo_name": "my-repo"}, _running_service(root)
+        )
         data = _parse_response(result)
         assert data["success"] is True
         assert len(data["domains"]) >= 1
@@ -245,7 +234,7 @@ class TestAC3CanonicalFieldNames:
         """get_domain_summary participating_repos entries use 'repo' key."""
         root = _make_dep_map_with_repo_in_domain(tmp_path, "my-repo", "my-domain")
         result = _call_get_domain_summary(
-            {"domain_name": "my-domain"}, _make_app_state(root)
+            {"domain_name": "my-domain"}, _running_service(root)
         )
         data = _parse_response(result)
         assert data["success"] is True
@@ -262,7 +251,7 @@ class TestAC3CanonicalFieldNames:
     ) -> None:
         """cross_domain_graph edge entries use 'source_domain' and 'target_domain' keys."""
         root = _make_two_domain_graph(tmp_path)
-        result = _call_get_cross_domain_graph({}, _make_app_state(root))
+        result = _call_get_cross_domain_graph({}, _running_service(root))
         data = _parse_response(result)
         assert data["success"] is True
         assert len(data["edges"]) >= 1
@@ -286,7 +275,9 @@ class TestAC4InputParameterNamesUnchanged:
     def test_find_consumers_accepts_repo_name_input_param(self, tmp_path: Path) -> None:
         """find_consumers still accepts 'repo_name' as input parameter (unchanged)."""
         root = _make_dep_map_with_consumer(tmp_path, "my-target")
-        result = _call_find_consumers({"repo_name": "my-target"}, _make_app_state(root))
+        result = _call_find_consumers(
+            {"repo_name": "my-target"}, _running_service(root)
+        )
         data = _parse_response(result)
         # Must not be invalid_input (which would indicate the param name changed)
         assert data.get("resolution") != "invalid_input", (
@@ -298,7 +289,9 @@ class TestAC4InputParameterNamesUnchanged:
     ) -> None:
         """get_repo_domains still accepts 'repo_name' as input parameter (unchanged)."""
         root = _make_dep_map_with_repo_in_domain(tmp_path, "my-repo", "d")
-        result = _call_get_repo_domains({"repo_name": "my-repo"}, _make_app_state(root))
+        result = _call_get_repo_domains(
+            {"repo_name": "my-repo"}, _running_service(root)
+        )
         data = _parse_response(result)
         assert data.get("resolution") != "invalid_input", (
             "repo_name input parameter must still be accepted"
@@ -310,7 +303,7 @@ class TestAC4InputParameterNamesUnchanged:
         """get_domain_summary still accepts 'domain_name' as input parameter (unchanged)."""
         root = _make_dep_map_with_repo_in_domain(tmp_path, "r", "target-domain")
         result = _call_get_domain_summary(
-            {"domain_name": "target-domain"}, _make_app_state(root)
+            {"domain_name": "target-domain"}, _running_service(root)
         )
         data = _parse_response(result)
         assert data.get("resolution") != "invalid_input", (
@@ -323,7 +316,7 @@ class TestAC4InputParameterNamesUnchanged:
         """find_consumers with repo_name='target-repo' returns consumers for that repo."""
         root = _make_dep_map_with_consumer(tmp_path, "target-repo")
         result = _call_find_consumers(
-            {"repo_name": "target-repo"}, _make_app_state(root)
+            {"repo_name": "target-repo"}, _running_service(root)
         )
         data = _parse_response(result)
         assert data["success"] is True
@@ -346,7 +339,7 @@ class TestAC5DualWriteAliases:
         """find_consumers consumer entry has both 'repo' (canonical) and 'consuming_repo' (deprecated alias)."""
         root = _make_dep_map_with_consumer(tmp_path, "target-repo")
         result = _call_find_consumers(
-            {"repo_name": "target-repo"}, _make_app_state(root)
+            {"repo_name": "target-repo"}, _running_service(root)
         )
         data = _parse_response(result)
         assert data["success"] is True
@@ -369,7 +362,9 @@ class TestAC5DualWriteAliases:
     ) -> None:
         """get_repo_domains domain entry has both 'domain' (canonical) and 'domain_name' (deprecated alias)."""
         root = _make_dep_map_with_repo_in_domain(tmp_path, "my-repo", "my-domain")
-        result = _call_get_repo_domains({"repo_name": "my-repo"}, _make_app_state(root))
+        result = _call_get_repo_domains(
+            {"repo_name": "my-repo"}, _running_service(root)
+        )
         data = _parse_response(result)
         assert data["success"] is True
         assert len(data["domains"]) >= 1
@@ -388,13 +383,13 @@ class TestAC5DualWriteAliases:
 
     def test_depmap_aliases_module_exists(self) -> None:
         """_depmap_aliases.py module must exist and be importable."""
-        from code_indexer.server.mcp.handlers import _depmap_aliases  # noqa: F401
+        from cidx_depmap.server.mcp import _depmap_aliases  # noqa: F401
 
         assert _depmap_aliases is not None
 
     def test_dual_write_helper_function_is_centralized(self) -> None:
         """Dual-write helper must be importable from _depmap_aliases module."""
-        from code_indexer.server.mcp.handlers._depmap_aliases import (
+        from cidx_depmap.server.mcp._depmap_aliases import (
             apply_consumer_aliases,
             apply_domain_membership_aliases,
         )
@@ -404,7 +399,7 @@ class TestAC5DualWriteAliases:
 
     def test_apply_consumer_aliases_adds_both_keys(self) -> None:
         """apply_consumer_aliases adds canonical 'repo' and deprecated 'consuming_repo'."""
-        from code_indexer.server.mcp.handlers._depmap_aliases import (
+        from cidx_depmap.server.mcp._depmap_aliases import (
             apply_consumer_aliases,
         )
 
@@ -428,7 +423,7 @@ class TestAC5DualWriteAliases:
 
         Blocker 1: consumer entries have both canonical domain and deprecated domain_name.
         """
-        from code_indexer.server.mcp.handlers._depmap_aliases import (
+        from cidx_depmap.server.mcp._depmap_aliases import (
             apply_consumer_aliases,
         )
 
@@ -450,7 +445,7 @@ class TestAC5DualWriteAliases:
 
     def test_apply_domain_membership_aliases_adds_both_keys(self) -> None:
         """apply_domain_membership_aliases adds canonical 'domain' and deprecated 'domain_name'."""
-        from code_indexer.server.mcp.handlers._depmap_aliases import (
+        from cidx_depmap.server.mcp._depmap_aliases import (
             apply_domain_membership_aliases,
         )
 

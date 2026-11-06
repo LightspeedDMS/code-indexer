@@ -81,7 +81,7 @@ class TestHandlersTruncationFunctionsSyncMethods:
         When checking if _apply_scip_payload_truncation is a coroutine function
         Then it should return False (sync function)
         """
-        from code_indexer.server.mcp.handlers import _apply_scip_payload_truncation
+        from cidx_scip.server.mcp._common import _apply_scip_payload_truncation
 
         # Verify _apply_scip_payload_truncation is NOT a coroutine function
         assert not inspect.iscoroutinefunction(_apply_scip_payload_truncation), (

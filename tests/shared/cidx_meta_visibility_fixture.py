@@ -32,7 +32,7 @@ from typing import Any, Dict, List, Optional
 from code_indexer.server.services.access_filtering_service import (
     AccessFilteringService,
 )
-from code_indexer.server.services.dep_map_index_regenerator import IndexRegenerator
+from cidx_depmap.server.dep_map_index_regenerator import IndexRegenerator
 from code_indexer.server.services.group_access_manager import GroupAccessManager
 from code_indexer.server.services.memory_io import atomic_write_memory_file
 

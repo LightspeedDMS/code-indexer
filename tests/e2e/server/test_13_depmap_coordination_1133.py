@@ -35,7 +35,8 @@ sentinel almost immediately).
 
 The MCP trigger checks ``dependency_map_enabled`` BEFORE the sentinel claim, so
 the feature must be enabled first.  That is done through the real Web-UI config
-front door (POST /admin/config/claude_cli with a session cookie + CSRF token) —
+front door (the config screen's Feature Settings form for the cidx-depmap
+feature, POST /admin/features/config/depmap, with a session cookie + CSRF token) —
 ``set_global_config`` is only for the repo-sync ``refresh_interval`` and does
 not accept this key.
 
@@ -71,6 +72,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from code_indexer.server.features.web import FORM_FIELD_PREFIX
 from tests.e2e.server.conftest import AdminTokenProvider
 from tests.e2e.server.mcp_helpers import call_mcp_tool, parse_mcp_result
 
@@ -94,7 +96,8 @@ pytestmark = pytest.mark.skipif(
 # ---------------------------------------------------------------------------
 LOGIN_PAGE = "/login"
 CONFIG_PAGE = "/admin/config"
-CONFIG_POST_CLAUDE_CLI = "/admin/config/claude_cli"
+# The cidx-depmap feature's Feature Settings form (generic feature config door).
+CONFIG_POST_DEPMAP = "/admin/features/config/depmap"
 REST_TRIGGER = "/admin/dependency-map/trigger"
 JOB_STATUS_TMPL = "/api/jobs/{job_id}"
 
@@ -137,8 +140,8 @@ def _enable_dependency_map(client: TestClient) -> None:
     """Enable ``dependency_map_enabled`` through the real Web-UI config front door.
 
     Establishes an admin WEB SESSION (cookie) — distinct from the JWT bearer
-    used for MCP — then POSTs the claude_cli config section with the feature
-    flag set.  This is required because the MCP/REST trigger handlers gate on
+    used for MCP — then POSTs the depmap Feature Settings form with the
+    feature flag set.  This is required because the MCP/REST trigger handlers gate on
     ``dependency_map_enabled`` BEFORE the sentinel claim.
 
     Bounded: no loops; a fixed sequence of front-door calls.
@@ -173,23 +176,32 @@ def _enable_dependency_map(client: TestClient) -> None:
     )
     csrf2 = _extract_csrf(config_page.text) or csrf
 
+    # The form posts every runtime key of the section; an unchecked box is
+    # absent (False), so only the flag this test needs is sent.
     save_resp = client.post(
-        CONFIG_POST_CLAUDE_CLI,
-        data={"dependency_map_enabled": "true", "csrf_token": csrf2},
+        CONFIG_POST_DEPMAP,
+        data={
+            f"{FORM_FIELD_PREFIX}dependency_map_enabled": "on",
+            "csrf_token": csrf2,
+        },
         follow_redirects=False,
     )
     assert save_resp.status_code in (200, 302, 303), (
-        f"POST {CONFIG_POST_CLAUDE_CLI} failed: {save_resp.status_code} — "
+        f"POST {CONFIG_POST_DEPMAP} failed: {save_resp.status_code} — "
         f"{save_resp.text[:200]}"
     )
 
-    # Verify the runtime config actually flipped (front-door write took effect).
+    # Verify the stored feature setting actually flipped (front-door write took effect).
+    from cidx_depmap.config import DEPMAP_CONFIG_SECTION
+
+    from code_indexer.server.features.config import section_values
     from code_indexer.server.services.config_service import get_config_service
 
-    cfg = get_config_service().get_config()
-    ci = cfg.claude_integration_config if cfg else None
-    assert ci is not None and ci.dependency_map_enabled is True, (
-        "dependency_map_enabled did not flip to True after the config-screen POST"
+    values = section_values(
+        "depmap", DEPMAP_CONFIG_SECTION, get_config_service().get_config()
+    )
+    assert values["dependency_map_enabled"] is True, (
+        "dependency_map_enabled did not flip to True after the Feature Settings POST"
     )
     # NOTE: the web session cookie is deliberately RETAINED — the REST trigger
     # route (/admin/dependency-map/trigger) authenticates via _require_admin_session
@@ -199,16 +211,17 @@ def _enable_dependency_map(client: TestClient) -> None:
 
 
 def _dep_map_service(client: TestClient):
-    """Return the live server's DependencyMapService from app state.
+    """Return the live server's running DependencyMapService.
 
-    Uses getattr against ``client.app`` (typed by mypy as the bare ASGI callable,
-    which has no ``.state`` attribute) so static typing is satisfied while the
-    runtime behaviour is identical to ``client.app.state.dependency_map_service``.
+    The cidx-depmap feature keeps it in its own slot (``runtime.SERVICE``),
+    installed by its on_startup in the server *client* runs; the handlers
+    and routes read it there.
     """
-    state = getattr(client.app, "state", None)
-    service = getattr(state, "dependency_map_service", None)
+    from cidx_depmap.server import runtime
+
+    service = runtime.dependency_map_service()
     assert service is not None, (
-        "dependency_map_service is not wired on app.state — the dep-map "
+        "the dependency-map service is not running — the dep-map "
         "coordination front door is unavailable in this harness"
     )
     return service
@@ -218,12 +231,12 @@ def _new_sentinel(client: TestClient):
     """Build a SharedJobSentinel bound to the live server's sentinel directory.
 
     Resolves the directory from the SAME source the production handlers use:
-    ``app.state.dependency_map_service.get_sentinel_dir()`` — the single source
+    the running service's ``get_sentinel_dir()`` — the single source
     of truth (Story #1035 B6).  Asserts it is non-None so the synchronous-claim
     409 path is guaranteed to be active in this harness (Codex RISK 3).
     """
     from code_indexer.server.services.shared_job_sentinel import SharedJobSentinel
-    from code_indexer.server.services.dependency_map_service import (
+    from cidx_depmap.server.dependency_map_service import (
         ANALYSIS_STALE_TIMEOUT_SECONDS,
     )
 
@@ -722,7 +735,7 @@ def seeded_anomaly_dir(depmap_enabled_client: TestClient) -> Iterator[Path]:
 
     Files are written into ``<cidx_meta_read_path>/dependency-map/`` — the exact
     directory the read handler (`depmap_get_cross_domain_graph`) resolves via
-    ``app.state.dependency_map_service.cidx_meta_read_path``.  Teardown ALWAYS
+    the running service's ``cidx_meta_read_path``.  Teardown ALWAYS
     removes every seeded file so later tests + the session log-audit gate are
     unaffected.
     """

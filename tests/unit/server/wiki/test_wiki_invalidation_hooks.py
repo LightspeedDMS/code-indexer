@@ -1,7 +1,10 @@
 """Tests for wiki invalidation hook wiring (Story #304).
 
 Validates that mutation handlers trigger wiki_cache_invalidator
-after successful operations (AC1, AC2, AC8, AC9).
+after successful operations (AC1, AC2, AC8, AC9). Since modular phase 4e
+the core's handlers announce the change through repository_events and the
+cidx-wiki feature's invalidator listens (its on_startup subscribes it);
+:func:`subscribed_invalidator` subscribes it the same way.
 """
 
 import os
@@ -11,8 +14,23 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from code_indexer.server.wiki.wiki_cache import WikiCache
-from code_indexer.server.wiki.wiki_cache_invalidator import WikiCacheInvalidator
+from cidx_wiki.server.wiki_cache import WikiCache
+from cidx_wiki.server.wiki_cache_invalidator import WikiCacheInvalidator
+
+
+@pytest.fixture(autouse=True)
+def subscribed_invalidator():
+    """The wiki's invalidator singleton listening to the core's repository
+    events, as the started wiki feature has it."""
+    from code_indexer.server.features import repository_events
+    from cidx_wiki.server.wiki_cache_invalidator import wiki_cache_invalidator
+
+    unsubscribe = repository_events.subscribe(wiki_cache_invalidator)
+    try:
+        yield
+    finally:
+        unsubscribe()
+        wiki_cache_invalidator.wiki_cache = None
 
 
 @pytest.fixture
@@ -98,7 +116,7 @@ class TestHandlersCallInvalidator:
     def test_handle_create_file_calls_invalidator_for_md(self):
         """handle_create_file must call wiki_cache_invalidator.invalidate_for_file_change."""
         from code_indexer.server.mcp.handlers import handle_create_file
-        from code_indexer.server.wiki.wiki_cache_invalidator import (
+        from cidx_wiki.server.wiki_cache_invalidator import (
             wiki_cache_invalidator,
         )
 
@@ -144,7 +162,7 @@ class TestHandlersCallInvalidator:
     def test_handle_edit_file_calls_invalidator_for_md(self):
         """handle_edit_file must call wiki_cache_invalidator.invalidate_for_file_change."""
         from code_indexer.server.mcp.handlers import handle_edit_file
-        from code_indexer.server.wiki.wiki_cache_invalidator import (
+        from cidx_wiki.server.wiki_cache_invalidator import (
             wiki_cache_invalidator,
         )
 
@@ -192,7 +210,7 @@ class TestHandlersCallInvalidator:
     def test_handle_delete_file_calls_invalidator_for_md(self):
         """handle_delete_file must call wiki_cache_invalidator.invalidate_for_file_change."""
         from code_indexer.server.mcp.handlers import handle_delete_file
-        from code_indexer.server.wiki.wiki_cache_invalidator import (
+        from cidx_wiki.server.wiki_cache_invalidator import (
             wiki_cache_invalidator,
         )
 
@@ -237,7 +255,7 @@ class TestHandlersCallInvalidator:
     def test_invalidation_not_called_for_non_md_create(self):
         """handle_create_file must NOT call invalidator for .py files (AC5)."""
         from code_indexer.server.mcp.handlers import handle_create_file
-        from code_indexer.server.wiki.wiki_cache_invalidator import (
+        from cidx_wiki.server.wiki_cache_invalidator import (
             wiki_cache_invalidator,
         )
 
@@ -288,7 +306,7 @@ class TestGitOperationInvalidationHookAC2:
     def test_git_pull_calls_invalidator(self):
         """git_pull handler must call wiki_cache_invalidator after successful pull."""
         from code_indexer.server.mcp.handlers import git_pull
-        from code_indexer.server.wiki.wiki_cache_invalidator import (
+        from cidx_wiki.server.wiki_cache_invalidator import (
             wiki_cache_invalidator,
         )
 
@@ -312,7 +330,7 @@ class TestGitOperationInvalidationHookAC2:
     def test_git_branch_switch_calls_invalidator(self):
         """git_branch_switch handler must call wiki_cache_invalidator after successful switch."""
         from code_indexer.server.mcp.handlers import git_branch_switch
-        from code_indexer.server.wiki.wiki_cache_invalidator import (
+        from cidx_wiki.server.wiki_cache_invalidator import (
             wiki_cache_invalidator,
         )
 
@@ -343,7 +361,7 @@ class TestGitOperationInvalidationHookAC2:
     def test_git_reset_calls_invalidator_on_success(self):
         """git_reset handler must call wiki_cache_invalidator after successful reset."""
         from code_indexer.server.mcp.handlers import git_reset
-        from code_indexer.server.wiki.wiki_cache_invalidator import (
+        from cidx_wiki.server.wiki_cache_invalidator import (
             wiki_cache_invalidator,
         )
 
@@ -371,7 +389,7 @@ class TestGitOperationInvalidationHookAC2:
     def test_git_clean_calls_invalidator_on_success(self):
         """git_clean handler must call wiki_cache_invalidator after successful clean."""
         from code_indexer.server.mcp.handlers import git_clean
-        from code_indexer.server.wiki.wiki_cache_invalidator import (
+        from cidx_wiki.server.wiki_cache_invalidator import (
             wiki_cache_invalidator,
         )
 
@@ -402,7 +420,7 @@ class TestGitOperationInvalidationHookAC2:
     def test_git_merge_abort_calls_invalidator_on_success(self):
         """git_merge_abort handler must call wiki_cache_invalidator after successful abort."""
         from code_indexer.server.mcp.handlers import git_merge_abort
-        from code_indexer.server.wiki.wiki_cache_invalidator import (
+        from cidx_wiki.server.wiki_cache_invalidator import (
             wiki_cache_invalidator,
         )
 
@@ -430,7 +448,7 @@ class TestGitOperationInvalidationHookAC2:
     def test_git_checkout_file_calls_invalidator_on_success(self):
         """git_checkout_file handler must call wiki_cache_invalidator after successful checkout."""
         from code_indexer.server.mcp.handlers import git_checkout_file
-        from code_indexer.server.wiki.wiki_cache_invalidator import (
+        from cidx_wiki.server.wiki_cache_invalidator import (
             wiki_cache_invalidator,
         )
 
@@ -466,7 +484,7 @@ class TestWriteModeExitInvalidationHookAC9:
     def test_handle_exit_write_mode_calls_invalidator(self):
         """handle_exit_write_mode must call wiki_cache_invalidator after triggering refresh."""
         from code_indexer.server.mcp.handlers import handle_exit_write_mode
-        from code_indexer.server.wiki.wiki_cache_invalidator import (
+        from cidx_wiki.server.wiki_cache_invalidator import (
             wiki_cache_invalidator,
         )
 
@@ -476,30 +494,29 @@ class TestWriteModeExitInvalidationHookAC9:
         mock_user = MagicMock()
         mock_user.username = "testuser"
 
-        with patch(
-            "code_indexer.server.services.file_crud_service.file_crud_service"
-        ) as mock_crud:
-            mock_crud.is_write_exception.return_value = True
-            with patch(
-                "code_indexer.server.mcp.handlers._get_golden_repos_dir",
-                return_value="/fake/golden",
-            ):
-                with patch(
-                    "code_indexer.server.mcp.handlers._write_mode_strip_global",
-                    return_value="my-repo",
-                ):
-                    with patch("pathlib.Path.exists", return_value=True):
-                        with patch(
-                            "code_indexer.server.mcp.handlers._get_app_refresh_scheduler"
-                        ) as mock_get_scheduler:
-                            mock_scheduler = MagicMock()
-                            mock_get_scheduler.return_value = mock_scheduler
-                            with patch(
-                                "code_indexer.server.mcp.handlers._write_mode_run_refresh"
-                            ):
-                                handle_exit_write_mode(
-                                    {"repo_alias": "my-repo-global"},
-                                    mock_user,
-                                )
+        # handle_exit_write_mode lives in handlers.files and binds its
+        # collaborators there; the write-mode marker is read through
+        # WriteModeMarkers (registry-backed since content seam step 5a), not a
+        # Path.exists() of a marker file -- patch those, where they are used.
+        from code_indexer.server.mcp.handlers import files as files_handlers
 
+        with (
+            patch(
+                "code_indexer.server.services.file_crud_service.file_crud_service"
+            ) as mock_crud,
+            patch.object(
+                files_handlers, "_get_golden_repos_dir", return_value="/fake/golden"
+            ),
+            patch.object(files_handlers.WriteModeMarkers, "exists", return_value=True),
+            patch.object(
+                files_handlers,
+                "_get_app_refresh_scheduler",
+                return_value=MagicMock(),
+            ),
+            patch.object(files_handlers, "_write_mode_run_refresh") as mock_refresh,
+        ):
+            mock_crud.is_write_exception.return_value = True
+            handle_exit_write_mode({"repo_alias": "my-repo-global"}, mock_user)
+
+        mock_refresh.assert_called_once()
         mock_cache.invalidate_repo.assert_called_with("my-repo-global")

@@ -29,7 +29,7 @@ def _make_config_manager():
 
 
 def _import_service():
-    from code_indexer.server.services.dependency_map_domain_service import (
+    from cidx_depmap.server.dependency_map_domain_service import (
         DependencyMapDomainService,
     )
 

@@ -11,7 +11,7 @@ except ImportError:
     # Fall back to standard library sqlite3
     import sqlite3
 
-from code_indexer.scip.database.schema import DatabaseManager
+from cidx_scip.database.schema import DatabaseManager
 
 
 class TestDatabaseFileCreation:

@@ -35,7 +35,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from code_indexer.server.services.dependency_map_service import DependencyMapService
+from cidx_depmap.server.dependency_map_service import DependencyMapService
 from code_indexer.server.services.job_tracker import JobTracker, DuplicateJobError
 
 
@@ -182,8 +182,8 @@ class TestRunFullAnalysisLifecycleGate:
     dependency-map lock.
     """
 
-    @patch("code_indexer.server.services.dependency_map_service.LifecycleBatchRunner")
-    @patch("code_indexer.server.services.dependency_map_service.LifecycleFleetScanner")
+    @patch("cidx_depmap.server.dependency_map_service.LifecycleBatchRunner")
+    @patch("cidx_depmap.server.dependency_map_service.LifecycleFleetScanner")
     def test_run_full_analysis_repairs_broken_aliases_before_dep_map_work(
         self, scanner_cls, runner_cls, service
     ):
@@ -203,8 +203,8 @@ class TestRunFullAnalysisLifecycleGate:
         # parent_job_id is the tracked job id this run registered
         assert kwargs["parent_job_id"].startswith("dep-map-full-")
 
-    @patch("code_indexer.server.services.dependency_map_service.LifecycleBatchRunner")
-    @patch("code_indexer.server.services.dependency_map_service.LifecycleFleetScanner")
+    @patch("cidx_depmap.server.dependency_map_service.LifecycleBatchRunner")
+    @patch("cidx_depmap.server.dependency_map_service.LifecycleFleetScanner")
     def test_run_full_analysis_skips_pre_flight_when_nothing_broken(
         self, scanner_cls, runner_cls, service
     ):
@@ -214,8 +214,8 @@ class TestRunFullAnalysisLifecycleGate:
 
         runner_cls.assert_not_called()
 
-    @patch("code_indexer.server.services.dependency_map_service.LifecycleBatchRunner")
-    @patch("code_indexer.server.services.dependency_map_service.LifecycleFleetScanner")
+    @patch("cidx_depmap.server.dependency_map_service.LifecycleBatchRunner")
+    @patch("cidx_depmap.server.dependency_map_service.LifecycleFleetScanner")
     def test_run_full_analysis_propagates_duplicate_job_error(
         self, scanner_cls, runner_cls, service, real_job_tracker
     ):
@@ -245,8 +245,8 @@ class TestRunDeltaAnalysisLifecycleGate:
     dependency-map lock.
     """
 
-    @patch("code_indexer.server.services.dependency_map_service.LifecycleBatchRunner")
-    @patch("code_indexer.server.services.dependency_map_service.LifecycleFleetScanner")
+    @patch("cidx_depmap.server.dependency_map_service.LifecycleBatchRunner")
+    @patch("cidx_depmap.server.dependency_map_service.LifecycleFleetScanner")
     def test_run_delta_analysis_repairs_broken_aliases_before_dep_map_work(
         self, scanner_cls, runner_cls, service
     ):
@@ -264,8 +264,8 @@ class TestRunDeltaAnalysisLifecycleGate:
         assert aliases == ["alias-x", "alias-y"]
         assert kwargs["parent_job_id"].startswith("dep-map-delta-")
 
-    @patch("code_indexer.server.services.dependency_map_service.LifecycleBatchRunner")
-    @patch("code_indexer.server.services.dependency_map_service.LifecycleFleetScanner")
+    @patch("cidx_depmap.server.dependency_map_service.LifecycleBatchRunner")
+    @patch("cidx_depmap.server.dependency_map_service.LifecycleFleetScanner")
     def test_run_delta_analysis_skips_pre_flight_when_nothing_broken(
         self, scanner_cls, runner_cls, service
     ):
@@ -275,8 +275,8 @@ class TestRunDeltaAnalysisLifecycleGate:
 
         runner_cls.assert_not_called()
 
-    @patch("code_indexer.server.services.dependency_map_service.LifecycleBatchRunner")
-    @patch("code_indexer.server.services.dependency_map_service.LifecycleFleetScanner")
+    @patch("cidx_depmap.server.dependency_map_service.LifecycleBatchRunner")
+    @patch("cidx_depmap.server.dependency_map_service.LifecycleFleetScanner")
     def test_run_delta_analysis_propagates_duplicate_job_error(
         self, scanner_cls, runner_cls, service, real_job_tracker
     ):

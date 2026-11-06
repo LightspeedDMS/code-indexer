@@ -147,23 +147,27 @@ def _real_engine_env(repo_path: Path) -> Generator[None, None, None]:
             create=True,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._search._resolve_repo_path",
+            "cidx_xray.server.mcp.xray._search._resolve_repo_path",
             return_value=str(repo_path),
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._search._get_background_job_manager",
+            "cidx_xray.server.mcp.xray._search._get_background_job_manager",
             return_value=mock_bjm,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._search._get_job_tracker",
+            "cidx_xray.server.mcp.xray._search._get_job_tracker",
             return_value=mock_jt,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._search._get_xray_executor",
+            "cidx_xray.server.mcp.xray._search._get_xray_executor",
             return_value=mock_exec,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._search._get_xray_cell_limiter",
+            "cidx_xray.server.mcp.xray._infra._get_xray_executor",
+            return_value=mock_exec,
+        ),
+        patch(
+            "cidx_xray.server.mcp.xray._search._get_xray_cell_limiter",
             return_value=None,
         ),
         patch("asyncio.get_running_loop", return_value=loop_instance),

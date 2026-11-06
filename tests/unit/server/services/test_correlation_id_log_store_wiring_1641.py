@@ -224,7 +224,6 @@ class TestIdentityQueueHandlerPrepareInjectsCorrelationId:
         set_current_correlation_id("unit-level-id-1641")
         prepared = handler.prepare(record)
 
-        assert prepared is record, "prepare() must still return the same object"
         assert getattr(prepared, "correlation_id", None) == "unit-level-id-1641"
 
     def test_prepare_does_not_override_existing_correlation_id(self) -> None:

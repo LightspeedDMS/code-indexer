@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 
 from _audit_accounts_support import CAPTURE_LOGGER, capture_errors
 from _audit_front_doors import ACTING_ADMIN, front_door_env
+from tests.unit.server.app_state_patch import patch_app_state
 
 _MEMBER = "example-member"
 _REPO = "example-shared-repo"
@@ -55,8 +56,8 @@ def doors(tmp_path: Path, monkeypatch) -> Iterator[SimpleNamespace]:
         monkeypatch.setattr(
             env.manager, "activated_repo_manager", activated, raising=False
         )
-        monkeypatch.setattr(
-            app_module.app.state, "activated_repo_manager", activated, raising=False
+        patch_app_state(
+            monkeypatch, app_module.app.state, "activated_repo_manager", activated
         )
         groups = app_module.app.state.group_manager
         monkeypatch.setattr(groups_router, "_group_manager", groups)

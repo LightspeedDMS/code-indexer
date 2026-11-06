@@ -27,12 +27,15 @@ import pytest
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.services.access_filtering_service import AccessFilteringService
 from code_indexer.server.services.group_access_manager import GroupAccessManager
-from code_indexer.server.services.memory_candidate_retriever import (
+from cidx_memory.server.memory_candidate_retriever import (
     MemoryCandidate,
     MemoryCandidateRetriever,
 )
 from code_indexer.server.services.memory_io import atomic_write_memory_file
-from code_indexer.server.utils.config_manager import MemoryRetrievalConfig
+from tests.unit.server._memory_feature import (
+    memory_context_installed,
+    memory_search_section_installed,
+)
 
 GLOBAL_ID = "1" * 32
 REPO_A_ID = "a" * 32
@@ -51,9 +54,6 @@ BODIES = {
 }
 
 _APP_MODULE_PATCH = "code_indexer.server.mcp.handlers._utils.app_module"
-_REPO_SEARCH_CONFIG_PATCH = (
-    "code_indexer.server.mcp.handlers.search.repo_search.get_config_service"
-)
 _SHARED_VECTOR_PATCH = (
     "code_indexer.server.mcp.handlers.search.repo_search._compute_shared_query_vector"
 )
@@ -126,18 +126,9 @@ def _user(username: str) -> User:
     )
 
 
-class _ConfigService:
-    """Config service stand-in exposing a real MemoryRetrievalConfig."""
-
-    def __init__(self, cohere_min_score: float = 0.4) -> None:
-        self._config = SimpleNamespace(
-            memory_retrieval_config=MemoryRetrievalConfig(
-                memory_cohere_min_score=cohere_min_score
-            )
-        )
-
-    def get_config(self) -> Any:
-        return self._config
+def _settings(cohere_min_score: float = 0.4) -> Dict[str, Any]:
+    """The memory feature's config section."""
+    return {"memory_cohere_min_score": cohere_min_score}
 
 
 def _candidates(ids: List[str], golden: Path) -> List[MemoryCandidate]:
@@ -177,20 +168,28 @@ def _run(
     reranker_status: str = "disabled",
     cohere_min_score: float = 0.4,
 ) -> List[Dict[str, Any]]:
-    from code_indexer.server.mcp.handlers.search.memory_retrieval import (
-        _run_memory_retrieval,
-    )
+    from cidx_memory.server.retrieval import relevant_memories
+    from cidx_sdk import SearchAugmentRequest
 
-    with patch(_APP_MODULE_PATCH, _app_module(golden, service)):
-        result = _run_memory_retrieval(
-            {"query_text": "example query", "search_mode": "semantic", "limit": 5},
-            _user(username),
-            _ConfigService(cohere_min_score=cohere_min_score),
-            reranker_status,
-            query_vector=_QUERY_VECTOR,
+    app_module = _app_module(golden, service)
+    with (
+        patch(_APP_MODULE_PATCH, app_module),
+        memory_context_installed(
+            app_module.app, settings=_settings(cohere_min_score=cohere_min_score)
+        ),
+    ):
+        result = relevant_memories(
+            SearchAugmentRequest(
+                username=username,
+                query_text="example query",
+                search_mode="semantic",
+                limit=5,
+                query_vector=_QUERY_VECTOR,
+                reranker_status=reranker_status,
+            )
         )
     assert result is not None
-    return result
+    return [dict(m) for m in result]
 
 
 def _ids(memories: List[Dict[str, Any]]) -> List[str]:
@@ -200,7 +199,7 @@ def _ids(memories: List[Dict[str, Any]]) -> List[str]:
 ALL_SCOPED = [GLOBAL_ID, REPO_A_ID, REPO_B_ID, REPO_B_GLOBAL_ALIAS_ID]
 
 
-class TestRunMemoryRetrievalVisibility:
+class TestMemorySectionVisibility:
     # Reranker "success" with a zero post-rerank floor lets memories reach the
     # response on the rerank path, so the visibility check is proven there too.
     @pytest.mark.parametrize(
@@ -313,7 +312,8 @@ def _search_code(
         params["rerank_query"] = rerank_query
     with (
         patch(_APP_MODULE_PATCH, app_module),
-        patch(_REPO_SEARCH_CONFIG_PATCH, return_value=_ConfigService(0.0)),
+        memory_search_section_installed(),
+        memory_context_installed(app_module.app, settings=_settings(0.0)),
         patch(_SHARED_VECTOR_PATCH, return_value=(_QUERY_VECTOR, "digest")),
     ):
         from code_indexer.server.mcp.handlers import search_code

@@ -10,6 +10,8 @@ GOAL: Test ripgrep/grep exit code differentiation (Bug #173)
 import logging
 import threading
 import pytest
+
+from .conftest import FakeRipgrepBackend
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from code_indexer.global_repos.regex_search import (
@@ -92,38 +94,25 @@ class TestRipgrepExitCodeHandling:
         self, ripgrep_service, test_repo, caplog
     ):
         """Test exit code 0 (matches found) does not log warning."""
-        with patch(
-            "code_indexer.global_repos.regex_search.SubprocessExecutor"
-        ) as mock_executor_class:
-            mock_executor = MagicMock()
-            mock_executor_class.return_value = mock_executor
-
-            # Mock exit code 0 (success, matches found)
-            mock_result = SearchExecutionResult(
-                status=ExecutionStatus.SUCCESS,
-                output_file="/tmp/test.txt",
-                exit_code=0,
-                timed_out=False,
-                stderr_output=None,
+        # Seam: script the ripgrep backend instead of substituting
+        # SubprocessExecutor inside regex_search and patching builtins.open.
+        ripgrep_service._ripgrep_backend = FakeRipgrepBackend(
+            exit_code=0,
+            stderr_output="",
+            is_error=False,
+        )
+        call_thread_id = threading.get_ident()
+        with caplog.at_level(logging.DEBUG):
+            await ripgrep_service._search_ripgrep(
+                pattern="test",
+                search_path=test_repo,
+                include_patterns=None,
+                exclude_patterns=None,
+                case_sensitive=True,
+                context_lines=0,
+                max_results=100,
+                timeout_seconds=10,
             )
-            mock_executor.execute_with_limits = AsyncMock(return_value=mock_result)
-            mock_executor.shutdown = MagicMock()
-
-            with patch("builtins.open", create=True) as mock_open:
-                mock_open.return_value.__enter__.return_value.read.return_value = ""
-
-                call_thread_id = threading.get_ident()
-                with caplog.at_level(logging.DEBUG):
-                    await ripgrep_service._search_ripgrep(
-                        pattern="test",
-                        search_path=test_repo,
-                        include_patterns=None,
-                        exclude_patterns=None,
-                        case_sensitive=True,
-                        context_lines=0,
-                        max_results=100,
-                        timeout_seconds=10,
-                    )
 
         # No WARNING logs should be present (scoped to this call's records —
         # see _call_records for why a bare caplog.records scan is flaky).
@@ -141,39 +130,25 @@ class TestRipgrepExitCodeHandling:
         Bug #173: This is the core fix - exit code 1 with no stderr means
         "no matches found" which is normal ripgrep behavior, not an error.
         """
-        with patch(
-            "code_indexer.global_repos.regex_search.SubprocessExecutor"
-        ) as mock_executor_class:
-            mock_executor = MagicMock()
-            mock_executor_class.return_value = mock_executor
-
-            # Mock exit code 1 with no stderr (no matches found)
-            mock_result = SearchExecutionResult(
-                status=ExecutionStatus.ERROR,
-                output_file="/tmp/test.txt",
-                exit_code=1,
-                timed_out=False,
-                error_message="Command exited with code 1",
-                stderr_output=None,  # No stderr = normal "no matches"
+        # Seam: script the ripgrep backend instead of substituting
+        # SubprocessExecutor inside regex_search and patching builtins.open.
+        ripgrep_service._ripgrep_backend = FakeRipgrepBackend(
+            exit_code=1,
+            stderr_output="",
+            is_error=True,
+        )
+        call_thread_id = threading.get_ident()
+        with caplog.at_level(logging.DEBUG):
+            result = await ripgrep_service._search_ripgrep(
+                pattern="nonexistent_pattern",
+                search_path=test_repo,
+                include_patterns=None,
+                exclude_patterns=None,
+                case_sensitive=True,
+                context_lines=0,
+                max_results=100,
+                timeout_seconds=10,
             )
-            mock_executor.execute_with_limits = AsyncMock(return_value=mock_result)
-            mock_executor.shutdown = MagicMock()
-
-            with patch("builtins.open", create=True) as mock_open:
-                mock_open.return_value.__enter__.return_value.read.return_value = ""
-
-                call_thread_id = threading.get_ident()
-                with caplog.at_level(logging.DEBUG):
-                    result = await ripgrep_service._search_ripgrep(
-                        pattern="nonexistent_pattern",
-                        search_path=test_repo,
-                        include_patterns=None,
-                        exclude_patterns=None,
-                        case_sensitive=True,
-                        context_lines=0,
-                        max_results=100,
-                        timeout_seconds=10,
-                    )
 
         # Should return empty results
         assert result == ([], 0), "Exit code 1 should return empty results"
@@ -198,37 +173,24 @@ class TestRipgrepExitCodeHandling:
         hiding the error from callers. Now it raises so the job result surfaces
         phase1_failed=True.
         """
-        with patch(
-            "code_indexer.global_repos.regex_search.SubprocessExecutor"
-        ) as mock_executor_class:
-            mock_executor = MagicMock()
-            mock_executor_class.return_value = mock_executor
-
-            mock_result = SearchExecutionResult(
-                status=ExecutionStatus.ERROR,
-                output_file="/tmp/test.txt",
-                exit_code=1,
-                timed_out=False,
-                error_message="Command exited with code 1",
-                stderr_output="regex parse error: invalid escape sequence",
+        # Seam: script the ripgrep backend instead of substituting
+        # SubprocessExecutor inside regex_search and patching builtins.open.
+        ripgrep_service._ripgrep_backend = FakeRipgrepBackend(
+            exit_code=1,
+            stderr_output="regex parse error: invalid escape sequence",
+            is_error=True,
+        )
+        with pytest.raises(RipgrepExecutionError) as exc_info:
+            await ripgrep_service._search_ripgrep(
+                pattern="[invalid",
+                search_path=test_repo,
+                include_patterns=None,
+                exclude_patterns=None,
+                case_sensitive=True,
+                context_lines=0,
+                max_results=100,
+                timeout_seconds=10,
             )
-            mock_executor.execute_with_limits = AsyncMock(return_value=mock_result)
-            mock_executor.shutdown = MagicMock()
-
-            with patch("builtins.open", create=True) as mock_open:
-                mock_open.return_value.__enter__.return_value.read.return_value = ""
-
-                with pytest.raises(RipgrepExecutionError) as exc_info:
-                    await ripgrep_service._search_ripgrep(
-                        pattern="[invalid",
-                        search_path=test_repo,
-                        include_patterns=None,
-                        exclude_patterns=None,
-                        case_sensitive=True,
-                        context_lines=0,
-                        max_results=100,
-                        timeout_seconds=10,
-                    )
 
         assert "regex parse error" in str(
             exc_info.value
@@ -243,37 +205,24 @@ class TestRipgrepExitCodeHandling:
         Previously logged WARNING and returned empty results silently.
         Now raises so callers see phase1_failed=True in the job result.
         """
-        with patch(
-            "code_indexer.global_repos.regex_search.SubprocessExecutor"
-        ) as mock_executor_class:
-            mock_executor = MagicMock()
-            mock_executor_class.return_value = mock_executor
-
-            mock_result = SearchExecutionResult(
-                status=ExecutionStatus.ERROR,
-                output_file="/tmp/test.txt",
-                exit_code=2,
-                timed_out=False,
-                error_message="Command exited with code 2",
-                stderr_output="permission denied: /restricted/file",
+        # Seam: script the ripgrep backend instead of substituting
+        # SubprocessExecutor inside regex_search and patching builtins.open.
+        ripgrep_service._ripgrep_backend = FakeRipgrepBackend(
+            exit_code=2,
+            stderr_output="permission denied: /restricted/file",
+            is_error=True,
+        )
+        with pytest.raises(RipgrepExecutionError) as exc_info:
+            await ripgrep_service._search_ripgrep(
+                pattern="test",
+                search_path=test_repo,
+                include_patterns=None,
+                exclude_patterns=None,
+                case_sensitive=True,
+                context_lines=0,
+                max_results=100,
+                timeout_seconds=10,
             )
-            mock_executor.execute_with_limits = AsyncMock(return_value=mock_result)
-            mock_executor.shutdown = MagicMock()
-
-            with patch("builtins.open", create=True) as mock_open:
-                mock_open.return_value.__enter__.return_value.read.return_value = ""
-
-                with pytest.raises(RipgrepExecutionError) as exc_info:
-                    await ripgrep_service._search_ripgrep(
-                        pattern="test",
-                        search_path=test_repo,
-                        include_patterns=None,
-                        exclude_patterns=None,
-                        case_sensitive=True,
-                        context_lines=0,
-                        max_results=100,
-                        timeout_seconds=10,
-                    )
 
         assert (
             "exit_code=2" in str(exc_info.value)
@@ -288,39 +237,25 @@ class TestRipgrepExitCodeHandling:
 
         Edge case: stderr_output="" (empty string) should be treated same as None.
         """
-        with patch(
-            "code_indexer.global_repos.regex_search.SubprocessExecutor"
-        ) as mock_executor_class:
-            mock_executor = MagicMock()
-            mock_executor_class.return_value = mock_executor
-
-            # Mock exit code 1 with empty stderr (no matches found)
-            mock_result = SearchExecutionResult(
-                status=ExecutionStatus.ERROR,
-                output_file="/tmp/test.txt",
-                exit_code=1,
-                timed_out=False,
-                error_message="Command exited with code 1",
-                stderr_output="",  # Empty string = no stderr
+        # Seam: script the ripgrep backend instead of substituting
+        # SubprocessExecutor inside regex_search and patching builtins.open.
+        ripgrep_service._ripgrep_backend = FakeRipgrepBackend(
+            exit_code=1,
+            stderr_output="",
+            is_error=True,
+        )
+        call_thread_id = threading.get_ident()
+        with caplog.at_level(logging.DEBUG):
+            result = await ripgrep_service._search_ripgrep(
+                pattern="nonexistent",
+                search_path=test_repo,
+                include_patterns=None,
+                exclude_patterns=None,
+                case_sensitive=True,
+                context_lines=0,
+                max_results=100,
+                timeout_seconds=10,
             )
-            mock_executor.execute_with_limits = AsyncMock(return_value=mock_result)
-            mock_executor.shutdown = MagicMock()
-
-            with patch("builtins.open", create=True) as mock_open:
-                mock_open.return_value.__enter__.return_value.read.return_value = ""
-
-                call_thread_id = threading.get_ident()
-                with caplog.at_level(logging.DEBUG):
-                    result = await ripgrep_service._search_ripgrep(
-                        pattern="nonexistent",
-                        search_path=test_repo,
-                        include_patterns=None,
-                        exclude_patterns=None,
-                        case_sensitive=True,
-                        context_lines=0,
-                        max_results=100,
-                        timeout_seconds=10,
-                    )
 
         # Should return empty results
         assert result == ([], 0), "Exit code 1 should return empty results"

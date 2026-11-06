@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from code_indexer.server.services.xray_graph_governor.k_seed_table import (
+from cidx_xray.server.graph_governor.k_seed_table import (
     CONSERVATIVE_DEFAULT_K,
     MEASURED_K_SEED_TABLE,
     k_for_language,

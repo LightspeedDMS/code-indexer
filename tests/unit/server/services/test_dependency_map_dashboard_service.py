@@ -8,6 +8,7 @@ applied selectively - mocking only infrastructure boundaries like tracking backe
 TDD RED PHASE: These tests are written before the production code exists.
 """
 
+from tests.unit.server._depmap_feature import depmap_claude_config
 import json
 import tempfile
 from datetime import datetime, timezone, timedelta
@@ -27,7 +28,7 @@ from code_indexer.server.utils.config_manager import ClaudeIntegrationConfig
 @pytest.fixture
 def enabled_config():
     """Return real ClaudeIntegrationConfig with dependency map enabled."""
-    return ClaudeIntegrationConfig(
+    return depmap_claude_config(
         dependency_map_enabled=True,
         dependency_map_interval_hours=24,
     )
@@ -36,7 +37,7 @@ def enabled_config():
 @pytest.fixture
 def disabled_config():
     """Return real ClaudeIntegrationConfig with dependency map disabled."""
-    return ClaudeIntegrationConfig(
+    return depmap_claude_config(
         dependency_map_enabled=False,
         dependency_map_interval_hours=24,
     )
@@ -93,7 +94,7 @@ def _hours_ago_iso(hours: float) -> str:
 
 
 def _import_service():
-    from code_indexer.server.services.dependency_map_dashboard_service import (
+    from cidx_depmap.server.dependency_map_dashboard_service import (
         DependencyMapDashboardService,
     )
 
@@ -514,7 +515,7 @@ def _make_service_for_coverage(
         last_run_override: ISO timestamp string for last_run in tracking, or None.
                            Pass "__DEFAULT__" (the default) to use _hours_ago_iso(1).
     """
-    from code_indexer.server.services.dependency_map_dashboard_service import (
+    from cidx_depmap.server.dependency_map_dashboard_service import (
         DependencyMapDashboardService,
     )
 
@@ -1119,7 +1120,7 @@ class TestDependencyMapServicePublicAccessors:
 
     def test_get_activated_repos_public_method_exists(self):
         """DependencyMapService.get_activated_repos() must be a public method."""
-        from code_indexer.server.services.dependency_map_service import (
+        from cidx_depmap.server.dependency_map_service import (
             DependencyMapService,
         )
 
@@ -1129,7 +1130,7 @@ class TestDependencyMapServicePublicAccessors:
 
     def test_golden_repos_dir_public_property_exists(self):
         """DependencyMapService.golden_repos_dir must be a public property."""
-        from code_indexer.server.services.dependency_map_service import (
+        from cidx_depmap.server.dependency_map_service import (
             DependencyMapService,
         )
 
@@ -1140,7 +1141,7 @@ class TestDependencyMapServicePublicAccessors:
     def test_get_activated_repos_delegates_to_private(self):
         """get_activated_repos() returns same result as _get_activated_repos()."""
         from unittest.mock import Mock
-        from code_indexer.server.services.dependency_map_service import (
+        from cidx_depmap.server.dependency_map_service import (
             DependencyMapService,
         )
 
@@ -1167,7 +1168,7 @@ class TestDependencyMapServicePublicAccessors:
     def test_golden_repos_dir_property_returns_manager_dir(self):
         """golden_repos_dir property returns the golden_repos_manager's directory."""
         from unittest.mock import Mock
-        from code_indexer.server.services.dependency_map_service import (
+        from cidx_depmap.server.dependency_map_service import (
             DependencyMapService,
         )
 

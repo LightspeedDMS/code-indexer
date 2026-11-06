@@ -28,7 +28,7 @@ class TestSCIPQueryServiceInitialization:
 
     def test_initialization_with_golden_repos_dir_and_access_filtering(self):
         """AC4: SCIPQueryService initializes with golden_repos_dir and AccessFilteringService."""
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
         from code_indexer.server.services.access_filtering_service import (
             AccessFilteringService,
         )
@@ -49,7 +49,7 @@ class TestSCIPQueryServiceInitialization:
     def test_initialization_without_access_filtering(self):
         """Service can be constructed without access filtering (queries then
         fail closed -- see TestFindScipFilesFailsClosed)."""
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
 
         # Create service without access filtering
         service = SCIPQueryService(
@@ -62,7 +62,7 @@ class TestSCIPQueryServiceInitialization:
 
     def test_get_golden_repos_dir_returns_path(self):
         """Service returns golden repos directory as Path object."""
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
 
         service = SCIPQueryService(
             golden_repos_dir="/custom/data/golden-repos",
@@ -81,7 +81,7 @@ class TestFindScipFilesFailsClosed:
     def test_find_scip_files_without_access_service_fails_closed(self):
         """No access filtering service -> refused, nothing is listed."""
         import tempfile
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
         from code_indexer.server.services.repo_access_guard import (
             AccessFilteringServiceUnavailableError,
         )
@@ -104,7 +104,7 @@ class TestFindScipFilesFailsClosed:
     def test_find_scip_files_returns_empty_when_no_scip_indexes_exist(self):
         """Returns empty list when no SCIP indexes exist."""
         import tempfile
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
 
         with tempfile.TemporaryDirectory() as tmpdir:
             golden_repos = Path(tmpdir) / "golden-repos"
@@ -125,7 +125,7 @@ class TestFindScipFilesFailsClosed:
 
     def test_find_scip_files_returns_empty_when_golden_repos_dir_not_exists(self):
         """Returns empty list when golden repos directory doesn't exist."""
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
 
         service = SCIPQueryService(
             golden_repos_dir="/nonexistent/path/golden-repos",
@@ -143,7 +143,7 @@ class TestFindScipFilesWithAccessControl:
     def test_find_scip_files_filters_by_user_accessible_repos(self):
         """AC1: Find SCIP files only for accessible repositories."""
         import tempfile
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
         from code_indexer.server.services.access_filtering_service import (
             AccessFilteringService,
         )
@@ -188,7 +188,7 @@ class TestFindScipFilesWithAccessControl:
     def test_find_scip_files_returns_empty_for_user_with_no_access(self):
         """AC3: Returns empty list for user with no access to any repository."""
         import tempfile
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
         from code_indexer.server.services.access_filtering_service import (
             AccessFilteringService,
         )
@@ -225,7 +225,7 @@ class TestFindScipFilesWithAccessControl:
         """No caller identity -> refused before the access service is asked
         or any repository is listed."""
         import tempfile
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
         from code_indexer.server.services.access_filtering_service import (
             AccessFilteringService,
         )
@@ -261,7 +261,7 @@ class TestFindScipFilesWithRepositoryAlias:
     def test_find_scip_files_for_specific_repository(self):
         """AC2: Find SCIP files only for specific repository."""
         import tempfile
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
 
         with tempfile.TemporaryDirectory() as tmpdir:
             golden_repos = Path(tmpdir) / "golden-repos"
@@ -290,7 +290,7 @@ class TestFindScipFilesWithRepositoryAlias:
     def test_find_scip_files_for_nonexistent_repository(self):
         """Returns empty list when repository_alias doesn't exist."""
         import tempfile
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
 
         with tempfile.TemporaryDirectory() as tmpdir:
             golden_repos = Path(tmpdir) / "golden-repos"
@@ -317,7 +317,7 @@ class TestFindScipFilesWithRepositoryAlias:
     def test_find_scip_files_with_repository_alias_and_access_control(self):
         """Combines repository_alias filter with access control."""
         import tempfile
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
         from code_indexer.server.services.access_filtering_service import (
             AccessFilteringService,
         )
@@ -357,7 +357,7 @@ class TestFindScipFilesDirectoryFiltering:
     def test_find_scip_files_skips_non_directories(self):
         """Verify files in golden repos root are skipped during iteration."""
         import tempfile
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
 
         with tempfile.TemporaryDirectory() as tmpdir:
             golden_repos = Path(tmpdir) / "golden-repos"
@@ -387,7 +387,7 @@ class TestFindScipFilesDirectoryFiltering:
     def test_find_scip_files_skips_hidden_directories(self):
         """Verify hidden directories (e.g., .git) are skipped."""
         import tempfile
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
 
         with tempfile.TemporaryDirectory() as tmpdir:
             golden_repos = Path(tmpdir) / "golden-repos"
@@ -421,7 +421,7 @@ class TestFindScipFilesDirectoryFiltering:
         versioned snapshots are reached through alias target resolution
         (test_scip_version_consistency_bug1084.py), never scanned directly."""
         import tempfile
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
 
         with tempfile.TemporaryDirectory() as tmpdir:
             golden_repos = Path(tmpdir) / "golden-repos"
@@ -456,7 +456,7 @@ class TestGetAccessibleReposMethod:
 
     def test_get_accessible_repos_returns_none_when_no_service(self):
         """When no AccessFilteringService, returns None."""
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
 
         service = SCIPQueryService(
             golden_repos_dir="/data/golden-repos",
@@ -471,7 +471,7 @@ class TestGetAccessibleReposMethod:
 
     def test_get_accessible_repos_delegates_to_access_service(self):
         """When AccessFilteringService exists, delegates to it."""
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
         from code_indexer.server.services.access_filtering_service import (
             AccessFilteringService,
         )
@@ -504,7 +504,7 @@ class TestUserWithNoGroupMemberships:
         depending on access control policy.
         """
         import tempfile
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
         from code_indexer.server.services.access_filtering_service import (
             AccessFilteringService,
         )
@@ -545,7 +545,7 @@ class TestUserWithNoGroupMemberships:
         The access service returns an empty set for users without group
         memberships, indicating they have no repository access.
         """
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
         from code_indexer.server.services.access_filtering_service import (
             AccessFilteringService,
         )
@@ -578,8 +578,8 @@ class TestQueryResultToDictHelper:
 
     def test_converts_query_result_to_dict(self):
         """Verify QueryResult is converted to a dictionary with all fields."""
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
-        from code_indexer.scip.query.primitives import QueryResult
+        from cidx_scip.server.query_service import SCIPQueryService
+        from cidx_scip.query.primitives import QueryResult
 
         service = SCIPQueryService(
             golden_repos_dir="/data/golden-repos",
@@ -612,8 +612,8 @@ class TestQueryResultToDictHelper:
 
     def test_converts_path_object_to_string(self):
         """Verify Path objects in file_path are converted to strings."""
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
-        from code_indexer.scip.query.primitives import QueryResult
+        from cidx_scip.server.query_service import SCIPQueryService
+        from cidx_scip.query.primitives import QueryResult
 
         service = SCIPQueryService(
             golden_repos_dir="/data/golden-repos",
@@ -639,8 +639,8 @@ class TestQueryResultToDictHelper:
 
     def test_handles_none_optional_fields(self):
         """Verify None values for optional fields are handled correctly."""
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
-        from code_indexer.scip.query.primitives import QueryResult
+        from cidx_scip.server.query_service import SCIPQueryService
+        from cidx_scip.query.primitives import QueryResult
 
         service = SCIPQueryService(
             golden_repos_dir="/data/golden-repos",
@@ -672,8 +672,8 @@ class TestFindDefinitionMethod:
         """AC: Find symbol definition across repositories."""
         import tempfile
         from unittest.mock import patch, MagicMock
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
-        from code_indexer.scip.query.primitives import QueryResult
+        from cidx_scip.server.query_service import SCIPQueryService
+        from cidx_scip.query.primitives import QueryResult
 
         with tempfile.TemporaryDirectory() as tmpdir:
             golden_repos = Path(tmpdir) / "golden-repos"
@@ -703,7 +703,7 @@ class TestFindDefinitionMethod:
             ]
 
             with patch(
-                "code_indexer.scip.query.primitives.SCIPQueryEngine",
+                "cidx_scip.query.primitives.SCIPQueryEngine",
                 return_value=mock_engine,
             ):
                 results = service.find_definition("UserService", username=TEST_USER)
@@ -720,8 +720,8 @@ class TestFindDefinitionMethod:
         """Aggregates results from multiple SCIP files across repositories."""
         import tempfile
         from unittest.mock import patch, MagicMock
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
-        from code_indexer.scip.query.primitives import QueryResult
+        from cidx_scip.server.query_service import SCIPQueryService
+        from cidx_scip.query.primitives import QueryResult
 
         with tempfile.TemporaryDirectory() as tmpdir:
             golden_repos = Path(tmpdir) / "golden-repos"
@@ -768,7 +768,7 @@ class TestFindDefinitionMethod:
                 return mock
 
             with patch(
-                "code_indexer.scip.query.primitives.SCIPQueryEngine",
+                "cidx_scip.query.primitives.SCIPQueryEngine",
                 side_effect=create_mock_engine,
             ):
                 results = service.find_definition("Config", username=TEST_USER)
@@ -782,7 +782,7 @@ class TestFindDefinitionMethod:
         """Passes exact parameter to SCIPQueryEngine."""
         import tempfile
         from unittest.mock import patch, MagicMock
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
 
         with tempfile.TemporaryDirectory() as tmpdir:
             golden_repos = Path(tmpdir) / "golden-repos"
@@ -801,7 +801,7 @@ class TestFindDefinitionMethod:
             mock_engine.find_definition.return_value = []
 
             with patch(
-                "code_indexer.scip.query.primitives.SCIPQueryEngine",
+                "cidx_scip.query.primitives.SCIPQueryEngine",
                 return_value=mock_engine,
             ):
                 service.find_definition("ExactSymbol", exact=True, username=TEST_USER)
@@ -814,8 +814,8 @@ class TestFindDefinitionMethod:
         """Filters SCIP files by repository_alias."""
         import tempfile
         from unittest.mock import patch, MagicMock
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
-        from code_indexer.scip.query.primitives import QueryResult
+        from cidx_scip.server.query_service import SCIPQueryService
+        from cidx_scip.query.primitives import QueryResult
 
         with tempfile.TemporaryDirectory() as tmpdir:
             golden_repos = Path(tmpdir) / "golden-repos"
@@ -852,7 +852,7 @@ class TestFindDefinitionMethod:
                 return mock_engine
 
             with patch(
-                "code_indexer.scip.query.primitives.SCIPQueryEngine",
+                "cidx_scip.query.primitives.SCIPQueryEngine",
                 side_effect=track_engine,
             ):
                 results = service.find_definition(
@@ -866,7 +866,7 @@ class TestFindDefinitionMethod:
     def test_find_definition_returns_empty_list_when_no_scip_files(self):
         """Returns empty list when no SCIP files exist."""
         import tempfile
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
 
         with tempfile.TemporaryDirectory() as tmpdir:
             golden_repos = Path(tmpdir) / "golden-repos"
@@ -885,8 +885,8 @@ class TestFindDefinitionMethod:
         """Continues processing other SCIP files when one fails."""
         import tempfile
         from unittest.mock import patch, MagicMock
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
-        from code_indexer.scip.query.primitives import QueryResult
+        from cidx_scip.server.query_service import SCIPQueryService
+        from cidx_scip.query.primitives import QueryResult
 
         with tempfile.TemporaryDirectory() as tmpdir:
             golden_repos = Path(tmpdir) / "golden-repos"
@@ -921,7 +921,7 @@ class TestFindDefinitionMethod:
                 return mock
 
             with patch(
-                "code_indexer.scip.query.primitives.SCIPQueryEngine",
+                "cidx_scip.query.primitives.SCIPQueryEngine",
                 side_effect=create_mock_engine,
             ):
                 results = service.find_definition("Good", username=TEST_USER)
@@ -937,8 +937,8 @@ class TestFindReferencesMethod:
         """AC: Find all references to a symbol across repositories."""
         import tempfile
         from unittest.mock import patch, MagicMock
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
-        from code_indexer.scip.query.primitives import QueryResult
+        from cidx_scip.server.query_service import SCIPQueryService
+        from cidx_scip.query.primitives import QueryResult
 
         with tempfile.TemporaryDirectory() as tmpdir:
             golden_repos = Path(tmpdir) / "golden-repos"
@@ -956,7 +956,7 @@ class TestFindReferencesMethod:
             ]
 
             with patch(
-                "code_indexer.scip.query.primitives.SCIPQueryEngine",
+                "cidx_scip.query.primitives.SCIPQueryEngine",
                 return_value=mock_engine,
             ):
                 results = service.find_references("authenticate", username=TEST_USER)
@@ -969,7 +969,7 @@ class TestFindReferencesMethod:
         """Passes limit parameter to SCIPQueryEngine."""
         import tempfile
         from unittest.mock import patch, MagicMock
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
 
         with tempfile.TemporaryDirectory() as tmpdir:
             golden_repos = Path(tmpdir) / "golden-repos"
@@ -983,7 +983,7 @@ class TestFindReferencesMethod:
             mock_engine.find_references.return_value = []
 
             with patch(
-                "code_indexer.scip.query.primitives.SCIPQueryEngine",
+                "cidx_scip.query.primitives.SCIPQueryEngine",
                 return_value=mock_engine,
             ):
                 service.find_references("symbol", limit=50, username=TEST_USER)
@@ -996,7 +996,7 @@ class TestFindReferencesMethod:
         """Default limit is 100 when not specified."""
         import tempfile
         from unittest.mock import patch, MagicMock
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
 
         with tempfile.TemporaryDirectory() as tmpdir:
             golden_repos = Path(tmpdir) / "golden-repos"
@@ -1010,7 +1010,7 @@ class TestFindReferencesMethod:
             mock_engine.find_references.return_value = []
 
             with patch(
-                "code_indexer.scip.query.primitives.SCIPQueryEngine",
+                "cidx_scip.query.primitives.SCIPQueryEngine",
                 return_value=mock_engine,
             ):
                 service.find_references("symbol", username=TEST_USER)
@@ -1027,8 +1027,8 @@ class TestGetDependenciesMethod:
         """AC: Get symbol dependencies."""
         import tempfile
         from unittest.mock import patch, MagicMock
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
-        from code_indexer.scip.query.primitives import QueryResult
+        from cidx_scip.server.query_service import SCIPQueryService
+        from cidx_scip.query.primitives import QueryResult
 
         with tempfile.TemporaryDirectory() as tmpdir:
             golden_repos = Path(tmpdir) / "golden-repos"
@@ -1045,7 +1045,7 @@ class TestGetDependenciesMethod:
             ]
 
             with patch(
-                "code_indexer.scip.query.primitives.SCIPQueryEngine",
+                "cidx_scip.query.primitives.SCIPQueryEngine",
                 return_value=mock_engine,
             ):
                 results = service.get_dependencies(
@@ -1060,7 +1060,7 @@ class TestGetDependenciesMethod:
         """Passes depth parameter to SCIPQueryEngine."""
         import tempfile
         from unittest.mock import patch, MagicMock
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
 
         with tempfile.TemporaryDirectory() as tmpdir:
             golden_repos = Path(tmpdir) / "golden-repos"
@@ -1074,7 +1074,7 @@ class TestGetDependenciesMethod:
             mock_engine.get_dependencies.return_value = []
 
             with patch(
-                "code_indexer.scip.query.primitives.SCIPQueryEngine",
+                "cidx_scip.query.primitives.SCIPQueryEngine",
                 return_value=mock_engine,
             ):
                 service.get_dependencies("Symbol", depth=3, username=TEST_USER)
@@ -1091,8 +1091,8 @@ class TestGetDependentsMethod:
         """Returns symbols that depend on the target symbol."""
         import tempfile
         from unittest.mock import patch, MagicMock
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
-        from code_indexer.scip.query.primitives import QueryResult
+        from cidx_scip.server.query_service import SCIPQueryService
+        from cidx_scip.query.primitives import QueryResult
 
         with tempfile.TemporaryDirectory() as tmpdir:
             golden_repos = Path(tmpdir) / "golden-repos"
@@ -1113,7 +1113,7 @@ class TestGetDependentsMethod:
             ]
 
             with patch(
-                "code_indexer.scip.query.primitives.SCIPQueryEngine",
+                "cidx_scip.query.primitives.SCIPQueryEngine",
                 return_value=mock_engine,
             ):
                 results = service.get_dependents("PaymentProcessor", username=TEST_USER)
@@ -1126,7 +1126,7 @@ class TestGetDependentsMethod:
         """Passes depth parameter to SCIPQueryEngine."""
         import tempfile
         from unittest.mock import patch, MagicMock
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
 
         with tempfile.TemporaryDirectory() as tmpdir:
             golden_repos = Path(tmpdir) / "golden-repos"
@@ -1140,7 +1140,7 @@ class TestGetDependentsMethod:
             mock_engine.get_dependents.return_value = []
 
             with patch(
-                "code_indexer.scip.query.primitives.SCIPQueryEngine",
+                "cidx_scip.query.primitives.SCIPQueryEngine",
                 return_value=mock_engine,
             ):
                 service.get_dependents("Symbol", depth=2, username=TEST_USER)
@@ -1157,8 +1157,8 @@ class TestAnalyzeImpactMethod:
         """Returns impact analysis result."""
         import tempfile
         from unittest.mock import patch
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
-        from code_indexer.scip.query.composites import (
+        from cidx_scip.server.query_service import SCIPQueryService
+        from cidx_scip.query.composites import (
             ImpactAnalysisResult,
             AffectedSymbol,
             AffectedFile,
@@ -1187,7 +1187,7 @@ class TestAnalyzeImpactMethod:
             )
 
             with patch(
-                "code_indexer.scip.query.composites.analyze_impact",
+                "cidx_scip.query.composites.analyze_impact",
                 return_value=mock_result,
             ) as mock_analyze:
                 result = service.analyze_impact("DbConn", username=TEST_USER)
@@ -1201,8 +1201,8 @@ class TestAnalyzeImpactMethod:
         """Passes depth parameter to analyze_impact function."""
         import tempfile
         from unittest.mock import patch
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
-        from code_indexer.scip.query.composites import ImpactAnalysisResult
+        from cidx_scip.server.query_service import SCIPQueryService
+        from cidx_scip.query.composites import ImpactAnalysisResult
 
         with tempfile.TemporaryDirectory() as tmpdir:
             golden_repos = Path(tmpdir) / "golden-repos"
@@ -1215,7 +1215,7 @@ class TestAnalyzeImpactMethod:
             mock_result = ImpactAnalysisResult("Sym", None, 5, [], [], False, 0)
 
             with patch(
-                "code_indexer.scip.query.composites.analyze_impact",
+                "cidx_scip.query.composites.analyze_impact",
                 return_value=mock_result,
             ) as mock_analyze:
                 service.analyze_impact("Symbol", depth=5, username=TEST_USER)
@@ -1232,7 +1232,7 @@ class TestTraceCallchainMethod:
         """SCIPQueryService pointed at a golden-repos dir with one repo
         carrying an (empty, placeholder) SCIP database -- shared setup for
         every test in this class."""
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
 
         golden_repos = tmp_path / "golden-repos"
         scip = golden_repos / "repo" / ".code-indexer" / "scip"
@@ -1243,7 +1243,7 @@ class TestTraceCallchainMethod:
     def test_trace_callchain_returns_call_chains(self, service):
         """AC: Trace call chain between symbols."""
         from unittest.mock import patch, MagicMock
-        from code_indexer.scip.query.backends import CallChain
+        from cidx_scip.query.backends import CallChain
 
         mock_engine = MagicMock()
         mock_engine.trace_call_chain.return_value = [
@@ -1255,7 +1255,7 @@ class TestTraceCallchainMethod:
         ]
 
         with patch(
-            "code_indexer.scip.query.primitives.SCIPQueryEngine",
+            "cidx_scip.query.primitives.SCIPQueryEngine",
             return_value=mock_engine,
         ):
             results, timeout_errors = service.trace_callchain(
@@ -1275,7 +1275,7 @@ class TestTraceCallchainMethod:
         mock_engine.trace_call_chain.return_value = []
 
         with patch(
-            "code_indexer.scip.query.primitives.SCIPQueryEngine",
+            "cidx_scip.query.primitives.SCIPQueryEngine",
             return_value=mock_engine,
         ):
             results, timeout_errors = service.trace_callchain(
@@ -1309,7 +1309,7 @@ class TestTraceCallchainMethod:
         mock_engine.trace_call_chain.side_effect = _fake_trace_call_chain
 
         with patch(
-            "code_indexer.scip.query.primitives.SCIPQueryEngine",
+            "cidx_scip.query.primitives.SCIPQueryEngine",
             return_value=mock_engine,
         ):
             results, timeout_errors = service.trace_callchain(
@@ -1326,7 +1326,7 @@ class TestGetContextMethodFastFail:
     def test_get_context_returns_empty_dict_when_no_scip_files(self):
         """Bug #1088: get_context() returns empty structured dict when no SCIP index exists."""
         import tempfile
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
 
         with tempfile.TemporaryDirectory() as tmpdir:
             golden_repos = Path(tmpdir) / "golden-repos"
@@ -1353,7 +1353,7 @@ class TestGetContextMethodFastFail:
         """Bug #1088: get_context() must NOT call get_smart_context when no SCIP index exists."""
         import tempfile
         from unittest.mock import patch
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
 
         with tempfile.TemporaryDirectory() as tmpdir:
             golden_repos = Path(tmpdir) / "golden-repos"
@@ -1366,7 +1366,7 @@ class TestGetContextMethodFastFail:
             )
 
             with patch(
-                "code_indexer.scip.query.composites.get_smart_context"
+                "cidx_scip.query.composites.get_smart_context"
             ) as mock_get_smart_context:
                 service.get_context("some_symbol", username=TEST_USER)
 
@@ -1374,7 +1374,7 @@ class TestGetContextMethodFastFail:
 
     def test_get_context_returns_empty_dict_when_golden_repos_dir_nonexistent(self):
         """Bug #1088: get_context() returns empty dict when golden_repos_dir does not exist."""
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
 
         service = SCIPQueryService(
             golden_repos_dir="/nonexistent/path/golden-repos",
@@ -1400,8 +1400,8 @@ class TestGetContextMethod:
         """Returns smart context for a symbol."""
         import tempfile
         from unittest.mock import patch
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
-        from code_indexer.scip.query.composites import (
+        from cidx_scip.server.query_service import SCIPQueryService
+        from cidx_scip.query.composites import (
             SmartContextResult,
             ContextFile,
             ContextSymbol,
@@ -1435,7 +1435,7 @@ class TestGetContextMethod:
             )
 
             with patch(
-                "code_indexer.scip.query.composites.get_smart_context",
+                "cidx_scip.query.composites.get_smart_context",
                 return_value=mock_result,
             ):
                 result = service.get_context("UserService", username=TEST_USER)
@@ -1444,12 +1444,40 @@ class TestGetContextMethod:
             assert result["total_files"] == 1
             assert len(result["files"]) == 1
 
+    def test_get_context_scopes_scip_dir_to_alias(self):
+        """EVO-66189: get_context must scope the composite's scip_dir to the alias's own
+        .code-indexer/scip (like get_impact), NOT the whole golden-repos root — otherwise
+        get_smart_context globs every repo's *.scip.db over NFS and blows the watchdog."""
+        import tempfile
+        from unittest.mock import patch
+        from cidx_scip.server.query_service import SCIPQueryService
+        from cidx_scip.query.composites import SmartContextResult
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            golden_repos = Path(tmpdir) / "golden-repos"
+            scip = golden_repos / "repo" / ".code-indexer" / "scip"
+            scip.mkdir(parents=True)
+            (scip / "index.scip.db").touch()
+
+            service = SCIPQueryService(str(golden_repos), GRANT_ALL)
+            with patch(
+                "cidx_scip.query.composites.get_smart_context",
+                return_value=SmartContextResult("Sym", "", [], 0, 0, 0.0),
+            ) as mock_ctx:
+                service.get_context("Sym", repository_alias="repo", username=TEST_USER)
+
+            # get_smart_context(symbol, scip_dir, ...) — arg[1] must be the repo's own
+            # scip dir, not the golden-repos root.
+            called_scip_dir = Path(mock_ctx.call_args.args[1])
+            assert called_scip_dir == scip
+            assert called_scip_dir != golden_repos
+
     def test_get_context_with_limit_and_min_score(self):
         """Passes limit and min_score parameters."""
         import tempfile
         from unittest.mock import patch
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
-        from code_indexer.scip.query.composites import SmartContextResult
+        from cidx_scip.server.query_service import SCIPQueryService
+        from cidx_scip.query.composites import SmartContextResult
 
         with tempfile.TemporaryDirectory() as tmpdir:
             golden_repos = Path(tmpdir) / "golden-repos"
@@ -1462,7 +1490,7 @@ class TestGetContextMethod:
             mock_result = SmartContextResult("Sym", "", [], 0, 0, 0.0)
 
             with patch(
-                "code_indexer.scip.query.composites.get_smart_context",
+                "cidx_scip.query.composites.get_smart_context",
                 return_value=mock_result,
             ) as mock_ctx:
                 service.get_context(
@@ -1481,11 +1509,11 @@ class TestAccessControlForQueryMethods:
         """Query methods only search accessible repositories."""
         import tempfile
         from unittest.mock import patch, MagicMock
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
         from code_indexer.server.services.access_filtering_service import (
             AccessFilteringService,
         )
-        from code_indexer.scip.query.primitives import QueryResult
+        from cidx_scip.query.primitives import QueryResult
 
         with tempfile.TemporaryDirectory() as tmpdir:
             golden_repos = Path(tmpdir) / "golden-repos"
@@ -1513,7 +1541,7 @@ class TestAccessControlForQueryMethods:
                 return mock
 
             with patch(
-                "code_indexer.scip.query.primitives.SCIPQueryEngine",
+                "cidx_scip.query.primitives.SCIPQueryEngine",
                 side_effect=track_engine,
             ):
                 service.find_definition("Symbol", username="user")
@@ -1527,7 +1555,7 @@ class TestAccessControlForQueryMethods:
         queried."""
         import tempfile
         from unittest.mock import patch
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
         from code_indexer.server.services.repo_access_guard import (
             AccessFilteringServiceUnavailableError,
         )
@@ -1544,9 +1572,7 @@ class TestAccessControlForQueryMethods:
             # No access filtering service
             service = SCIPQueryService(str(golden_repos), None)
 
-            with patch(
-                "code_indexer.scip.query.primitives.SCIPQueryEngine"
-            ) as engine_cls:
+            with patch("cidx_scip.query.primitives.SCIPQueryEngine") as engine_cls:
                 with pytest.raises(AccessFilteringServiceUnavailableError):
                     service.find_definition("Symbol", username="user")
 
@@ -1570,7 +1596,7 @@ class TestAliasNormalizationBug661:
     def test_global_suffix_alias_resolves_to_correct_repo(self):
         """find_scip_files with 'repo-name-global' alias must find 'repo-name' dir."""
         import tempfile
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
 
         with tempfile.TemporaryDirectory() as tmpdir:
             golden_repos = Path(tmpdir) / "golden-repos"
@@ -1595,7 +1621,7 @@ class TestAliasNormalizationBug661:
     def test_full_path_alias_resolves_to_correct_repo(self):
         """find_scip_files with a full filesystem path alias uses basename."""
         import tempfile
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
 
         with tempfile.TemporaryDirectory() as tmpdir:
             golden_repos = Path(tmpdir) / "golden-repos"
@@ -1619,7 +1645,7 @@ class TestAliasNormalizationBug661:
     def test_bare_name_alias_still_works(self):
         """find_scip_files with plain repo name (no suffix) still resolves."""
         import tempfile
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
 
         with tempfile.TemporaryDirectory() as tmpdir:
             golden_repos = Path(tmpdir) / "golden-repos"
@@ -1642,7 +1668,7 @@ class TestAliasNormalizationBug661:
     def test_nonexistent_alias_returns_empty(self):
         """find_scip_files with an alias that matches no repo returns []."""
         import tempfile
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
 
         with tempfile.TemporaryDirectory() as tmpdir:
             golden_repos = Path(tmpdir) / "golden-repos"
@@ -1664,7 +1690,7 @@ class TestAliasNormalizationBug661:
         """Omitting repository_alias returns every repository the caller is
         granted (here: all of them)."""
         import tempfile
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
 
         with tempfile.TemporaryDirectory() as tmpdir:
             golden_repos = Path(tmpdir) / "golden-repos"
@@ -1687,7 +1713,7 @@ class TestAnalyzeImpactScoping:
     no SCIP index, instead of scanning every golden repo (perf bug: 48s empty)."""
 
     def _service(self):
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
 
         return SCIPQueryService(
             golden_repos_dir="/data/golden-repos", access_filtering_service=GRANT_ALL
@@ -1700,9 +1726,7 @@ class TestAnalyzeImpactScoping:
         service = self._service()
         with (
             patch.object(service, "find_scip_files", return_value=[]) as mock_find,
-            patch(
-                "code_indexer.scip.query.composites.analyze_impact"
-            ) as mock_composite,
+            patch("cidx_scip.query.composites.analyze_impact") as mock_composite,
         ):
             result = service.analyze_impact(
                 "LSAuthenticator",
@@ -1739,7 +1763,7 @@ class TestAnalyzeImpactScoping:
         """When an index exists, the composite is pointed at the repo's own
         .code-indexer/scip dir, not the whole golden-repos root."""
         from unittest.mock import patch
-        from code_indexer.scip.query.composites import ImpactAnalysisResult
+        from cidx_scip.query.composites import ImpactAnalysisResult
 
         service = self._service()
         scip_file = Path(
@@ -1759,7 +1783,7 @@ class TestAnalyzeImpactScoping:
         with (
             patch.object(service, "find_scip_files", return_value=[scip_file]),
             patch(
-                "code_indexer.scip.query.composites.analyze_impact",
+                "cidx_scip.query.composites.analyze_impact",
                 return_value=empty,
             ) as mock_composite,
         ):
@@ -1775,7 +1799,7 @@ class TestAnalyzeImpactScoping:
         assert called_dir == Path("/data/golden-repos/example-repo/.code-indexer/scip")
 
     def test_scip_dir_for_files_finds_code_indexer_scip(self):
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
 
         files = [Path("/data/golden-repos/evo/.code-indexer/scip/sub/a.scip.db")]
         assert SCIPQueryService._scip_dir_for_files(files) == Path(

@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterator, Optional
 
 import pytest
 
@@ -28,6 +28,7 @@ from code_indexer.server.auth.user_manager import UserRole
 from code_indexer.server.mcp.handlers import _utils as mcp_utils
 from code_indexer.server.services.audit_log_service import AuditLogService
 from code_indexer.server.services.group_access_manager import GroupAccessManager
+from tests.unit.server._scip_feature import scip_tools_installed
 from tests.unit.server.self_service_elevation_harness import (
     SelfServiceStack,
     build_stack,
@@ -53,9 +54,11 @@ def stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SelfServiceStack:
 @pytest.fixture
 def tools(
     stack: SelfServiceStack, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> Dict[str, Dict[str, Any]]:
-    """Real group and audit stores on this test's files; returns, per tool,
-    its arguments and a value only its successful result carries."""
+) -> Iterator[Dict[str, Dict[str, Any]]]:
+    """Real group and audit stores on this test's files; yields, per tool,
+    its arguments and a value only its successful result carries. The SCIP
+    tools are the scip feature's: installed as an app with it enabled has
+    them."""
     groups = GroupAccessManager(tmp_path / "groups.db")
     group = groups.create_group("example-team", "Example team")
     groups.assign_user_to_group(_MEMBER, group.id, _ADMIN)
@@ -79,11 +82,12 @@ def tools(
     state = mcp_utils.app_module.app.state
     monkeypatch.setattr(state, "group_manager", groups, raising=False)
     monkeypatch.setattr(state, "audit_service", audit, raising=False)
-    return {
-        "get_group": {"args": {"group_id": str(group.id)}, "secret": _MEMBER},
-        "scip_pr_history": {"args": {}, "secret": _PR_URL},
-        "scip_cleanup_history": {"args": {}, "secret": _CLEANED_PATH},
-    }
+    with scip_tools_installed():
+        yield {
+            "get_group": {"args": {"group_id": str(group.id)}, "secret": _MEMBER},
+            "scip_pr_history": {"args": {}, "secret": _PR_URL},
+            "scip_cleanup_history": {"args": {}, "secret": _CLEANED_PATH},
+        }
 
 
 _TOOLS = ["get_group", "scip_pr_history", "scip_cleanup_history"]

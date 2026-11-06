@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from code_indexer.global_repos.dependency_map_analyzer import DependencyMapAnalyzer
+from cidx_depmap.server.dependency_map_analyzer import DependencyMapAnalyzer
 
 # The subprocess command has the shape: ['script', '-q', '-e', '-c', <shell_str>, '/dev/null']
 # Index 4 is the embedded shell command string containing the actual claude invocation.
@@ -60,7 +60,7 @@ def _isolate_verification_semaphore():
     test_verification_pass_cli_args.py (same root cause, same fix pattern).
     """
     with patch(
-        "code_indexer.global_repos.dependency_map_analyzer._get_verification_semaphore",
+        "cidx_depmap.server.dependency_map_analyzer._get_verification_semaphore",
         side_effect=lambda max_concurrent: threading.Semaphore(max_concurrent),
     ):
         yield
@@ -3172,7 +3172,7 @@ class TestIteration14PurposeDrivenHooks:
         """
         import threading as _threading
 
-        from code_indexer.global_repos import dependency_map_analyzer as _dma_module
+        from cidx_depmap.server import dependency_map_analyzer as _dma_module
 
         # Provide a fresh, isolated semaphore so this test never contends with
         # parallel tests that share the module-level singleton.

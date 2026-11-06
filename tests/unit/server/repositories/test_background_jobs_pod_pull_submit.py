@@ -88,7 +88,19 @@ class TestPodPullSubmit:
         job_id = self._submit(m, "add_golden_repo", metadata={"alias": "repoA"})
         assert any(item[0] == job_id for item in self.enqueued)
 
-    def test_all_five_heavy_ops_are_pod_pull(self):
+    def test_the_exact_pod_pull_op_set(self):
+        # The memory-heavy index builds (incl. semantic_backfill_reindex — a re-embed is
+        # as heavy as add), PLUS two that are pod-pull WITHOUT being memory-heavy:
+        # fts_backfill_build (EVO-66445, a cheap local tantivy rebuild) and
+        # global_repo_refresh (background-work audit — _MEMORY_HEAVY_OPS gates the LOCAL
+        # pool worker, which a pod-pull row never reaches, and adding refresh there would
+        # newly throttle a solo/sqlite server that has always run them ungated; the
+        # cluster backpressure arrives anyway because DistributedJobClaimer memory-gates
+        # EVERY claim).
+        #
+        # Spelled out in full on purpose: every entry must also have a lifespan dispatch
+        # executor (validate_dispatch_covers enforces that pairing at startup) and a
+        # submit call that passes metadata=, so adding one is never a one-line change.
         assert POD_PULL_OPS == frozenset(
             {
                 "add_golden_repo",
@@ -96,5 +108,21 @@ class TestPodPullSubmit:
                 "provider_temporal_index_rebuild",
                 "sync_repository",
                 "change_branch",
+                "semantic_backfill_reindex",
+                "fts_backfill_build",
+                "global_repo_refresh",
             }
         )
+
+    def test_semantic_backfill_reindex_is_pod_pull_and_memory_heavy(self):
+        from code_indexer.server.repositories.background_jobs import _MEMORY_HEAVY_OPS
+
+        # Unlike the light FTS build, a semantic re-embed IS memory-gated.
+        assert "semantic_backfill_reindex" in POD_PULL_OPS
+        assert "semantic_backfill_reindex" in _MEMORY_HEAVY_OPS
+
+    def test_fts_backfill_is_pod_pull_but_not_memory_heavy(self):
+        from code_indexer.server.repositories.background_jobs import _MEMORY_HEAVY_OPS
+
+        assert "fts_backfill_build" in POD_PULL_OPS
+        assert "fts_backfill_build" not in _MEMORY_HEAVY_OPS  # not memory-gated
