@@ -199,6 +199,20 @@ class ServerResourceConfig:
     # have been REMOVED from the codebase. They were nonsensical limitations that served no purpose.
 
 
+def _normalize_group_mappings(
+    value: "Optional[Union[Dict[str, str], List[Dict[str, str]]]]",
+) -> list:
+    """Normalise group_mappings: None -> [], dict -> list-of-dicts, list unchanged."""
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        return [
+            {"external_group_id": external_id, "cidx_group": cidx_group}
+            for external_id, cidx_group in value.items()
+        ]
+    return list(value)
+
+
 @dataclass
 class OIDCProviderConfig:
     """Single external OIDC provider configuration."""
@@ -227,17 +241,7 @@ class OIDCProviderConfig:
     def __post_init__(self):
         if self.scopes is None:
             self.scopes = ["openid", "profile", "email"]
-        if self.group_mappings is None:
-            self.group_mappings = []
-        elif isinstance(self.group_mappings, dict):
-            # Backward compatibility: convert old dict format to new list format
-            self.group_mappings = [
-                {
-                    "external_group_id": external_id,
-                    "cidx_group": cidx_group,
-                }
-                for external_id, cidx_group in self.group_mappings.items()
-            ]
+        self.group_mappings = _normalize_group_mappings(self.group_mappings)
 
 
 @dataclass
@@ -268,16 +272,10 @@ class TrustedGatewayConfig:
     enable_jit_provisioning: bool = True
     group_mappings: Optional[Union[Dict[str, str], List[Dict[str, str]]]] = None
     leeway_seconds: int = 60
+    allow_email_auto_link: bool = False
 
     def __post_init__(self):
-        if self.group_mappings is None:
-            self.group_mappings = []
-        elif isinstance(self.group_mappings, dict):
-            # Backward compatibility: old dict format -> list format (mirrors OIDC).
-            self.group_mappings = [
-                {"external_group_id": external_id, "cidx_group": cidx_group}
-                for external_id, cidx_group in self.group_mappings.items()
-            ]
+        self.group_mappings = _normalize_group_mappings(self.group_mappings)
 
 @dataclass
 class TelemetryConfig:

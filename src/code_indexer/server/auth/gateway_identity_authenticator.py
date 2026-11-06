@@ -33,12 +33,17 @@ class GatewayIdentityAuthenticator:
     """Turn a validated gateway JWT into a provisioned cidx ``User``."""
 
     def __init__(
-        self, validator: "GatewayJwtValidator", oidc_manager: "OIDCManager"
+        self,
+        validator: "GatewayJwtValidator",
+        oidc_manager: "OIDCManager",
+        *,
+        allow_email_auto_link: bool = False,
     ) -> None:
         # oidc_manager is an OIDCManager configured for the trusted gateway (its own
         # issuer/claims/JIT policy/group_mappings), NOT the interactive-SSO instance.
         self._validator = validator
         self._oidc_manager = oidc_manager
+        self._allow_email_auto_link = allow_email_auto_link
 
     def handles(self, token: str) -> bool:
         """True iff ``token`` is issued by the trusted gateway (cheap iss pre-check)."""
@@ -63,7 +68,7 @@ class GatewayIdentityAuthenticator:
 
         user_info = OIDCUserInfo(
             subject=identity.subject,
-            email=identity.email,
+            email=identity.email if self._allow_email_auto_link else None,
             email_verified=identity.email_verified,
             username=identity.username,
             # OIDCUserInfo semantics: absence is None, not [] (matches OIDCProvider).

@@ -27,6 +27,7 @@ async def build_gateway_authenticator(
     user_manager,
     jwt_manager,
     group_manager=None,
+    oauth_backend=None,
     oidc_db_path: Optional[str] = None,
 ) -> "Optional[GatewayIdentityAuthenticator]":
     """Return a GatewayIdentityAuthenticator when the gateway trust is enabled, else None.
@@ -37,6 +38,10 @@ async def build_gateway_authenticator(
         jwt_manager: the app-wired JWTManager (unused by the bearer path, required by
             OIDCManager's constructor).
         group_manager: GroupAccessManager for SSO group provisioning (optional).
+        oauth_backend: the cluster's Postgres-backed OAuth backend (from
+            ``backend_registry.oauth``). When set, the gateway OIDCManager uses
+            cluster storage instead of per-pod SQLite. Strongly recommended in
+            multi-replica deployments.
         oidc_db_path: override the gateway's identity-link store path (tests pass a tmp
             file). Defaults to a gateway-specific ``gateway_oauth.db`` -- deliberately NOT
             the shared ``oauth.db`` interactive SSO uses, so the two trust domains' subjects
@@ -69,7 +74,8 @@ async def build_gateway_authenticator(
             config=tg,
             user_manager=user_manager,
             jwt_manager=jwt_manager,
-            db_path=db_path,  # isolated identity-link store (distinct trust domain)
+            oauth_backend=oauth_backend,
+            db_path=db_path,  # fallback for solo mode (ignored when oauth_backend set)
         )
         await oidc.initialize()
         if group_manager is not None:
@@ -77,7 +83,11 @@ async def build_gateway_authenticator(
             # mirroring the interactive-SSO wiring in lifespan.
             setattr(oidc, "group_manager", group_manager)
 
-        return GatewayIdentityAuthenticator(validator, oidc)
+        return GatewayIdentityAuthenticator(
+            validator,
+            oidc,
+            allow_email_auto_link=getattr(tg, 'allow_email_auto_link', False),
+        )
     except Exception:
         # Fail safe: never leave a half-wired authenticator. Gateway auth stays off.
         logger.error(
