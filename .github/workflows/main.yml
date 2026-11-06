@@ -11,10 +11,18 @@ permissions:
   contents: write  # Allow creating tags and releases
   actions: read    # Allow reading workflow runs
 
+# ^ why PR-scoped cancellation; superseded PR runs waste runner minutes
+# ^ why unique group per push; a shared group can cancel a version-bump run and lose the tag
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
-    # ^ coupled legacy_triggers with lint, rust, check-version (aliases); = the on: set before secret-scan widened it
-    if: &legacy_triggers ${{ (github.event_name == 'push' && contains(fromJSON('["refs/heads/master","refs/heads/main","refs/heads/develop","refs/heads/development","refs/heads/staging"]'), github.ref)) || (github.event_name == 'pull_request' && contains(fromJSON('["master","main"]'), github.base_ref)) }}
+    # ^ coupled legacy_triggers with lint, rust, check-version; gates on pushes to key branches and PRs into master/main/development
+    if: &legacy_triggers ${{ (github.event_name == 'push' && contains(fromJSON('["refs/heads/master","refs/heads/main","refs/heads/develop","refs/heads/development","refs/heads/staging"]'), github.ref)) || (github.event_name == 'pull_request' && contains(fromJSON('["master","main","development"]'), github.base_ref)) }}
+    permissions:
+      contents: read
     #^ why ubuntu-24.04, not ubuntu-latest; latest = 26.04 has no Python 3.9 for setup-python
     runs-on: ubuntu-24.04
     strategy:
@@ -43,6 +51,8 @@ jobs:
 
   lint:
     if: *legacy_triggers
+    permissions:
+      contents: read
     #^ coupled Python 3.9 (mypy python_version) with ubuntu-24.04; ubuntu-latest = 26.04 lacks 3.9
     runs-on: ubuntu-24.04
 
@@ -193,6 +203,53 @@ jobs:
           --only-verified --fail --fail-on-scan-errors --no-update --json \
           | jq -r '"FINDING trufflehog detector=\(.DetectorName) commit=\(.SourceMetadata.Data.Git.commit // "-") line=\(.SourceMetadata.Data.Git.line // "-") (path withheld; run trufflehog locally)"'
 
+    # ^ security patterns from the DISCLOSURE_PATTERNS secret (never from the tree)
+    # ^ invariant fail closed when secret missing on push or same-repo PR; fork PRs skip (Actions withholds secrets)
+    # ^ invariant print label only, never matched content — public Actions logs outlive history rewrites
+    - name: Disclosure scan (private patterns, per-commit, redacted)
+      if: ${{ !cancelled() && steps.range.outcome == 'success' }}
+      env:
+        LOG_OPTS: ${{ steps.range.outputs.log_opts }}
+        DISCLOSURE_PATTERNS: ${{ secrets.DISCLOSURE_PATTERNS }}
+        IS_FORK_PR: ${{ github.event.pull_request.head.repo.fork == true }}
+      run: |
+        set -euo pipefail
+        if [ -z "${DISCLOSURE_PATTERNS:-}" ]; then
+          if [ "$IS_FORK_PR" = "true" ]; then
+            echo "::notice::Disclosure scan skipped — fork PRs receive no secrets"
+            exit 0
+          fi
+          printf '::error::DISCLOSURE_PATTERNS secret is empty or missing — failing closed\n'
+          exit 1
+        fi
+        patch_content=$(git log -p --no-renames --diff-merges=first-parent $LOG_OPTS \
+          | grep '^+' | grep -v '^+++ ' | sed 's/^+//' || true)
+        msg_content=$(git log --format=%B $LOG_OPTS || true)
+        file_names=$(git log --name-only --diff-filter=ACMR --format= $LOG_OPTS | sort -u || true)
+        found=0
+        while IFS='=' read -r label regex; do
+          [ -z "${label:-}" ] && continue
+          [[ "$label" =~ ^[[:space:]]*# ]] && continue
+          set +e
+          printf '%s\n' "$patch_content" | grep -qE "$regex"; rc_diff=$?
+          printf '%s\n' "$msg_content" | grep -qE "$regex"; rc_msg=$?
+          printf '%s\n' "$file_names" | grep -qE "$regex"; rc_name=$?
+          set -e
+          if [ "$rc_diff" -ge 2 ] || [ "$rc_msg" -ge 2 ] || [ "$rc_name" -ge 2 ]; then
+            printf '::error::Invalid regex for pattern "%s" (grep exit %d/%d/%d) — failing closed\n' "$label" "$rc_diff" "$rc_msg" "$rc_name"
+            exit 1
+          fi
+          [ "$rc_diff" -eq 0 ] && { printf 'FINDING disclosure label=%s in diff (run locally for details)\n' "$label"; found=1; }
+          [ "$rc_msg" -eq 0 ] && { printf 'FINDING disclosure label=%s in commit message (run locally for details)\n' "$label"; found=1; }
+          [ "$rc_name" -eq 0 ] && { printf 'FINDING disclosure label=%s in file name (run locally for details)\n' "$label"; found=1; }
+        done <<< "$DISCLOSURE_PATTERNS"
+        if [ "$found" -eq 1 ]; then
+          printf '::error::Disclosure scan failed — internal identifiers found\n'
+          exit 1
+        fi
+        count=$(printf '%s\n' "$DISCLOSURE_PATTERNS" | grep -c '=' || echo 0)
+        printf 'Disclosure scan passed (%s patterns checked)\n' "$count"
+
   # Before this job existed, NO gate anywhere (local or CI) ran `cargo test` or
   # `cargo clippy` -- the entire 447-test Rust suite under rust/ (xray-core,
   # xray-cli), including the AC18 structural-parity check
@@ -204,6 +261,8 @@ jobs:
   # exactly like `lint` and `test` already do.
   rust:
     if: *legacy_triggers
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
 
     steps:
@@ -238,6 +297,7 @@ jobs:
       uses: Swatinem/rust-cache@v2
       with:
         workspaces: "rust -> target"
+        save-if: ${{ github.event_name == 'push' }}
 
     #^ why --locked => lockfile drift fails here, not at deploy (auto-updater builds --locked)
     - name: Run cargo test --locked --workspace (rust/xray-core + rust/xray-cli, incl. AC18 PREAMBLE parity check)
@@ -249,7 +309,10 @@ jobs:
       run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
   check-version:
-    if: *legacy_triggers
+    # ^ why push-only; outputs feed create-tag (development) and create-release (master), both push-only
+    if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/development' || github.ref == 'refs/heads/master') }}
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     outputs:
       version_changed: ${{ steps.check_version.outputs.version_changed }}
