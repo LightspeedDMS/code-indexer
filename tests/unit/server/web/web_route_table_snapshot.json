@@ -1,0 +1,2928 @@
+{
+ "api_router": [
+  {
+   "dependencies": [],
+   "endpoint": "get_server_time",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "get_server_time",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/server-time",
+   "response_class": "default:JSONResponse",
+   "status_code": null,
+   "tags": []
+  }
+ ],
+ "login_router": [
+  {
+   "dependencies": [],
+   "endpoint": "unified_login_page",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "unified_login_page",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": [
+     "error",
+     "info",
+     "redirect_to"
+    ]
+   },
+   "path": "/login",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "unified_login_submit",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "unified_login_submit",
+   "params": {
+    "body": [
+     "csrf_token",
+     "password",
+     "redirect_to",
+     "username"
+    ],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/login",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "unified_login_sso",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "unified_login_sso",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": [
+     "redirect_to"
+    ]
+   },
+   "path": "/login/sso",
+   "response_class": "default:JSONResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "redirect_admin_login",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "redirect_admin_login",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": [
+     "redirect_to"
+    ]
+   },
+   "path": "/admin/login",
+   "response_class": "default:JSONResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "redirect_user_login",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "redirect_user_login",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": [
+     "redirect_to"
+    ]
+   },
+   "path": "/user/login",
+   "response_class": "default:JSONResponse",
+   "status_code": null,
+   "tags": []
+  }
+ ],
+ "user_router": [
+  {
+   "dependencies": [],
+   "endpoint": "user_api_keys_page",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "user_api_keys_page",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/api-keys",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "user_api_keys_list_partial",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "user_api_keys_list_partial",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/partials/api-keys-list",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "user_mcp_credentials_page",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "user_mcp_credentials_page",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/mcp-credentials",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "user_mcp_credentials_list_partial",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "user_mcp_credentials_list_partial",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/partials/mcp-credentials-list",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "user_git_credentials_page",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "user_git_credentials_page",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/git-credentials",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "user_git_credentials_list_partial",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "user_git_credentials_list_partial",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/partials/git-credentials-list",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "<web>._git_credential_self_elevation"
+   ],
+   "endpoint": "user_git_credentials_add",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "user_git_credentials_add",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/git-credentials",
+   "response_class": "default:JSONResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "<web>._git_credential_self_elevation"
+   ],
+   "endpoint": "user_git_credentials_delete",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "DELETE"
+   ],
+   "name": "user_git_credentials_delete",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [
+     "credential_id"
+    ],
+    "query": []
+   },
+   "path": "/git-credentials/{credential_id}",
+   "response_class": "default:JSONResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "user_logout",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "user_logout",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/logout",
+   "response_class": "default:JSONResponse",
+   "status_code": null,
+   "tags": []
+  }
+ ],
+ "web_router": [
+  {
+   "dependencies": [],
+   "endpoint": "logout",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "logout",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/logout",
+   "response_class": "default:JSONResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "dashboard",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "dashboard",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "dashboard_health_partial",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "dashboard_health_partial",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/partials/dashboard-health",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "dashboard_stats_partial",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "dashboard_stats_partial",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": [
+     "api_filter",
+     "recent_filter",
+     "time_filter"
+    ]
+   },
+   "path": "/partials/dashboard-stats",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "dashboard_job_counts_partial",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "dashboard_job_counts_partial",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": [
+     "time_filter"
+    ]
+   },
+   "path": "/partials/dashboard-job-counts",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "dashboard_recent_jobs_partial",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "dashboard_recent_jobs_partial",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": [
+     "recent_filter"
+    ]
+   },
+   "path": "/partials/dashboard-recent-jobs",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "dashboard_api_metrics_partial",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "dashboard_api_metrics_partial",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": [
+     "api_filter"
+    ]
+   },
+   "path": "/partials/dashboard-api-metrics",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "dashboard_cache_metrics_partial",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "dashboard_cache_metrics_partial",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": [
+     "cache_window"
+    ]
+   },
+   "path": "/partials/dashboard-cache-metrics",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "dashboard_langfuse_partial",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "dashboard_langfuse_partial",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/partials/dashboard-langfuse",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "admin_cache_sample",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "admin_cache_sample",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": [
+     "limit"
+    ]
+   },
+   "path": "/admin/cache-sample",
+   "response_class": "default:JSONResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "dashboard_api_per_user_partial",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "dashboard_api_per_user_partial",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": [
+     "api_filter"
+    ]
+   },
+   "path": "/partials/dashboard-api-per-user",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "dashboard_api_chart_partial",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "dashboard_api_chart_partial",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": [
+     "api_filter"
+    ]
+   },
+   "path": "/partials/dashboard-api-chart",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "langfuse_sync_trigger",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "langfuse_sync_trigger",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/langfuse-sync/trigger",
+   "response_class": "JSONResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "users_page",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "users_page",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": [
+     "error",
+     "success",
+     "u"
+    ]
+   },
+   "path": "/users",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "create_user",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "create_user",
+   "params": {
+    "body": [
+     "confirm_password",
+     "csrf_token",
+     "new_password",
+     "new_username",
+     "role"
+    ],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/users/create",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "update_user_role",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "update_user_role",
+   "params": {
+    "body": [
+     "csrf_token",
+     "role"
+    ],
+    "cookie": [],
+    "header": [],
+    "path": [
+     "username"
+    ],
+    "query": []
+   },
+   "path": "/users/{username}/role",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "change_user_password",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "change_user_password",
+   "params": {
+    "body": [
+     "confirm_password",
+     "csrf_token",
+     "new_password"
+    ],
+    "cookie": [],
+    "header": [],
+    "path": [
+     "username"
+    ],
+    "query": []
+   },
+   "path": "/users/{username}/password",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "update_user_email",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "update_user_email",
+   "params": {
+    "body": [
+     "csrf_token",
+     "new_email"
+    ],
+    "cookie": [],
+    "header": [],
+    "path": [
+     "username"
+    ],
+    "query": []
+   },
+   "path": "/users/{username}/email",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "delete_user",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "delete_user",
+   "params": {
+    "body": [
+     "csrf_token"
+    ],
+    "cookie": [],
+    "header": [],
+    "path": [
+     "username"
+    ],
+    "query": []
+   },
+   "path": "/users/{username}/delete",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "users_list_partial",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "users_list_partial",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/partials/users-list",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "groups_page",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "groups_page",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/groups",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "create_group",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "create_group",
+   "params": {
+    "body": [
+     "csrf_token",
+     "description",
+     "name"
+    ],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/groups/create",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "update_group",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "update_group",
+   "params": {
+    "body": [
+     "csrf_token",
+     "description",
+     "name"
+    ],
+    "cookie": [],
+    "header": [],
+    "path": [
+     "group_id"
+    ],
+    "query": []
+   },
+   "path": "/groups/{group_id}/update",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "delete_group",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "delete_group",
+   "params": {
+    "body": [
+     "csrf_token"
+    ],
+    "cookie": [],
+    "header": [],
+    "path": [
+     "group_id"
+    ],
+    "query": []
+   },
+   "path": "/groups/{group_id}/delete",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "assign_user_to_group",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "assign_user_to_group",
+   "params": {
+    "body": [
+     "csrf_token",
+     "group_id"
+    ],
+    "cookie": [],
+    "header": [],
+    "path": [
+     "user_id"
+    ],
+    "query": []
+   },
+   "path": "/groups/users/{user_id:path}/assign",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "groups_list_partial",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "groups_list_partial",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/partials/groups-list",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "groups_users_list_partial",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "groups_users_list_partial",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/partials/groups-users-list",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "groups_repo_access_partial",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "groups_repo_access_partial",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/partials/groups-repo-access",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "grant_repo_access",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "grant_repo_access",
+   "params": {
+    "body": [
+     "csrf_token",
+     "group_id",
+     "repo_name"
+    ],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/groups/repo-access/grant",
+   "response_class": "default:JSONResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "revoke_repo_access",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "revoke_repo_access",
+   "params": {
+    "body": [
+     "csrf_token",
+     "group_id",
+     "repo_name"
+    ],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/groups/repo-access/revoke",
+   "response_class": "default:JSONResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "golden_repos_page",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "golden_repos_page",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/golden-repos",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "add_golden_repo",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "add_golden_repo",
+   "params": {
+    "body": [
+     "alias",
+     "csrf_token",
+     "default_branch",
+     "repo_url"
+    ],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/golden-repos/add",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "batch_create_golden_repos",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "batch_create_golden_repos",
+   "params": {
+    "body": [
+     "csrf_token",
+     "repos"
+    ],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/golden-repos/batch-create",
+   "response_class": "default:JSONResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "delete_golden_repo",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "delete_golden_repo",
+   "params": {
+    "body": [
+     "csrf_token"
+    ],
+    "cookie": [],
+    "header": [],
+    "path": [
+     "alias"
+    ],
+    "query": []
+   },
+   "path": "/golden-repos/{alias}/delete",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "refresh_golden_repo",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "refresh_golden_repo",
+   "params": {
+    "body": [
+     "csrf_token"
+    ],
+    "cookie": [],
+    "header": [],
+    "path": [
+     "alias"
+    ],
+    "query": []
+   },
+   "path": "/golden-repos/{alias}/refresh",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "force_resync_golden_repo",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "force_resync_golden_repo",
+   "params": {
+    "body": [
+     "csrf_token"
+    ],
+    "cookie": [],
+    "header": [],
+    "path": [
+     "alias"
+    ],
+    "query": []
+   },
+   "path": "/golden-repos/{alias}/force-resync",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "save_temporal_options",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "save_temporal_options",
+   "params": {
+    "body": [
+     "all_branches",
+     "csrf_token",
+     "diff_context",
+     "max_commits",
+     "since_date"
+    ],
+    "cookie": [],
+    "header": [],
+    "path": [
+     "alias"
+    ],
+    "query": []
+   },
+   "path": "/golden-repos/{alias}/temporal-options",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "change_golden_repo_branch",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "change_golden_repo_branch",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [
+     "alias"
+    ],
+    "query": []
+   },
+   "path": "/golden-repos/{alias}/change-branch",
+   "response_class": "default:JSONResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "get_golden_repo_branches",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "get_golden_repo_branches",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [
+     "alias"
+    ],
+    "query": []
+   },
+   "path": "/golden-repos/{alias}/branches",
+   "response_class": "default:JSONResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "activate_golden_repo",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "activate_golden_repo",
+   "params": {
+    "body": [
+     "csrf_token",
+     "golden_alias",
+     "user_alias",
+     "username"
+    ],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/golden-repos/activate",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "golden_repo_details",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "golden_repo_details",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [
+     "alias"
+    ],
+    "query": []
+   },
+   "path": "/golden-repos/{alias}/details",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "golden_repos_list_partial",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "golden_repos_list_partial",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/partials/golden-repos-list",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "golden_repo_details_partial",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "golden_repo_details_partial",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [
+     "alias"
+    ],
+    "query": []
+   },
+   "path": "/partials/golden-repos/{alias}/details",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "repos_page",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "repos_page",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": [
+     "golden_repo",
+     "page",
+     "search",
+     "user"
+    ]
+   },
+   "path": "/repos",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "repos_list_partial",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "repos_list_partial",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": [
+     "golden_repo",
+     "page",
+     "search",
+     "user"
+    ]
+   },
+   "path": "/partials/repos-list",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "repo_details",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "repo_details",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [
+     "user_alias",
+     "username"
+    ],
+    "query": []
+   },
+   "path": "/repos/{username}/{user_alias}/details",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "deactivate_repo",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "deactivate_repo",
+   "params": {
+    "body": [
+     "csrf_token"
+    ],
+    "cookie": [],
+    "header": [],
+    "path": [
+     "user_alias",
+     "username"
+    ],
+    "query": []
+   },
+   "path": "/repos/{username}/{user_alias}/deactivate",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "jobs_page",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "jobs_page",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": [
+     "job_type",
+     "page",
+     "search",
+     "status_filter"
+    ]
+   },
+   "path": "/jobs",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "jobs_list_partial",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "jobs_list_partial",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": [
+     "job_type",
+     "page",
+     "search",
+     "status_filter"
+    ]
+   },
+   "path": "/partials/jobs-list",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "cancel_job",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "cancel_job",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [
+     "job_id"
+    ],
+    "query": []
+   },
+   "path": "/jobs/{job_id}/cancel",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "get_queue_status_api",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "get_queue_status_api",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/api/queue-status",
+   "response_class": "default:JSONResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "query_page",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "query_page",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/query",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "query_submit",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "query_submit",
+   "params": {
+    "body": [
+     "at_commit",
+     "case_sensitive",
+     "csrf_token",
+     "fuzzy",
+     "language",
+     "limit",
+     "min_score",
+     "path_pattern",
+     "query_text",
+     "regex",
+     "repository",
+     "scip_exact",
+     "scip_query_type",
+     "search_mode",
+     "time_range",
+     "time_range_all"
+    ],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/query",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "query_results_partial",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "query_results_partial",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/partials/query-results",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "query_results_partial_post",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "query_results_partial_post",
+   "params": {
+    "body": [
+     "at_commit",
+     "case_sensitive",
+     "csrf_token",
+     "fuzzy",
+     "language",
+     "limit",
+     "min_score",
+     "path_pattern",
+     "query_text",
+     "regex",
+     "repository",
+     "scip_exact",
+     "scip_query_type",
+     "search_mode",
+     "time_range",
+     "time_range_all"
+    ],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/partials/query-results",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "auto_discovery_page",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "auto_discovery_page",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/auto-discovery",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "analytics_export_page",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "analytics_export_page",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/analytics-export",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "discovery_all",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "discovery_all",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [
+     "platform"
+    ],
+    "query": [
+     "show_hidden"
+    ]
+   },
+   "path": "/api/discovery/{platform}/all",
+   "response_class": "default:JSONResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "discovery_start",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "discovery_start",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [
+     "platform"
+    ],
+    "query": []
+   },
+   "path": "/api/discovery/{platform}/start",
+   "response_class": "default:JSONResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "discovery_result",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "discovery_result",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [
+     "job_id",
+     "platform"
+    ],
+    "query": []
+   },
+   "path": "/api/discovery/{platform}/result/{job_id}",
+   "response_class": "default:JSONResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "discovery_enrich",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "discovery_enrich",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [
+     "platform"
+    ],
+    "query": []
+   },
+   "path": "/api/discovery/{platform}/enrich",
+   "response_class": "default:JSONResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "gitlab_repos_partial",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "gitlab_repos_partial",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": [
+     "cursor",
+     "page_size",
+     "search",
+     "show_hidden"
+    ]
+   },
+   "path": "/partials/auto-discovery/gitlab",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "github_repos_partial",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "github_repos_partial",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": [
+     "cursor",
+     "page_size",
+     "search",
+     "show_hidden"
+    ]
+   },
+   "path": "/partials/auto-discovery/github",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "hide_discovery_repo",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "hide_discovery_repo",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/api/discovery/hide",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "unhide_discovery_repo",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "unhide_discovery_repo",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/api/discovery/unhide",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "fetch_discovery_branches",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "fetch_discovery_branches",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/api/discovery/branches",
+   "response_class": "default:JSONResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "config_page",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "config_page",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/config",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "reset_config",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "reset_config",
+   "params": {
+    "body": [
+     "csrf_token"
+    ],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/config/reset",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "update_langfuse_pull_config",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "update_langfuse_pull_config",
+   "params": {
+    "body": [
+     "csrf_token"
+    ],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/config/langfuse_pull",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "update_cidx_meta_backup_config",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "update_cidx_meta_backup_config",
+   "params": {
+    "body": [
+     "csrf_token"
+    ],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/config/cidx_meta_backup",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "set_siem_delivery_credential",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "set_siem_delivery_credential",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/config/siem_delivery/credential",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "remove_siem_delivery_credential",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "remove_siem_delivery_credential",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/config/siem_delivery/credential/remove",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "set_siem_delivery_trusted_ca",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "set_siem_delivery_trusted_ca",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/config/siem_delivery/trusted_ca",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "remove_siem_delivery_trusted_ca",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "remove_siem_delivery_trusted_ca",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/config/siem_delivery/trusted_ca/remove",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "clear_query_embedding_cache_table",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "clear_query_embedding_cache_table",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/config/query-embedding-cache/clear",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "update_config_section",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "update_config_section",
+   "params": {
+    "body": [
+     "csrf_token"
+    ],
+    "cookie": [],
+    "header": [],
+    "path": [
+     "section"
+    ],
+    "query": []
+   },
+   "path": "/config/{section}",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "config_section_partial",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "config_section_partial",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": [
+     "section"
+    ]
+   },
+   "path": "/partials/config-section",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "save_api_key",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "save_api_key",
+   "params": {
+    "body": [
+     "api_url",
+     "csrf_token",
+     "token"
+    ],
+    "cookie": [],
+    "header": [],
+    "path": [
+     "platform"
+    ],
+    "query": []
+   },
+   "path": "/config/api-keys/{platform}",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "delete_api_key",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "DELETE"
+   ],
+   "name": "delete_api_key",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [
+     "platform"
+    ],
+    "query": []
+   },
+   "path": "/config/api-keys/{platform}",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "git_settings_page",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "git_settings_page",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/settings/git",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "api_keys_page",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "api_keys_page",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/api-keys",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "api_keys_list_partial",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "api_keys_list_partial",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/partials/api-keys-list",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "admin_mcp_credentials_page",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "admin_mcp_credentials_page",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/mcp-credentials",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "admin_mcp_credentials_list_partial",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "admin_mcp_credentials_list_partial",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/partials/mcp-credentials-list",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "admin_system_credentials_api",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "admin_system_credentials_api",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/api/system-credentials",
+   "response_class": "JSONResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "admin_git_credentials_page",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "admin_git_credentials_page",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/git-credentials",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "admin_git_credentials_list_partial",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "admin_git_credentials_list_partial",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/partials/git-credentials-list",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "admin_git_credentials_add",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "admin_git_credentials_add",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/git-credentials",
+   "response_class": "default:JSONResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "admin_git_credentials_delete",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "DELETE"
+   ],
+   "name": "admin_git_credentials_delete",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [
+     "credential_id"
+    ],
+    "query": []
+   },
+   "path": "/git-credentials/{credential_id}",
+   "response_class": "default:JSONResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "ssh_keys_page",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "ssh_keys_page",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/ssh-keys",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "create_ssh_key",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "create_ssh_key",
+   "params": {
+    "body": [
+     "csrf_token",
+     "description",
+     "email",
+     "key_name",
+     "key_type"
+    ],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/ssh-keys/create",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "delete_ssh_key",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "delete_ssh_key",
+   "params": {
+    "body": [
+     "csrf_token",
+     "key_name"
+    ],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/ssh-keys/delete",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "assign_host_to_key",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "assign_host_to_key",
+   "params": {
+    "body": [
+     "csrf_token",
+     "hostname",
+     "key_name"
+    ],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/ssh-keys/assign-host",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "logs_page",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "logs_page",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": [
+     "level",
+     "logger",
+     "node_id",
+     "page",
+     "search"
+    ]
+   },
+   "path": "/logs",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "logs_list_partial",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "logs_list_partial",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": [
+     "level",
+     "logger",
+     "node_id",
+     "page",
+     "search"
+    ]
+   },
+   "path": "/partials/logs-list",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "export_logs_web",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "export_logs_web",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": [
+     "format",
+     "level",
+     "search"
+    ]
+   },
+   "path": "/logs/export",
+   "response_class": "default:JSONResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "embedding_stats_dashboard_page",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "embedding_stats_dashboard_page",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": [
+     "golden_repo_alias",
+     "job_id",
+     "provider",
+     "purpose"
+    ]
+   },
+   "path": "/embedding-stats",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [],
+   "endpoint": "self_monitoring_page",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "GET"
+   ],
+   "name": "self_monitoring_page",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/self-monitoring",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "save_self_monitoring_config",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "save_self_monitoring_config",
+   "params": {
+    "body": [
+     "csrf_token"
+    ],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/self-monitoring",
+   "response_class": "HTMLResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "trigger_manual_scan",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "trigger_manual_scan",
+   "params": {
+    "body": [
+     "csrf_token"
+    ],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/self-monitoring/run-now",
+   "response_class": "JSONResponse",
+   "status_code": null,
+   "tags": []
+  },
+  {
+   "dependencies": [
+    "code_indexer.server.auth.dependencies.get_current_admin_user_hybrid",
+    "code_indexer.server.auth.dependencies.require_elevation.<locals>._check",
+    "fastapi.security.http.HTTPBearer"
+   ],
+   "endpoint": "restart_server",
+   "include_in_schema": true,
+   "kind": "APIRoute",
+   "methods": [
+    "POST"
+   ],
+   "name": "restart_server",
+   "params": {
+    "body": [],
+    "cookie": [],
+    "header": [],
+    "path": [],
+    "query": []
+   },
+   "path": "/restart",
+   "response_class": "JSONResponse",
+   "status_code": null,
+   "tags": []
+  }
+ ]
+}
