@@ -1,0 +1,122 @@
+{
+  "consumer": {
+    "name": "cidx"
+  },
+  "provider": {
+    "name": "workspace-mcp"
+  },
+  "interactions": [
+    {
+      "description": "a regex search",
+      "providerState": "a repository exists under the content root",
+      "request": {
+        "method": "POST",
+        "path": "/content/rg",
+        "headers": {
+          "Authorization": "Bearer cidx-contract-token",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "argv": [
+            "rg",
+            "--json",
+            "-e",
+            "needle",
+            "-g",
+            "!.code-indexer/**",
+            "-g",
+            "!.git/**",
+            "--",
+            "/tmp/cidx-content-rg-contract/repo"
+          ],
+          "working_dir": "/tmp/cidx-content-rg-contract/repo",
+          "timeout_ms": 30000,
+          "max_output_bytes": 67108864
+        }
+      },
+      "response": {
+        "status": 200
+      }
+    },
+    {
+      "description": "a regex search using every search flag",
+      "providerState": "a repository exists under the content root",
+      "request": {
+        "method": "POST",
+        "path": "/content/rg",
+        "headers": {
+          "Authorization": "Bearer cidx-contract-token",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "argv": [
+            "rg",
+            "--json",
+            "-e",
+            "needle.*thread",
+            "--multiline",
+            "--multiline-dotall",
+            "--pcre2",
+            "-i",
+            "-C",
+            "2",
+            "-g",
+            "*.py",
+            "-g",
+            "!tests/*",
+            "-g",
+            "!.code-indexer/**",
+            "-g",
+            "!.git/**",
+            "--",
+            "/tmp/cidx-content-rg-contract/repo"
+          ],
+          "working_dir": "/tmp/cidx-content-rg-contract/repo",
+          "timeout_ms": 30000,
+          "max_output_bytes": 67108864
+        }
+      },
+      "response": {
+        "status": 200
+      }
+    },
+    {
+      "description": "the trigram index's listing of the files a search reads",
+      "providerState": "a repository exists under the content root",
+      "request": {
+        "method": "POST",
+        "path": "/content/rg",
+        "headers": {
+          "Authorization": "Bearer cidx-contract-token",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "argv": [
+            "rg",
+            "--files-with-matches",
+            "--multiline",
+            "-e",
+            "\\A[\\s\\S]",
+            "-g",
+            "!.code-indexer/**",
+            "-g",
+            "!.git/**",
+            "--",
+            "/tmp/cidx-content-rg-contract/repo"
+          ],
+          "working_dir": "/tmp/cidx-content-rg-contract/repo",
+          "timeout_ms": 300000,
+          "max_output_bytes": 67108864
+        }
+      },
+      "response": {
+        "status": 200
+      }
+    }
+  ],
+  "metadata": {
+    "pactSpecification": {
+      "version": "2.0.0"
+    }
+  }
+}
