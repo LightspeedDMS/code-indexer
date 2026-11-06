@@ -13,7 +13,7 @@ else
   DIFF_CMD="git diff --cached --diff-filter=ACM -U0 -- . ':!scripts/check-disclosure.sh'"
 fi
 
-ADDED_LINES=$($DIFF_CMD | grep -E '^\+[^+]' | sed 's/^\+//' || true)
+ADDED_LINES=$(eval "$DIFF_CMD" | grep -E '^\+[^+]' | sed 's/^\+//' || true)
 
 if [ -z "$ADDED_LINES" ]; then
   echo "No added lines to scan."
