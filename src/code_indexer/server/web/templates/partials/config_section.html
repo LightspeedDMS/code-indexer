@@ -3090,7 +3090,7 @@ function saveLlmCredsConfig() {
         <h2>Trusted Gateway (per-user bearer)</h2>
     </summary>
     <p class="section-description">
-        Trusts an mcp-gateway as an external RS256 bearer-token issuer. When enabled, cidx validates the per-user RS256 JWTs the gateway forwards (against the gateway JWKS) and JIT-provisions the user via the OIDC path, so cidx enforces its own per-user access (groups / repo_group_access). This is a separate issuer from the SSO Authentication section above. <strong>Changes to this section apply on the next server restart</strong> (the authenticator is built once at startup).
+        Trusts an API gateway as an external RS256 bearer-token issuer. When enabled, cidx validates the per-user RS256 JWTs the gateway forwards (against the gateway JWKS) and JIT-provisions the user via the OIDC path, so cidx enforces its own per-user access (groups / repo_group_access). This is a separate issuer from the SSO Authentication section above. <strong>Changes to this section apply on the next server restart</strong> (the authenticator is built once at startup).
     </p>
     <article>
         <!-- Display Mode -->
@@ -3205,12 +3205,12 @@ function saveLlmCredsConfig() {
                 </label>
                 <label for="trusted_gateway-issuer">
                     Issuer
-                    <input type="text" id="trusted_gateway-issuer" name="issuer" value="{{ config.trusted_gateway.issuer }}" placeholder="https://mcp.test.lightspeedtools.cloud">
+                    <input type="text" id="trusted_gateway-issuer" name="issuer" value="{{ config.trusted_gateway.issuer }}" placeholder="https://gateway.example.com">
                     <small>Expected <code>iss</code>; also routes the auth dispatch</small>
                 </label>
                 <label for="trusted_gateway-jwks-uri">
                     JWKS URI
-                    <input type="text" id="trusted_gateway-jwks-uri" name="jwks_uri" value="{{ config.trusted_gateway.jwks_uri }}" placeholder="https://mcp.test.lightspeedtools.cloud/oauth/jwks.json">
+                    <input type="text" id="trusted_gateway-jwks-uri" name="jwks_uri" value="{{ config.trusted_gateway.jwks_uri }}" placeholder="https://gateway.example.com/oauth/jwks.json">
                     <small>Gateway JWKS endpoint (RS256 signing keys)</small>
                 </label>
                 <label for="trusted_gateway-audience">
