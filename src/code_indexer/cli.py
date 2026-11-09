@@ -1325,7 +1325,7 @@ def _execute_semantic_search(
 
         # The server stamps --git-backend=delegated on a query it spawns in a
         # directory that holds index state only: the branch filter then asks
-        # git-mcp, never local git in an empty directory.
+        # the git service, never local git in an empty directory.
         query_git_backend = _query_git_backend(git_backend)
         git_topology_service = GitTopologyService(
             config.codebase_dir, git_backend=query_git_backend
@@ -3175,7 +3175,7 @@ def _resolve_hnsw_sync_epoch_enabled_for_cli() -> bool:
     help="Internal: who answers git questions about the repository (HEAD's "
     "commit and branch, recorded in the index). 'local' (default) runs git "
     "here. 'delegated' asks the git-backend plugin the server is configured "
-    "with (git-mcp), for a repository this machine does not hold. Stamped by "
+    "with (the git service), for a repository this machine does not hold. Stamped by "
     "the server on the commands it spawns.",
 )
 @click.option(
@@ -3431,7 +3431,7 @@ def index(
         sys.exit(1)
 
     # Temporal indexing reads only history, and with --git-backend delegated it
-    # reads it through the git seam (git-mcp). Delegated CONTENT with LOCAL git
+    # reads it through the git seam (the git service). Delegated CONTENT with LOCAL git
     # means the repository is not on this machine and nothing can read its
     # history: refused here, before --clear can wipe anything, rather than index
     # an empty history.
@@ -6027,7 +6027,7 @@ def _annotate_staleness(
     hidden=True,
     help="Internal: who answers the branch filter's git questions (HEAD's "
     "branch, commit and tree, commit reachability). 'local' (default) runs git "
-    "here; 'delegated' asks the git-backend plugin (git-mcp). Stamped by the "
+    "here; 'delegated' asks the git-backend plugin (the git service). Stamped by the "
     "server on the queries it spawns.",
 )
 @click.pass_context
@@ -7578,7 +7578,7 @@ def query(
 
         # The server stamps --git-backend=delegated on a query it spawns in a
         # directory that holds index state only: the branch filter then asks
-        # git-mcp, never local git in an empty directory.
+        # the git service, never local git in an empty directory.
         query_git_backend = _query_git_backend(git_backend)
         git_topology_service = GitTopologyService(
             config.codebase_dir, git_backend=query_git_backend
@@ -19919,7 +19919,7 @@ def _global_activate_delegated_refusal() -> Optional[str]:
 
     It registers an alias pointing at ``<golden-repos>/repos/<name>/.code-indexer/index``
     on THIS host's disk. Under the server's ``content_backend: delegated`` the
-    repositories live on workspace-mcp and each pod's index state is its own,
+    repositories live on the content service and each pod's index state is its own,
     so that alias -- written to the registry every pod shares -- would name a
     path no other pod has. The selection is read from the server config
     (``CIDX_SERVER_DATA_DIR``, default ``~/.cidx-server``): this command runs
@@ -19941,7 +19941,7 @@ def _global_activate_delegated_refusal() -> Optional[str]:
         return None
     return (
         "'cidx global activate' is not available when the server's "
-        "content_backend is 'delegated': repositories live on workspace-mcp and "
+        "content_backend is 'delegated': repositories live on the content service and "
         "an alias to this host's index would be unreadable on every other pod. "
         "Add or refresh the golden repository through the server "
         "(POST /api/admin/golden-repos or the refresh endpoint) instead."

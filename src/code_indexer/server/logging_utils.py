@@ -44,8 +44,8 @@ def strip_url_credentials(url: Any) -> Any:
     unlike :func:`mask_url_credentials` which yields a display-only ``***`` form.
 
     Used when a URL will be PERSISTED (golden-repo metadata / ``.git/config``) in a
-    deployment whose git backend supplies its own credentials (git-mcp),
-    so the token lives only in git-mcp and never in cidx's stored state. Non-string
+    deployment whose git backend supplies its own credentials (the git service),
+    so the token lives only in the git service and never in cidx's stored state. Non-string
     input, credential-free URLs, and scheme-only forms (``local://alias``) are
     returned unchanged; idempotent.
     """

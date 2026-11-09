@@ -573,12 +573,12 @@ def _component_index_facts(
 def _analyze_delegated_component_repo(
     source: ContentSeamSource, repo_path: Path, name: str
 ) -> ComponentRepoInfo:
-    """``_analyze_component_repo`` for a member on workspace-mcp.
+    """``_analyze_component_repo`` for a member on the content service.
 
     Size is the member's files from the content seam's manifest plus this
     pod's index state for it; the manifest never walks ``.git``, so unlike
     the local walk the git object store is not counted. A backend failure (a
-    member missing on workspace-mcp included) raises.
+    member missing on the content service included) raises.
     """
     index_dir = index_root(repo_path)
     has_index, file_count, last_indexed = _component_index_facts(index_dir, name)
@@ -616,7 +616,7 @@ def _get_composite_details(repo: ActivatedRepository) -> CompositeRepositoryDeta
 
     source = composite_seam_source(repo.path)
     if source is not None:
-        # Content seam: the members are on workspace-mcp and the registry
+        # Content seam: the members are on the content service and the registry
         # names them -- this pod may not even hold the composite's config.
         for repo_name in plain_member_names(repo.discovered_repos, repo.path):
             info = _analyze_delegated_component_repo(

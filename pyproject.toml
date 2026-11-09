@@ -7,7 +7,7 @@ name = "code-indexer"
 dynamic = ["version"]
 description = "AI-powered semantic code search with local models"
 authors = [
-    {name = "LightspeedDMS", email = "seba.battig@example.com"}
+    {name = "LightspeedDMS", email = "dev-team@example.com"}
 ]
 readme = "README.md"
 license = {text = "MIT"}
@@ -218,8 +218,8 @@ Issues = "https://github.com/LightspeedDMS/code-indexer/issues"
 code-indexer = "code_indexer.cli_fast_entry:main"
 cidx = "code_indexer.cli_fast_entry:main"
 
-# clone_backend=delegated: workspace-mcp's clone-path client. It belongs to
-# the workspace-mcp delegate and moves to cidx-delegate-workspace when that
+# clone_backend=delegated: the content service's clone-path client. It belongs to
+# the the content service delegate and moves to cidx-delegate-workspace when that
 # distribution exists (two "delegated" providers would refuse to start, so the
 # move cannot leave a duplicate behind). The other clone modes are
 # cidx-backend-workspace's.
