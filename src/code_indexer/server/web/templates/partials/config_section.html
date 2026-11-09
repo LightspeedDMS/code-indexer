@@ -2225,7 +2225,7 @@ function saveLlmCredsConfig() {
                     <small>When disabled (default), golden temporal indexing tracks only the branch registered at golden-repo registration. Enabling later requires no re-index.</small>
                 </label>
                 <label for="indexing-golden-description-generation-enabled">
-                    <!-- EVO-65484: hidden fallback guarantees the key is always submitted
+                    <!-- issue-65484: hidden fallback guarantees the key is always submitted
                          even when unchecked (browsers omit unchecked checkboxes) -- same
                          pattern as the temporal_all_branches_enabled field above. -->
                     <input type="hidden" name="golden_description_generation_enabled" value="false">
@@ -3084,7 +3084,7 @@ function saveLlmCredsConfig() {
 </details>
 
 
-<!-- Trusted mcp-gateway bearer auth (EVO-66121) -->
+<!-- Trusted mcp-gateway bearer auth (issue-66121) -->
 <details class="config-section" id="section-trusted_gateway">
     <summary>
         <h2>Trusted Gateway (per-user bearer)</h2>

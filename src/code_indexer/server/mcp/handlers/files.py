@@ -363,7 +363,7 @@ def _resolve_global_repo_target(
         resolve_alias_or_index_path,
     )
 
-    # Bug #1315 / EVO-66336: fall back to the registry row's own index_path when
+    # Bug #1315 / issue-66336: fall back to the registry row's own index_path when
     # the alias pointer file is missing/unreadable, mirroring search.py's resolver
     # (and the other 5 sites) so file-listing and search behave identically for
     # -global repos. A golden-repo-seeder refresh can transiently empty

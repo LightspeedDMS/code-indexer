@@ -316,7 +316,7 @@ class RepositoryListingManager:
 
         try:
             # Get remote branches using git ls-remote.
-            # NOTE: left raw on purpose (EVO-64678) — GitBackend.ls_remote() is a
+            # NOTE: left raw on purpose (issue-64678) — GitBackend.ls_remote() is a
             # reachability probe: it returns bool, passes no --heads, and swallows
             # a non-zero exit. This call site needs the refs/heads stdout and the
             # returncode/stderr to build its RepositoryListingError, so the seam

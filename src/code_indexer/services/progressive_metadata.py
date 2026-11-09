@@ -231,7 +231,7 @@ class ProgressiveMetadata:
 
     def mark_chunk_coverage_current(self) -> None:
         """Record that every stored file was checked against (or written
-        under) the current chunk routing (EVO-64616, chunk_coverage)."""
+        under) the current chunk routing (issue-64616, chunk_coverage)."""
         self.metadata[CHUNK_COVERAGE_KEY] = CHUNK_COVERAGE_VERSION
         self._save_metadata()
 
@@ -253,7 +253,7 @@ class ProgressiveMetadata:
     ):
         """Update progress counters and timestamp after each file.
 
-        ``multimodal_chunks_failed`` (EVO-64616): image chunks of this run
+        ``multimodal_chunks_failed`` (issue-64616): image chunks of this run
         that got no multimodal point; their text is indexed."""
         current_timestamp = time.time()
 

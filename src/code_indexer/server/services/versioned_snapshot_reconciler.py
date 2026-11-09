@@ -593,7 +593,7 @@ def _reconcile_one_namespace_body(
         # skipped forever. A repo that still exists but has a merely
         # unreadable pointer right now is never reclaimed: it fails this
         # check via either the registry or the base-clone conjunct.
-        # EVO-64616: a renamed alias keeps serving the snapshots under its
+        # issue-64616: a renamed alias keeps serving the snapshots under its
         # OLD namespace (a published path is opaque) until its next refresh
         # snapshots under the new one. A namespace any pointer still names is
         # never reclaimed, whatever its own alias's state.

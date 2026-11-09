@@ -1138,7 +1138,7 @@ class GitOperationsService:
                 if status_code[1] in "MADRC":
                     unstaged.append(file_path)
 
-                # Untracked files -- never cidx's own index state (EVO-64616:
+                # Untracked files -- never cidx's own index state (issue-64616:
                 # a copy activated before its .git/info/exclude was written
                 # still lists it).
                 if status_code == "??" and not is_index_state_path(file_path):
@@ -1604,7 +1604,7 @@ class GitOperationsService:
             validated_paths = validate_pathspecs(validated_paths) or []
 
             if any(_may_cover_index_state(p) for p in validated_paths):
-                # EVO-64616: a stage of the whole tree must not pick up cidx's
+                # issue-64616: a stage of the whole tree must not pick up cidx's
                 # index state in a copy activated before activation excluded
                 # it. Excluding it first (idempotent) is the guarantee; an
                 # exclude PATHSPEC is not -- git fails the add when it names a
@@ -1989,7 +1989,7 @@ class GitOperationsService:
         set_upstream: bool,
         push_url: Optional[str],
     ) -> "subprocess.CompletedProcess[str]":
-        """git_push when the working copy is not on this pod (EVO-64616): the
+        """git_push when the working copy is not on this pod (issue-64616): the
         push runs in git-mcp, which supplies its OWN credential, so no
         credential from here applies and none is sent. Validation runs
         through the same seam (the remote must be configured there). A
@@ -2081,12 +2081,12 @@ class GitOperationsService:
 
         # Local metadata lookups, bounded; a timeout says what timed out.
         # Through self._git_run: on a pod that does not hold the repository
-        # they run where it is (EVO-64616).
+        # they run where it is (issue-64616).
         try:
             remote = validate_remote_name(remote, repo_path, runner=self._git_run)
             branch = validate_branch_name(branch, param_name="branch")
             if self._delegated_tools() is not None:
-                # EVO-64616: git-mcp pushes with its OWN credential; the
+                # issue-64616: git-mcp pushes with its OWN credential; the
                 # user's PAT never leaves this pod.
                 return self.git_push(
                     repo_path, remote=remote, branch=branch, set_upstream=set_upstream

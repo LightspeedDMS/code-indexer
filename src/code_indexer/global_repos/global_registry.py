@@ -338,7 +338,7 @@ class GlobalRegistry:
 
     def update_index_path(self, alias_name: str, index_path: str) -> bool:
         """
-        Repoint a global repo's on-disk index_path (EVO-66808).
+        Repoint a global repo's on-disk index_path (issue-66808).
 
         Targeted single-column update so it never resets last_refresh /
         enable_temporal / enable_scip / temporal_options. Used by the golden-repo

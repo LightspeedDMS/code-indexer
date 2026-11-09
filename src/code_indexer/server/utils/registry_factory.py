@@ -136,7 +136,7 @@ class PostgresGlobalRegistryAdapter:
         self._backend.update_enable_scip(alias_name, enable_scip)
 
     def update_index_path(self, alias_name: str, index_path: str) -> bool:
-        """Delegate to backend's update_index_path() (EVO-66808)."""
+        """Delegate to backend's update_index_path() (issue-66808)."""
         return cast(bool, self._backend.update_index_path(alias_name, index_path))
 
     def list_due_repos(self, limit: int, now: float) -> List[Dict[str, Any]]:

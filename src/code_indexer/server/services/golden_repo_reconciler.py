@@ -168,7 +168,7 @@ class ReconcileResult:
     orphans_failed: List[str] = field(default_factory=list)
     pointers_repaired: List[str] = field(default_factory=list)
     pointers_repair_failed: List[str] = field(default_factory=list)
-    # EVO-66808: healthy repos whose stale global_repos.index_path was repointed
+    # issue-66808: healthy repos whose stale global_repos.index_path was repointed
     # to the actual on-disk clone path (and those whose repair failed).
     index_paths_repaired: List[str] = field(default_factory=list)
     index_paths_repair_failed: List[str] = field(default_factory=list)
@@ -672,7 +672,7 @@ def _run_sweep(
     # Pass 3: repair healthy global repos (idempotent; never deletes):
     #   (a) Bug #1317 / #1315: a MISSING alias pointer -- clone/index intact,
     #       registry says global, only the pointer JSON is gone. Re-write it.
-    #   (b) EVO-66808: a STALE global_repos.index_path -- an absolute path baked at
+    #   (b) issue-66808: a STALE global_repos.index_path -- an absolute path baked at
     #       registration under an older data-dir layout (e.g.
     #       /opt/code-indexer/.cidx-server/data/golden-repos/<name>) that no longer
     #       exists after the data dir moved (e.g. /data/data/golden-repos/<name>),
@@ -699,7 +699,7 @@ def _run_sweep(
         # shared registry (SQLite/PostgreSQL), so a transient DB error is possible.
         # Keep it inside a try -- a read failure for ONE alias must be recorded and
         # skipped, never propagate out of the loop and abort Pass 3 (both the
-        # #1317 pointer repair and the EVO-66808 index_path repair) for every
+        # #1317 pointer repair and the issue-66808 index_path repair) for every
         # remaining healthy repo.
         try:
             globally_active = golden_repo_manager.is_globally_active(alias)
@@ -736,7 +736,7 @@ def _run_sweep(
             )
             result.pointers_repair_failed.append(alias)
 
-        # (b) stale-index_path repair (EVO-66808)
+        # (b) stale-index_path repair (issue-66808)
         try:
             repo_info = global_registry.get_global_repo(global_alias)
             stored_index_path = (repo_info or {}).get("index_path")
@@ -750,7 +750,7 @@ def _run_sweep(
                 if global_registry.update_index_path(global_alias, actual_path):
                     result.index_paths_repaired.append(alias)
                     logger.warning(
-                        "EVO-66808 reconcile: repointed stale index_path for "
+                        "issue-66808 reconcile: repointed stale index_path for "
                         "globally-active repo '%s' (%s -> %s).",
                         alias,
                         stored_index_path,
@@ -758,7 +758,7 @@ def _run_sweep(
                     )
         except Exception as ip_error:  # one repair failure never aborts the reconcile
             logger.error(
-                "EVO-66808 reconcile: failed to repair index_path for '%s': %s",
+                "issue-66808 reconcile: failed to repair index_path for '%s': %s",
                 alias,
                 ip_error,
             )
@@ -905,7 +905,7 @@ def _reconcile_stale_indexes(
     This is a READ-ONLY staleness detection pass: it mutates nothing in the
     registry or on disk. The only side effect is triggering refresh jobs.
 
-    Disabled under a delegated IndexStore (EVO-64616): the recorded commit is
+    Disabled under a delegated IndexStore (issue-64616): the recorded commit is
     read from the index on THIS pod, which then holds only the versions it
     served -- so the pass would judge an arbitrary subset, or check every
     repository out to judge them all. Each repository's scheduled refresh

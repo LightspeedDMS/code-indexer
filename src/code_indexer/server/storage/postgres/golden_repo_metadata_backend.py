@@ -112,7 +112,7 @@ class GoldenRepoMetadataPostgresBackend(
             created_at: ISO 8601 timestamp when repository was created.
             enable_temporal: Whether temporal indexing is enabled.
             temporal_options: Optional temporal indexing options.
-            workspace_id: Optional workspace-mcp workspace id (EVO-65021), used by
+            workspace_id: Optional workspace-mcp workspace id (issue-65021), used by
                 the delegated SCIP indexer to address sandbox-mcp
                 (``sb-{workspace_id}``). ``None`` when not (yet) known.
 
@@ -361,7 +361,7 @@ class GoldenRepoMetadataPostgresBackend(
     def update_workspace_id(self, alias: str, workspace_id: Optional[str]) -> bool:
         """Update the workspace-mcp ``workspace_id`` for a golden repository.
 
-        EVO-65021: persists (or clears, when ``workspace_id`` is None) the
+        issue-65021: persists (or clears, when ``workspace_id`` is None) the
         workspace-mcp handle used by the delegated SCIP indexer to address
         sandbox-mcp. Used by the registration capture path and any backfill.
 

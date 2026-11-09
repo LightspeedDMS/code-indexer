@@ -374,7 +374,7 @@ class LifecycleClaudeCliInvoker:
             # and git-mcp (and fails loud when they cannot answer); this pod's
             # directory says nothing about it.
             path_obj = self._validate_repo_names(alias, repo_path)
-            # EVO-64616: resolve the source BEFORE submitting a job. An empty
+            # issue-64616: resolve the source BEFORE submitting a job. An empty
             # repository raises GoldenRepoEmptyError, which the batch runner
             # skips; inside the dispatcher the plugin would turn it into a
             # crashed job and a per-repo failure.

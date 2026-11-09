@@ -74,7 +74,7 @@ class GlobalReposLifecycleManager:
                 reconciliation can update golden_repos_metadata (bare-alias-keyed)
                 alongside global_repos. None (default) lets RefreshScheduler
                 resolve its own fallback lazily (solo mode / not yet available).
-            git_backend: EVO-64678 Phase 3 git seam — forwarded to
+            git_backend: issue-64678 Phase 3 git seam — forwarded to
                 RefreshScheduler so its golden-repo clone/checkout/pull/refresh
                 git runs through the configured backend (LocalGitBackend by
                 default; the git-mcp-backed backend when git_backend='delegated').

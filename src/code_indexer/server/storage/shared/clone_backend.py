@@ -228,7 +228,7 @@ class DelegatedCloneBackend:
     """Clone backend that delegates the activated-repo copy-on-write clone to
     workspace-mcp instead of running any filesystem operation inside cidx.
 
-    EVO-64615 / EVO-64616: the server process must NOT perform filesystem
+    issue-64615 / issue-64616: the server process must NOT perform filesystem
     clones directly — that responsibility belongs to workspace-mcp (which owns
     the CoW/reflink primitive and the storage layout). This backend forwards
     the ONE filesystem-mutating Protocol method — ``create_clone_at_path`` —
@@ -320,7 +320,7 @@ class DelegatedCloneBackend:
         "method": ...}``. cancel_check is honored before and after the request
         (the copy itself is not mid-flight cancellable, but the caller rmtrees
         dest on the raised SubprocessCancelledError). Any non-2xx or transport
-        error raises — NO silent local fallback (EVO-64615). poll_interval is
+        error raises — NO silent local fallback (issue-64615). poll_interval is
         accepted for CloneBackend Protocol symmetry and unused here.
         """
         self._request_clone(
@@ -383,7 +383,7 @@ class DelegatedCloneBackend:
         """Remove the working copy at *path*; False when it was already absent.
 
         Already absent includes workspace-mcp answering 404 for the PATH
-        (ENOENT, EVO-64616): a second deleter of the same path (another pod)
+        (ENOENT, issue-64616): a second deleter of the same path (another pod)
         finds it gone, which is the outcome it asked for, never a failure. A
         404 that does not name a missing path (a route this workspace-mcp
         lacks) still raises: it says nothing about the copy."""
@@ -556,7 +556,7 @@ class DelegatedCloneBackend:
 
 
 def make_delegated_clone_backend(settings: CloneBackendSettings) -> CloneBackend:
-    """``clone_backend=delegated``: workspace-mcp's clone-path (EVO-64616)."""
+    """``clone_backend=delegated``: workspace-mcp's clone-path (issue-64616)."""
     if settings.endpoint is None:
         raise ValueError(
             "endpoint_config is required when clone_backend_type='delegated'"

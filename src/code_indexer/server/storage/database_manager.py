@@ -1005,7 +1005,7 @@ class DatabaseSchema:
             self._migrate_performance_indexes(conn)
             # Story #280/#283: Wiki feature migrations
             self._migrate_golden_repos_metadata_wiki(conn)
-            # EVO-65021: workspace-mcp workspace_id retention for golden repos
+            # issue-65021: workspace-mcp workspace_id retention for golden repos
             self._migrate_golden_repos_metadata_workspace_id(conn)
             self._migrate_wiki_cache_tables(conn)
             # Story #287 / Bug #1340: wiki_article_views must exist at
@@ -1479,7 +1479,7 @@ class DatabaseSchema:
     def _migrate_golden_repos_metadata_workspace_id(
         self, conn: sqlite3.Connection
     ) -> None:
-        """Migrate golden_repos_metadata for workspace_id retention (EVO-65021).
+        """Migrate golden_repos_metadata for workspace_id retention (issue-65021).
 
         Adds the nullable ``workspace_id`` column so a golden repo can carry the
         workspace-mcp ``workspace_id`` that the delegated SCIP indexer must hand
@@ -1499,7 +1499,7 @@ class DatabaseSchema:
             )
             conn.commit()
             logger.info(
-                "EVO-65021 migration applied to golden_repos_metadata: added "
+                "issue-65021 migration applied to golden_repos_metadata: added "
                 "workspace_id"
             )
 

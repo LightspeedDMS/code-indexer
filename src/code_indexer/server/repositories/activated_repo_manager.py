@@ -269,12 +269,12 @@ class ActivatedRepoManager:
                 reindex after activation/switch/sync on non-default branches
                 (Bug #1203). When None, post-activation reindex is skipped
                 (safe for legacy callers until lifespan wires this in).
-            git_backend: EVO-64678 git seam. Defaults to the local git backend (git run
+            git_backend: issue-64678 git seam. Defaults to the local git backend (git run
                 in-process), i.e. exactly today's behavior; the server injects the
                 configured backend via build_git_backend() at startup. Distinct
-                from clone_backend (EVO-64616), which covers CoW cloning only.
+                from clone_backend (issue-64616), which covers CoW cloning only.
         """
-        # EVO-64678: all git runs through this seam. Default local => no behavior change.
+        # issue-64678: all git runs through this seam. Default local => no behavior change.
         self._git_backend: GitBackend = (
             git_backend if git_backend is not None else local_git_backend()
         )
@@ -1648,7 +1648,7 @@ class ActivatedRepoManager:
                     f"Attempting to fetch from remote for repository '{user_alias}'"
                 )
                 fetch_attempted = True
-                # EVO-64678: via the git seam. A non-zero exit now surfaces as
+                # issue-64678: via the git seam. A non-zero exit now surfaces as
                 # CalledProcessError, caught here so the fallback path and the
                 # warning message keep their exact previous shape.
                 try:
@@ -1667,7 +1667,7 @@ class ActivatedRepoManager:
 
             # Step 3: Check for uncommitted changes
             uncommitted_changes = []
-            # EVO-64678: via the git seam; a failed status is tolerated exactly
+            # issue-64678: via the git seam; a failed status is tolerated exactly
             # as the old `returncode == 0` guard tolerated it.
             try:
                 git_status_output = self._git_backend.status_porcelain(
@@ -1710,7 +1710,7 @@ class ActivatedRepoManager:
             if not branch_switch_success and create:
                 # Try to create new branch
                 try:
-                    # EVO-64678: via the git seam. CalledProcessError is caught
+                    # issue-64678: via the git seam. CalledProcessError is caught
                     # inline so the failure stays a WARNING (never an escalation
                     # to the enclosing SubprocessError handler).
                     try:
@@ -1830,7 +1830,7 @@ class ActivatedRepoManager:
 
         try:
             # First try to get current branch from git directly
-            # EVO-64678: via the git seam (same `git symbolic-ref --short HEAD`).
+            # issue-64678: via the git seam (same `git symbolic-ref --short HEAD`).
             # A non-zero exit (e.g. detached HEAD) raises CalledProcessError,
             # caught here so the metadata fallback below still runs.
             try:
@@ -2307,7 +2307,7 @@ class ActivatedRepoManager:
                 f"Syncing repository '{user_alias}' with golden repository"
             )
 
-            # EVO-64678: via the git seam. CalledProcessError is caught here,
+            # issue-64678: via the git seam. CalledProcessError is caught here,
             # before the enclosing SubprocessError-family handlers, so both the
             # "not accessible" error and the local-only fallback keep their
             # exact previous shape.
@@ -2335,7 +2335,7 @@ class ActivatedRepoManager:
 
             # Step 2: Check if there are changes to merge
             # Compare current branch with golden branch
-            # EVO-64678: via the git seam; a failed diff is tolerated exactly as
+            # issue-64678: via the git seam; a failed diff is tolerated exactly as
             # the old `returncode == 0` guard tolerated it (treated as "no changes").
             try:
                 changed_files = self._git_backend.diff_name_only(
@@ -2355,7 +2355,7 @@ class ActivatedRepoManager:
                 }
 
             # Step 3: Merge changes from golden
-            # EVO-64678: via the git seam. CalledProcessError is rebuilt into the
+            # issue-64678: via the git seam. CalledProcessError is rebuilt into the
             # identical conflict/failure messages from e.stdout/e.stderr.
             try:
                 self._git_backend.merge(
@@ -2399,7 +2399,7 @@ class ActivatedRepoManager:
                     )
 
             # Step 5: Return success message with details
-            # changed_files was computed from the diff above (EVO-64678: the seam
+            # changed_files was computed from the diff above (issue-64678: the seam
             # returns the same stripped, non-empty --name-only lines).
 
             self.logger.info(
@@ -2464,7 +2464,7 @@ class ActivatedRepoManager:
             current_branch = repo_data.get("current_branch", "master")
 
             # Get list of local branches
-            # EVO-64678: via the git seam; list_branches() already returns the
+            # issue-64678: via the git seam; list_branches() already returns the
             # stripped, non-empty lines the old comprehension produced.
             try:
                 local_branches = self._git_backend.list_branches(
@@ -3306,7 +3306,7 @@ class ActivatedRepoManager:
             # Switch to requested branch if different from default
             if branch_name != golden_repo.default_branch:
                 update_progress(70, f"Switching to branch '{branch_name}'")
-                # EVO-64678: via the git seam; CalledProcessError is caught here
+                # issue-64678: via the git seam; CalledProcessError is caught here
                 # so the rollback + error message are byte-for-byte unchanged.
                 try:
                     self._git_backend.checkout(
@@ -3353,7 +3353,7 @@ class ActivatedRepoManager:
                 update_progress(
                     85, f"Setting git config user.email to {git_committer_email}"
                 )
-                # EVO-64678: via the git seam; failures stay non-fatal WARNINGs.
+                # issue-64678: via the git seam; failures stay non-fatal WARNINGs.
                 try:
                     self._git_backend.config_set(
                         activated_repo_path,
@@ -3381,7 +3381,7 @@ class ActivatedRepoManager:
                     + (f", ssh_key_used={ssh_key_used}" if ssh_key_used else "")
                 )
 
-            # EVO-64616: cidx's index state is never the user's to commit.
+            # issue-64616: cidx's index state is never the user's to commit.
             # Non-fatal: git_status/git_stage leave it out regardless.
             try:
                 self._working_copies().exclude_index_state(activated_repo_path)
@@ -4644,7 +4644,7 @@ class ActivatedRepoManager:
 
             # Step 2: Detect and convert bare repositories (Story #636)
             # Golden repos are stored as bare, but activated repos need working trees
-            # EVO-64678: via the git seam. A non-zero rev-parse used to mean
+            # issue-64678: via the git seam. A non-zero rev-parse used to mean
             # is_bare=False; CalledProcessError is caught to keep that (it must
             # NOT reach the enclosing handler, which deletes the clone).
             try:
@@ -4662,7 +4662,7 @@ class ActivatedRepoManager:
                     f"Detected bare repository clone, converting to non-bare: {dest_path}"
                 )
 
-                # Convert bare to non-bare (EVO-64678: via the git seam)
+                # Convert bare to non-bare (issue-64678: via the git seam)
                 try:
                     self._git_backend.config_set(
                         dest_path, "core.bare", "false", timeout=30
@@ -4696,7 +4696,7 @@ class ActivatedRepoManager:
                                 os.remove(dst_item)
                         shutil.move(src_item, dst_item)
 
-                # Checkout working tree (EVO-64678: via the git seam)
+                # Checkout working tree (issue-64678: via the git seam)
                 try:
                     self._git_backend.checkout(
                         dest_path, "HEAD", force=True, timeout=60
@@ -4805,7 +4805,7 @@ class ActivatedRepoManager:
         # decisive lever -- set it BEFORE the refresh below AND
         # before _configure_git_structure's `git status` (persisted
         # in dest_path/.git/config, read by both call sites).
-        # EVO-64678: via the git seam. config_set writes the repo-local
+        # issue-64678: via the git seam. config_set writes the repo-local
         # config (git's default location), same as the explicit --local.
         try:
             self._git_backend.config_set(
@@ -4821,7 +4821,7 @@ class ActivatedRepoManager:
         self.logger.info(
             "Running git update-index --refresh to fix CoW clone timestamps"
         )
-        # EVO-64678: via the git seam. update_index_refresh() runs with
+        # issue-64678: via the git seam. update_index_refresh() runs with
         # check=False -- a non-zero exit here is normal and was already
         # non-fatal.
         self._git_backend.update_index_refresh(dest_path, timeout=60)
@@ -4838,7 +4838,7 @@ class ActivatedRepoManager:
         # DISCARD any genuinely different content -- a real content
         # difference immediately after a CoW clone would be abnormal,
         # so surface it with a WARNING instead of destroying it.
-        # EVO-64678: via the git seam. A failed status used to skip the
+        # issue-64678: via the git seam. A failed status used to skip the
         # check entirely; CalledProcessError is caught to keep that (an
         # empty result yields no tracked lines and therefore no warning).
         try:
@@ -5008,7 +5008,7 @@ class ActivatedRepoManager:
             ActivatedRepoError: If git remote configuration fails
         """
         try:
-            # Verify remote configuration (EVO-64678: via the git seam)
+            # Verify remote configuration (issue-64678: via the git seam)
             try:
                 remotes_output = self._git_backend.remote_list(
                     dest_path, verbose=True, timeout=30
@@ -5067,7 +5067,7 @@ class ActivatedRepoManager:
                 f"Activated repository '{user_alias}' not found for user '{username}'"
             )
         if self._git_backend.owns_credentials:
-            # EVO-64616: git-mcp supplies its own credential and keeps the
+            # issue-64616: git-mcp supplies its own credential and keeps the
             # clone's configuration; nothing to sanitize or supply from here.
             return None
         # Raises GitCommandError when the stored URLs cannot be sanitized.
@@ -5094,7 +5094,7 @@ class ActivatedRepoManager:
         # Repository credentials are supplied to git at run time and never
         # stored in a clone's configuration: the stored URL is credential-free.
         url = remote_url_without_credentials(url)
-        # Try to add remote (EVO-64678: via the git seam; the "already exists"
+        # Try to add remote (issue-64678: via the git seam; the "already exists"
         # branch is driven off the CalledProcessError's stderr, unchanged)
         try:
             self._git_backend.remote_add(
@@ -5143,7 +5143,7 @@ class ActivatedRepoManager:
         """
         try:
             # Step 1: Extract GitHub/GitLab URL from golden repo's origin
-            # EVO-64678: via the git seam; "no origin" now arrives as
+            # issue-64678: via the git seam; "no origin" now arrives as
             # CalledProcessError, caught here to keep the local-path fallback.
             try:
                 github_url = self._git_backend.remote_get_url(
@@ -5167,7 +5167,7 @@ class ActivatedRepoManager:
             self._add_or_update_remote(dest_path, "golden", source_path)
 
             # Step 4: Fetch from golden (local, fast) to ensure remote branches are available
-            # EVO-64678: via the git seam.
+            # issue-64678: via the git seam.
             try:
                 self._git_backend.fetch(
                     dest_path, "golden", timeout=self.GIT_FETCH_TIMEOUT
@@ -5251,7 +5251,7 @@ class ActivatedRepoManager:
         """
         try:
             # Check if origin remote exists and get its URL
-            # EVO-64678: via the git seam; CalledProcessError == the old
+            # issue-64678: via the git seam; CalledProcessError == the old
             # `returncode != 0` "no origin remote" case.
             try:
                 origin_url = self._git_backend.remote_get_url(
@@ -5268,7 +5268,7 @@ class ActivatedRepoManager:
                 )
 
                 # Get GitHub URL from golden repo's origin
-                # EVO-64678: via the git seam (CalledProcessError == no origin).
+                # issue-64678: via the git seam (CalledProcessError == no origin).
                 try:
                     github_url = self._git_backend.remote_get_url(
                         golden_repo_path, "origin", timeout=self.GIT_COMMAND_TIMEOUT
@@ -5331,7 +5331,7 @@ class ActivatedRepoManager:
                 return True
 
             # Check if golden remote exists (dual remote setup)
-            # EVO-64678: via the git seam (CalledProcessError == no golden remote).
+            # issue-64678: via the git seam (CalledProcessError == no golden remote).
             try:
                 self._git_backend.remote_get_url(
                     repo_dir, "golden", timeout=self.GIT_COMMAND_TIMEOUT
@@ -5572,7 +5572,7 @@ class ActivatedRepoManager:
         """
         try:
             # Check if origin remote exists
-            # EVO-64678: via the git seam; CalledProcessError == the old
+            # issue-64678: via the git seam; CalledProcessError == the old
             # `returncode != 0` "no origin remote configured" case.
             try:
                 origin_url = self._git_backend.remote_get_url(
@@ -5639,7 +5639,7 @@ class ActivatedRepoManager:
         """
         try:
             # Switch to branch (create tracking branch if needed)
-            # EVO-64678: via the git seam; CalledProcessError reproduces the old
+            # issue-64678: via the git seam; CalledProcessError reproduces the old
             # `returncode != 0` DEBUG-and-return-False path.
             try:
                 self._git_backend.checkout(
@@ -5690,7 +5690,7 @@ class ActivatedRepoManager:
         """
         try:
             # Strategy 1: Try direct checkout (branch already exists locally)
-            # EVO-64678: via the git seam; each CalledProcessError falls through
+            # issue-64678: via the git seam; each CalledProcessError falls through
             # to the next strategy exactly as the old returncode checks did.
             try:
                 self._git_backend.checkout(repo_dir, branch_name, timeout=60)
@@ -5843,7 +5843,7 @@ class ActivatedRepoManager:
                 return ["main"]  # Default fallback
 
             # Get all branches (local and remote)
-            # EVO-64678: via the git seam; list_branches() yields the same
+            # issue-64678: via the git seam; list_branches() yields the same
             # stripped, non-empty lines, and CalledProcessError reproduces the
             # old `returncode != 0` -> ["main"] fallback.
             try:

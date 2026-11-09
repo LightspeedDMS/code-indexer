@@ -38,7 +38,7 @@ class AddGoldenRepoRequest(BaseModel):
     )
     enable_temporal: bool = False
     temporal_options: Optional[TemporalIndexOptions] = None
-    # EVO-65021 (seam #3): the workspace-mcp workspace_id the provisioner used to
+    # issue-65021 (seam #3): the workspace-mcp workspace_id the provisioner used to
     # materialize this golden repo (in-place/provisioning registration). Captured
     # at registration and persisted on the golden-repo metadata so the delegated
     # SCIP indexer can address sandbox-mcp (``sb-{workspace_id}``). None when the
@@ -49,7 +49,7 @@ class AddGoldenRepoRequest(BaseModel):
         max_length=200,
         description=(
             "workspace-mcp workspace id this repo was provisioned into "
-            "(EVO-65021). Retained for the delegated SCIP backend."
+            "(issue-65021). Retained for the delegated SCIP backend."
         ),
     )
 
@@ -92,7 +92,7 @@ class AddGoldenRepoRequest(BaseModel):
     @field_validator("workspace_id")
     @classmethod
     def validate_workspace_id(cls, v: Optional[str]) -> Optional[str]:
-        """Validate workspace_id (EVO-65021 seam #3). None is left as-is.
+        """Validate workspace_id (issue-65021 seam #3). None is left as-is.
 
         When supplied it is a ``ws-<hex>`` handle that gets persisted onto the
         golden-repo metadata and threaded into the SCIP generator as the

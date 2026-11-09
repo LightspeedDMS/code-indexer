@@ -281,7 +281,7 @@ _MEMORY_HEAVY_OPS: frozenset = frozenset(
 # Public (imported by distributed_job_worker + index_job_claim_loop + lifespan)
 # so the ops set has a single source of truth across the cluster job plumbing.
 #
-# EVO-66445: fts_backfill_build is POD_PULL (work-stealable across pods) but NOT
+# issue-66445: fts_backfill_build is POD_PULL (work-stealable across pods) but NOT
 # memory-heavy — a tantivy rebuild is a cheap LOCAL build, so it must not be gated by
 # the memory-admission path (which keys on _MEMORY_HEAVY_OPS above). Keeping the two
 # sets distinct lets a light op be distributed without being throttled. The literal
@@ -2865,7 +2865,7 @@ class BackgroundJobManager:
             # guard applied to the sibling JobTracker sweep.
             _backend_type_name = type(self._sqlite_backend).__name__
             if _backend_type_name == "BackgroundJobsPostgresBackend":
-                # EVO-70528: the cluster backend refuses an unscoped sweep (it
+                # issue-70528: the cluster backend refuses an unscoped sweep (it
                 # would fail other nodes' live jobs), so asking only produced a
                 # WARNING on every start. The node-scoped sweep runs through
                 # JobTracker.cleanup_orphaned_jobs_on_startup(node_id).

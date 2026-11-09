@@ -132,11 +132,11 @@ class GitSyncExecutor:
             repository_path: Path to the git repository
             backup_dir: Optional directory for backups (defaults to repo/.git/cidx_backups)
             auto_index_on_changes: Automatically trigger cidx index when changes detected
-            git_backend: EVO-64678 git seam. Defaults to the local git backend (git run
+            git_backend: issue-64678 git seam. Defaults to the local git backend (git run
                 in-process), i.e. exactly today's behavior; the server injects the
                 configured backend via build_git_backend() at startup.
         """
-        # EVO-64678: all git runs through this seam. Default local => no behavior change.
+        # issue-64678: all git runs through this seam. Default local => no behavior change.
         self._git_backend: GitBackend = (
             git_backend if git_backend is not None else local_git_backend()
         )
@@ -355,7 +355,7 @@ class GitSyncExecutor:
             commit_hash = get_current_commit(self.repository_path)
 
             # Check for uncommitted changes
-            # EVO-64678: via the git seam (git status --porcelain).
+            # issue-64678: via the git seam (git status --porcelain).
             status_stdout = self._git_backend.status_porcelain(
                 str(self.repository_path)
             )
@@ -363,7 +363,7 @@ class GitSyncExecutor:
 
             # Check if HEAD is detached
             try:
-                # EVO-64678: via the git seam (git symbolic-ref HEAD, no --short).
+                # issue-64678: via the git seam (git symbolic-ref HEAD, no --short).
                 self._git_backend.symbolic_ref(str(self.repository_path), short=False)
                 is_detached_head = False
             except subprocess.CalledProcessError:
@@ -374,7 +374,7 @@ class GitSyncExecutor:
             is_behind_remote = False
             try:
                 # Check if remote tracking branch exists
-                # EVO-64678: via the git seam (git rev-parse ...).
+                # issue-64678: via the git seam (git rev-parse ...).
                 self._git_backend.rev_parse(
                     str(self.repository_path),
                     "--abbrev-ref",
@@ -387,11 +387,11 @@ class GitSyncExecutor:
                 # remote (default "origin"), whereas a bare `git fetch` follows
                 # branch.<name>.remote for the current branch. That remote is
                 # exactly the @{u} this block measures against, so forcing
-                # "origin" would not be a no-op. See EVO-64678.
+                # "origin" would not be a no-op. See issue-64678.
                 run_git_command(["git", "fetch"], cwd=self.repository_path)
 
                 # Check if behind remote
-                # EVO-64678: via the git seam (git rev-list --count HEAD..@{u}).
+                # issue-64678: via the git seam (git rev-list --count HEAD..@{u}).
                 is_behind_remote = (
                     self._git_backend.rev_list_count(
                         str(self.repository_path), "HEAD..@{u}"
@@ -571,7 +571,7 @@ class GitSyncExecutor:
             )
 
         # Execute git command.
-        # NOTE: left raw on purpose (EVO-64678) — GitBackend.pull() takes no env,
+        # NOTE: left raw on purpose (issue-64678) — GitBackend.pull() takes no env,
         # so routing through the seam would silently drop the caller-configured
         # `GIT_SSH_COMMAND ... -i <key_path>` built above by configure_ssh_auth().
         # Convert once the seam grows an env/extra_env parameter.
@@ -634,7 +634,7 @@ class GitSyncExecutor:
             return []
 
         try:
-            # EVO-64678: via the git seam. `git diff --name-only A B` and
+            # issue-64678: via the git seam. `git diff --name-only A B` and
             # `git diff --name-only A..B` are synonymous, and the seam already
             # strips/drops blank lines exactly like the old comprehension.
             changed_files: List[str] = self._git_backend.diff_name_only(
@@ -656,7 +656,7 @@ class GitSyncExecutor:
             return 0
 
         try:
-            # EVO-64678: via the git seam (git rev-list --count A..B).
+            # issue-64678: via the git seam (git rev-list --count A..B).
             commits_pulled: int = self._git_backend.rev_list_count(
                 str(self.repository_path), f"{before_commit}..{after_commit}"
             )

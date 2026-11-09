@@ -304,7 +304,7 @@ class VectorCalculationManager:
         # Submit to thread pool
         if not self.executor:
             raise RuntimeError("Thread pool not started")
-        # EVO-66113: plain ThreadPoolExecutor.submit() does NOT propagate
+        # issue-66113: plain ThreadPoolExecutor.submit() does NOT propagate
         # ContextVars into the worker thread (mirrors the
         # semantic_query_manager.py precedent for _search_event_ctx) --
         # without copy_context().run(), the embed-stats fallback tags set
@@ -449,7 +449,7 @@ class VectorCalculationManager:
         # Submit to thread pool
         if not self.executor:
             raise RuntimeError("Thread pool not started")
-        # EVO-66113: see submit_chunk() for why copy_context().run() is
+        # issue-66113: see submit_chunk() for why copy_context().run() is
         # required here -- plain executor.submit() would drop the
         # embed-stats fallback ContextVars set in the main thread.
         _stats_ctx = contextvars.copy_context()

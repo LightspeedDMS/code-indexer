@@ -233,8 +233,8 @@ def submit_provider_index_job(
                 provider_name=provider,
                 clear=action == "recreate",
                 # Pod-pull: reconstruction params for _provider_index_job
-                # (EVO-64545). repo_alias lets the child subprocess tag
-                # embed-stats records (EVO-66105). Upstream's ops-layer
+                # (issue-64545). repo_alias lets the child subprocess tag
+                # embed-stats records (issue-66105). Upstream's ops-layer
                 # extraction dropped these, which silently broke pod-pull
                 # work-stealing for provider-index jobs in cluster mode.
                 metadata={
@@ -471,7 +471,7 @@ def _record_bulk(
 
 
 # ---------------------------------------------------------------------------
-# Golden catalog / workspace registration sync, run once by an admin (EVO-64616)
+# Golden catalog / workspace registration sync, run once by an admin (issue-64616)
 # ---------------------------------------------------------------------------
 
 #: The audit target of a catalog sync request (the whole golden catalog).

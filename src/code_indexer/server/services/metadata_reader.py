@@ -21,7 +21,7 @@ class IndexState(NamedTuple):
     source: str  # metadata file name, e.g. "metadata-cohere.json"
     status: Optional[str]
     current_commit: Optional[str]
-    #: EVO-64616: chunk routing version the stored files were checked
+    #: issue-64616: chunk routing version the stored files were checked
     #: against (chunk_coverage); 0 for an index older than the check.
     chunk_coverage_version: int = 0
 
@@ -57,7 +57,7 @@ class RecordedFailures(NamedTuple):
     #: Failures a provider COUNTED but recorded no path for (``failed_files``
     #: above the length of its ``failed_file_paths``), summed over providers.
     #: No path means no per-file retry can reach them: a full reconcile of
-    #: the repository is owed instead (EVO-64616).
+    #: the repository is owed instead (issue-64616).
     unattributed: int = 0
 
 

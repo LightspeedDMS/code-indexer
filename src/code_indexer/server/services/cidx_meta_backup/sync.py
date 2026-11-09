@@ -75,7 +75,7 @@ class CidxMetaBackupSync:
         env.setdefault("GIT_AUTHOR_EMAIL", "cidx-meta-backup@example.invalid")
         env.setdefault("GIT_COMMITTER_NAME", env["GIT_AUTHOR_NAME"])
         env.setdefault("GIT_COMMITTER_EMAIL", env["GIT_AUTHOR_EMAIL"])
-        # EVO-64678: this helper runs arbitrary git (including commits) against
+        # issue-64678: this helper runs arbitrary git (including commits) against
         # cidx-meta with argv only known at runtime, so it goes through the seam
         # chokepoint and lets is_mutating_git() classify each call rather than a
         # static scan guessing. No invoker claims cidx-meta today, so behaviour is

@@ -116,7 +116,7 @@ def _resolve_global_repo_target(repository_alias: str, user: User) -> tuple:
         is_content_seam_delegated,
     )
 
-    # EVO-69846: also bypass filesystem checks when the search backend is
+    # issue-69846: also bypass filesystem checks when the search backend is
     # delegated -- a stateless pod has no local index files AND may have no
     # repository checkout, so the Path.exists() guard would reject every
     # search_code call before it reaches the delegated search backend.

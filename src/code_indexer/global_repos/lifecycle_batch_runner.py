@@ -813,7 +813,7 @@ class LifecycleBatchRunner:
                 last_analyzed=existing_last_analyzed,
             )
         except GoldenRepoEmptyError as empty_exc:
-            # EVO-64616: an empty repository (no commit) has nothing to
+            # issue-64616: an empty repository (no commit) has nothing to
             # describe. A state, not a failure: skip it without counting a
             # per-alias failure; the next run looks again once it has commits.
             _logger.info("lifecycle-runner: skipping %r: %s", alias, empty_exc)

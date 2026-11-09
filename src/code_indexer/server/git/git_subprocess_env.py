@@ -237,7 +237,7 @@ def _run_local_git(repo_path: str, args: list) -> "subprocess.CompletedProcess[s
     """Run a local (no network) git command in ``repo_path``. Raises
     _LocalGitFailure, after a WARNING, when it times out or cannot start.
 
-    Through the git chokepoint (EVO-64678), so a configuration write is
+    Through the git chokepoint (issue-64678), so a configuration write is
     delegated wherever mutations are."""
     try:
         return git_runner.run_git_command(
@@ -339,7 +339,7 @@ def ensure_remote_url_without_credentials(repo_path: str) -> int:
         is_versioned_snapshot_in_running_server,
     )
 
-    # EVO-64616: under a delegated git backend the clone is git-mcp's, which
+    # issue-64616: under a delegated git backend the clone is git-mcp's, which
     # holds the only credential and stores none in the clone; this pod has no
     # .git to rewrite (local git here would fail the operation, or rewrite
     # cidx's own copy of nothing).

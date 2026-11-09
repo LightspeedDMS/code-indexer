@@ -361,7 +361,7 @@ class GitOperationError(GoldenRepoError):
 class WorkspaceIdNotRetainedError(GoldenRepoError):
     """Raised when a golden repo's workspace-mcp ``workspace_id`` cannot be resolved.
 
-    EVO-65021: the delegated SCIP indexer must hand sandbox-mcp the
+    issue-65021: the delegated SCIP indexer must hand sandbox-mcp the
     workspace-mcp ``workspace_id`` (``sb-{workspace_id}``) of the golden repo's
     workspace. This is raised by :meth:`GoldenRepoManager.resolve_workspace_id`
     when the alias is unknown, or when the repo predates workspace_id retention
@@ -434,7 +434,7 @@ class GoldenRepo(BaseModel):
     temporal_options: Optional[Dict] = None
     category_id: Optional[int] = None
     category_auto_assigned: bool = False
-    # EVO-65021: workspace-mcp workspace id (``ws-<hex>``) this golden repo was
+    # issue-65021: workspace-mcp workspace id (``ws-<hex>``) this golden repo was
     # provisioned into. Consumed by the delegated SCIP indexer to address
     # sandbox-mcp (``sb-{workspace_id}``). None when not (yet) retained.
     workspace_id: Optional[str] = None
@@ -512,7 +512,7 @@ class GoldenRepoManager:
             data_dir: Data directory path (REQUIRED - no default)
             resource_config: Resource configuration (timeouts, limits)
             db_path: Path to SQLite database file (optional, auto-computed from data_dir if not provided)
-            git_backend: EVO-64678 git seam. Defaults to the local git backend (git run
+            git_backend: issue-64678 git seam. Defaults to the local git backend (git run
                 in-process), i.e. exactly today's behavior; the server injects the
                 configured backend via build_git_backend() at startup.
             content_backend: the content seam. Defaults to the local mode's module
@@ -527,7 +527,7 @@ class GoldenRepoManager:
         if not data_dir or not data_dir.strip():
             raise ValueError("data_dir is required and cannot be None or empty")
 
-        # EVO-64678: all git runs through this seam. Default local => no behavior change.
+        # issue-64678: all git runs through this seam. Default local => no behavior change.
         self._git_backend: GitBackend = (
             git_backend if git_backend is not None else local_git_backend()
         )
@@ -751,7 +751,7 @@ class GoldenRepoManager:
         return repo
 
     def _strip_credentials_if_delegated(self, repo_url: str) -> str:
-        """EVO-64616: return *repo_url* with any embedded credential REMOVED when
+        """issue-64616: return *repo_url* with any embedded credential REMOVED when
         the git backend supplies its own (delegated → git-mcp), so the PAT lives
         ONLY in git-mcp and never in cidx's stored golden state (metadata row +
         background-job metadata + ``.git/config``). Local mode returns it unchanged
@@ -802,7 +802,7 @@ class GoldenRepoManager:
             temporal_options: Temporal indexing configuration options
             submitter_username: The authenticated caller, recorded on the job
                 and as the audit actor.
-            workspace_id: Optional workspace-mcp workspace id (EVO-65021) to
+            workspace_id: Optional workspace-mcp workspace id (issue-65021) to
                 retain on the golden repo so the delegated SCIP indexer can
                 address sandbox-mcp (``sb-{workspace_id}``). None when the
                 caller does not (yet) know it.
@@ -901,7 +901,7 @@ class GoldenRepoManager:
 
         # Validate BEFORE submitting job. Read the SHARED backend, never this
         # worker's cache: Bug #1314 is the cache missing an alias another node
-        # registered; EVO-64616 is the converse -- a cache HIT for an alias
+        # registered; issue-64616 is the converse -- a cache HIT for an alias
         # another node has since removed (a failed add rolls its row back on
         # the node that ran it), which nothing evicts here. The cache-first
         # resolver then refused that alias as "already exists" on every pod
@@ -952,7 +952,7 @@ class GoldenRepoManager:
                 clone_dir,
             )
 
-        # EVO-64616: strip any embedded credential up front (when git-mcp owns
+        # issue-64616: strip any embedded credential up front (when git-mcp owns
         # auth) so the pre-flight probe AND the background-job metadata carry a
         # clean URL; the persistence point strips again as defense-in-depth.
         repo_url = self._strip_credentials_if_delegated(repo_url)
@@ -990,11 +990,11 @@ class GoldenRepoManager:
                     f"{mask_url_credentials(repo_url)}"
                 )
 
-        # EVO-64545 (pod-pull): the real clone+index+register+activate work now
+        # issue-64545 (pod-pull): the real clone+index+register+activate work now
         # lives in execute_add_golden_repo_work() so any pod's IndexJobClaimLoop
         # can run it from the job row's metadata. This thin wrapper preserves the
         # exact solo/local-pool path.
-        # EVO-66113 / Story #2118: BackgroundJobManager._execute_job injects the
+        # issue-66113 / Story #2118: BackgroundJobManager._execute_job injects the
         # assigned job_id into any worker whose signature declares a `job_id`
         # param, straight from the dequeued (job_id, func, args, kwargs) tuple
         # -- race-free, so no post-submit mutable holder is needed. It is
@@ -1012,7 +1012,7 @@ class GoldenRepoManager:
                 job_id=job_id,
             )
 
-        # Submit to BackgroundJobManager. EVO-64545: pass reconstruction params
+        # Submit to BackgroundJobManager. issue-64545: pass reconstruction params
         # as metadata so in cluster mode the row is left PENDING and claimable +
         # runnable on any pod (pod-pull); solo mode runs background_worker locally.
         job_id = self.background_job_manager.submit_job(
@@ -1046,13 +1046,13 @@ class GoldenRepoManager:
         progress_callback: Optional[Callable[..., Any]] = None,
         job_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """EVO-64545: reusable clone + index + register + global-activate body for
+        """issue-64545: reusable clone + index + register + global-activate body for
         add_golden_repo, extracted verbatim from the former background_worker
         closure so a pod-pull IndexJobClaimLoop can execute it on any pod from the
         job row's metadata. Retry-safe: a partial clone is cleaned up on failure
         and a duplicate alias is rejected up front by the caller.
         """
-        # EVO-64616 defense-in-depth: this is the persistence boundary (clone +
+        # issue-64616 defense-in-depth: this is the persistence boundary (clone +
         # _sqlite_backend.add_repo + GoldenRepo record) and is reachable directly
         # from a pod-pull job's metadata, so strip here too — a credential must
         # never reach the stored record even if a caller passed an unstripped URL.
@@ -1324,7 +1324,7 @@ class GoldenRepoManager:
                 # exceptions), but we wrap the call in a belt-and-suspenders
                 # try/except for consistency with the other hooks and to
                 # guard against any unexpected error in the wiring itself.
-                # EVO-65484: gate + run the synchronous description/lifecycle
+                # issue-65484: gate + run the synchronous description/lifecycle
                 # generation (extracted so the gate is unit-testable).
                 self._maybe_register_lifecycle_after_registration(
                     alias, submitter_username
@@ -1424,7 +1424,7 @@ class GoldenRepoManager:
         for *alias*, both are removed: the index state on this pod, the clone
         through workspace-mcp's ``/clone-path/delete`` (idempotent: nothing
         there is a no-op). Never an in-place registration's directory -- that
-        content is its provisioner's (EVO-64228).
+        content is its provisioner's (issue-64228).
 
         Another pod's add of the same alias cannot be mid-clone here: an add
         runs only as an ``add_golden_repo`` job row, and the
@@ -1489,7 +1489,7 @@ class GoldenRepoManager:
         return removed or deleted
 
     def _golden_description_generation_enabled(self) -> bool:
-        """EVO-65484: whether to run description/lifecycle generation on golden add.
+        """issue-65484: whether to run description/lifecycle generation on golden add.
 
         Reads ``indexing.golden_description_generation_enabled`` (default True).
         Fail-open: any error resolving the config returns True so the (historical)
@@ -1504,7 +1504,7 @@ class GoldenRepoManager:
             )
         except Exception as exc:  # config read must never block add
             logging.warning(
-                "EVO-65484: could not read golden_description_generation_enabled "
+                "issue-65484: could not read golden_description_generation_enabled "
                 f"({exc}); defaulting to enabled."
             )
             return True
@@ -1512,7 +1512,7 @@ class GoldenRepoManager:
     def _maybe_register_lifecycle_after_registration(
         self, alias: str, submitter_username: str
     ) -> None:
-        """EVO-65484: run description/lifecycle generation unless gated off.
+        """issue-65484: run description/lifecycle generation unless gated off.
 
         Extracted from ``execute_add_golden_repo_work`` so the gate is unit-testable.
         When ``golden_description_generation_enabled`` is False (config), skip the
@@ -1523,7 +1523,7 @@ class GoldenRepoManager:
         """
         if not self._golden_description_generation_enabled():
             logging.info(
-                "EVO-65484: golden_description_generation_enabled=false; "
+                "issue-65484: golden_description_generation_enabled=false; "
                 f"skipping description/lifecycle generation for '{alias}'."
             )
             return
@@ -1720,7 +1720,7 @@ class GoldenRepoManager:
         return repo_url, branch if branch and branch != "HEAD" else "main"
 
     def reconcile_registry_from_filesystem(self) -> Dict[str, int]:
-        """EVO-65484: make the golden-repo registry a faithful, self-healing
+        """issue-65484: make the golden-repo registry a faithful, self-healing
         projection of on-disk state — BIDIRECTIONALLY.
 
         A filesystem index-build and a DB registry-row insert cannot be atomic
@@ -1731,7 +1731,7 @@ class GoldenRepoManager:
         1. Index-orphan (index on disk, no registry row). Registration persists the
            index (``_execute_post_clone_workflow``) BEFORE the row (``add_repo``), so
            a crash / pod eviction between the two orphans the index; the workspace-mcp
-           seeder then re-provisions it (EVO-65481). Heal: reconstruct identity from
+           seeder then re-provisions it (issue-65481). Heal: reconstruct identity from
            the on-disk clone and add the row. NEVER re-indexes (index already exists).
 
         2. Row-orphan (registry row, but its on-disk clone directory is entirely
@@ -1755,7 +1755,7 @@ class GoldenRepoManager:
         3. Activation-orphan (registry row, no ``<alias>-global`` entry): the row
            is registered but not queryable. Every row pass 1 backfills is born
            this way. Heal: activate it from the index it already has
-           (``services/global_activation_repair.py``; EVO-64616). Pass 1 skips
+           (``services/global_activation_repair.py``; issue-64616). Pass 1 skips
            an alias whose add or removal is in flight: an add builds its index
            BEFORE it inserts its row, so a backfill there made the add fail on
            the duplicate key before activating.
@@ -1803,7 +1803,7 @@ class GoldenRepoManager:
             if alias in registered:
                 counts["skipped_registered"] += 1
                 continue
-            # EVO-64616: an add builds the index BEFORE it inserts the row, so
+            # issue-64616: an add builds the index BEFORE it inserts the row, so
             # "indexed, no row" is also every add still in flight. Backfilling
             # one made the add fail on the duplicate key before its global
             # activation, stranding a row with no -global entry. A removal in
@@ -1833,7 +1833,7 @@ class GoldenRepoManager:
                 )
                 counts["backfilled"] += 1
                 logging.info(
-                    "EVO-65484: backfilled registry entry for indexed-but-unregistered "
+                    "issue-65484: backfilled registry entry for indexed-but-unregistered "
                     "golden repo '%s' (repo_url=%s branch=%s)",
                     alias,
                     mask_url_credentials(repo_url),
@@ -1845,7 +1845,7 @@ class GoldenRepoManager:
                 # the whole reconcile.
                 counts["errors"] += 1
                 logging.warning(
-                    "EVO-65484: could not backfill registry entry for '%s': %s",
+                    "issue-65484: could not backfill registry entry for '%s': %s",
                     entry.name,
                     exc,
                 )
@@ -1876,7 +1876,7 @@ class GoldenRepoManager:
                 prune_rows = []
                 counts["errors"] += 1
                 logging.warning(
-                    "EVO-65484: row-orphan prune skipped -- workspace-mcp, which "
+                    "issue-65484: row-orphan prune skipped -- workspace-mcp, which "
                     "holds the clones, cannot be asked: %s",
                     exc,
                 )
@@ -1902,7 +1902,7 @@ class GoldenRepoManager:
                 except Exception as exc:  # never prune on an error
                     counts["errors"] += 1
                     logging.warning(
-                        "EVO-65484: could not ask workspace-mcp whether the "
+                        "issue-65484: could not ask workspace-mcp whether the "
                         "clone of '%s' at %s exists; row left: %s",
                         alias,
                         clone_path,
@@ -1913,7 +1913,7 @@ class GoldenRepoManager:
                 if self.is_globally_active(alias):
                     counts["orphan_rows_skipped_global"] += 1
                     logging.warning(
-                        "EVO-65484: registry row '%s' has no on-disk clone but is "
+                        "issue-65484: registry row '%s' has no on-disk clone but is "
                         "globally active — leaving it for manual teardown",
                         alias,
                     )
@@ -1927,7 +1927,7 @@ class GoldenRepoManager:
                 if derived:
                     counts["orphan_rows_skipped_activated"] += 1
                     logging.warning(
-                        "EVO-65484: registry row '%s' has no on-disk clone but %d "
+                        "issue-65484: registry row '%s' has no on-disk clone but %d "
                         "activated repo(s) derive from it — leaving it for manual "
                         "teardown",
                         alias,
@@ -1938,30 +1938,30 @@ class GoldenRepoManager:
                 self.golden_repos.pop(alias, None)
                 counts["pruned_orphan_rows"] += 1
                 logging.info(
-                    "EVO-65484: pruned registry row '%s' — its on-disk clone %s is gone",
+                    "issue-65484: pruned registry row '%s' — its on-disk clone %s is gone",
                     alias,
                     clone_path,
                 )
             except Exception as exc:  # one bad row never aborts the prune
                 counts["errors"] += 1
                 logging.warning(
-                    "EVO-65484: could not prune orphan registry row '%s': %s",
+                    "issue-65484: could not prune orphan registry row '%s': %s",
                     alias,
                     exc,
                 )
 
-        # Pass 3 -- EVO-64616: a row with no `<alias>-global` registry entry is
+        # Pass 3 -- issue-64616: a row with no `<alias>-global` registry entry is
         # registered but not queryable. Rows backfilled above are born that way;
         # so are rows stranded by an add that failed after its row insert.
         # Activate them from the index they already have (never re-indexed).
         self._repair_global_activation(counts)
 
-        # Pass 4 -- EVO-64616: a base clone is never a checkout (see
+        # Pass 4 -- issue-64616: a base clone is never a checkout (see
         # ``_publish_index``); clear the marker an earlier in-place publish left.
         self._clear_base_clone_markers(counts)
 
         logging.info(
-            "EVO-65484: registry reconcile from filesystem complete: %s", counts
+            "issue-65484: registry reconcile from filesystem complete: %s", counts
         )
         return counts
 
@@ -1987,7 +1987,7 @@ class GoldenRepoManager:
             except OSError as exc:
                 counts["errors"] += 1
                 logging.warning(
-                    "EVO-64616: could not clear the checkout marker of base "
+                    "issue-64616: could not clear the checkout marker of base "
                     "clone %s: %s",
                     clone_path,
                     exc,
@@ -1997,7 +1997,7 @@ class GoldenRepoManager:
                 counts["base_clone_markers_cleared"] += 1
         if counts["base_clone_markers_cleared"]:
             logging.warning(
-                "EVO-64616: cleared the checkout marker of %d golden base "
+                "issue-64616: cleared the checkout marker of %d golden base "
                 "clone(s); a base clone is never a served-index cache entry",
                 counts["base_clone_markers_cleared"],
             )
@@ -2017,7 +2017,7 @@ class GoldenRepoManager:
         except Exception as exc:
             counts["errors"] += 1
             logging.error(
-                "EVO-64616: could not ask whether an add/removal of '%s' is in "
+                "issue-64616: could not ask whether an add/removal of '%s' is in "
                 "flight; not backfilling it this cycle: %s",
                 alias,
                 exc,
@@ -2028,7 +2028,7 @@ class GoldenRepoManager:
         return in_flight
 
     def _directory_in_rename(self, alias: str, counts: Dict[str, int]) -> bool:
-        """EVO-64616: True when *alias* is either end of an unfinished rename
+        """issue-64616: True when *alias* is either end of an unfinished rename
         (a crashed one included): the new directory is being copied, the
         old one is about to go. Registering either would split the
         repository in two. Unanswerable: counted as an error and skipped."""
@@ -2042,7 +2042,7 @@ class GoldenRepoManager:
         except Exception as exc:
             counts["errors"] += 1
             logging.error(
-                "EVO-64616: could not ask whether '%s' is being renamed; not "
+                "issue-64616: could not ask whether '%s' is being renamed; not "
                 "backfilling it this cycle: %s",
                 alias,
                 exc,
@@ -2072,7 +2072,7 @@ class GoldenRepoManager:
         except Exception as exc:
             counts["errors"] += 1
             logging.error(
-                "EVO-64616: could not ask whether '%s' was removed; not "
+                "issue-64616: could not ask whether '%s' was removed; not "
                 "backfilling it this cycle: %s",
                 alias,
                 exc,
@@ -2081,7 +2081,7 @@ class GoldenRepoManager:
         if left:
             counts["skipped_removed"] += 1
             logging.info(
-                "EVO-64616: not re-registering '%s': it was removed and this is "
+                "issue-64616: not re-registering '%s': it was removed and this is "
                 "the clone the removal left",
                 alias,
             )
@@ -2100,7 +2100,7 @@ class GoldenRepoManager:
         except Exception as exc:
             counts["errors"] += 1
             logging.error(
-                "EVO-64616: global activation repair failed: %s", exc, exc_info=True
+                "issue-64616: global activation repair failed: %s", exc, exc_info=True
             )
             return
         counts.update(result.counts())
@@ -2163,7 +2163,7 @@ class GoldenRepoManager:
         with self._operation_lock:
             # Idempotency: return False if already registered. Authoritative
             # read for the same reason as _submit_add_job's guard (Bug #1314
-            # and EVO-64616): a stale cache hit for an alias another node
+            # and issue-64616): a stale cache hit for an alias another node
             # removed must not report it as registered.
             if self._resolve_golden_repo_authoritative(alias) is not None:
                 return False
@@ -2344,7 +2344,7 @@ class GoldenRepoManager:
         repo_url: Optional[str] = None,
         branch: Optional[str] = None,
     ) -> str:
-        """EVO-64616: rename *alias* to *new_alias* without re-cloning or
+        """issue-64616: rename *alias* to *new_alias* without re-cloning or
         re-embedding (``services/golden_repo_rename.py``), optionally
         correcting a mis-registered URL/branch to what the clone holds.
         Checked here, run as a background job; returns its id. Raises a
@@ -2849,7 +2849,7 @@ class GoldenRepoManager:
         """
         try:
             # Use git ls-remote to check if repository is accessible.
-            # EVO-64678: via the git seam; ls_remote() maps a non-zero exit to
+            # issue-64678: via the git seam; ls_remote() maps a non-zero exit to
             # False, and a timeout still propagates to the handler below.
             # Repository credentials are supplied at run time, never on argv.
             reachable: bool = self._git_backend.ls_remote(
@@ -2864,7 +2864,7 @@ class GoldenRepoManager:
             # WARNING, with the error's type: the caller only reports "Invalid
             # or inaccessible", and the cause can be the git backend's, not
             # the repository's -- e.g. git-mcp pages a many-ref ls-remote
-            # answer and the delegated backend refuses it (EVO-64616).
+            # answer and the delegated backend refuses it (issue-64616).
             logger.warning(
                 "Repository accessibility check failed for %s: %s: %s",
                 mask_url_credentials(repo_url),
@@ -3172,10 +3172,10 @@ class GoldenRepoManager:
         alias's own entry under the golden-repos root, and -- outside a
         removal -- never an in-place registration: a source its provisioner
         (workspace-mcp) materialized at the path and cidx only indexes
-        (EVO-64228), which a failed or retried add must leave alone.
+        (issue-64228), which a failed or retried add must leave alone.
 
         *removal*: the repository is being removed on purpose, so an in-place
-        registration at the alias's own entry goes too (EVO-64616). Left
+        registration at the alias's own entry goes too (issue-64616). Left
         behind, it was an indexed clone with no registry row, which the
         registry reconcile re-registered -- undoing the removal.
         """
@@ -3607,7 +3607,7 @@ class GoldenRepoManager:
             # Clone full repository with complete history for semantic search.
             # Only pass --branch when explicitly requested; omitting it lets git
             # resolve the remote HEAD, which works for any default branch name.
-            # EVO-64678: routed through the git seam (default LocalGitBackend ==
+            # issue-64678: routed through the git seam (default LocalGitBackend ==
             # today's behavior). The clone's stored origin is the
             # credential-free URL; repository credentials are supplied to git
             # at run time, never on argv (a backend owning its credentials gets
@@ -3649,7 +3649,7 @@ class GoldenRepoManager:
             the old behavior that always hardcoded 'main' regardless.
         """
         try:
-            # EVO-64678: via the git seam. rev_parse() already strips stdout and
+            # issue-64678: via the git seam. rev_parse() already strips stdout and
             # raises CalledProcessError on failure, which the handler below
             # catches exactly as before.
             branch: str = self._git_backend.rev_parse(
@@ -3760,7 +3760,7 @@ class GoldenRepoManager:
         pod's index-state directory. A clone cidx owns (see
         :meth:`_delegated_clone_retain_reason`) is deleted through
         ``/clone-path/delete`` -- an in-place registration at the alias's own
-        entry included (EVO-64616); one it does not own -- a path outside
+        entry included (issue-64616); one it does not own -- a path outside
         golden-repos, or a row that cannot be read -- is retained and the
         result says why. The deletion runs under
         the same guards the local file cleanup uses (no refresh in progress,
@@ -4051,7 +4051,7 @@ class GoldenRepoManager:
     ) -> None:
         """Block until *clone_path* is an enterable directory from THIS node's view.
 
-        EVO-64616 cross-client barrier: a delegated clone is written by git-mcp on
+        issue-64616 cross-client barrier: a delegated clone is written by git-mcp on
         a different NFS client, so after the backend reports success this process's
         client can still serve a NEGATIVE dcache entry for the freshly-created
         directory — the very next ``cidx init``/``cidx index`` child, launched with
@@ -4119,8 +4119,8 @@ class GoldenRepoManager:
                 subprocess's stderr -- forwarded verbatim to
                 run_with_popen_progress. A channel entirely separate from
                 progress_callback (see _make_hnsw_orphan_event_logger).
-            golden_repo_alias: EVO-66113 optional alias to tag embed stats records.
-            job_id: EVO-66113 optional job id for embed stats correlation.
+            golden_repo_alias: issue-66113 optional alias to tag embed stats records.
+            job_id: issue-66113 optional job id for embed stats correlation.
 
         Raises:
             GitOperationError: If any workflow step fails
@@ -4129,7 +4129,7 @@ class GoldenRepoManager:
             f"Executing post-clone workflow for {clone_path} (force_init={force_init})"
         )
 
-        # EVO-64616: with a DELEGATED clone, git-mcp writes the repo on a different
+        # issue-64616: with a DELEGATED clone, git-mcp writes the repo on a different
         # NFS client than this cidx process. The delegated backend returns as soon
         # as git-mcp reports success, but this node's NFS client can briefly still
         # have a negative-cached view of the just-created directory — so the very
@@ -4492,7 +4492,7 @@ class GoldenRepoManager:
             )
             logging.info(f"cidx index --fts completed for {clone_path}")
 
-            # EVO-66445: the `cidx index --fts` above runs FTS through
+            # issue-66445: the `cidx index --fts` above runs FTS through
             # smart_indexer, which SILENTLY degrades to semantic-only on any FTS
             # init/build error ("graceful degradation") -- which is how the entire
             # golden fleet ended up with a semantic index but no tantivy_index
@@ -4513,14 +4513,14 @@ class GoldenRepoManager:
             )
             if not _fts_outcome.ok:
                 logging.error(
-                    "EVO-66445: FTS index unavailable after registration for "
+                    "issue-66445: FTS index unavailable after registration for "
                     "alias=%s: %s",
                     golden_repo_alias,
                     _fts_outcome.detail,
                 )
             else:
                 logging.info(
-                    "EVO-66445: FTS index %s for alias=%s",
+                    "issue-66445: FTS index %s for alias=%s",
                     _fts_outcome.status.value,
                     golden_repo_alias,
                 )
@@ -4948,7 +4948,7 @@ class GoldenRepoManager:
                 return ["main"]  # Default fallback
 
             # Get branches using git command.
-            # EVO-64678: via the git seam. The raw call used check=False and
+            # issue-64678: via the git seam. The raw call used check=False and
             # returned ["main"] on a non-zero exit; list_branches() raises
             # instead, so CalledProcessError is caught here to keep that exact
             # tolerant behavior (and to avoid the generic warning below).
@@ -5067,7 +5067,7 @@ class GoldenRepoManager:
     def get_workspace_id(self, alias: str) -> Optional[str]:
         """Return the workspace-mcp ``workspace_id`` retained for *alias*, or None.
 
-        EVO-65021 read accessor. Resolves via the shared backend (source of
+        issue-65021 read accessor. Resolves via the shared backend (source of
         truth) so a repo registered on another worker/node is visible here.
         Returns None both when the alias is unknown AND when the repo predates
         workspace_id retention (has not been captured/backfilled). Callers that
@@ -5082,11 +5082,11 @@ class GoldenRepoManager:
     def resolve_workspace_id(self, alias: str) -> str:
         """Resolve the workspace-mcp ``workspace_id`` for *alias* or raise.
 
-        EVO-65365: no longer on the Option-C production golden path (which
+        issue-65365: no longer on the Option-C production golden path (which
         addresses golden repos by bare alias, not workspace_id); retained for the
         workspace_id addressing/compat mode in ``build_scip_generator`` and tests.
 
-        EVO-65021: this is the accessor the delegated SCIP indexer (stream-01)
+        issue-65021: this is the accessor the delegated SCIP indexer (stream-01)
         consumes to address sandbox-mcp (``sb-{workspace_id}``). Unlike
         :meth:`get_workspace_id`, it never returns a falsy handle — it raises
         :class:`WorkspaceIdNotRetainedError` when the alias is unknown or its
@@ -5103,7 +5103,7 @@ class GoldenRepoManager:
         Raises:
             WorkspaceIdNotRetainedError: alias unknown, or workspace_id unset.
         """
-        # EVO-65021 (Bug #1316 shape): workspace_id flips from NULL to a value at
+        # issue-65021 (Bug #1316 shape): workspace_id flips from NULL to a value at
         # an arbitrary later point (backfill / registration on ANOTHER worker), so
         # a per-worker cache HIT can serve a stale ``workspace_id=None`` forever
         # (until process restart). Because THIS method's OUTCOME decides whether a
@@ -5128,7 +5128,7 @@ class GoldenRepoManager:
     def set_workspace_id(self, alias: str, workspace_id: Optional[str]) -> bool:
         """Persist the workspace-mcp ``workspace_id`` for *alias*.
 
-        EVO-65021 capture/backfill accessor: writes the handle to the shared
+        issue-65021 capture/backfill accessor: writes the handle to the shared
         backend and refreshes the per-worker cache so subsequent
         :meth:`get_workspace_id`/:meth:`resolve_workspace_id` reads on this
         worker see it immediately. Passing None clears the handle.
@@ -5338,16 +5338,16 @@ class GoldenRepoManager:
         credentials_url: Optional[str],
     ) -> None:
         """Fetch the target branch and validate that it exists (AC3); then make
-        the clone's fetch refspec cover it where needed (EVO-64616,
+        the clone's fetch refspec cover it where needed (issue-64616,
         ``_cb_repair_fetch_refspec``).
 
         ``credentials_url`` is the registered repository URL; its credentials
         are supplied to git at run time (a backend owning its credentials
         ignores it)."""
-        # EVO-64678: both git calls route through the seam. Both ran with
+        # issue-64678: both git calls route through the seam. Both ran with
         # check=True, and the seam raises CalledProcessError on a non-zero exit,
         # so failures propagate to change_branch() exactly as before.
-        # EVO-64616: only the TARGET branch is fetched. A plain fetch uses the
+        # issue-64616: only the TARGET branch is fetched. A plain fetch uses the
         # clone's configured refspec, which on a single-branch clone names the
         # CURRENT branch -- and moving off a branch upstream deleted (renamed
         # default) then failed with "couldn't find remote ref" before it began.
@@ -5401,7 +5401,7 @@ class GoldenRepoManager:
         credentials_url: Optional[str],
     ) -> None:
         """Point a single-branch clone whose branch is gone upstream at the
-        target branch, before the checkout (EVO-64616).
+        target branch, before the checkout (issue-64616).
 
         A single-branch clone's configured refspec names the branch it was
         cloned on. When that branch is gone upstream (the reason the branch is
@@ -5467,7 +5467,7 @@ class GoldenRepoManager:
         ``credentials_url`` is the registered repository URL; its credentials
         are supplied to the pull at run time (a backend owning its
         credentials ignores it)."""
-        # EVO-64678: both git calls route through the seam; check=True semantics
+        # issue-64678: both git calls route through the seam; check=True semantics
         # are preserved (the seam raises CalledProcessError on non-zero exit).
         self._git_backend.checkout(
             base_clone_path,
@@ -5993,7 +5993,7 @@ class GoldenRepoManager:
         the running server built. None under the local store.
 
         A snapshot it was built from is marked as holding the version (a
-        checkout of it). A base clone is not (EVO-64616): published in place
+        checkout of it). A base clone is not (issue-64616): published in place
         by an add or the global-activation repair, the marker made it a
         served-index cache entry, and eviction removed the index state the
         refresh builds on -- on the shared golden-repos volume, for every
@@ -6237,7 +6237,7 @@ class GoldenRepoManager:
                 if snapshot is not None and not swap_started:
                     self._cb_discard_unpublished_snapshot(alias, snapshot)
                 # Bug #469: Rollback git HEAD to previous branch on partial failure.
-                # EVO-64678: via the git seam. The raw call passed no timeout,
+                # issue-64678: via the git seam. The raw call passed no timeout,
                 # so none is passed here; check=True is preserved by the seam.
                 try:
                     self._git_backend.checkout(base, previous_branch)
@@ -6377,7 +6377,7 @@ class GoldenRepoManager:
             submitter_username=submitter_username,
             is_admin=True,
             repo_alias=alias,
-            # EVO-64545 (pod-pull): the executor is the bound change_branch method
+            # issue-64545 (pod-pull): the executor is the bound change_branch method
             # reconstructed from these params on whichever pod claims the row.
             metadata={"alias": alias, "target_branch": target_branch},
         )
@@ -6443,7 +6443,7 @@ class GoldenRepoManager:
         elsewhere (``scip_backend='delegated-plugin'``) enqueues the build
         (never blocking this add-index job) and nothing runs here; the builder
         is fail-soft, but an explicit add-index request whose build could not
-        be enqueued (``skipped``) fails the job (EVO-64616) -- reporting success
+        be enqueued (``skipped``) fails the job (issue-64616) -- reporting success
         with no build behind it left repos at "not_indexed" with no reason. A
         builder answering ``run_locally`` gets its command run here, unchanged
         (``cidx scip generate``), still raising ``GoldenRepoError`` on failure.
@@ -6467,7 +6467,7 @@ class GoldenRepoManager:
                 phase=index_type,
                 detail=f"{label}: generating...",
             )
-        # EVO-64616: an explicit add-index request always builds (clear=True):
+        # issue-64616: an explicit add-index request always builds (clear=True):
         # the freshness marker can outlive the index it describes, and a
         # FRESH answer used to complete the job with nothing indexed.
         outcome = builder.build(
@@ -6602,7 +6602,7 @@ class GoldenRepoManager:
         if "temporal" in index_types:
             self._refuse_temporal_under_delegated_content()
 
-        # EVO-66113: BackgroundJobManager._execute_job injects the assigned
+        # issue-66113: BackgroundJobManager._execute_job injects the assigned
         # job_id into any worker whose signature declares a `job_id` param,
         # straight from the dequeued (job_id, func, args, kwargs) tuple --
         # race-free, so no post-submit mutable holder is needed.
@@ -7039,7 +7039,7 @@ class GoldenRepoManager:
                         detail="Creating snapshot...",
                     )
 
-                # EVO-64616: a delegated SCIP build runs in the sandbox, after
+                # issue-64616: a delegated SCIP build runs in the sandbox, after
                 # this job; nothing was built here, so there is no new index to
                 # snapshot or publish (snapshotting it failed validation on a
                 # pod without the index directory). Its outcome is tracked

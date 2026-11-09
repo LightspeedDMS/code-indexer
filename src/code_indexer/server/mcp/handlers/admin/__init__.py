@@ -522,7 +522,7 @@ def _served_global_index_path(
     Local IndexStore: the golden clone, exactly as before. Under a delegated
     IndexStore the clone directory on this pod holds only what this pod built
     or checked out, so the alias target is read with its PUBLISHED version
-    served here (EVO-64616); a failure raises, and an alias without a pointer
+    served here (issue-64616); a failure raises, and an alias without a pointer
     is not found -- never "not indexed".
     """
     from code_indexer.server.startup.index_store_wiring import server_index_store
@@ -634,7 +634,7 @@ def get_index_status(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 repo_alias=repo_alias,
                 username=user.username,
             )
-            # EVO-64616: a golden repo's delegated build of a feature-built
+            # issue-64616: a golden repo's delegated build of a feature-built
             # index (SCIP) runs elsewhere; its progress and outcome are part of
             # that index's status (IndexBuilderContribution.annotate_status).
             from code_indexer.kernel.index_builders import (

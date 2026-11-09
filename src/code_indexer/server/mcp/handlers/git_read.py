@@ -1396,7 +1396,7 @@ def git_status(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             return _mcp_response({"success": False, "error": error_msg})
         assert repo_path is not None  # narrowed by error_msg check above
 
-        # EVO-66189: golden `-global` repos are read-only pinned snapshots, so a real
+        # issue-66189: golden `-global` repos are read-only pinned snapshots, so a real
         # `git status` over the shared NFS working tree is pure cost — ~30s on a large
         # monolith (killed at git_local_timeout). When not in write mode they are always
         # clean (cidx's own `.code-indexer/` artifacts are not meaningful repo status), so

@@ -62,7 +62,7 @@ class CidxMetaBackupBootstrap:
         # an interactive editor in the non-interactive systemd job context
         # -- see CidxMetaBackupSync._git() for the active fix this mirrors.
         env.setdefault("GIT_EDITOR", "true")
-        # EVO-64678: this helper runs arbitrary git (including commits) against
+        # issue-64678: this helper runs arbitrary git (including commits) against
         # cidx-meta with argv only known at runtime, so it goes through the seam
         # chokepoint and lets is_mutating_git() classify each call rather than a
         # static scan guessing. No invoker claims cidx-meta today, so behaviour is

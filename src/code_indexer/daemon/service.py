@@ -2277,7 +2277,7 @@ class CIDXDaemonService(Service):
         from code_indexer.indexing.file_finder import FileFinder
         from code_indexer.services.fts_lifecycle import rebuild_fts_index
 
-        # EVO-66445: the FTS index is (re)built ENTIRELY from FileFinder-discovered
+        # issue-66445: the FTS index is (re)built ENTIRELY from FileFinder-discovered
         # files on disk below — it never reads indexing_progress.json. Requiring that
         # file here (the daemon-RPC twin of the local-mode guard removed in cli.py)
         # made daemon-delegated rebuilds fail for repos indexed OUT-OF-BAND (cidx

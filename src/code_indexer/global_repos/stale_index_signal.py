@@ -3,7 +3,7 @@ the bound on forced reconciles that leave it unchanged.
 
 When git reports no new commits, RefreshScheduler still forces a reconcile
 if a provider's index metadata shows an interrupted run or a commit other
-than the working-tree HEAD -- or recorded failures it still owes (EVO-64616:
+than the working-tree HEAD -- or recorded failures it still owes (issue-64616:
 an unattributed count or retryable paths, ``owed_failures_signal``). This
 module turns the metadata of EVERY provider
 (metadata_reader.read_index_states) plus the HEAD into one signal. Its key
@@ -50,12 +50,12 @@ _HEX_DIGITS = frozenset("0123456789abcdef")
 STATUS_SIGNAL = "status"
 # A recorded commit is not HEAD.
 COMMIT_DRIFT_SIGNAL = "commit_drift"
-# EVO-64616: the last run recorded failures it still owes -- recorded paths
+# issue-64616: the last run recorded failures it still owes -- recorded paths
 # that still exist (retryable), or a failure COUNT with no recorded path
 # (unattributed, which only a reconcile finds). No upstream change will ever
 # re-run them, so the refresh must, bounded like every other signal.
 OWED_FAILURES_SIGNAL = "owed_failures"
-# EVO-64616: a completed index not yet checked against the current chunk
+# issue-64616: a completed index not yet checked against the current chunk
 # routing (chunk_coverage) -- files indexed while image chunks bypassed the
 # text index are missing chunks, and reconcile re-processes only those. No
 # upstream change is needed for that, so the refresh forces it once.
@@ -79,7 +79,7 @@ class StaleSignal(NamedTuple):
         """Whether the forced run must be a ``--reconcile``. A chunk coverage
         check runs in every incremental run of an unchecked index, which
         reads only the stored payloads -- not every file -- so it needs none
-        (EVO-64616); neither does building a trigram index, which re-embeds
+        (issue-64616); neither does building a trigram index, which re-embeds
         nothing."""
         return self.kind not in (CHUNK_COVERAGE_SIGNAL, TRIGRAM_SIGNAL)
 
@@ -91,7 +91,7 @@ class StaleSignal(NamedTuple):
         status signal means the previous run never published, so its
         reconcile always publishes even when it finds nothing to index. A
         chunk coverage check that found every file complete changed nothing
-        either (EVO-64616)."""
+        either (issue-64616)."""
         return (
             self.kind in (COMMIT_DRIFT_SIGNAL, CHUNK_COVERAGE_SIGNAL)
             and self.all_completed
@@ -170,7 +170,7 @@ def owed_failures_signal(
         message=(
             f"Recorded indexing failures of {alias_name} are still owed "
             f"({failures.unattributed} without a path, {failures.retryable_paths} "
-            "retryable file(s)) despite no new git changes (EVO-64616)"
+            "retryable file(s)) despite no new git changes (issue-64616)"
         ),
         kind=OWED_FAILURES_SIGNAL,
         all_completed=False,
@@ -181,7 +181,7 @@ def chunk_coverage_signal(
     states: Sequence[IndexState], head: Optional[str], alias_name: str
 ) -> Optional[StaleSignal]:
     """The signal of a completed provider index not yet checked against the
-    current chunk routing, or None (EVO-64616, ``chunk_coverage``).
+    current chunk routing, or None (issue-64616, ``chunk_coverage``).
 
     Only a COMPLETED run's metadata is judged: any other status is the
     status signal's concern. The key carries the recorded version and HEAD,
@@ -201,7 +201,7 @@ def chunk_coverage_signal(
             ),
             message=(
                 f"Index of {alias_name} ({state.source}) was not checked for "
-                "files missing some of their chunks (EVO-64616)"
+                "files missing some of their chunks (issue-64616)"
             ),
             kind=CHUNK_COVERAGE_SIGNAL,
             all_completed=all_completed,

@@ -279,7 +279,7 @@ _RG_FILES_TIMEOUT_SECONDS = 600.0
 #: and workspace-mcp rejects anything over ``CONTENT_RG_MAX_TIMEOUT_MS``
 #: (300 000 ms) or ``CONTENT_RG_MAX_OUTPUT_BYTES`` (64 MiB, content-rg.service.ts)
 #: with a 400 -- which failed EVERY delegated trigram build while the listing
-#: asked for 600 s / 256 MiB (EVO-64616). Applied only at that boundary
+#: asked for 600 s / 256 MiB (issue-64616). Applied only at that boundary
 #: (:func:`_listing_limits`); a local rg keeps the full budget.
 _DELEGATED_RG_MAX_TIMEOUT_SECONDS = 300.0
 _DELEGATED_RG_MAX_OUTPUT_BYTES = 64 * 1024 * 1024
@@ -1170,7 +1170,7 @@ class TrigramIndexManager:
                         f"trigram index query for {self._db_path} cancelled "
                         f"after timeout"
                     )
-                # EVO-66189: the trigram DB is ~1.2 GB on shared NFS; cold queries were
+                # issue-66189: the trigram DB is ~1.2 GB on shared NFS; cold queries were
                 # dominated by NFS page seeks (measured 4-9s cold vs ~0.2s warm). mmap it
                 # so cold pages fault through the OS page cache (shared across queries, no
                 # per-read() syscall), and give the connection a larger page cache. The

@@ -334,7 +334,7 @@ class GoldenRepoMetadataSqliteBackend(
             created_at: ISO 8601 timestamp when repository was created.
             enable_temporal: Whether temporal indexing is enabled.
             temporal_options: Optional temporal indexing options (stored as JSON).
-            workspace_id: Optional workspace-mcp workspace id (EVO-65021). Persisted
+            workspace_id: Optional workspace-mcp workspace id (issue-65021). Persisted
                 so the delegated SCIP indexer can address sandbox-mcp
                 (``sb-{workspace_id}``). ``None`` when not (yet) known.
 
@@ -572,7 +572,7 @@ class GoldenRepoMetadataSqliteBackend(
 
     def update_workspace_id(self, alias: str, workspace_id: Optional[str]) -> bool:
         """
-        Update the workspace-mcp workspace_id for a golden repo (EVO-65021).
+        Update the workspace-mcp workspace_id for a golden repo (issue-65021).
 
         Targeted single-column update so the delegated SCIP indexer can address
         sandbox-mcp (``sb-{workspace_id}``) for this repo. Passing ``None``
@@ -714,7 +714,7 @@ def _migrate_golden_repos_metadata_columns(conn: sqlite3.Connection) -> None:
         ("category_id", "INTEGER"),
         ("category_auto_assigned", "INTEGER DEFAULT 0"),
         ("wiki_enabled", "INTEGER DEFAULT 0"),
-        # EVO-65021: workspace-mcp workspace_id retention for golden repos.
+        # issue-65021: workspace-mcp workspace_id retention for golden repos.
         ("workspace_id", "TEXT"),
         PUBLISHED_POINTS_COLUMN,  # Story #2118: volume-alarm reference size
     ]

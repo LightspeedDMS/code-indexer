@@ -72,7 +72,7 @@ logger = logging.getLogger(__name__)
 
 EMBEDDING_STATS_BOOTSTRAP_DIR_ENV = "CIDX_EMBEDDING_STATS_BOOTSTRAP_DIR"
 
-# EVO-66113: per-job correlation tags threaded from parent to child so every
+# issue-66113: per-job correlation tags threaded from parent to child so every
 # EmbeddingCallRecord produced by the child carries the repo alias, job id,
 # and cluster node id of the parent's job context.
 EMBEDDING_STATS_GOLDEN_REPO_ALIAS_ENV = "CIDX_EMBEDDING_STATS_GOLDEN_REPO_ALIAS"
@@ -172,10 +172,10 @@ def build_embedding_stats_child_env(
         server_config: The server's own ServerConfig, or None if unavailable.
         base_env: Environment to merge into (copied, never mutated). When
             None, defaults to a copy of the current process's os.environ.
-        golden_repo_alias: EVO-66113 -- optional repo alias to tag every
+        golden_repo_alias: issue-66113 -- optional repo alias to tag every
             EmbeddingCallRecord produced by the child.
-        job_id: EVO-66113 -- optional job id for cost correlation.
-        node_id: EVO-66113 -- optional cluster node id. When None and
+        job_id: issue-66113 -- optional job id for cost correlation.
+        node_id: issue-66113 -- optional cluster node id. When None and
             server_config has a cluster.node_id, that value is used
             automatically.
 
@@ -187,7 +187,7 @@ def build_embedding_stats_child_env(
         storage_mode). When server_config is None, the dict is returned
         unchanged (no bootstrap var -- the child falls back to NoOpWriter).
 
-        EVO-66113: when golden_repo_alias / job_id / node_id are provided
+        issue-66113: when golden_repo_alias / job_id / node_id are provided
         (or node_id is resolved from server_config.cluster), the
         corresponding CIDX_EMBEDDING_STATS_* env vars are set so the child
         can tag its EmbeddingCallRecords.
@@ -198,7 +198,7 @@ def build_embedding_stats_child_env(
     if server_config is not None:
         merged[EMBEDDING_STATS_BOOTSTRAP_DIR_ENV] = server_config.server_dir
 
-        # EVO-66113: resolve node_id from cluster config when not explicitly
+        # issue-66113: resolve node_id from cluster config when not explicitly
         # provided by the caller.
         effective_node_id = node_id
         if effective_node_id is None and server_config.cluster:

@@ -11,13 +11,13 @@ children's embedding_call_stats rows (Story #2118).
 Built by ``build_index_dispatch`` (installed by startup/lifespan.py) so the
 cluster dispatch path is one real, testable function.
 
-IndexJobClaimLoop also injects the job id into the metadata (EVO-66105), so
+IndexJobClaimLoop also injects the job id into the metadata (issue-66105), so
 an executor that spreads the metadata into a call drops that key first
 (``_without_job_id``) -- spread alongside ``job_id=`` it would be passed twice.
 
 The internal pod-pull ops ride the same table: the scheduled golden-repo
 refresh (any pod claims distinct repos under the memory gate), the FTS
-backfill build (EVO-66445) and the semantic self-heal re-embed.
+backfill build (issue-66445) and the semantic self-heal re-embed.
 """
 
 from __future__ import annotations

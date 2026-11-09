@@ -331,7 +331,7 @@ def _owed_detail(failures: "RecordedFailures") -> str:
     if failures.retryable_paths:
         parts.append(f"{failures.retryable_paths} file(s) still owed")
     if failures.unattributed:
-        # EVO-64616: a count with no recorded path -- only a full reconcile
+        # issue-64616: a count with no recorded path -- only a full reconcile
         # (the refresh runs one, see RefreshScheduler._index_source) finds them.
         parts.append(
             f"{failures.unattributed} failure(s) recorded without a path: "
@@ -359,7 +359,7 @@ def settle_publish(
     owed count are ONE store transaction (resolve_and_record_owed_retry): a
     store failure commits nothing, so the covered pending trigger survives
     and its lease fires it again. Vanished files owe nothing. A failure COUNT with no recorded path (``failures.unattributed``,
-    EVO-64616) owes a full reconcile, scheduled the same way, so the owed
+    issue-64616) owes a full reconcile, scheduled the same way, so the owed
     count's escalating backoff bounds it. Returns the owed retry's due time,
     or None."""
     if not failures.known:

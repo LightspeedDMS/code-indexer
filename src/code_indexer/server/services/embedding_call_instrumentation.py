@@ -77,7 +77,7 @@ _stats_purpose_override: "contextvars.ContextVar[Optional[str]]" = (
     contextvars.ContextVar("_stats_purpose_override", default=None)
 )
 
-# EVO-66113: process-level fallback tags for golden_repo_alias, job_id,
+# issue-66113: process-level fallback tags for golden_repo_alias, job_id,
 # node_id.  Set ONCE at child-process startup (via
 # set_process_embed_stats_tags) from env vars threaded by the parent; read
 # as defaults when instrument_call()/instrument_call_async() callers pass
@@ -245,7 +245,7 @@ def _record_call(
             ):
                 purpose = _TEMPORAL_REFRESH_PURPOSE
         effective_purpose = _stats_purpose_override.get() or purpose
-        # EVO-66113: fall back to process-level tags when the caller did not
+        # issue-66113: fall back to process-level tags when the caller did not
         # pass explicit values (which is the normal case for all embed-
         # provider call sites -- they have no per-job context to thread).
         effective_alias = golden_repo_alias or _stats_golden_repo_alias.get()

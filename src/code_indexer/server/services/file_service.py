@@ -1095,7 +1095,7 @@ class FileListingService:
     def _collect_listing(self, repo_path: str, indexed_only: bool) -> List[FileInfo]:
         """Return the file listing, preferring the index fast-path when requested.
 
-        EVO-66189: with ``indexed_only`` set, serve from the index's ``path_index`` (an
+        issue-66189: with ``indexed_only`` set, serve from the index's ``path_index`` (an
         O(ms) msgpack read) instead of stat-walking the working tree over NFS. Falls back
         to the full walk when the repo has no index, so ``indexed_only`` is a safe hint.
         """
@@ -1388,7 +1388,7 @@ class FileListingService:
         indexable_extensions = self._get_indexable_extensions()
         resolved_root = repo_root.resolve()
 
-        # EVO-66189: os.walk with in-place pruning of ALWAYS_EXCLUDED_DIRS, replacing
+        # issue-66189: os.walk with in-place pruning of ALWAYS_EXCLUDED_DIRS, replacing
         # rglob("*") + a post-hoc _is_in_excluded_dir filter. The old walk stat'd EVERY
         # entry — including the ~57k vector files under this repo's own .code-indexer/ on
         # a large golden repo — over NFS, then discarded them. Pruning never descends the

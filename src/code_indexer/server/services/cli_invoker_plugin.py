@@ -158,7 +158,7 @@ def require_invoker_for_delegated_content(
     so the built-in ClaudeInvoker -- a local ``claude`` subprocess reading
     ``cwd`` here -- cannot analyze any of them. Without a plugin every golden
     repo add would fail its description generation one by one, at ERROR, for
-    as long as the server runs (EVO-64616). Called once at startup so the
+    as long as the server runs (issue-64616). Called once at startup so the
     misconfiguration fails once, loudly, naming the fix. A local content
     backend (the default) never resolves the plugin here, so its startup is
     unchanged. Neither does a deployment with description generation turned

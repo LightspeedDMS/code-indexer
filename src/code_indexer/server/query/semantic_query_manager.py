@@ -474,7 +474,7 @@ def _delegated_query_results(
     repository_alias: str,
     file_extensions: Optional[List[str]],
 ) -> List["QueryResult"]:
-    """A delegated search backend's rows as QueryResults (EVO-69846).
+    """A delegated search backend's rows as QueryResults (issue-69846).
 
     #2047: the backend carries no ``file_extensions`` filter, so the one
     extension rule (``py``, ``.py`` and ``PY`` alike) is applied to what
@@ -2004,7 +2004,7 @@ class SemanticQueryManager:
         Returns:
             List of QueryResult objects from this repository
         """
-        # Search delegation seam (EVO-69846): when a delegated search
+        # Search delegation seam (issue-69846): when a delegated search
         # backend is configured, forward the ENTIRE query (fts, semantic,
         # or hybrid) to the remote service. Placed BEFORE strategy and
         # composite branching so no local code path bypasses delegation.
@@ -3054,7 +3054,7 @@ class SemanticQueryManager:
         if chunk_type is not None:
             args.extend(["--chunk-type", chunk_type])
 
-        # EVO-64616: each member directory on this pod holds index state only
+        # issue-64616: each member directory on this pod holds index state only
         # when the repositories are delegated; the child then asks git-mcp for
         # its branch filter and the content backend for staleness. Nothing is
         # stamped under the local backends (the command line is unchanged).
@@ -3569,7 +3569,7 @@ class SemanticQueryManager:
         Raises:
             SemanticQueryError: If FTS index not available or search fails
         """
-        # Search delegation seam (EVO-69846): when a delegated search backend
+        # Search delegation seam (issue-69846): when a delegated search backend
         # is configured, forward the FTS query to the remote service instead
         # of reading local Tantivy index files.
         search_backend = self._get_search_backend()

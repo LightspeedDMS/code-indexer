@@ -63,7 +63,7 @@ def resolve_alias_or_index_path(
             fallback to be attempted), or None if the repo entry is unknown.
         skip_fs_check: When True, return ``index_path`` from the registry
             without verifying the directory exists on this container's
-            filesystem.  EKS pods with delegated backends (EVO-64616) do
+            filesystem.  EKS pods with delegated backends (issue-64616) do
             not mount the golden-repo volume; the path is still meaningful
             as a routing key for workspace-mcp / git-mcp.
 

@@ -718,7 +718,7 @@ class ActivatedRepoIndexManager:
             repo_path: Repository path
             index_type: Index type to process
             clear: Clear flag
-            repo_alias: Repository alias (EVO-65021) — threaded so the SCIP step
+            repo_alias: Repository alias (issue-65021) — threaded so the SCIP step
                 can resolve the golden-repo workspace_id under the delegated
                 backend. Optional so existing 3-arg callers keep working.
 
@@ -821,7 +821,7 @@ class ActivatedRepoIndexManager:
         unconditionally (both storage modes), before the existing
         build_cidx_subprocess_env() PYTHONPATH sanitization.
 
-        EVO-66105: golden_repo_alias is threaded through to
+        issue-66105: golden_repo_alias is threaded through to
         build_embedding_stats_child_env for per-repo VoyageAI cost
         correlation. node_id is auto-resolved from server_config.
         """
@@ -1175,7 +1175,7 @@ class ActivatedRepoIndexManager:
         The cidx-scip feature's builder (``Feature.index_builders()``) routes
         the build. An activated (per-user) repository always builds locally
         (``cidx scip generate --project <path> [--clear]``, run here): the
-        delegated backend cannot address a per-user checkout (EVO-65021
+        delegated backend cannot address a per-user checkout (issue-65021
         CRITICAL-2). A builder answer other than ``run_locally`` is reported
         as success with its status, so the enclosing reindex job is never
         failed by SCIP. With no builder (the feature is not enabled) the step
@@ -1192,7 +1192,7 @@ class ActivatedRepoIndexManager:
                 "success": True,
                 "message": "SCIP indexing skipped: the scip feature is not enabled",
             }
-        # EVO-65021 CRITICAL-2: ``repo_alias`` is an ACTIVATED (per-user) alias,
+        # issue-65021 CRITICAL-2: ``repo_alias`` is an ACTIVATED (per-user) alias,
         # NOT a golden alias (activated=True). MAJOR-5: ``clear`` reaches the
         # builder so a delegated rebuild cannot be answered FRESH.
         outcome = builder.build(
@@ -1607,7 +1607,7 @@ class ActivatedRepoIndexManager:
         )
 
         # Raises TemporalNotServedHereError rather than reading "absent" on a
-        # pod that cannot tell (EVO-64616); _get_temporal_status reports it.
+        # pod that cannot tell (issue-64616); _get_temporal_status reports it.
         require_temporal_answerable(
             golden_repos_dir,
             golden_repo_alias,

@@ -147,7 +147,7 @@ class CleanupManager:
         # time.monotonic() -- the retention floor must survive a process
         # restart, and time.monotonic() has no meaning across processes.
         self._scheduled_at: Dict[str, float] = {}
-        # EVO-64616: queued paths known to have a durable pending-deletion
+        # issue-64616: queued paths known to have a durable pending-deletion
         # row (persisted here, or hydrated from the backend). Every node
         # queues the same row; once a PEER deletes the path and removes the
         # row, this node's copy is stale -- see _deleted_by_peer.
@@ -587,7 +587,7 @@ class CleanupManager:
             )
 
     def _deleted_by_peer(self, index_path: str) -> bool:
-        """EVO-64616: whether another node already deleted *index_path*.
+        """issue-64616: whether another node already deleted *index_path*.
 
         Every node hydrates the same durable pending-deletion rows, and the
         cluster claim only serialises them: once the claim holder deletes

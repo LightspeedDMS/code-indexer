@@ -777,7 +777,7 @@ def make_lifespan(
         # In SQLite mode it contains SQLite backends; in postgres mode, PG
         # backends. MCP handlers use app.state.backend_registry
         # unconditionally.
-        # (EVO-66819 is the same fix on the fork side.)
+        # (issue-66819 is the same fix on the fork side.)
         app.state.backend_registry = backend_registry
 
         # Story #680: Store latency_tracker in app.state for dashboard route access.
@@ -1626,7 +1626,7 @@ def make_lifespan(
                 )
                 app.state.snapshot_manager = None
 
-            # EVO-64678 Phase 3: same git backend selection the repo managers use
+            # issue-64678 Phase 3: same git backend selection the repo managers use
             # (local by default; git-mcp-backed when git_backend='delegated'), so
             # RefreshScheduler's golden-repo git runs through the configured seam.
             from code_indexer.server.startup.git_backend_wiring import (
@@ -1820,17 +1820,17 @@ def make_lifespan(
                     global_lifecycle_manager.refresh_scheduler
                 )
 
-            # EVO-65484: heal registry/disk drift in the background. Registration
+            # issue-65484: heal registry/disk drift in the background. Registration
             # persists the index BEFORE the registry row (add_repo), so a crash / pod
             # eviction between the two leaves an index with no registry entry; the
-            # workspace-mcp seeder then re-provisions it destructively (EVO-65481).
+            # workspace-mcp seeder then re-provisions it destructively (issue-65481).
             # Backfill those rows so the registry is a faithful projection of on-disk
             # state. Runs OFF the event loop (an NFS scan of the golden set) so pod
             # readiness is not delayed; idempotent + IntegrityError-tolerant, so all
             # pods may run it concurrently.
             if golden_repo_manager is not None:
                 _grm_for_reconcile = golden_repo_manager
-                # EVO-65484: run PERIODICALLY, not just at startup. A crash between
+                # issue-65484: run PERIODICALLY, not just at startup. A crash between
                 # index-build and registry-row (or a removeOnDisk that skipped
                 # deregister) can drift the registry at any time; a startup-only heal
                 # leaves that drift until the next pod restart. Default 900s; set
@@ -1854,7 +1854,7 @@ def make_lifespan(
                                 _grm_for_reconcile.reconcile_registry_from_filesystem
                             )
                             logger.info(
-                                "EVO-65484: %s registry reconcile from filesystem: %s",
+                                "issue-65484: %s registry reconcile from filesystem: %s",
                                 "startup" if first else "periodic",
                                 _counts,
                             )
@@ -1862,7 +1862,7 @@ def make_lifespan(
                             raise
                         except Exception as _reconcile_err:  # safety
                             logger.warning(
-                                "EVO-65484: registry reconcile failed: %s",
+                                "issue-65484: registry reconcile failed: %s",
                                 _reconcile_err,
                                 exc_info=True,
                             )
@@ -1880,7 +1880,7 @@ def make_lifespan(
                     _run_registry_reconcile()
                 )
 
-                # EVO-64616: cidx owns the golden catalog (GitLab) and agent
+                # issue-64616: cidx owns the golden catalog (GitLab) and agent
                 # workspace registration. Each pass is single-flight across the
                 # cluster; both are OFF unless their mode is dry-run or apply.
                 from code_indexer.server.services import catalog_sync_scheduling
@@ -1889,10 +1889,10 @@ def make_lifespan(
                     _grm_for_reconcile
                 )
 
-                # EVO-65484's periodic SCIP backfill is the cidx-scip feature's
+                # issue-65484's periodic SCIP backfill is the cidx-scip feature's
                 # recurring job (modular phase 4d); the leader gate below stays
                 # for the semantic backfill.
-                # EVO-66188: avoid startup race where this task's first cycle can
+                # issue-66188: avoid startup race where this task's first cycle can
                 # run before cluster leader-election wiring completes. In postgres
                 # mode, hold the leader-gated backfills until cluster-service
                 # init marks the gate ready (set in the cluster-services startup block below).
@@ -2073,11 +2073,11 @@ def make_lifespan(
                 exc_info=True,
             )
 
-        # EVO-65021's scip_backend validation runs in the cidx-scip feature's
+        # issue-65021's scip_backend validation runs in the cidx-scip feature's
         # on_startup (modular phase 4d): a removed or unknown value still
         # stops startup.
 
-        # EVO-64616: with every repository backend and the IndexStore
+        # issue-64616: with every repository backend and the IndexStore
         # delegated, golden-repos holds this pod's index state only. cidx's own
         # state that used to sit there (payload cache, snapshot-reader leases)
         # moves to the pod's data directory, and startup REFUSES if any of it
@@ -3113,8 +3113,8 @@ def make_lifespan(
                 )
             )
 
-        # Startup: Initialize golden-repo FTS backfill sweep scheduler (EVO-66445).
-        # Reverse-fix half of EVO-66445: builds the Tantivy FTS index on golden
+        # Startup: Initialize golden-repo FTS backfill sweep scheduler (issue-66445).
+        # Reverse-fix half of issue-66445: builds the Tantivy FTS index on golden
         # repos registered before the forward fix existed (the fleet had a semantic
         # index but no tantivy_index, so search_mode="fts" errored fleet-wide). On
         # by default (config-gated), paced, cluster-safe, idempotent (no durable
@@ -3372,7 +3372,7 @@ def make_lifespan(
                             reconcile_golden_repo_registry,
                         )
 
-                        # EVO-65484/GAP-4: thread the refresh_scheduler through so a
+                        # issue-65484/GAP-4: thread the refresh_scheduler through so a
                         # stale golden-repo index is detected and refreshed, not just
                         # registry orphans. Upstream's threaded/backgrounded shape is
                         # kept -- it fixes a real event-loop freeze at ~900 repos.
@@ -3443,7 +3443,7 @@ def make_lifespan(
 
             _vsr_skip = versioned_snapshot_sweep_skip_reason(_vsr_index_store())
             if _vsr_skip is not None:
-                # EVO-64616: see versioned_snapshot_sweep_skip_reason.
+                # issue-64616: see versioned_snapshot_sweep_skip_reason.
                 logger.info(
                     "Startup: Bug #1567 versioned-snapshot orphan sweep skipped: %s",
                     _vsr_skip,
@@ -3548,7 +3548,7 @@ def make_lifespan(
                         return
                     _lease_skip = legacy_lease_sweep_skip_reason(_mount_config)
                     if _lease_skip is not None:
-                        # EVO-64616: leases are pod-local; the legacy directory
+                        # issue-64616: leases are pod-local; the legacy directory
                         # is inside cidx-meta on the golden-repos volume.
                         logger.info(
                             "Startup: Bug #1871 legacy snapshot-reader-lease "
@@ -4156,7 +4156,7 @@ def make_lifespan(
                 extra={"correlation_id": get_correlation_id()},
             )
 
-        # EVO-66121: trusted mcp-gateway per-user RS256 bearer authenticator (default off).
+        # issue-66121: trusted mcp-gateway per-user RS256 bearer authenticator (default off).
         # Validates per-user RS256 JWTs the gateway forwards + JIT-provisions via the OIDC
         # path (its OWN identity-link store, isolated from interactive SSO), so cidx enforces
         # its OWN per-user access. build_gateway_authenticator is fail-safe -> None when
@@ -4179,7 +4179,7 @@ def make_lifespan(
             )
             _gw_deps.gateway_identity_authenticator = _gw_auth
             logger.info(
-                "EVO-66121: trusted mcp-gateway bearer auth %s",
+                "issue-66121: trusted mcp-gateway bearer auth %s",
                 "enabled" if _gw_auth is not None else "not enabled",
                 extra={"correlation_id": get_correlation_id()},
             )
@@ -4354,7 +4354,7 @@ def make_lifespan(
         # in this function (immediately after app.state.storage_mode), before
         # GlobalReposLifecycleManager/RefreshScheduler/GlobalActivator are
         # constructed -- see that assignment for the full rationale.
-        # (EVO-66819 is the same fix on the fork side.)
+        # (issue-66819 is the same fix on the fork side.)
 
         # Bug #532: Inject DiagnosticsBackend into the module-level diagnostics_service
         # singleton. We inject it here after backend_registry is available.
@@ -5158,7 +5158,7 @@ def make_lifespan(
                     _nfs_validator_for_health: Any = None
                     _volume_skip = golden_volume_monitoring_skip_reason(_mount_config)
                     if _volume_skip is not None:
-                        # EVO-64616: see golden_volume_monitoring_skip_reason.
+                        # issue-64616: see golden_volume_monitoring_skip_reason.
                         logger.info(
                             "Story #1002: golden repo volume monitoring skipped: %s",
                             _volume_skip,
@@ -5309,7 +5309,7 @@ def make_lifespan(
                     extra={"correlation_id": get_correlation_id()},
                 )
             finally:
-                # EVO-66188: release SCIP reconcile's startup hold once cluster
+                # issue-66188: release SCIP reconcile's startup hold once cluster
                 # service initialization has completed (success, no-op, or error).
                 app.state.scip_reconcile_leader_gate_ready = True
 
@@ -5888,7 +5888,7 @@ def make_lifespan(
                 _audit_stop_exc,
             )
 
-        # Shutdown: Stop the EVO-65484 periodic registry reconcile loop so it does
+        # Shutdown: Stop the issue-65484 periodic registry reconcile loop so it does
         # not outlive the lifespan. cancel() unblocks its asyncio.sleep and the
         # coroutine re-raises CancelledError; non-fatal if it already finished.
         _reconcile_task = getattr(app.state, "registry_reconcile_task", None)

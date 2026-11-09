@@ -516,7 +516,7 @@ def on_repo_added(
         )
         return
 
-    # EVO-64616: with a CLI invoker plugin configured the deployment must NOT
+    # issue-64616: with a CLI invoker plugin configured the deployment must NOT
     # run the claude CLI locally (cli_invoker_plugin's contract), and the
     # description is written by the lifecycle path, which dispatches through
     # the plugin (GoldenRepoManager._maybe_register_lifecycle_after_registration,
@@ -784,7 +784,7 @@ def renamed_description(text: str, old: str, new: str, repo_url: Optional[str]) 
 def on_repo_renamed(
     old: str, new: str, golden_repos_dir: str, repo_url: Optional[str] = None
 ) -> str:
-    """EVO-64616: move *old*'s cidx-meta description to ``<new>.md`` (its
+    """issue-64616: move *old*'s cidx-meta description to ``<new>.md`` (its
     name, heading and URL rewritten) and its description-refresh tracking
     to *new*, so the renamed repository is not described again. Idempotent:
     a description already moved is left alone. Raises when the cidx-meta

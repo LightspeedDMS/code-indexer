@@ -350,14 +350,14 @@ BOOTSTRAP_KEYS = frozenset(
         "enable_predeactivation_leak_scan",  # Story #1032 - bootstrap flag to restore pre-flight leak scan
         "orphan_trash_sweep_per_startup_cap",  # Story #1032 HIGH #3 - cap startup orphan sweep entries
         "clone_backend",  # Story #510 / #1034 - needed pre-DB by build_snapshot_manager() at lifespan startup
-        "git_backend",  # EVO-64678 - needed pre-DB by build_git_backend() at lifespan startup
+        "git_backend",  # issue-64678 - needed pre-DB by build_git_backend() at lifespan startup
         "content_backend",  # content seam - read pre-DB by build_configured_content_backend() at lifespan startup (parallels clone_backend/git_backend; without it config.json is stripped and content silently falls back to 'local', i.e. reading a mount a delegated pod may not have)
         "ripgrep_backend",  # ripgrep seam - read pre-DB by build_configured_ripgrep_backend() at startup (parallels content_backend; without it config.json is stripped and regex search silently falls back to the local binary)
         "search_backend",  # search seam - read pre-DB by build_configured_search_backend() at startup (parallels ripgrep_backend; without it config.json is stripped and search silently falls back to local index files a delegated pod may not have)
         "index_store_backend",  # IndexStore step 2 - read pre-DB by build_configured_index_store() at startup (parallels ripgrep_backend; without it config.json is stripped and refresh silently keeps indexes pod-local, never published)
         "enabled_features",  # modular phase 3 - read pre-DB by build_feature_registry() while the app is created; without it config.json is stripped and an enabled-but-missing feature would silently not load
         "feature_bootstrap_settings",  # modular phase 4a - feature config keys declared bootstrap (cidx_sdk.ConfigKey.bootstrap), read before the runtime DB exists
-        "workspace_mcp",  # EVO-64616 - endpoint/api_key read pre-DB by the delegated clone/git backends at startup
+        "workspace_mcp",  # issue-64616 - endpoint/api_key read pre-DB by the delegated clone/git backends at startup
         "cow_daemon",  # Story #510 / #1034 - daemon config for CowDaemonBackend wiring at startup
     }
 )
@@ -660,7 +660,7 @@ class ConfigService:
         assert config.resource_config is not None
         assert config.password_security is not None
         assert config.oidc_provider_config is not None
-        assert config.trusted_gateway_config is not None  # EVO-66121
+        assert config.trusted_gateway_config is not None  # issue-66121
         assert config.telemetry_config is not None
         # Story #3 - Configuration Consolidation: Assert new config objects
         assert config.search_limits_config is not None
@@ -802,7 +802,7 @@ class ConfigService:
                 "groups_claim": config.oidc_provider_config.groups_claim,
                 "group_mappings": config.oidc_provider_config.group_mappings,
             },
-            # EVO-66121: trusted mcp-gateway RS256 bearer issuer (default off)
+            # issue-66121: trusted mcp-gateway RS256 bearer issuer (default off)
             "trusted_gateway": {
                 "enabled": config.trusted_gateway_config.enabled,
                 "issuer": config.trusted_gateway_config.issuer,
@@ -1050,7 +1050,7 @@ class ConfigService:
                     if config.indexing_config is not None
                     else False
                 ),
-                # EVO-65484: golden-repo description-generation gate display wiring
+                # issue-65484: golden-repo description-generation gate display wiring
                 "golden_description_generation_enabled": (
                     config.indexing_config.golden_description_generation_enabled
                     if config.indexing_config is not None
@@ -2320,7 +2320,7 @@ class ConfigService:
     def _update_trusted_gateway_setting(
         self, config: ServerConfig, key: str, value: Any
     ) -> None:
-        """Update a trusted mcp-gateway bearer-auth setting (EVO-66121).
+        """Update a trusted mcp-gateway bearer-auth setting (issue-66121).
 
         Note: the gateway authenticator is built once at startup from this config
         (see gateway_auth_wiring.build_gateway_authenticator), so changes take effect
@@ -3324,7 +3324,7 @@ class ConfigService:
             )
             return
 
-        # EVO-65484: golden-repo description-generation gate (default ON).
+        # issue-65484: golden-repo description-generation gate (default ON).
         if key == "golden_description_generation_enabled":
             indexing.golden_description_generation_enabled = _parse_bool(value)
             self.save_config(config)

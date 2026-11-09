@@ -1105,7 +1105,7 @@ def remove_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 @require_mcp_elevation()
 def rename_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Rename a golden repository's alias (admin only; elevation-gated like
-    REST POST /api/admin/golden-repos/{alias}/rename; EVO-64616)."""
+    REST POST /api/admin/golden-repos/{alias}/rename; issue-64616)."""
     alias = params.get("alias", "")
     new_alias = params.get("new_alias", "")
     if not alias or not new_alias:

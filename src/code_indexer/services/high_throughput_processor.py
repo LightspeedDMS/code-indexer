@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 
 
 def multimodal_indexing_enabled() -> bool:
-    """EVO-65484: whether to build the multimodal (image) index during indexing.
+    """issue-65484: whether to build the multimodal (image) index during indexing.
 
     cidx builds a multimodal (voyage-multimodal-3 / embed-v4.0) image index in
     parallel with the code index on every run, embedding images in markdown/etc.
@@ -466,7 +466,7 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
         # Initialize file processing rate tracking for files/s metric
         self._initialize_file_rate_tracking()
 
-        # Create multimodal client for image+text embedding support (EVO-65484: only
+        # Create multimodal client for image+text embedding support (issue-65484: only
         # when multimodal indexing is enabled — otherwise no image index is built and
         # no multimodal vendor calls are made).
         multimodal_client: Optional[Any] = None

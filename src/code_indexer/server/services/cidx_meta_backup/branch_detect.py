@@ -22,7 +22,7 @@ def detect_default_branch(
     cancellation is not a detection failure).
     """
     try:
-        # Through the git seam chokepoint (EVO-64678), like every other git
+        # Through the git seam chokepoint (issue-64678), like every other git
         # call cidx-meta backup makes; a read, so it runs locally.
         result = run_git_command(
             ["git", "remote", "show", "origin"],

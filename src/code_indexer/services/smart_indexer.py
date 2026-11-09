@@ -178,7 +178,7 @@ class SmartIndexer(HighThroughputProcessor):
     #: Set by each smart_index() run: it created or rebuilt the FTS index,
     #: so it changed the index even if it processed no file (_finish_run).
     _run_rebuilt_fts: bool = False
-    #: EVO-64616: relative paths the reconcile snapshot found missing some of
+    #: issue-64616: relative paths the reconcile snapshot found missing some of
     #: their chunks (chunk_coverage); the reconcile re-processes them.
     _reconcile_incomplete_paths: FrozenSet[str] = frozenset()
     #: Files this run's processing failed (its stats, set by _finish_run);
@@ -1798,7 +1798,7 @@ class SmartIndexer(HighThroughputProcessor):
         # points/layout just because only the TEXT collection was cleared
         # above.
         self._clear_current_provider_multimodal_collection(provider_name)
-        # EVO-64616: every file is written under the current chunk routing.
+        # issue-64616: every file is written under the current chunk routing.
         self.progressive_metadata.mark_chunk_coverage_current()
         if enhanced_callback and points_before_clear > 0:
             enhanced_callback(
@@ -2001,7 +2001,7 @@ class SmartIndexer(HighThroughputProcessor):
         if not stats.cancelled:
             if progress_callback:
                 progress_callback(0, 0, Path(""), info="Finalizing indexing session...")
-            # EVO-64616: a full run records its failed paths like every other
+            # issue-64616: a full run records its failed paths like every other
             # run; it used to count failed_files with no failed_file_paths,
             # which no path-based retry could ever reach.
             self._record_failures_of_run(stats, [], [])
@@ -2223,7 +2223,7 @@ class SmartIndexer(HighThroughputProcessor):
         # Files the previous run could not index are retried even when
         # nothing changed since, so they never stay missing from the index.
         retried_failures, files_to_index = self._merge_recorded_failures(files_to_index)
-        # EVO-64616: files indexed before every chunk reached the text index
+        # issue-64616: files indexed before every chunk reached the text index
         # are re-processed once (chunk_coverage).
         coverage_checked, files_to_index = self._fold_in_incomplete_chunk_files(
             _self_heal_collection_name, files_to_index
@@ -2582,7 +2582,7 @@ class SmartIndexer(HighThroughputProcessor):
         ):
             self.progressive_metadata.mark_store_verified()
         if not stats.cancelled and files_count_to_process is None:
-            # EVO-64616: this reconcile re-processed every file whose stored
+            # issue-64616: this reconcile re-processed every file whose stored
             # chunks were incomplete; one that failed is a recorded failure.
             self.progressive_metadata.mark_chunk_coverage_current()
         return stats
@@ -2950,7 +2950,7 @@ class SmartIndexer(HighThroughputProcessor):
                             f"current='{current_effective_id}' vs db='{db_content_id}' - will re-index"
                         )
                     elif relative_path in self._reconcile_incomplete_paths:
-                        # EVO-64616: indexed while image chunks bypassed the
+                        # issue-64616: indexed while image chunks bypassed the
                         # text index; only the missing chunks are embedded
                         # (the stored ones are reused by content hash).
                         files_to_index.append(file_path)
@@ -3570,7 +3570,7 @@ class SmartIndexer(HighThroughputProcessor):
     def _fold_in_incomplete_chunk_files(
         self, collection_name: str, files: List[Path]
     ) -> Tuple[bool, List[Path]]:
-        """EVO-64616: add the files whose stored chunks do not cover their
+        """issue-64616: add the files whose stored chunks do not cover their
         ``total_chunks`` -- indexed while image chunks bypassed the text
         index -- to ``files``, once per index (``chunk_coverage``).
 
@@ -3601,7 +3601,7 @@ class SmartIndexer(HighThroughputProcessor):
         if healed:
             logger.info(
                 "Re-indexing %d file(s) whose stored chunks are incomplete "
-                "(indexed before every chunk reached the text index, EVO-64616)",
+                "(indexed before every chunk reached the text index, issue-64616)",
                 len(healed),
             )
         return True, list(files) + healed
@@ -4085,7 +4085,7 @@ class SmartIndexer(HighThroughputProcessor):
                 info=f"✅ Snapshot complete: {len(indexed_files_with_timestamps)} unique files found",
             )
 
-        # EVO-64616: files whose stored chunks do not cover total_chunks
+        # issue-64616: files whose stored chunks do not cover total_chunks
         # (chunk_coverage), from the same snapshot -- no extra read.
         stored_to_relative = {
             str(stored): relative

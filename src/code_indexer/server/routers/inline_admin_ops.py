@@ -76,7 +76,7 @@ _DEFAULT_EXPORT_RETENTION_DAYS: int = 30
 # Module-level logger
 logger = logging.getLogger(__name__)
 
-# EVO-65484: the seeder and workspace-mcp both authenticate as the cidx ``admin``
+# issue-65484: the seeder and workspace-mcp both authenticate as the cidx ``admin``
 # user, so every golden-repo job is stamped "submitted by admin" -- useless for
 # telling apart the golden seeder vs the workspace-mcp server vs a real operator.
 # A caller may send an ``X-Cidx-Caller`` header (e.g. "seeder", "workspace-mcp");
@@ -119,7 +119,7 @@ class ExportFiltersRequest(BaseModel):
 def _refresh_submission_error(alias: str, exc: Exception) -> HTTPException:
     """The HTTP answer, logged with its cause, for a failed refresh submission.
 
-    EVO-64616: every failure used to become a 500 whose cause reached only the
+    issue-64616: every failure used to become a 500 whose cause reached only the
     response body, so the server log showed a bare ``HTTP 500``. A refresh
     already queued or running is 409; an alias with no global activation is
     404; maintenance mode is 503; anything else stays 500 and is logged with
@@ -164,14 +164,14 @@ def _refresh_submission_error(alias: str, exc: Exception) -> HTTPException:
 
 
 class GoldenCatalogSyncRequest(BaseModel):
-    """Body of POST /api/admin/golden-catalog/sync (EVO-64616)."""
+    """Body of POST /api/admin/golden-catalog/sync (issue-64616)."""
 
     dry_run: bool = True
     scope: Literal["catalog", "workspaces", "all"] = "all"
 
 
 class RenameGoldenRepoRequest(BaseModel):
-    """Body of POST /api/admin/golden-repos/{alias}/rename (EVO-64616)."""
+    """Body of POST /api/admin/golden-repos/{alias}/rename (issue-64616)."""
 
     new_alias: str = Field(..., min_length=1, max_length=128)
     repo_url: Optional[str] = Field(
@@ -339,7 +339,7 @@ def register_admin_ops_routes(
                 "enable_temporal": repo_data.enable_temporal,
             }
 
-            # EVO-65021 (seam #3): capture the workspace-mcp workspace_id supplied
+            # issue-65021 (seam #3): capture the workspace-mcp workspace_id supplied
             # by the (in-place/provisioning) caller so it is persisted on the
             # golden-repo metadata for the delegated SCIP backend. Omitted when
             # None so the manager's default (no retention) is unchanged.
@@ -364,14 +364,14 @@ def register_admin_ops_routes(
             )
 
         except DuplicateJobError as e:
-            # EVO-69818: a duplicate in-flight job is a conflict, not a server
+            # issue-69818: a duplicate in-flight job is a conflict, not a server
             # error -- same mapping as add_golden_repo_index.
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=str(e),
             ) from e
         except GoldenRepoAlreadyExistsError as e:
-            # EVO-64616: re-registering an existing alias is a conflict the
+            # issue-64616: re-registering an existing alias is a conflict the
             # caller can act on (an idempotent seeder counts it as done), not
             # a server error. Logged at INFO without the traceback.
             logger.info(
@@ -383,7 +383,7 @@ def register_admin_ops_routes(
                 detail=str(e),
             ) from e
         except Exception as e:
-            # EVO-64608: surface the swallowed cause. Without this the exception's
+            # issue-64608: surface the swallowed cause. Without this the exception's
             # detail goes ONLY into the 500 response body (never into cidx logs), so a
             # high registration-failure rate is undiagnosable (hard evidence: ~315
             # unlogged registration 500s / 3h on the multipod). logger.exception logs
@@ -992,7 +992,7 @@ def register_admin_ops_routes(
         request: RenameGoldenRepoRequest,
         current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
     ) -> Dict[str, Any]:
-        """Rename a golden repository's alias (admin only; EVO-64616).
+        """Rename a golden repository's alias (admin only; issue-64616).
 
         Moves the clone, the published index, the ``-global`` pointer, the
         registry rows and every reference to the alias, without re-cloning
@@ -1041,7 +1041,7 @@ def register_admin_ops_routes(
         current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
     ) -> Dict[str, Any]:
         """Run the golden catalog sync and/or the workspace registration sync
-        once (admin only; EVO-64616). ``dry_run`` (the default) reports the
+        once (admin only; issue-64616). ``dry_run`` (the default) reports the
         planned adds, renames, heals and (workspace) deregistrations and
         changes nothing. Asynchronous: poll ``job_id``; its result is the
         plan and what was applied."""
@@ -1368,7 +1368,7 @@ def register_admin_ops_routes(
         snapshot: Dict[str, Any] = gov.get_snapshot()
         return snapshot
 
-    # EVO-64609: back-compat admin alias for GET /api/jobs/{job_id}. Multiple clients
+    # issue-64609: back-compat admin alias for GET /api/jobs/{job_id}. Multiple clients
     # (the golden-repo-seeder and agent-orchestrator workers) poll job status at
     # /api/admin/jobs/{id} -- a path that no longer exists post-multipod -> route-not
     # -found 404, which a client can misread as a job failure. Delegate to the same

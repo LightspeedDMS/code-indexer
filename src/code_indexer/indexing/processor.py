@@ -42,7 +42,7 @@ class ProcessingStats:
     #: Bug #2155: relative paths of the files a previous run recorded as
     #: failed that this run re-planned (``_merge_recorded_failures``).
     retried_failed_paths: FrozenSet[str] = frozenset()
-    #: EVO-64616: image chunks that got no multimodal point although
+    #: issue-64616: image chunks that got no multimodal point although
     #: multimodal indexing is on (their text is still indexed).
     multimodal_chunks_failed: int = 0
 

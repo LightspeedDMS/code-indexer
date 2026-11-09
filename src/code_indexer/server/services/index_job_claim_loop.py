@@ -159,7 +159,7 @@ class IndexJobClaimLoop:
         job_id = job["job_id"]
         op_type = job.get("operation_type", "")
         metadata = job.get("metadata") or {}
-        # EVO-66105: inject job_id into metadata so executors can thread it
+        # issue-66105: inject job_id into metadata so executors can thread it
         # through to build_embedding_stats_child_env for per-job VoyageAI
         # cost correlation.  The executor signature is (metadata, callback);
         # adding a key here is the least-invasive way to propagate without

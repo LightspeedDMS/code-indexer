@@ -250,7 +250,7 @@ class GitPullUpdater(UpdateStrategy):
 
         Args:
             repo_path: Path to git repository
-            git_backend: EVO-64678 git seam. Defaults to the local git backend (git run
+            git_backend: issue-64678 git seam. Defaults to the local git backend (git run
                 locally via utils.git_runner), which reproduces today's behavior;
                 server wiring can inject the configured backend instead. Every
                 git operation below goes through it -- cancellation and
@@ -378,7 +378,7 @@ class GitPullUpdater(UpdateStrategy):
             from .git_error_classifier import classify_fetch_error
 
             # Bug #1832: classification keeps the raw, uncapped stderr; only the
-            # logged/raised MESSAGE is upgraded to the full diagnostic. EVO-64678:
+            # logged/raised MESSAGE is upgraded to the full diagnostic. issue-64678:
             # sourced from the seam's CalledProcessError rather than a CompletedProcess.
             category = classify_fetch_error(fetch_exc.stderr)
             diagnostic = _format_called_process_diagnostic(fetch_exc)
@@ -416,7 +416,7 @@ class GitPullUpdater(UpdateStrategy):
         """
         try:
             # First, fetch latest refs from remote.
-            # EVO-64678: routed through the git seam (default LocalGitBackend ==
+            # issue-64678: routed through the git seam (default LocalGitBackend ==
             # today's `git fetch origin`, with the same non-interactive SSH env).
             # A non-zero exit or a timeout is a classified GitFetchError.
             self._fetch_classified()
@@ -474,7 +474,7 @@ class GitPullUpdater(UpdateStrategy):
             Current branch name, or "main" as fallback
         """
         try:
-            # EVO-64678: via the git seam. rev_parse() emits the same
+            # issue-64678: via the git seam. rev_parse() emits the same
             # `git rev-parse --abbrev-ref HEAD`, already strips stdout, and
             # raises CalledProcessError on a non-zero exit — caught below so the
             # "(returncode=N)" warning keeps its exact shape.
@@ -518,7 +518,7 @@ class GitPullUpdater(UpdateStrategy):
         Raises:
             RuntimeError: If fetch or reset fails
         """
-        # EVO-64678: fetch + reset routed through the git seam. Both raise
+        # issue-64678: fetch + reset routed through the git seam. Both raise
         # CalledProcessError on a non-zero exit, so each is caught INLINE to
         # rebuild the identical RuntimeError message the returncode checks
         # produced. The seam methods return None, so the git stdout that used to
@@ -571,7 +571,7 @@ class GitPullUpdater(UpdateStrategy):
     def is_empty_repository(self) -> bool:
         """True when there is nothing to check out, pull or index: the clone
         has no commit (git's unborn-HEAD answer) AND ``origin``, fetched now,
-        has no branch either (EVO-64616).
+        has no branch either (issue-64616).
 
         A clone with a commit answers False after one ``rev-parse HEAD``; only
         an unborn clone is fetched, so a repository that gained its first
@@ -633,7 +633,7 @@ class GitPullUpdater(UpdateStrategy):
         """
         try:
             # Story #726: Defense in depth - check for local modifications.
-            # EVO-64678: via the git seam. status_porcelain() returns raw stdout
+            # issue-64678: via the git seam. status_porcelain() returns raw stdout
             # and raises CalledProcessError on a non-zero exit; the raw call used
             # `check=False` and simply skipped the modified-file handling when
             # git failed, so the inline catch reproduces that tolerance exactly.
@@ -662,7 +662,7 @@ class GitPullUpdater(UpdateStrategy):
                 )
 
                 # Reset local modifications to allow clean pull.
-                # EVO-64678: via the git seam. reset() raises
+                # issue-64678: via the git seam. reset() raises
                 # CalledProcessError on a non-zero exit; caught inline so the
                 # failure stays NON-fatal ("Proceeding with pull anyway"),
                 # exactly as the returncode check did.
@@ -692,7 +692,7 @@ class GitPullUpdater(UpdateStrategy):
 
             logger.info(f"Executing git pull for {self.repo_path}")
 
-            # EVO-64678: routed through the git seam (default LocalGitBackend ==
+            # issue-64678: routed through the git seam (default LocalGitBackend ==
             # today's plain `git pull` with the non-interactive SSH env). The
             # seam raises CalledProcessError on a non-zero exit, so the whole
             # former `if result.returncode != 0:` body moves into the inline

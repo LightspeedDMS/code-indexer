@@ -181,7 +181,7 @@ class GlobalAliasNotFoundError(ValueError):
     """Neither the alias nor its ``-global`` form is in the global registry.
 
     A ValueError, as before, so existing callers keep catching it; typed so the
-    REST layer can answer 404 instead of a bare 500 (EVO-64616). A golden repo
+    REST layer can answer 404 instead of a bare 500 (issue-64616). A golden repo
     whose registry row exists but whose global activation does not lands here.
     """
 
@@ -213,7 +213,7 @@ def global_repo_refresh_executor(
         alias,
         force_reset=bool(metadata.get("force_reset", False)),
         progress_callback=progress_callback,
-        # EVO-66105: IndexJobClaimLoop injects metadata["job_id"] precisely so
+        # issue-66105: IndexJobClaimLoop injects metadata["job_id"] precisely so
         # executors can thread it through -- the (metadata, callback) signature
         # leaves no other channel. _execute_refresh carries it into
         # build_embedding_stats_child_env, which tags each EmbeddingCallRecord.
@@ -298,7 +298,7 @@ class PublishedRefreshBackupError(RuntimeError):
     problem), but the index is current: no refresh retry is owed."""
 
 
-#: EVO-64616: the repointed origins healed by the refresh running in this
+#: issue-64616: the repointed origins healed by the refresh running in this
 #: context (``_execute_refresh`` opens one count per refresh; None outside).
 _ORIGINS_RESTORED: "contextvars.ContextVar[Optional[List[str]]]" = (
     contextvars.ContextVar("cidx_refresh_origins_restored", default=None)
@@ -363,7 +363,7 @@ def _partial_publish_warning(
     )
     if retry_due is not None:
         if failures.unattributed and not failures.retryable_paths:
-            # EVO-64616: counted failures with no recorded path.
+            # issue-64616: counted failures with no recorded path.
             return (
                 f"{head}; {failures.unattributed} recorded without a path: "
                 f"full reconcile at {retry_due:.0f}"
@@ -772,7 +772,7 @@ def _is_git_repo_url(repo_url: str) -> bool:
     return any(repo_url.startswith(prefix) for prefix in _GIT_URL_PREFIXES)
 
 
-#: ``skipped`` reason of a refresh of a repository with no commit (EVO-64616).
+#: ``skipped`` reason of a refresh of a repository with no commit (issue-64616).
 EMPTY_REPOSITORY_SKIP = "empty_repository"
 
 
@@ -806,7 +806,7 @@ def _git_pull_updater_for(
     fetched or pulled. Raises OrphanedRepoError (before any rewrite) when
     the clone is missing. Runs in the refresh job's thread.
 
-    EVO-64678: every git call goes through *git_backend* (the scheduler's
+    issue-64678: every git call goes through *git_backend* (the scheduler's
     seam; the local git backend when None). A backend that owns its credentials
     (git-mcp) holds the clone and the PAT: nothing is supplied from here and
     the stored URL is git-mcp's to keep clean, so no local git runs."""
@@ -947,7 +947,7 @@ class RefreshScheduler:
                 golden_repos_metadata table alongside the -global-alias-keyed
                 global_repos table (self.registry) -- the two are structurally separate
                 stores for the same logical repo and can otherwise drift independently.
-            git_backend: EVO-64678 git seam. Defaults to the local git backend (git run
+            git_backend: issue-64678 git seam. Defaults to the local git backend (git run
                 locally via utils.git_runner), which reproduces today's behavior;
                 server wiring can inject the configured backend via
                 build_git_backend() at startup.
@@ -1341,7 +1341,7 @@ class RefreshScheduler:
         repo_url: str,
         cancel_check: Optional[Callable[[], bool]],
     ) -> None:
-        """EVO-64616: stop a refresh whose base clone fetches from a
+        """issue-64616: stop a refresh whose base clone fetches from a
         repository other than the registered one, before it checks out,
         fetches or indexes anything.
 
@@ -1411,7 +1411,7 @@ class RefreshScheduler:
         shown_origin: str,
         cancel_check: Optional[Callable[[], bool]],
     ) -> Optional[str]:
-        """EVO-64616: heal a base clone whose origin (*shown_origin*,
+        """issue-64616: heal a base clone whose origin (*shown_origin*,
         credential-free) was repointed but whose content is still the
         registered repository's (``repointed_origin``): origin is set back to
         the credential-free registered URL, one WARNING names the alias and
@@ -1517,7 +1517,7 @@ class RefreshScheduler:
         detached source) has no branch to enforce: nothing is logged, raised
         or checked out. A cancellation is re-raised as-is.
 
-        EVO-64678: both git steps go through the scheduler's git seam -- run
+        issue-64678: both git steps go through the scheduler's git seam -- run
         on this pod they find no repository on a mount-less pod (the read
         used to fail silently and the check did nothing). A detached HEAD
         reads as "" (``head_branch``), exactly as ``branch --show-current``
@@ -2044,7 +2044,7 @@ class RefreshScheduler:
         self._apply_fetch_backoff(alias_name, error.category, count)
 
         if names_missing_remote_ref(error.stderr):
-            # EVO-64616: actionable, not a bare git line.
+            # issue-64616: actionable, not a bare git line.
             raise RuntimeError(
                 f"Fetch failed for {alias_name} (category={error.category}): "
                 f"its registered branch "
@@ -2143,7 +2143,7 @@ class RefreshScheduler:
             return False
 
         try:
-            # EVO-64678: routed through the git seam (cancellable: Bug #2012,
+            # issue-64678: routed through the git seam (cancellable: Bug #2012,
             # git_cancel_scope). retry stays False so a
             # failed clone is NOT re-attempted -- a retry would hit
             # "destination path already exists" and report a different error.
@@ -2695,7 +2695,7 @@ class RefreshScheduler:
                 the row metadata because the executing pod cannot see the
                 submitting call's arguments.
             job_id: The claimed row's id, recorded on the embedding_call_stats
-                rows of this refresh (EVO-66113 / Story #2118 per-job cost
+                rows of this refresh (issue-66113 / Story #2118 per-job cost
                 correlation). Supplied from metadata["job_id"], which
                 IndexJobClaimLoop injects for exactly this purpose; omitting it
                 NULLs the job id on every embedding call record the fleet
@@ -3071,7 +3071,7 @@ class RefreshScheduler:
         # worker must NOT register a second job for the same pair or it collides
         # with its own parent row and the refresh is marked failed before it
         # starts.
-        # EVO-66113 / Story #2118: BackgroundJobManager._execute_job injects the
+        # issue-66113 / Story #2118: BackgroundJobManager._execute_job injects the
         # assigned job_id into any worker whose signature declares a `job_id`
         # param, straight from the dequeued (job_id, func, args, kwargs) tuple
         # -- race-free, so no post-submit mutable holder is needed. It is
@@ -3246,7 +3246,7 @@ class RefreshScheduler:
         try:
             # Bug #2012: every git command of this refresh -- through the
             # git seam, whichever step builds it -- runs cancellable.
-            # EVO-64616: a healed repointed origin is counted in the result.
+            # issue-64616: a healed repointed origin is counted in the result.
             restored: List[str] = []
             restored_token = _ORIGINS_RESTORED.set(restored)
             try:
@@ -3486,7 +3486,7 @@ class RefreshScheduler:
 
                     # AC6: Reconcile registry with filesystem at START of refresh
                     # This ensures registry flags reflect actual index state before refresh begins
-                    # (EVO-64616: under a delegated IndexStore, of the published
+                    # (issue-64616: under a delegated IndexStore, of the published
                     # index served here -- never of an absent directory).
                     start_target = self._start_reconcile_target(
                         alias_name, current_target
@@ -3549,7 +3549,7 @@ class RefreshScheduler:
                         #   "Command 'index' is not available in no configuration found"
                         # These repos are only refreshed via explicit trigger from their writers.
                         code_indexer_dir = Path(source_path) / ".code-indexer"
-                        # EVO-64616: under a delegated IndexStore cidx-meta's
+                        # issue-64616: under a delegated IndexStore cidx-meta's
                         # content is on workspace-mcp and this pod's directory
                         # holds index state only -- which a pod that did not
                         # register it never had. Its index state comes from the
@@ -3777,7 +3777,7 @@ class RefreshScheduler:
                                     source_path, alias_name
                                 )
                                 if not force_reconcile:
-                                    # EVO-64616: recorded failures still owed
+                                    # issue-64616: recorded failures still owed
                                     # are re-run even with no new file, bounded
                                     # like the git path's stale signals.
                                     _owed = self._owed_failures_signal(
@@ -3926,7 +3926,7 @@ class RefreshScheduler:
                                 # no-ops here. #1338: caught by TYPE, never by
                                 # message-substring matching.
                                 try:
-                                    # EVO-64678: thread our backend through, or a
+                                    # issue-64678: thread our backend through, or a
                                     # delegated RefreshScheduler would silently keep
                                     # running git locally inside GitPullUpdater.
                                     # Bug #2012: its git calls are cancellable.
@@ -3967,13 +3967,13 @@ class RefreshScheduler:
                             # branch (Bug #469 orphan alias) switches nothing,
                             # warns and continues (a meta-directory repo has
                             # no git branch to verify).
-                            # EVO-64616: an empty repository (no commit here
+                            # issue-64616: an empty repository (no commit here
                             # or upstream) has no branch to check out, nothing
                             # to pull and nothing to index -- a clean skip,
                             # before the branch check would fail it.
                             # Its fetch (unborn clones only) fails like the
                             # change check's: classified, backed off, redacted.
-                            # EVO-64616: first of all, the clone must fetch
+                            # issue-64616: first of all, the clone must fetch
                             # from the registered repository (a repointed
                             # origin is healed when the content is still
                             # the registered repository's).
@@ -5017,7 +5017,7 @@ class RefreshScheduler:
         if is_served_here(store, source):
             return
         root = store.index_root(source)
-        # EVO-64616: an evicted base the backfill sweeps wrote into again
+        # issue-64616: an evicted base the backfill sweeps wrote into again
         # (cooldown markers, SCIP output) holds no index: it is seeded like a
         # missing one -- the checkout keeps those leftovers.
         if (
@@ -5140,11 +5140,11 @@ class RefreshScheduler:
         Raises:
             RuntimeError: If any indexing step fails or times out
         """
-        # EVO-64616: an incremental base this pod no longer holds (evicted by
+        # issue-64616: an incremental base this pod no longer holds (evicted by
         # the served-index cache, or never built here) is checked out from
         # the IndexStore first, so the refresh embeds only what changed.
         self._seed_incremental_base(alias_name, source_path)
-        # EVO-64616: nothing published to seed from, and no configuration of
+        # issue-64616: nothing published to seed from, and no configuration of
         # its own: initialized here, or `cidx index` fails the same way on
         # every cycle.
         self._initialize_unconfigured_source(alias_name, source_path, cancel_check)
@@ -5170,7 +5170,7 @@ class RefreshScheduler:
                 )
                 break
 
-        # EVO-64616: failures a provider COUNTED with no recorded path (its
+        # issue-64616: failures a provider COUNTED with no recorded path (its
         # failed_files above its failed_file_paths) are invisible to an
         # incremental run, which retries recorded paths only -- the stale
         # count would stay forever. A reconcile compares every file with the
@@ -5718,7 +5718,7 @@ class RefreshScheduler:
         builder = index_builder(SCIP_INDEX_TYPE)
         if builder is None:
             return
-        # EVO-65365: the -global -> bare alias normalization (CRITICAL-1) is
+        # issue-65365: the -global -> bare alias normalization (CRITICAL-1) is
         # the builder's (the feature's funnel), shared by every golden
         # entrypoint.
         outcome = builder.build(
@@ -5908,7 +5908,7 @@ class RefreshScheduler:
             if git_dir.exists():
                 logger.info("Running git update-index --refresh to fix CoW timestamps")
                 try:
-                    # EVO-64678: via the git seam. update_index_refresh() runs
+                    # issue-64678: via the git seam. update_index_refresh() runs
                     # with check=False -- a non-zero exit is normal here -- so
                     # this stays as tolerant as the raw call it replaces. It
                     # returns None, so git's stderr is no longer available for
@@ -5927,7 +5927,7 @@ class RefreshScheduler:
 
                 logger.info("Running git restore . to clean up timestamp changes")
                 try:
-                    # EVO-64678: via the git seam. restore() runs with
+                    # issue-64678: via the git seam. restore() runs with
                     # check=True, so CalledProcessError is caught here to keep
                     # the raw call's non-fatal (check=False) behavior and log
                     # git's stderr at DEBUG exactly as before. Bug #2012: a
@@ -6101,7 +6101,7 @@ class RefreshScheduler:
 
         served_cache = active_served_index_cache()
         if served_cache is not None:
-            # The base index was just used: keep its LRU age current (EVO-64616).
+            # The base index was just used: keep its LRU age current (issue-64616).
             served_cache.note_used(source_path)
         try:
             temporal_fields = self._publish_indexed_temporal(alias_name)
@@ -6764,7 +6764,7 @@ class RefreshScheduler:
         metadata exists. With neither condition, recorded failures still owed
         (an unattributed count, or retryable paths) are an OWED_FAILURES
         signal, and a completed index not yet checked for files missing some
-        of their chunks a CHUNK_COVERAGE signal (EVO-64616). Nothing is logged
+        of their chunks a CHUNK_COVERAGE signal (issue-64616). Nothing is logged
         here; the caller decides."""
         states = read_index_states(source_path)
         if not states:
@@ -6773,7 +6773,7 @@ class RefreshScheduler:
         signal = stale_signal_from_states(states, head, alias_name)
         if signal is not None:
             return signal
-        # EVO-64616: failures the last run recorded and still owes are stale
+        # issue-64616: failures the last run recorded and still owes are stale
         # too -- with no upstream change nothing else ever re-runs them (a
         # record written before the count-only fix stayed forever).
         return (

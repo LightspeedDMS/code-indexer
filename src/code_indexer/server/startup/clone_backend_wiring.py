@@ -87,11 +87,11 @@ def _check_workspace_mcp_health(
 ) -> None:
     """Verify workspace-mcp is reachable before wiring the delegated backend.
 
-    EVO-64616: the ``delegated`` clone backend forwards every activated-repo
+    issue-64616: the ``delegated`` clone backend forwards every activated-repo
     CoW clone to workspace-mcp. If workspace-mcp is unreachable at startup we
     fail fast — there is NO silent fallback to a local cidx-side copy (that
     would reintroduce the very filesystem work delegation exists to remove,
-    EVO-64615). GETs ``{endpoint}/clone-path/health``.
+    issue-64615). GETs ``{endpoint}/clone-path/health``.
 
     Only a transient failure (connection/timeout/5xx,
     :func:`_is_transient_health_failure`) is retried, for up to *wait_seconds* (default
@@ -99,7 +99,7 @@ def _check_workspace_mcp_health(
     built ONCE, so a pod that starts while workspace-mcp is restarting (a
     rollout of both) stayed without a clone backend until its own restart --
     every rename, activation and orphan prune on it refused, for hours, while
-    its siblings worked (EVO-64616, tools-test claude-code-indexer-1).
+    its siblings worked (issue-64616, tools-test claude-code-indexer-1).
     """
     import requests
 
@@ -540,8 +540,8 @@ def build_snapshot_manager(
         detail = f"daemon={cow_cfg.daemon_url}, mount={cow_cfg.mount_point}"
 
     elif backend_type == "delegated":
-        # EVO-64616: delegate the activated-repo CoW clone to workspace-mcp so
-        # cidx performs NO filesystem clone itself (EVO-64615). Fail-fast on an
+        # issue-64616: delegate the activated-repo CoW clone to workspace-mcp so
+        # cidx performs NO filesystem clone itself (issue-64615). Fail-fast on an
         # unreachable workspace-mcp -- NO silent local fallback. cidx does not
         # translate paths here (unlike cow-daemon); workspace-mcp owns reflink
         # placement, so the golden/activated symlink-placement checks do not

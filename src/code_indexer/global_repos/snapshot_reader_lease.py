@@ -34,7 +34,7 @@ class LeaseDirectoryAmbiguousError(RuntimeError):
     """
 
 
-#: EVO-64616: the pod-local lease directory a server with every repository
+#: issue-64616: the pod-local lease directory a server with every repository
 #: backend and the IndexStore delegated installs at startup
 #: (``use_pod_local_lease_directory``). None: the shared directory beside
 #: cidx-meta, exactly as before.

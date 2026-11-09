@@ -201,7 +201,7 @@ def run_git_command(
     if not cmd or cmd[0] != "git":
         raise ValueError("Command must start with 'git'")
 
-    # Delegation seam (EVO-64616 Phase 2): this is the ONE chokepoint every git
+    # Delegation seam (issue-64616 Phase 2): this is the ONE chokepoint every git
     # call bottoms out at (LocalGitBackend AND GitOperationsService both reach
     # here), so a deployment that must not run git mutations in the cidx image
     # installs a GitInvoker and every mutation delegates -- with zero call-site
@@ -347,7 +347,7 @@ def run_git_command_with_retry(
     while attempt <= MAX_RETRIES:
         try:
             # Execute via run_git_command so the git-invoker delegation seam
-            # (EVO-64616 Phase 2) applies here too: network-touching mutations
+            # (issue-64616 Phase 2) applies here too: network-touching mutations
             # (fetch/pull/push) run through the retry path, and delegating a git
             # command must not depend on which entry point a caller happens to
             # use. run_git_command builds the safe.directory env, merges any

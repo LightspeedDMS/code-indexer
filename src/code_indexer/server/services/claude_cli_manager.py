@@ -546,7 +546,7 @@ class ClaudeCliManager:
 
         Args:
             processed: List of processed aliases
-            job_id: EVO-66105 -- optional job_id for embed stats correlation
+            job_id: issue-66105 -- optional job_id for embed stats correlation
         """
         if not self._meta_dir:
             return
@@ -558,7 +558,7 @@ class ClaudeCliManager:
         if cidx_meta_content.shared_cidx_meta(self._meta_dir) is None:
             try:
                 commit_msg = f"Replace README fallbacks with generated descriptions: {', '.join(processed)}"
-                # EVO-64678: cidx-meta mutations go through the git seam chokepoint
+                # issue-64678: cidx-meta mutations go through the git seam chokepoint
                 # like every other server-side mutation. No invoker claims cidx-meta
                 # today so these still run locally, but they are now seam-visible and
                 # pick up get_git_environment()'s safe.directory handling.
@@ -619,7 +619,7 @@ class ClaudeCliManager:
             )
 
             # Story #2118: a catch-up re-index of the existing cidx-meta
-            # collection; job_id (EVO-66105) is the tracked job when there is
+            # collection; job_id (issue-66105) is the tracked job when there is
             # one, else the attribution records ``nojob:<site>``.
             _result = subprocess.run(
                 # cidx-meta's content follows the content backend; its git

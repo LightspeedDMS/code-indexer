@@ -100,7 +100,7 @@ class FileProcessingResult:
     processing_time: float
     error: Optional[str] = None
     vanished: bool = False  # True when file disappeared before stat() (TOCTOU skip)
-    #: EVO-64616: image chunks of a successful file that got no multimodal
+    #: issue-64616: image chunks of a successful file that got no multimodal
     #: point (no resolvable image, or the provider failed). Their text is
     #: still in the text index; the count keeps the gap visible.
     multimodal_chunks_failed: int = 0
@@ -944,11 +944,11 @@ class FileChunkingManager:
 
             logger.debug(f"Generated {len(chunks)} chunks for {file_path}")
 
-            # EVO-64616: EVERY chunk's text goes to the text index; a chunk
+            # issue-64616: EVERY chunk's text goes to the text index; a chunk
             # with images is ALSO embedded multimodally when a multimodal
             # client exists. Image chunks used to go to the multimodal path
             # only, so their text was lost whenever that path produced
-            # nothing: with multimodal indexing off (EVO-65484) always -- a
+            # nothing: with multimodal indexing off (issue-65484) always -- a
             # page whose every chunk referenced an image failed with "No
             # batches created" on every run (5605 .htm files of jplanner) --
             # and with it on, for a chunk whose images could not be resolved

@@ -892,7 +892,7 @@ def _check_indexes(repo_alias: str, current_user: User) -> IndexesStatusResponse
                     golden_repo_manager=golden_repo_manager,
                 )
             except TemporalNotServedHereError as not_here:
-                # Never has_temporal=False: this pod cannot tell (EVO-64616).
+                # Never has_temporal=False: this pod cannot tell (issue-64616).
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                     detail=str(not_here),

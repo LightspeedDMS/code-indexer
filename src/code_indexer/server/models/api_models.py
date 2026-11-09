@@ -418,7 +418,7 @@ class FileListQueryParams(BaseModel):
     indexed_only: bool = Field(
         default=False,
         description=(
-            "EVO-66189 fast path: when true, serve the listing from the index's "
+            "issue-66189 fast path: when true, serve the listing from the index's "
             "path_index (indexed source files only) instead of walking the working "
             "tree over NFS. size_bytes/modified_at are not populated in this mode. "
             "Falls back to the full walk when no index is present."

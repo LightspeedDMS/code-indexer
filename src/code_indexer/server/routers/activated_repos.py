@@ -511,7 +511,7 @@ async def get_indexes_status(
                     ),
                 )
             except TemporalNotServedHereError as not_here:
-                # Never "absent": this pod cannot tell (EVO-64616).
+                # Never "absent": this pod cannot tell (issue-64616).
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                     detail=str(not_here),

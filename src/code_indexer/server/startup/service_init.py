@@ -253,7 +253,7 @@ def initialize_services() -> Dict[str, Any]:
 
     config_service = get_config_service()
 
-    # EVO-64616: SCIP query delegation was removed. A config.json still setting
+    # issue-64616: SCIP query delegation was removed. A config.json still setting
     # scip_query_backend to anything but 'local' stops startup here, before the
     # SQLite runtime-config initialisation below strips config.json to
     # bootstrap keys and with it the removed key. A config.json read failure is
@@ -533,7 +533,7 @@ def initialize_services() -> Dict[str, Any]:
     # Initialize managers with resource configuration
     # (data_dir and db_path_str already computed above for storage mode detection)
 
-    # EVO-64678 Phase 3: resolve the git backend ONCE and share it across every
+    # issue-64678 Phase 3: resolve the git backend ONCE and share it across every
     # git-executing manager built here. `local` (default) yields a plain
     # LocalGitBackend — identical to prior behaviour; `delegated` yields the
     # git-mcp-backed backend (fails loud if the plugin is unavailable).
@@ -551,7 +551,7 @@ def initialize_services() -> Dict[str, Any]:
 
     _content_backend = build_configured_content_backend(server_config)
 
-    # EVO-64616: a delegated content backend needs a CLI invoker plugin for
+    # issue-64616: a delegated content backend needs a CLI invoker plugin for
     # description generation -- checked once here, not per golden repo add.
     # Skipped while generation is opted out, so the flag stays a rollback lever.
     from code_indexer.server.services.cli_invoker_plugin import (

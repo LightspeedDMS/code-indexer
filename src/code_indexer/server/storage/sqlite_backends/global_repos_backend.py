@@ -284,7 +284,7 @@ class GlobalReposSqliteBackend:
 
     def update_index_path(self, alias_name: str, index_path: str) -> bool:
         """
-        Repoint a repository's on-disk index_path (EVO-66808).
+        Repoint a repository's on-disk index_path (issue-66808).
 
         A targeted single-column update (NOT a full register_repo upsert) so it
         never resets last_refresh / enable_temporal / enable_scip / temporal_options
