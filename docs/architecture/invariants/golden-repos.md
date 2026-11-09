@@ -92,6 +92,32 @@ A `golden_repos` row must never exist without its on-disk clone and alias pointe
 `_resolve_golden_repo` serves cached rows (reload on miss). Decisions that depend on a field another node can change
 (`default_branch`, `temporal_options`) read through `_resolve_golden_repo_authoritative`, which bypasses the cache.
 
+### Duplicate-alias guard is authoritative
+
+The add-time duplicate guard (`_submit_add_job`) and `register_local_repo`'s idempotency check read the shared backend
+through `_resolve_golden_repo_authoritative`, never the cache-first resolver. A cached row that another node REMOVED (a
+failed add rolls its row back on the node that ran it) otherwise refused the alias as "already exists" on every pod
+that had cached it, while `GET /api/admin/golden-repos` did not list it. A genuine duplicate raises
+`GoldenRepoAlreadyExistsError` (a `GoldenRepoError`), which `POST /api/admin/golden-repos` maps to 409. Guard:
+`tests/unit/server/repositories/test_golden_repo_add_duplicate_authoritative_evo64616.py`.
+
+### Refresh submission status
+
+`POST /api/admin/golden-repos/{alias}/refresh` maps each submission failure to its cause
+(`_refresh_submission_error` in `server/routers/inline_admin_ops.py`) and logs it: `DuplicateJobError` is 409, a
+golden row without its global activation (`GlobalAliasNotFoundError`, raised by
+`RefreshScheduler._resolve_global_alias`) is 404, maintenance mode is 503 with `Retry-After`, anything else is 500
+logged with its traceback. Guard: `tests/unit/server/routers/test_refresh_golden_repo_status_evo64616.py`.
+
+### Index backfill never scans control directories
+
+`GoldenIndexBackfillReconciler`'s directory scan (FTS and semantic backfill) treats each non-dot directory under
+golden-repos as a repository, except `GOLDEN_REPOS_CONTROL_DIRS` (`aliases`, `cidx-exports`) in
+`server/services/golden_index_backfill.py`. Without it `aliases/` was enqueued for an FTS build and its attempt marker
+created `aliases/.code-indexer`. A new control directory directly under golden-repos must be added there (or be a
+dot-directory). Caller-supplied registry `entries` are not filtered. Guard:
+`tests/unit/server/services/test_golden_index_backfill.py`.
+
 ## Temporal flags and options
 
 - `golden_repos_metadata` is the authoritative store of a golden repository's `temporal_options` (`max_commits`,

@@ -19,7 +19,7 @@ How the two tiers are stored, committed and propagated is described in
 - [Authentication and Security](#authentication-and-security)
 - [AI and Integrations](#ai-and-integrations)
 - [Observability](#observability)
-- [Wiki](#wiki)
+- [Feature Settings](#feature-settings)
 - [Settings changed outside the Configuration screen](#settings-changed-outside-the-configuration-screen)
 - [Not editable in the Web UI](#not-editable-in-the-web-ui)
 - [Bootstrap keys (config.json)](#bootstrap-keys-configjson)
@@ -37,7 +37,7 @@ The Configuration screen is available to `admin` accounts. When step-up elevatio
 section requires an open elevation window ([Login and Elevation](../server/auth/login-and-elevation.md)).
 
 Each section is saved through `POST /admin/config/{section}`, where `{section}` must be one of
-`_VALID_CONFIG_SECTIONS` (`src/code_indexer/server/web/routes.py`). The route validates the form, then
+`_VALID_CONFIG_SECTIONS` (`src/code_indexer/server/web/pages/config_values.py`). The route validates the form, then
 `ConfigService.update_settings_audited()` (for the TOTP section, `update_totp_elevation_audited()`) applies all fields
 of the section as one change: it is validated as a whole (`ServerConfigManager.validate_config()`), a rejected value
 saves nothing, and one audit row records the change.
@@ -63,7 +63,8 @@ with every stored secret and `host`, `port` and `workers`.
 - **Allowed**: values the server accepts on save (route validation in `_validate_config_section()`, the per-field
   setters in `config_service.py`, or `validate_config()`). "Form only" marks a limit that only the HTML input
   enforces. "Raised to" marks a value the server silently raises to a minimum instead of rejecting.
-- **Restart**: "yes" when the field is listed in `RESTART_REQUIRED_FIELDS` (`web/routes.py`): the value is read once
+- **Restart**: "yes" when the field is listed in `RESTART_REQUIRED_FIELDS` (`web/pages/config_values.py`), or for a
+  feature setting when its `ConfigKey.restart_required` is set: the value is read once
   at startup, and the Web UI shows "Requires server restart" next to it. An empty cell means the field is not on
   that list; this reference does not assert that every such field applies without a restart. Where the code reads a
   value on every use, the section notes say so.
@@ -239,15 +240,6 @@ Section `temporal_indexing`, object `temporal_indexing_config`.
 |---------|---------|---------|-------|
 | `index_floor_date` | empty (full history) | `YYYY-MM-DD` or empty | Temporal indexing runs skip commits dated before it. Bounds future runs only. When a golden repository also has a floor date, the later date applies |
 
-### X-Ray Search
-
-Section `xray`, object `xray_config`.
-
-| Setting | Default | Allowed | Notes |
-|---------|---------|---------|-------|
-| `xray_timeout_seconds` | `120` | 10 to 600 | Per-job wall-clock limit of an X-Ray search |
-| `xray_worker_threads` | `4` | 1 to 8 | AST evaluation threads; the saving process also updates its X-Ray concurrency limit at once |
-
 ## Search and Content
 
 ### Search Limits
@@ -355,10 +347,9 @@ Default `indexable_extensions`: `.py .js .jsx .ts .tsx .java .scala .kt .kts .gr
 .cs .go .rs .rb .erb .php .swift .m .mm .r .lua .pl .pm .sh .bash .zsh .fish .ps1 .psm1 .bat .cmd .sql .html .htm
 .css .scss .sass .less .xml .xsl .xsd .json .yaml .yml .toml .ini .cfg .conf .md .mdx .rst .txt .tex`.
 
-### SCIP Code Intelligence
+### Temporal Index Staleness
 
-Section `scip`, object `scip_config`. The form has one field; the other SCIP limits are listed under
-[Not editable in the Web UI](#not-editable-in-the-web-ui).
+Section `scip`, object `scip_config` (historical names: the object holds only this core setting).
 
 | Setting | Default | Allowed | Notes |
 |---------|---------|---------|-------|
@@ -519,18 +510,6 @@ Section `claude_cli`, object `claude_integration_config`. The Claude model these
 | `description_refresh_enabled` | `false` | `true`, `false` | | Scheduled repository description refresh |
 | `description_refresh_interval_hours` | `24` | 1 or more | | |
 | `research_assistant_timeout_seconds` | `1200` | integer (form: 60 to 7200) | | Limit for one Research Assistant Claude CLI run ([Research Assistant](../server/research-assistant.md)) |
-| `dependency_map_enabled` | `false` | `true`, `false` | yes | Dependency-map generation ([Dependency Map](../architecture/dependency-map.md)) |
-| `dependency_map_interval_hours` | `168` | raised to 1 | | Delta analysis interval |
-| `dependency_map_pass_timeout_seconds` | `1800` | raised to 60 | | Per-pass limit |
-| `dependency_map_pass1_max_turns` | `0` | raised to 0 | | `0`: single-shot, no tools |
-| `dependency_map_pass2_max_turns` | `0` | raised to 0 | | `0`: no turn cap |
-| `dependency_map_delta_max_turns` | `0` | raised to 0 | | `0`: no turn cap |
-| `refinement_enabled` | `false` | `true`, `false` | | Scheduled fact-checking of dependency documents |
-| `refinement_interval_hours` | `24` | raised to 1 | | |
-| `refinement_domains_per_run` | `3` | 1 to 50 (clamped) | | |
-| `dep_map_fact_check_enabled` | `false` | `true`, `false` | | Verification pass after generation |
-| `fact_check_timeout_seconds` | `600` | 60 to 3600 | | |
-| `dep_map_auto_repair_enabled` | `false` | `true`, `false` | | Scheduled jobs run one repair pass when anomalies are found |
 
 ### Codex CLI Integration
 
@@ -609,9 +588,67 @@ cycle. See [Langfuse Trace Sync](../server/langfuse-trace-sync.md).
 | `pull_max_concurrent_observations` | `5` | 1 to 20 (clamped) |
 | `pull_projects` | empty list | public key and secret key per project; duplicate public keys are rejected |
 
-## Wiki
+## Feature Settings
 
-Section `wiki`, object `wiki_config`. Read when a wiki page is rendered. See [Wiki](../server/wiki.md).
+A feature add-on's settings are shown and edited only in the screen's **Feature Settings** block, one form per
+loaded feature (its config section), and only while the feature is in `enabled_features`. The form posts to
+`POST /admin/features/config/{feature}`; the same keys are read and set through `GET /api/admin/features/config`
+and `PUT /api/admin/features/{feature}/config` (admin, elevation). Each save is validated against the section (key,
+type, bounds; a value outside the bounds is refused, never raised to a bound) and committed as one change with one
+audit row on `feature_settings.<feature>`. Runtime keys are stored in `feature_settings.<feature>`; bootstrap keys
+(`feature_bootstrap_settings.<feature>` in `config.json`) are shown read-only. A "Restart" yes is the key's
+`restart_required` flag. Values stored under a feature's former core keys are moved into its section on load.
+
+### X-Ray Search
+
+Feature `xray` ([cidx-xray](../architecture/cidx-xray.md)). A pre-feature `xray_config` value is moved here on load.
+
+| Setting | Default | Allowed | Notes |
+|---------|---------|---------|-------|
+| `xray_timeout_seconds` | `120` | 10 to 600 | Per-job wall-clock limit of an X-Ray search |
+| `xray_worker_threads` | `4` | 1 to 8 | AST evaluation threads; the saving process also updates its X-Ray concurrency limit at once |
+| `xray_backend` | `local` | `local`, `delegated` | Bootstrap (read-only on the screen) |
+
+### SCIP Code Intelligence
+
+Feature `scip` ([cidx-scip](../architecture/cidx-scip.md)). Values stored under `scip_config` before the move are
+carried into the section on load.
+
+| Setting | Default | Allowed | Restart |
+|---------|---------|---------|---------|
+| `scip_reference_limit` | `100` | 10 to 10000 | yes |
+| `scip_dependency_depth` | `3` | 1 to 10 | yes |
+| `scip_callchain_max_depth` | `3` | 1 to 50 | yes |
+| `scip_callchain_limit` | `100` | 1 to 1000 | yes |
+| `scip_workspace_retention_days` | `7` | 1 to 365 (`CIDX_SCIP_WORKSPACE_RETENTION_DAYS` overrides) | yes |
+| `scip_backend` | `local` | `local`, `delegated-plugin` | Bootstrap (read-only on the screen) |
+
+### Dependency Map
+
+Feature `depmap` ([cidx-depmap](../architecture/cidx-depmap.md)). Values stored under `claude_integration_config`
+before modular phase 4g are moved into the section on load. `dep_map_fact_check_enabled` also gates the fact check
+of repository descriptions, which therefore runs only while the feature is enabled. The Claude model is
+`analysis_model` ([Golden Repository Settings](#golden-repository-settings)).
+
+| Setting | Default | Allowed | Restart | Notes |
+|---------|---------|---------|---------|-------|
+| `dependency_map_enabled` | `false` | `true`, `false` | yes | Dependency-map generation ([Dependency Map](../architecture/dependency-map.md)) |
+| `dependency_map_interval_hours` | `168` | 1 or more | | Delta analysis interval |
+| `dependency_map_pass_timeout_seconds` | `1800` | 60 or more | | Per-pass limit |
+| `dependency_map_pass1_max_turns` | `0` | 0 or more | | `0`: single-shot, no tools |
+| `dependency_map_pass2_max_turns` | `0` | 0 or more | | `0`: no turn cap |
+| `dependency_map_delta_max_turns` | `0` | 0 or more | | `0`: no turn cap |
+| `refinement_enabled` | `false` | `true`, `false` | | Scheduled fact-checking of dependency documents |
+| `refinement_interval_hours` | `24` | 1 or more | | |
+| `refinement_domains_per_run` | `3` | 1 to 50 | | |
+| `dep_map_fact_check_enabled` | `false` | `true`, `false` | | Verification pass after generation |
+| `fact_check_timeout_seconds` | `600` | 60 to 3600 | | |
+| `dep_map_auto_repair_enabled` | `false` | `true`, `false` | | Scheduled jobs run one repair pass when anomalies are found |
+
+### Wiki
+
+Feature `wiki`. Read when a wiki page is rendered. A pre-feature `wiki_config` value is moved into the section on
+load. See [Wiki](../server/wiki.md) and [cidx-wiki](../architecture/cidx-wiki.md).
 
 | Setting | Default | Allowed | Notes |
 |---------|---------|---------|-------|
@@ -621,6 +658,11 @@ Section `wiki`, object `wiki_config`. Read when a wiki page is rendered. See [Wi
 | `enable_views_seeding` | `true` | `true`, `false` | Seeds view counts from the front-matter `views` field when the wiki is enabled, and shows that field |
 | `metadata_display_order` | empty | comma-separated metadata keys | Listed keys first, the rest alphabetically |
 
+### Memory Retrieval
+
+Feature `memory` (formerly `memory_retrieval_config`); see
+[Memory Retrieval: Settings](../server/memory-retrieval.md#settings).
+
 ## Settings changed outside the Configuration screen
 
 | Setting | Where |
@@ -629,7 +671,6 @@ Section `wiki`, object `wiki_config`. Read when a wiki page is rendered. See [Wi
 | Provider API keys, subscription mode | The Provider API Keys and Subscription Mode panels, which call their own endpoints (above) |
 | GitHub and GitLab tokens | The GitHub/GitLab Keys panel (above) |
 | `golden_repos_config.refresh_interval_seconds` | Also the MCP tools `get_global_config` / `set_global_config` |
-| `memory_retrieval_config.*` | No front door; see [Memory Retrieval: Settings](../server/memory-retrieval.md#settings) |
 
 ## Not editable in the Web UI
 
@@ -651,11 +692,6 @@ unless the stored configuration already carries another value.
 | `cache_config` | `query_path_cache_enabled` | `true` | |
 | `cache_config` | `repo_config_cache_ttl_seconds`, `repo_config_cache_max_entries` | `30`, `2048` | |
 | `resource_config` | `git_update_index_timeout`, `git_restore_timeout` | `300`, `300` | |
-| `scip_config` | `scip_reference_limit` | `100` | 10 to 10000 |
-| `scip_config` | `scip_dependency_depth` | `3` | 1 to 10 |
-| `scip_config` | `scip_callchain_max_depth` | `3` | 1 to 50 |
-| `scip_config` | `scip_callchain_limit` | `100` | 1 to 1000 |
-| `scip_config` | `scip_workspace_retention_days` | `7` | 1 to 365 |
 | `git_timeouts_config` | `git_local_timeout`, `git_remote_timeout` | `30`, `300` | 5 or more, 30 or more |
 | `git_timeouts_config` | `github_api_timeout`, `gitlab_api_timeout` | `30`, `30` | 5 to 120 |
 | `error_handling_config` | `max_retry_attempts` | `3` | 1 to 10 |
@@ -684,10 +720,9 @@ unless the stored configuration already carries another value.
 | `voyage_ai_sinbin`, `cohere_sinbin` | `failure_threshold`, `failure_window_seconds`, `initial_cooldown_seconds`, `max_cooldown_seconds`, `backoff_multiplier` | `5`, `60`, `30`, `300`, `2.0` | |
 | `query_orchestration` | `parallel_query_orchestrator_timeout_seconds`, `max_query_latency_budget_seconds` | `20`, `60` | |
 | `query_orchestration` | `all_providers_sinbinned_retry_limit`, `provider_health_probe_interval_seconds`, `provider_health_probe_join_timeout_seconds` | `2`, `30`, `5` | |
-| `memory_retrieval_config` | five settings | see [Memory Retrieval](../server/memory-retrieval.md#settings) | |
+| `feature_settings.memory` (cidx-memory; a stored `memory_retrieval_config` moves here on load) | five settings | see [Memory Retrieval](../server/memory-retrieval.md#settings) | |
 
-Of these, `coalesce_k_min`, `coalesce_k_max`, `scip_reference_limit`, `scip_dependency_depth`,
-`scip_callchain_max_depth`, `scip_callchain_limit`, `scip_workspace_retention_days`, `temporal_lane_concurrency`,
+Of these, `coalesce_k_min`, `coalesce_k_max`, `temporal_lane_concurrency`,
 `scheduled_catchup_enabled`, `scheduled_catchup_interval_minutes`, `max_retry_attempts`, `base_retry_delay_seconds`
 and `max_retry_delay_seconds` are in `RESTART_REQUIRED_FIELDS`.
 
@@ -720,3 +755,5 @@ restart before saving any setting ([Deployment](../server/deployment.md#bootstra
 | `enable_graph_channel_repair` | `true` | `true`, `false` | Dependency-map graph-channel repair |
 | `graph_repair_self_loop`, `graph_repair_malformed_yaml`, `graph_repair_garbage_domain`, `graph_repair_bidirectional_mismatch` | none (`dry_run`) | `disabled`, `dry_run`, `enabled` | Per-anomaly repair mode ([Dependency Map](../architecture/dependency-map.md#repair-and-phase-37-graph-channel-repair)) |
 | `fault_injection_enabled`, `fault_injection_nonprod_ack` | `false`, `false` | `true`, `false` | Fault-injection harness gate ([Fault Injection](../server/fault-injection.md)) |
+| `enabled_features` | `[]` | list of installed feature names, e.g. `["xray", "scip", "wiki", "memory", "depmap"]` | Feature add-ons whose server side runs (tools, routes, migrations, settings). An enabled name that is not installed stops startup ([Feature SDK](../architecture/feature-sdk.md)) |
+| `feature_bootstrap_settings` | `{}` | `{feature: {key: value}}` | Bootstrap keys of a feature's config section. X-Ray: `{"xray": {"xray_backend": "local"}}`, `delegated` runs evaluators in the X-Ray backend plugin, no fallback ([X-Ray](../architecture/cidx-xray.md)); a legacy top-level `xray_backend` is moved here on load. SCIP: `{"scip": {"scip_backend": "local"}}`, `delegated-plugin` builds in the SCIP backend plugin, no fallback ([SCIP](../architecture/cidx-scip.md)); a legacy top-level `scip_backend` is moved here on load |

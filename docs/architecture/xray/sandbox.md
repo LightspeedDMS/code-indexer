@@ -9,10 +9,10 @@ it is described in [architecture.md](architecture.md).
 
 | Layer | Where | What it enforces |
 |-------|-------|------------------|
-| 1. Pre-flight validation | `validate_rust_evaluator()`, `src/code_indexer/xray/sandbox.py` | Required entry points and a fast forbidden-construct scan, before any job or compile starts |
+| 1. Pre-flight validation | `validate_rust_evaluator()`, `packages/features/cidx-xray/src/cidx_xray/sandbox.py` | Required entry points and a fast forbidden-construct scan, before any job or compile starts |
 | 2. Authoritative validation | `validate_evaluator_source()`, `rust/xray-core/src/validator.rs` | AST-based allowlist and blocklist, run by the compile pipeline before `rustc` |
 | 3. Compilation | `rust/xray-core/src/compiler/` | Assembly with the fixed PREAMBLE/EPILOGUE, pinned toolchain, bounded compile time |
-| 4. Execution | `xray-cli` child process, `src/code_indexer/xray/rust_backend.py` | Evaluator runs outside the server process; killed with its process group on timeout |
+| 4. Execution | `xray-cli` child process, `packages/features/cidx-xray/src/cidx_xray/rust_backend.py` | Evaluator runs outside the server process; killed with its process group on timeout |
 | 5. Output handling | `rust_backend.py` | File reads confined to the repository root; server paths removed from error messages |
 
 ## 1. Pre-flight validation

@@ -3,9 +3,14 @@
 How the server attaches stored technical memories to semantic search results, which settings control it, and what
 it logs.
 
-Code: `src/code_indexer/server/mcp/memory_retrieval_pipeline.py` (filters, ordering, hydration, nudge),
-`src/code_indexer/server/mcp/handlers/search/memory_retrieval.py` (integration with `search_code`),
-`src/code_indexer/server/services/memory_candidate_retriever.py` (HNSW lookup).
+Memory retrieval is part of the `cidx-memory` feature add-on (modular phase 4f): it runs only while `"memory"` is
+in `enabled_features` ([cidx-memory](../architecture/cidx-memory.md)).
+
+Code (under `packages/features/cidx-memory/src/cidx_memory/server/`): `memory_retrieval_pipeline.py` (filters,
+ordering, hydration, nudge), `retrieval.py` (the `relevant_memories` search section `search_code` hands its
+results to), `memory_candidate_retriever.py` (HNSW lookup). The core computes the query embedding once
+(`src/code_indexer/server/mcp/handlers/search/query_vector.py`) and calls the section through
+`server/features/search_augmenters.py`.
 
 ## What it does
 
@@ -23,7 +28,8 @@ It does not run for:
 - searches of a `-global` repository, of several repositories, or of a wildcard pattern;
 - REST `/api/query`.
 
-The feature is **on by default**.
+The lookup is **on by default** while the feature is enabled. If the core could not compute the query embedding,
+no lookup runs and `relevant_memories` is absent (there is no second embedding attempt).
 
 ## Pipeline
 
@@ -55,7 +61,8 @@ Memories come from the shared store; they are not partitioned by user.
 
 ## Settings
 
-Runtime settings in the server database, object `memory_retrieval_config` (not `config.json`):
+Runtime settings in the server database, the memory feature's config section `feature_settings.memory` (not
+`config.json`). A `memory_retrieval_config` stored before the move is moved into the section on load:
 
 | Setting | Default | Meaning |
 |---------|---------|---------|
@@ -65,9 +72,9 @@ Runtime settings in the server database, object `memory_retrieval_config` (not `
 | `memory_retrieval_k_multiplier` | `5` | Candidate pool multiplier of step 2 (positive integer) |
 | `memory_retrieval_max_body_chars` | `2000` | Body length cap (positive integer); stored, but not applied: bodies are returned untruncated |
 
-The switch and the floors are read on every request. The Web UI Configuration page has no section for these
-settings, and its save route does not accept the `memory_retrieval` section, so the defaults apply
-unless the stored configuration already carries other values.
+The switch and the floors are read on every request. They are edited in the Feature Settings block of the Web UI
+Configuration page (or `PUT /api/admin/features/memory/config`) while the feature is enabled; the multiplier and
+body cap must be at least 1, the floors between 0 and 1.
 
 ### Tuning the floors
 

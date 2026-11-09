@@ -4,8 +4,10 @@ The CIDX Server can render the Markdown files of a repository as a browsable wik
 what the wiki serves, how to turn it on for a repository, how pages are rendered and cached, who can read them, and
 the view analytics.
 
-Code: `src/code_indexer/server/wiki/` (`routes.py`, `wiki_service.py`, `wiki_cache.py`,
-`wiki_cache_invalidator.py`); the router is mounted at `/wiki` (`routers/inline_routes.py`).
+The wiki is the `cidx-wiki` feature add-on: the server serves it only when `"wiki"` is in `enabled_features`
+(`config.json`). Code: `packages/features/cidx-wiki/src/cidx_wiki/server/` (`routes.py`, `wiki_service.py`,
+`wiki_cache.py`, `wiki_cache_invalidator.py`, `admin_routes.py`); the core mounts its routers at `/wiki` and
+`/admin`. See [cidx-wiki](../architecture/cidx-wiki.md).
 
 ## What it serves
 
@@ -146,7 +148,8 @@ repository". The tool declares the `query_repos` permission.
 
 ## Configuration
 
-Runtime settings, Web UI Configuration, Wiki section (object `wiki_config`), read whenever a page is rendered. Full
+Runtime settings of the cidx-wiki feature (`feature_settings.wiki`; Web UI Configuration, Feature Settings block), read
+whenever a page is rendered. Full
 table: [Server Settings Reference: Wiki](../reference/server-settings.md#wiki).
 
 | Setting | Default | Effect |

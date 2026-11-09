@@ -5,6 +5,13 @@ Maintainer reference for the server's dependency map: the per-domain Markdown fi
 delta analysis, the coordination that keeps one analysis running at a time, and the optional git backup of
 `cidx-meta`.
 
+The dependency map is the cidx-depmap feature add-on since modular phase 4g
+([cidx-depmap](cidx-depmap.md)): the modules named below as `services/dep_map_*.py`,
+`services/dependency_map_*.py`, `web/dependency_map_routes.py` and `mcp/handlers/depmap.py` are under
+`packages/features/cidx-depmap/src/cidx_depmap/server/` now (see the moved-path table there); the document
+parsers (`dep_map_parser_tables`, `dep_map_parser_hygiene`, `dep_map_file_utils`, `dep_map_source`), the catalog
+projection and the storage backends stay in the core.
+
 All paths below are relative to `src/code_indexer/server/` unless they start with `src/`.
 
 ## Contents

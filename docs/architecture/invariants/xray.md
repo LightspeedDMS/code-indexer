@@ -7,7 +7,7 @@ Rules the X-Ray code (AST-aware search over user-supplied Rust evaluators) must 
 ## Lazy loading of tree-sitter
 
 - `tree_sitter` and `tree_sitter_languages` are imported only inside `AstSearchEngine.__init__`
-  (`src/code_indexer/xray/`). CLI startup must not load them.
+  (`packages/features/cidx-xray/src/cidx_xray/`). CLI startup must not load them.
 - Gate: `tests/unit/xray/test_lazy_load.py` imports the CLI in a subprocess and asserts tree-sitter is absent from
   `sys.modules`. It runs in a subprocess because an in-process check is defeated by modules an earlier test already
   imported.
@@ -17,11 +17,11 @@ Rules the X-Ray code (AST-aware search over user-supplied Rust evaluators) must 
 ## Evaluator execution path
 
 - MCP and REST evaluate through the Rust engine (`rust/xray-core`, `rust/xray-cli`), called from
-  `src/code_indexer/xray/rust_backend.py` (`RustNativeBackend`). The evaluator is user Rust code with the signature
+  `packages/features/cidx-xray/src/cidx_xray/rust_backend.py` (`RustNativeBackend`). The evaluator is user Rust code with the signature
   `fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>`.
 - `validate_rust_evaluator()` runs before any job is submitted (MCP handlers in
   `src/code_indexer/server/mcp/handlers/xray/`, REST in `src/code_indexer/server/routes/xray_routes.py`).
-- The Python `PythonEvaluatorSandbox` (`src/code_indexer/xray/sandbox.py`, `HARD_TIMEOUT_SECONDS = 5.0`) is retained
+- The Python `PythonEvaluatorSandbox` (`packages/features/cidx-xray/src/cidx_xray/sandbox.py`, `HARD_TIMEOUT_SECONDS = 5.0`) is retained
   but is not on the MCP/REST request path. See [Sandbox](../xray/sandbox.md).
 - The Rust engine supports 17 languages by extension (`rust/xray-core/src/languages.rs`): Java, Kotlin, Python,
   TypeScript (ts, tsx), JavaScript (js, jsx, mjs, cjs), Go, C#, Bash, HTML, CSS, HCL/Terraform, YAML, SQL, XML,
@@ -74,7 +74,7 @@ Rules the X-Ray code (AST-aware search over user-supplied Rust evaluators) must 
   subprocess timeout clamped to what remains of the caller's deadline. It is not invoked at all when no cluster cache
   backend is configured (solo/CLI). Every failure path records the `cidx.xray.cache_identity_failures` counter
   (`_record_identity_failure_metric`).
-- The PostgreSQL cluster cache (`xray_cache_backend.py`) stores the identity as the value of its `source_hash` primary
+- The PostgreSQL cluster cache (`cidx_xray/postgres_cache.py`) stores the identity as the value of its `source_hash` primary
   key. TTL is enforced on read only (the `fetch()` cutoff). Expired rows are deleted lazily by `_cleanup_expired()`,
   which runs only as a side effect of `store()`: on an idle cluster old rows remain. Do not describe them as aging
   out automatically.
@@ -84,7 +84,7 @@ Rules the X-Ray code (AST-aware search over user-supplied Rust evaluators) must 
 
 ## Pattern library
 
-- Service: `XrayPatternService` (`src/code_indexer/server/services/xray_pattern_service.py`). Patterns live in
+- Service: `XrayPatternService` (`packages/features/cidx-xray/src/cidx_xray/server/pattern_service.py`). Patterns live in
   cidx-meta under `xray-patterns/{scope}/{name}.yaml`; `__any__` is the cross-repository scope.
 - Resolution order is repository scope first, then `__any__`. Never reverse it.
 - Scope and name reject `/`, `\` and `..` before any filesystem access; a non-string `repo_alias` is rejected with
