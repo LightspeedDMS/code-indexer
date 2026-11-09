@@ -1,11 +1,11 @@
-"""Unit tests for Temporal evolution entry truncation logic (AC2, AC3, AC4).
+"""Unit tests for Temporal example-repo entry truncation logic (AC2, AC3, AC4).
 
 Story #681: S3 - Temporal Search with Payload Control
 Story #50: Updated to sync operations for FastAPI thread pool execution.
 
-AC2: Evolution Entry Content Truncation
-AC3: Evolution Entry Diff Truncation
-AC4: Multiple Evolution Entries (independent handles)
+AC2: example-repo Entry Content Truncation
+AC3: example-repo Entry Diff Truncation
+AC4: Multiple example-repo Entries (independent handles)
 """
 
 import pytest
@@ -19,13 +19,13 @@ PREVIEW_SIZE = 2000
 
 @pytest.mark.slow
 class TestAC2EvolutionContentTruncation:
-    """AC2: Evolution Entry Content Truncation tests.
+    """AC2: example-repo Entry Content Truncation tests.
 
     Story #50: _apply_temporal_payload_truncation is now sync.
     """
 
     def test_large_evolution_content_is_truncated(self, cache):
-        """Test that evolution entry content > 2000 chars is truncated."""
+        """Test that example-repo entry content > 2000 chars is truncated."""
         from code_indexer.server.mcp.handlers import _apply_temporal_payload_truncation
 
         large_evo_content = "E" * (PREVIEW_SIZE + 2000)
@@ -34,7 +34,7 @@ class TestAC2EvolutionContentTruncation:
                 "file_path": "/path/to/file.py",
                 "content": "small main content",
                 "temporal_context": {
-                    "evolution": [
+                    "example-repo": [
                         {
                             "commit_hash": "abc123",
                             "content": large_evo_content,
@@ -54,9 +54,9 @@ class TestAC2EvolutionContentTruncation:
             truncated = _apply_temporal_payload_truncation(results)  # Sync call
 
         result = truncated[0]
-        evo_entry = result["temporal_context"]["evolution"][0]
+        evo_entry = result["temporal_context"]["example-repo"][0]
 
-        # Evolution content should be truncated
+        # example-repo content should be truncated
         assert "content_preview" in evo_entry
         assert evo_entry["content_preview"] == "E" * PREVIEW_SIZE
         assert evo_entry["content_has_more"] is True
@@ -67,7 +67,7 @@ class TestAC2EvolutionContentTruncation:
         # Original content should be removed
         assert "content" not in evo_entry
 
-        # Other evolution fields preserved
+        # Other example-repo fields preserved
         assert evo_entry["commit_hash"] == "abc123"
         assert evo_entry["timestamp"] == "2024-01-01T00:00:00Z"
 
@@ -77,15 +77,15 @@ class TestAC2EvolutionContentTruncation:
         assert evo_entry["diff_has_more"] is False
 
     def test_small_evolution_content_not_truncated(self, cache):
-        """Test that evolution entry content <= 2000 chars is NOT truncated."""
+        """Test that example-repo entry content <= 2000 chars is NOT truncated."""
         from code_indexer.server.mcp.handlers import _apply_temporal_payload_truncation
 
-        small_evo_content = "Small evolution content"
+        small_evo_content = "Small example-repo content"
         results = [
             {
                 "content": "main content",
                 "temporal_context": {
-                    "evolution": [
+                    "example-repo": [
                         {
                             "commit_hash": "abc123",
                             "content": small_evo_content,
@@ -103,7 +103,7 @@ class TestAC2EvolutionContentTruncation:
 
             truncated = _apply_temporal_payload_truncation(results)  # Sync call
 
-        evo_entry = truncated[0]["temporal_context"]["evolution"][0]
+        evo_entry = truncated[0]["temporal_context"]["example-repo"][0]
 
         # Content should NOT be truncated
         assert evo_entry["content"] == small_evo_content
@@ -116,13 +116,13 @@ class TestAC2EvolutionContentTruncation:
 
 
 class TestAC3EvolutionDiffTruncation:
-    """AC3: Evolution Diff Truncation tests.
+    """AC3: example-repo Diff Truncation tests.
 
     Story #50: _apply_temporal_payload_truncation is now sync.
     """
 
     def test_large_evolution_diff_is_truncated(self, cache):
-        """Test that evolution entry diff > 2000 chars is truncated."""
+        """Test that example-repo entry diff > 2000 chars is truncated."""
         from code_indexer.server.mcp.handlers import _apply_temporal_payload_truncation
 
         large_diff = "D" * (PREVIEW_SIZE + 3000)
@@ -131,7 +131,7 @@ class TestAC3EvolutionDiffTruncation:
                 "file_path": "/path/to/file.py",
                 "content": "main content",
                 "temporal_context": {
-                    "evolution": [
+                    "example-repo": [
                         {
                             "commit_hash": "abc123",
                             "content": "small content",
@@ -150,7 +150,7 @@ class TestAC3EvolutionDiffTruncation:
 
             truncated = _apply_temporal_payload_truncation(results)  # Sync call
 
-        evo_entry = truncated[0]["temporal_context"]["evolution"][0]
+        evo_entry = truncated[0]["temporal_context"]["example-repo"][0]
 
         # Diff should be truncated
         assert "diff_preview" in evo_entry
@@ -169,7 +169,7 @@ class TestAC3EvolutionDiffTruncation:
         assert evo_entry["content_has_more"] is False
 
     def test_small_evolution_diff_not_truncated(self, cache):
-        """Test that evolution entry diff <= 2000 chars is NOT truncated."""
+        """Test that example-repo entry diff <= 2000 chars is NOT truncated."""
         from code_indexer.server.mcp.handlers import _apply_temporal_payload_truncation
 
         small_diff = "Small diff"
@@ -177,7 +177,7 @@ class TestAC3EvolutionDiffTruncation:
             {
                 "content": "main content",
                 "temporal_context": {
-                    "evolution": [
+                    "example-repo": [
                         {
                             "commit_hash": "abc123",
                             "content": "content",
@@ -195,7 +195,7 @@ class TestAC3EvolutionDiffTruncation:
 
             truncated = _apply_temporal_payload_truncation(results)  # Sync call
 
-        evo_entry = truncated[0]["temporal_context"]["evolution"][0]
+        evo_entry = truncated[0]["temporal_context"]["example-repo"][0]
 
         # Diff should NOT be truncated
         assert evo_entry["diff"] == small_diff
@@ -216,7 +216,7 @@ class TestAC3EvolutionDiffTruncation:
             {
                 "content": "main",
                 "temporal_context": {
-                    "evolution": [
+                    "example-repo": [
                         {
                             "commit_hash": "abc123",
                             "content": large_content,
@@ -234,7 +234,7 @@ class TestAC3EvolutionDiffTruncation:
 
             truncated = _apply_temporal_payload_truncation(results)  # Sync call
 
-        evo_entry = truncated[0]["temporal_context"]["evolution"][0]
+        evo_entry = truncated[0]["temporal_context"]["example-repo"][0]
 
         # Both should be truncated with different handles
         assert evo_entry["content_preview"] == "C" * PREVIEW_SIZE
@@ -252,20 +252,20 @@ class TestAC3EvolutionDiffTruncation:
 
 
 class TestAC4MultipleEvolutionEntries:
-    """AC4: Multiple Evolution Entries tests (independent handles).
+    """AC4: Multiple example-repo Entries tests (independent handles).
 
     Story #50: _apply_temporal_payload_truncation is now sync.
     """
 
     def test_multiple_entries_get_independent_handles(self, cache):
-        """Test that each evolution entry gets independent cache handles."""
+        """Test that each example-repo entry gets independent cache handles."""
         from code_indexer.server.mcp.handlers import _apply_temporal_payload_truncation
 
         results = [
             {
                 "content": "main",
                 "temporal_context": {
-                    "evolution": [
+                    "example-repo": [
                         {
                             "commit_hash": "commit1",
                             "content": "A" * (PREVIEW_SIZE + 1000),
@@ -293,29 +293,29 @@ class TestAC4MultipleEvolutionEntries:
 
             truncated = _apply_temporal_payload_truncation(results)  # Sync call
 
-        evolution = truncated[0]["temporal_context"]["evolution"]
+        evolution = truncated[0]["temporal_context"]["example-repo"]
 
         # Entry 1: both content and diff truncated
-        assert evolution[0]["content_preview"] == "A" * PREVIEW_SIZE
-        assert evolution[0]["content_has_more"] is True
-        assert evolution[0]["diff_preview"] == "a" * PREVIEW_SIZE
-        assert evolution[0]["diff_has_more"] is True
+        assert example-repo[0]["content_preview"] == "A" * PREVIEW_SIZE
+        assert example-repo[0]["content_has_more"] is True
+        assert example-repo[0]["diff_preview"] == "a" * PREVIEW_SIZE
+        assert example-repo[0]["diff_has_more"] is True
 
         # Entry 2: content truncated, diff not
-        assert evolution[1]["content_preview"] == "B" * PREVIEW_SIZE
-        assert evolution[1]["content_has_more"] is True
-        assert evolution[1]["diff"] == "small diff"
-        assert evolution[1]["diff_has_more"] is False
+        assert example-repo[1]["content_preview"] == "B" * PREVIEW_SIZE
+        assert example-repo[1]["content_has_more"] is True
+        assert example-repo[1]["diff"] == "small diff"
+        assert example-repo[1]["diff_has_more"] is False
 
         # Entry 3: content not truncated, diff truncated
-        assert evolution[2]["content"] == "small content"
-        assert evolution[2]["content_has_more"] is False
-        assert evolution[2]["diff_preview"] == "C" * PREVIEW_SIZE
-        assert evolution[2]["diff_has_more"] is True
+        assert example-repo[2]["content"] == "small content"
+        assert example-repo[2]["content_has_more"] is False
+        assert example-repo[2]["diff_preview"] == "C" * PREVIEW_SIZE
+        assert example-repo[2]["diff_has_more"] is True
 
         # All handles should be unique
         handles = []
-        for entry in evolution:
+        for entry in example-repo:
             if entry.get("content_cache_handle"):
                 handles.append(entry["content_cache_handle"])
             if entry.get("diff_cache_handle"):
@@ -326,10 +326,10 @@ class TestAC4MultipleEvolutionEntries:
         assert len(set(handles)) == 4  # All unique
 
     def test_empty_evolution_array_handled(self, cache):
-        """Test that empty evolution array is handled correctly."""
+        """Test that empty example-repo array is handled correctly."""
         from code_indexer.server.mcp.handlers import _apply_temporal_payload_truncation
 
-        results = [{"content": "main content", "temporal_context": {"evolution": []}}]
+        results = [{"content": "main content", "temporal_context": {"example-repo": []}}]
 
         with patch(
             "code_indexer.server.mcp.handlers.app_module.app.state"
@@ -338,5 +338,5 @@ class TestAC4MultipleEvolutionEntries:
 
             truncated = _apply_temporal_payload_truncation(results)  # Sync call
 
-        # Evolution should remain empty array
-        assert truncated[0]["temporal_context"]["evolution"] == []
+        # example-repo should remain empty array
+        assert truncated[0]["temporal_context"]["example-repo"] == []

@@ -723,7 +723,7 @@ def test_target_legitimately_refreshed_in_place_converges_instead_of_permanent_c
     already-published, fully-preserved shard as a "collision" forever --
     confirmed in production as 293 WARNINGs/23h for one repo (69 shards,
     zero progress across every pass). A target that still contains
-    EVERYTHING this mechanism verified at publish time (additive evolution
+    EVERYTHING this mechanism verified at publish time (additive example-repo
     only -- nothing lost or altered) must converge instead of colliding
     forever.
     """
@@ -947,13 +947,13 @@ def test_target_deleted_previously_verified_record_is_still_a_collision_1580(
     passing before AND after this session's allowlist fix): the
     pre-existing "missing record" test above actually ALTERS p1's
     content, which fails identically under both the OLD exact-digest
-    -equality rule and the NEW additive-evolution rule -- it never
+    -equality rule and the NEW additive-example-repo rule -- it never
     discriminated between them. This test instead DELETES p1 outright
     while keeping the target structurally complete via a different
     record (p2). A deleted record always changes
     ``manifest_digest(target)``, so the OLD exact-match rule already
     rejected this case too -- this test exists to positively confirm the
-    additive-evolution relaxation stayed strictly additive, never
+    additive-example-repo relaxation stayed strictly additive, never
     silently tolerating a subtractive change, rather than to reproduce a
     bug.
     """

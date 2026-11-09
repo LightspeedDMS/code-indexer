@@ -238,7 +238,7 @@ class TestTemporalMetadata:
            semantic_query_manager.py's _execute_temporal_query (lines
            2333-2344) builds temporal_context from commit_hash, commit_date,
            commit_message, author_name, commit_timestamp, and diff_type --
-           NOT the old first_seen/last_seen/commit_count/commits "evolution
+           NOT the old first_seen/last_seen/commit_count/commits "example-repo
            timeline" shape this test previously asserted. That shape was
            retired by Bug #1301 (those fields/params were never implemented
            production behavior and are permanent no-ops on the per-commit
