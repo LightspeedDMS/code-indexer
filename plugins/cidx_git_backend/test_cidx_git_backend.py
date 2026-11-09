@@ -1,15 +1,15 @@
 """
-Tests for the git-mcp-backed GitBackend ().
+Tests for the the git service-backed GitBackend ().
 
 The GitBackend contract is structural (cidx's Protocol) — so these pin the two
-things that can silently drift from git-mcp: (1) the JSON-RPC envelope and
+things that can silently drift from the git service: (1) the JSON-RPC envelope and
 cow_path addressing every method sends, and (2) the reconstruction of the handful
 of methods cidx expects as RAW git output (status_porcelain, remote_list -v,
 diff_name_only, list_branches, show_ref→CompletedProcess). Transport/tool errors
 must surface as GitMcpBackendError, never a silent empty result — a delegated
 backend that quietly "succeeded" would corrupt cidx's git state view.
 
-The live end-to-end pass (against the deployed git-mcp on a real repo) proved the
+The live end-to-end pass (against the deployed the git service on a real repo) proved the
 happy path; this locks the contract with no cluster needed.
 """
 
@@ -46,7 +46,7 @@ def _rpc(result: dict) -> str:
 
 
 def _content(payload) -> dict:
-    """git-mcp wraps a tool's JSON return as content[0].text."""
+    """the git service wraps a tool's JSON return as content[0].text."""
     return {"content": [{"type": "text", "text": json.dumps(payload)}]}
 
 
@@ -60,7 +60,7 @@ def backend(monkeypatch):
     monkeypatch.delenv("CIDX_GIT_MCP_URL", raising=False)
     monkeypatch.delenv("CIDX_GIT_MCP_TOKEN", raising=False)
     monkeypatch.delenv("CIDX_GIT_MCP_TIMEOUT", raising=False)
-    return GitMcpBackend(base_url="http://git-mcp:3000")
+    return GitMcpBackend(base_url="http://the git service:3000")
 
 
 class _FakeBytesResp(_FakeResp):
@@ -79,14 +79,14 @@ def _http_error(url: str, code: int, payload: dict) -> urllib.error.HTTPError:
     )
 
 
-#: How NestJS answers a route it does not have: a git-mcp predating raw exec.
+#: How NestJS answers a route it does not have: a the git service predating raw exec.
 _NO_RAW_ROUTE = {"statusCode": 404, "message": "Cannot POST /v1/git/exec/raw"}
 
 
 def _install(monkeypatch, responder, raw=None):
     """Patch urlopen; `responder(parsed_body) -> raw_json_str` answers the MCP
     endpoint, `raw(parsed_body) -> bytes | HTTPError` the raw exec endpoint
-    (default: a git-mcp without it, 404). Records calls."""
+    (default: a the git service without it, 404). Records calls."""
     calls = []
 
     def fake_urlopen(req, timeout=None):
@@ -126,7 +126,7 @@ class TestTransportEnvelope:
         assert "workspace_id" not in body["params"]["arguments"]
 
     def test_bearer_header_sent_when_token_set(self, monkeypatch):
-        b = GitMcpBackend(base_url="http://git-mcp:3000", token="tok123")
+        b = GitMcpBackend(base_url="http://the git service:3000", token="tok123")
         calls = _install(monkeypatch, lambda body: _rpc(_content({"ref": "m"})))
         b.current_branch(REPO)
         assert calls[-1]["req"].headers["Authorization"] == "Bearer tok123"
@@ -246,7 +246,7 @@ class TestReconstruction:
         ]
 
     def test_diff_name_only_uses_git_mcp_name_only_files(self, backend, monkeypatch):
-        # Uses git-mcp's own --name-only list (never a lossy unified-diff parse), so
+        # Uses the git service's own --name-only list (never a lossy unified-diff parse), so
         # even a quoted / non-ASCII path survives intact.
         calls = _install(
             monkeypatch, lambda b: _rpc(_content({"files": ["x.py", "dir/café.py"]}))
@@ -381,7 +381,7 @@ class TestErrorsFailLoud:
 
 class TestExceptionContract:
     """The ~30 seam callers do `except subprocess.CalledProcessError` and read
-    `.stderr`; the delegated backend MUST raise that type, with git-mcp's error
+    `.stderr`; the delegated backend MUST raise that type, with the git service's error
     text in `.stderr`, or every recovery path goes dead (a raw RuntimeError would
     escape uncaught)."""
 
@@ -457,8 +457,8 @@ class TestWrongShapeBodyFailsLoud:
 
 class TestCapabilities:
     def test_owns_credentials_true(self, backend):
-        # git-mcp holds the token and injects it, so cidx must strip any credential
-        # before storing a URL — the PAT lives only in git-mcp.
+        # the git service holds the token and injects it, so cidx must strip any credential
+        # before storing a URL — the PAT lives only in the git service.
         assert backend.owns_credentials is True
 
 
@@ -474,7 +474,7 @@ class TestFactory:
 class TestHistoryOps:
     """cidx temporal history: paged log, batched diffs and object reads.
 
-    git-mcp returns git's stdout base64-encoded; the plugin hands cidx those
+    the git service returns git's stdout base64-encoded; the plugin hands cidx those
     exact bytes and fails as a local ``check=True`` run would.
     """
 
@@ -642,7 +642,7 @@ class TestHistoryOps:
 
 class TestGitToolsRunner:
     """cidx's git tools on an activated copy: git_exec (raw, exit code
-    returned) and git_push (git-mcp's credentials)."""
+    returned) and git_push (the git service's credentials)."""
 
     @staticmethod
     def _raw(stdout: bytes, exit_code: int = 0, stderr: str = "") -> dict:
@@ -760,7 +760,7 @@ class TestGitToolsRunner:
 
 
 class TestPaginatedResultsRefused:
-    """git-mcp's response layer pages an oversized result and marks it with
+    """the git service's response layer pages an oversized result and marks it with
     ``_pagination``. A page is never the answer: every tool refuses it."""
 
     @staticmethod
@@ -852,12 +852,12 @@ def _no_mcp(body):
 
 
 class TestRawExec:
-    """``run`` goes through git-mcp's raw exec endpoint, falling back to MCP
-    ``git_exec`` only for a git-mcp without it (404) or without its secret
+    """``run`` goes through the git service's raw exec endpoint, falling back to MCP
+    ``git_exec`` only for a the git service without it (404) or without its secret
     (503). A partial answer is never accepted."""
 
     def test_raw_request_and_exact_bytes(self, monkeypatch):
-        backend = GitMcpBackend(base_url="http://git-mcp:3000", token="s3cret")
+        backend = GitMcpBackend(base_url="http://the git service:3000", token="s3cret")
         calls = _install(
             monkeypatch, _no_mcp, raw=lambda b: _raw_body(b"a\x00b\r\nc\n")
         )
@@ -870,7 +870,7 @@ class TestRawExec:
         assert (out.returncode, out.stdout) == (0, "a\x00b\nc\n")
         assert out.args == ["git", "blame", "--porcelain", "--", "a.py"]
         (call,) = calls
-        assert call["req"].full_url == "http://git-mcp:3000/v1/git/exec/raw"
+        assert call["req"].full_url == "http://the git service:3000/v1/git/exec/raw"
         assert call["req"].headers["Authorization"] == "Bearer s3cret"
         assert call["timeout"] == 50
         assert call["body"] == {
@@ -901,7 +901,7 @@ class TestRawExec:
 
         def raw(body):
             raw_calls.append(body)
-            return _http_error("http://git-mcp:3000/v1/git/exec/raw", code, {})
+            return _http_error("http://the git service:3000/v1/git/exec/raw", code, {})
 
         mcp = {"exit_code": 0, "stdout_b64": base64.b64encode(b"ok\n").decode()}
         calls = _install(monkeypatch, lambda b: _rpc(_content(mcp)), raw=raw)
@@ -916,17 +916,17 @@ class TestRawExec:
         assert len(raw_calls) == 2  # and asked again after it
 
     def test_a_token_bearing_backend_falls_back_on_503(self, monkeypatch):
-        """The production failure mode: cidx holds a token but git-mcp has no
+        """The production failure mode: cidx holds a token but the git service has no
         shared secret configured (or it was rotated away) -- 503, not 401."""
         import base64
 
-        backend = GitMcpBackend(base_url="http://git-mcp:3000", token="s3cret")
+        backend = GitMcpBackend(base_url="http://the git service:3000", token="s3cret")
         mcp = {"exit_code": 0, "stdout_b64": base64.b64encode(b"ok\n").decode()}
         calls = _install(
             monkeypatch,
             lambda b: _rpc(_content(mcp)),
             raw=lambda b: _http_error(
-                "http://git-mcp:3000/v1/git/exec/raw", 503, {"message": "no secret"}
+                "http://the git service:3000/v1/git/exec/raw", 503, {"message": "no secret"}
             ),
         )
         assert backend.run(REPO, ["log"]).stdout == "ok\n"
@@ -948,7 +948,7 @@ class TestRawExec:
             monkeypatch,
             _no_mcp,
             raw=lambda b: _http_error(
-                "http://git-mcp:3000/v1/git/exec/raw",
+                "http://the git service:3000/v1/git/exec/raw",
                 code,
                 {"message": "git subcommand not allowed"},
             ),
@@ -1028,11 +1028,11 @@ class TestRawExec:
     def test_typed_tools_never_use_raw(self, backend, monkeypatch):
         calls = _install(monkeypatch, lambda b: _rpc(_content({"reachable": True})))
         backend.ls_remote("https://example.com/r.git")
-        assert [c["req"].full_url for c in calls] == ["http://git-mcp:3000/v1/git/mcp"]
+        assert [c["req"].full_url for c in calls] == ["http://the git service:3000/v1/git/mcp"]
 
 
 def _auto_page(payload: dict, path: str, kept: int) -> dict:
-    """*payload* as @lightspeed/mcp-tools' autoPage cuts it: the list at
+    """*payload* as @example/mcp-tools' autoPage cuts it: the list at
     *path* sliced to *kept* items, the scalars untouched, a ``_pagination``
     block naming the cut list."""
     full = payload[path]
@@ -1075,7 +1075,7 @@ def _raw_requests(calls):
 
 class TestLsRemoteManyRefs:
     """a remote with ~900 refs (fresca) made git_ls_remote's ref list
-    exceed git-mcp's MCP ceiling; the page was refused and cidx reported the
+    exceed the git service's MCP ceiling; the page was refused and cidx reported the
     repo as invalid. Only ``reachable`` is read, and a page cut at ``refs``
     keeps it whole."""
 
@@ -1251,7 +1251,7 @@ class TestLargeOutputThroughRawExec:
         assert exc.value.stderr == "fatal: bad ref"
 
     def test_no_raw_endpoint_and_mcp_too_large_is_an_error(self, backend, monkeypatch):
-        # A git-mcp without raw exec (404) falls back to MCP git_exec, which
+        # A the git service without raw exec (404) falls back to MCP git_exec, which
         # refuses the same oversized output: an error, never the first page.
         def responder(body):
             if body["params"]["name"] == "git_exec":

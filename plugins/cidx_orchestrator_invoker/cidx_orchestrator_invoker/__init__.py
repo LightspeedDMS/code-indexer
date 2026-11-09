@@ -4,7 +4,7 @@ Run cidx's description/analysis prompts as agent-orchestrator jobs.
 cidx dispatches every description/analysis LLM call -- golden-repo registration
 lifecycle, dep-map passes, description refresh, self-monitoring -- through one
 CliDispatcher, whose primary invoker normally shells out to the ``claude`` CLI.
-In our EKS deployment the CLI is deliberately NOT in the cidx image: LLM
+In a clustered deployment the CLI is deliberately NOT in the cidx image: LLM
 execution belongs inside the orchestrator's sandboxed worker, not in a
 long-lived service pod. Without a replacement, every ``lifecycle_registration``
 job died with ``ClaudeInvoker: non-zero exit 127`` and ``/health`` degraded.
@@ -74,7 +74,7 @@ RESOLVES_GOLDEN_REPOSITORIES = True
 
 
 class OrchestratorInvoker:
-    """IntelligenceCliInvoker backed by the agent-orchestrator.
+    """IntelligenceCliInvoker backed by the orchestration layer.
 
     invoke(flow, cwd, prompt, timeout, max_turns) -> InvocationResult.
     Never raises: the dispatcher expects a well-typed result, never an exception.
@@ -145,7 +145,7 @@ class OrchestratorInvoker:
 
         On a pod without the repositories (cidx ``content_backend:
         delegated``) *cwd* holds index state only: the repository is resolved
-        from cidx's golden registry (registered remote + branch) and git-mcp
+        from cidx's golden registry (registered remote + branch) and the git service
         (the commit cidx indexed) -- see :func:`_resolve_golden_repo`. Otherwise
         it is read from the clone at *cwd*, as below. Which case applies is
         the core's answer in ``cidx_sdk.seams.cli_invoker.REPOSITORY_SOURCE``;
@@ -213,7 +213,7 @@ class OrchestratorInvoker:
             "outputMode": "result",
             "cidxAware": False,
             # gitAware provisions the repo in the orchestrator's sandbox (via
-            # workspace-mcp) from the top-level repoUrl/branch below. On when we
+            # the content service) from the top-level repoUrl/branch below. On when we
             # resolved a URL (so the agent analyzes real content), off otherwise.
             "gitAware": bool(repo),
         }
@@ -225,7 +225,7 @@ class OrchestratorInvoker:
             "metadata": {"source": "cidx", "cwd": cwd},
         }
         # repoUrl/branch are TOP-LEVEL body fields (not options): the orchestrator
-        # reads them there to scope the job's workspace-mcp JWT to this repo and
+        # reads them there to scope the job's the content service JWT to this repo and
         # provision it into the agent's sandbox.
         if repo:
             body["repoUrl"] = repo["repoUrl"]
@@ -346,7 +346,7 @@ def _resolve_golden_repo(cwd: str) -> Dict[str, Any]:
 
     ``{}`` when *cwd* is no golden repo (the job is about no repository).
     Otherwise ``repoUrl`` (credentials stripped), ``branch`` and ``commit``.
-    A registry or git-mcp failure RAISES (GoldenRepoSourceError): handing the
+    A registry or the git service failure RAISES (GoldenRepoSourceError): handing the
     agent no repository would publish a description of an empty tree.
     """
     repository_source = REPOSITORY_SOURCE.get()

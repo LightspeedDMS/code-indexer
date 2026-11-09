@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "cidx-orchestrator-invoker"
 version = "0.1.0"
-description = "Run cidx's LLM prompts as agent-orchestrator jobs instead of a local claude CLI subprocess"
+description = "Run cidx's LLM prompts as orchestration layer jobs instead of a local claude CLI subprocess"
 requires-python = ">=3.10"
 # A delegate depends on the SDK only (its seam types and the core's repository
 # source), never on the core. By path, like every in-repo distribution.

@@ -1,26 +1,26 @@
 """
-Delegate cidx's internal git operations to the git-mcp spoke ().
+Delegate cidx's internal git operations to the the git service spoke ().
 
 cidx's ``GitBackend`` seam routes every internal git call through one
 object. Its default ``LocalGitBackend`` shells out to git in-process. In the EKS
 deployment cidx must do NO git itself — git (like cloning) belongs in a spoke that
 owns the credentials and the shared volume. This plugin supplies a ``GitBackend``
-that forwards each op to **git-mcp**, exactly as the clone seam forwards cloning to
-workspace-mcp.
+that forwards each op to **the git service**, exactly as the clone seam forwards cloning to
+the content service.
 
-Addressing is BY PATH, matching the clone seam: git-mcp's tools accept a
+Addressing is BY PATH, matching the clone seam: the git service's tools accept a
 ``cow_path`` that runs the op directly on that path on the shared
 FlexVol — cidx passes its own ``repo_path``, no workspace_id it never registered.
 
 Transport: JSON-RPC ``tools/call`` over ``POST {CIDX_GIT_MCP_URL}/v1/git/mcp``,
-stdlib ``urllib`` only (no third-party deps in the cidx image). git-mcp returns a
+stdlib ``urllib`` only (no third-party deps in the cidx image). the git service returns a
 structured JSON result; a few GitBackend methods hand cidx RAW git output it parses
 (``status_porcelain``, ``remote_list``, ``diff_name_only``, ``list_branches``,
 ``show_ref``), so those are reconstructed faithfully here.
 
-``run`` (cidx's git tools: blame, log, show, ...) uses git-mcp's raw endpoint,
+``run`` (cidx's git tools: blame, log, show, ...) uses the git service's raw endpoint,
 ``POST {CIDX_GIT_MCP_URL}/v1/git/exec/raw``: git's stdout as raw bytes, then a
-NUL, then a JSON trailer proving the output is whole. A git-mcp without it (404)
+NUL, then a JSON trailer proving the output is whole. A the git service without it (404)
 or without its shared secret (503) gets MCP ``git_exec`` instead. No answer is
 ever accepted in part: a ``_pagination`` page from ANY tool, a truncated raw
 stream and a byte tool's ``OUTPUT_TOO_LARGE`` all raise.
@@ -34,10 +34,10 @@ nothing but the ``refs`` list (a remote with many refs) still answers it whole.
 
 Configuration (env)
 -------------------
-CIDX_GIT_MCP_URL     git-mcp base URL.
+CIDX_GIT_MCP_URL     the git service base URL.
                      Default: http://localhost:3000
 CIDX_GIT_MCP_TOKEN   Bearer token. The raw exec endpoint requires it to equal
-                     git-mcp's GIT_MCP_SHARED_SECRET (401 otherwise).
+                     the git service's GIT_MCP_SHARED_SECRET (401 otherwise).
 CIDX_GIT_MCP_TIMEOUT Per-request HTTP timeout seconds (default: 120).
 
 Enable with the server config ``git_backend='delegated'`` (installing the package
@@ -89,13 +89,13 @@ def _decode_like_text_mode(raw: bytes) -> str:
 
 _DEFAULT_URL = "http://localhost:3000"
 
-#: Items git-mcp accepts in one git_diff_commits / git_show_objects call. A
+#: Items the git service accepts in one git_diff_commits / git_show_objects call. A
 #: larger request is split into calls of this size -- still a batch per call.
 _MAX_HISTORY_BATCH = 256
 
 
 class GitMcpBackendError(subprocess.CalledProcessError):
-    """A git-mcp call failed (transport, JSON-RPC, or tool error).
+    """A the git service call failed (transport, JSON-RPC, or tool error).
 
     Subclasses ``subprocess.CalledProcessError`` — NOT a bare ``RuntimeError`` —
     because the ``GitBackend`` contract (``storage/shared/git_backend.py``)
@@ -105,7 +105,7 @@ class GitMcpBackendError(subprocess.CalledProcessError):
     ``e.stderr`` to drive recovery (remote-already-exists fallback, divergent-branch
     auto-recovery, fetch-error classification). A ``RuntimeError`` would miss every
     one of those handlers and escape uncaught, so the delegated backend must raise
-    the same type — with ``stderr`` populated from git-mcp's error text so the
+    the same type — with ``stderr`` populated from the git service's error text so the
     substring checks (`"already exists"`, …) still fire.
     """
 
@@ -115,7 +115,7 @@ class GitMcpBackendError(subprocess.CalledProcessError):
         *,
         stderr: Optional[str] = None,
         returncode: int = 1,
-        cmd: str = "git-mcp",
+        cmd: str = "the git service",
     ) -> None:
         super().__init__(
             returncode,
@@ -130,13 +130,13 @@ class GitMcpBackendError(subprocess.CalledProcessError):
 
 
 class GitMcpTimeoutError(GitMcpBackendError):
-    """A git-mcp call failed because of a transport or git-level timeout."""
+    """A the git service call failed because of a transport or git-level timeout."""
 
 
 class GitMcpPaginatedResultError(GitMcpBackendError):
-    """A git-mcp tool result carried ``_pagination``: it is a PAGE, not the result.
+    """A the git service tool result carried ``_pagination``: it is a PAGE, not the result.
 
-    git-mcp's shared MCP response layer pages any result over its size budget
+    the git service's shared MCP response layer pages any result over its size budget
     and marks it with a ``_pagination`` key. For ``git_exec`` that cuts
     ``stdout_b64`` mid-stream -- what arrives is a prefix of git's output (and
     usually not even valid base64); for a structured tool it is a truncated
@@ -146,26 +146,26 @@ class GitMcpPaginatedResultError(GitMcpBackendError):
     """
 
 
-#: The key git-mcp's response layer adds to a result it truncated into pages.
+#: The key the git service's response layer adds to a result it truncated into pages.
 _PAGINATION_KEY = "_pagination"
 
-#: git-mcp's raw exec endpoint: ``git_exec``'s request, answered with git's
+#: the git service's raw exec endpoint: ``git_exec``'s request, answered with git's
 #: stdout as raw bytes, one NUL, then a JSON trailer -- never paged, never
 #: base64, never truncated silently (see :meth:`GitMcpBackend._exec_raw`).
 _RAW_EXEC_ROUTE = "/v1/git/exec/raw"
 #: The trailer's separator from stdout. The split is at the LAST one: stdout
 #: may contain NULs (``-z`` output), the JSON trailer never does.
 _RAW_TRAILER_SEPARATOR = b"\x00"
-#: How long a git-mcp without the raw endpoint (404) or without its shared
+#: How long a the git service without the raw endpoint (404) or without its shared
 #: secret (503) is not asked again before falling back to MCP ``git_exec``.
 _RAW_RETRY_SECONDS = 300.0
 #: The ``code`` a byte tool's ``isError`` result carries when git's output is
-#: over git-mcp's budget (it refuses rather than truncating).
+#: over the git service's budget (it refuses rather than truncating).
 _OUTPUT_TOO_LARGE = "OUTPUT_TOO_LARGE"
 
 
 class GitMcpOutputTooLargeError(GitMcpBackendError):
-    """git's output exceeded git-mcp's budget and was refused, not truncated.
+    """git's output exceeded the git service's budget and was refused, not truncated.
 
     Raised for a byte tool's ``OUTPUT_TOO_LARGE`` error and for a raw exec
     whose trailer says ``truncated``: a prefix of the output is never handed
@@ -174,7 +174,7 @@ class GitMcpOutputTooLargeError(GitMcpBackendError):
 
 
 class _RawExecUnavailable(Exception):
-    """The raw exec endpoint cannot serve this git-mcp: use MCP ``git_exec``."""
+    """The raw exec endpoint cannot serve this the git service: use MCP ``git_exec``."""
 
 
 #: What a too-big MCP answer raises: a page (a structured tool's list cut
@@ -185,7 +185,7 @@ _OVER_MCP_CEILING = (GitMcpPaginatedResultError, GitMcpOutputTooLargeError)
 
 def _page_marker(text: str) -> Optional[Dict[str, Any]]:
     """The ``_pagination`` block when one text chunk of a tool result is a
-    git-mcp page (an empty dict when the block is not an object), else None."""
+    the git service page (an empty dict when the block is not an object), else None."""
     if _PAGINATION_KEY not in text:
         return None
     try:
@@ -205,7 +205,7 @@ _TOOL_TIMEOUT_PATTERNS = ("block timeout reached", "timed out")
 
 
 def _http_error_detail(exc: urllib.error.HTTPError) -> str:
-    """git-mcp's refusal message from an HTTP error body (bounded)."""
+    """the git service's refusal message from an HTTP error body (bounded)."""
     try:
         raw = exc.read(4096)
     except OSError:
@@ -232,7 +232,7 @@ def _complete_raw_output(
     at = body.rfind(_RAW_TRAILER_SEPARATOR)
     if at < 0:
         raise GitMcpBackendError(
-            "git-mcp raw exec response has no trailer: the stream was cut, so "
+            "the git service raw exec response has no trailer: the stream was cut, so "
             "the output may be partial"
         )
     stdout, raw_trailer = body[:at], body[at + 1 :]
@@ -240,41 +240,41 @@ def _complete_raw_output(
         trailer = json.loads(raw_trailer.decode("utf-8"))
     except (ValueError, UnicodeDecodeError) as exc:
         raise GitMcpBackendError(
-            f"git-mcp raw exec trailer is not JSON: {exc}"
+            f"the git service raw exec trailer is not JSON: {exc}"
         ) from exc
     if not isinstance(trailer, dict):
-        raise GitMcpBackendError("git-mcp raw exec trailer is not an object")
+        raise GitMcpBackendError("the git service raw exec trailer is not an object")
     stderr = str(trailer.get("stderr") or "")
     if trailer.get("timed_out") is not False:
         if trailer.get("timed_out") is True:
             raise GitMcpTimeoutError(
-                f"git-mcp raw exec: git timed out: {stderr}", stderr=stderr
+                f"the git service raw exec: git timed out: {stderr}", stderr=stderr
             )
-        raise GitMcpBackendError("git-mcp raw exec trailer has no timed_out flag")
+        raise GitMcpBackendError("the git service raw exec trailer has no timed_out flag")
     if trailer.get("truncated") is not False:
         if trailer.get("truncated") is True:
             raise GitMcpOutputTooLargeError(
-                "git-mcp raw exec: git's output is over git-mcp's budget",
+                "the git service raw exec: git's output is over the git service's budget",
                 stderr=stderr,
             )
-        raise GitMcpBackendError("git-mcp raw exec trailer has no truncated flag")
+        raise GitMcpBackendError("the git service raw exec trailer has no truncated flag")
     if trailer.get("error"):
         raise GitMcpBackendError(
-            f"git-mcp raw exec could not run git: {trailer['error']}", stderr=stderr
+            f"the git service raw exec could not run git: {trailer['error']}", stderr=stderr
         )
     exit_code = trailer.get("exit_code")
     if isinstance(exit_code, bool) or not isinstance(exit_code, int):
         raise GitMcpBackendError(
-            f"git-mcp raw exec trailer exit_code is not a number: {exit_code!r}"
+            f"the git service raw exec trailer exit_code is not a number: {exit_code!r}"
         )
     declared = trailer.get("stdout_bytes")
     if isinstance(declared, bool) or declared != len(stdout):
         raise GitMcpBackendError(
-            f"git-mcp raw exec sent {len(stdout)} stdout bytes but declared "
+            f"the git service raw exec sent {len(stdout)} stdout bytes but declared "
             f"{declared!r}: the output is not whole"
         )
     return subprocess.CompletedProcess(
-        args=["git-mcp", "git_exec", *args],
+        args=["the git service", "git_exec", *args],
         returncode=exit_code,
         stdout=stdout,
         stderr=stderr,
@@ -282,14 +282,14 @@ def _complete_raw_output(
 
 
 class GitMcpBackend:
-    """A ``GitBackend`` that forwards every op to git-mcp, addressed by cow_path.
+    """A ``GitBackend`` that forwards every op to the git service, addressed by cow_path.
 
     Implements the same method surface as ``LocalGitBackend`` (structural typing —
     cidx's ``GitBackend`` is a ``typing.Protocol``), so it needs no import from cidx
     and stays a stdlib-only plugin.
 
     ``credentials_url`` on the network operations is accepted and not
-    forwarded: git-mcp supplies its own credential (``owns_credentials``), so
+    forwarded: the git service supplies its own credential (``owns_credentials``), so
     cidx's registered URL credential never leaves the pod. A request is
     bounded by its HTTP timeout rather than killed mid-flight -- cidx checks
     its job's cancellation between operations.
@@ -319,10 +319,10 @@ class GitMcpBackend:
 
     @property
     def owns_credentials(self) -> bool:
-        """True: git-mcp holds the git credential (``GIT_CLONE_TOKEN`` → its own
+        """True: the git service holds the git credential (``GIT_CLONE_TOKEN`` → its own
         credential helper) and injects it for every network op, so cidx must NOT
         embed a token in repo URLs and should strip any credential before storing
-        one. The PAT then lives ONLY in git-mcp."""
+        one. The PAT then lives ONLY in the git service."""
         return True
 
     # ── transport ────────────────────────────────────────────────────────────
@@ -349,14 +349,14 @@ class GitMcpBackend:
         if result.get("isError"):
             if _OUTPUT_TOO_LARGE in text:
                 raise GitMcpOutputTooLargeError(
-                    f"git-mcp {tool}: git's output is over git-mcp's budget: {text}",
+                    f"the git service {tool}: git's output is over the git service's budget: {text}",
                     stderr=text,
                 )
             if any(pattern in text for pattern in _TOOL_TIMEOUT_PATTERNS):
                 raise GitMcpTimeoutError(
-                    f"git-mcp {tool} tool error: {text}", stderr=text
+                    f"the git service {tool} tool error: {text}", stderr=text
                 )
-            raise GitMcpBackendError(f"git-mcp {tool} tool error: {text}", stderr=text)
+            raise GitMcpBackendError(f"the git service {tool} tool error: {text}", stderr=text)
         self._refuse_paginated(tool, result, unread_list)
         return self._parse(tool, text)
 
@@ -364,7 +364,7 @@ class GitMcpBackend:
     def _refuse_paginated(
         tool: str, result: Dict[str, Any], unread_list: Optional[str] = None
     ) -> None:
-        """Raise when ANY text chunk of *result* is a git-mcp page -- except a
+        """Raise when ANY text chunk of *result* is a the git service page -- except a
         page whose cut ``path`` is exactly *unread_list*."""
         for chunk in result.get("content") or []:
             if not (isinstance(chunk, dict) and chunk.get("type") == "text"):
@@ -374,7 +374,7 @@ class GitMcpBackend:
                 continue
             if unread_list is None or marker.get("path") != unread_list:
                 raise GitMcpPaginatedResultError(
-                    f"git-mcp {tool} returned a paginated (truncated) result; "
+                    f"the git service {tool} returned a paginated (truncated) result; "
                     "refusing to treat one page of the output as all of it"
                 )
 
@@ -405,16 +405,16 @@ class GitMcpBackend:
         except (urllib.error.URLError, OSError) as exc:
             if _is_timeout(exc):
                 raise GitMcpTimeoutError(
-                    f"git-mcp {tool} request to {self._url} timed out: {exc}",
+                    f"the git service {tool} request to {self._url} timed out: {exc}",
                     stderr=str(exc),
                 ) from exc
             raise GitMcpBackendError(
-                f"git-mcp {tool} request to {self._url} failed: {exc}", stderr=str(exc)
+                f"the git service {tool} request to {self._url} failed: {exc}", stderr=str(exc)
             ) from exc
         payload = json.loads(raw) if raw else {}
         if "error" in payload:
             raise GitMcpBackendError(
-                f"git-mcp {tool} JSON-RPC error: {payload['error']}",
+                f"the git service {tool} JSON-RPC error: {payload['error']}",
                 stderr=str(payload["error"]),
             )
         result = payload.get("result", {}) or {}
@@ -429,17 +429,17 @@ class GitMcpBackend:
     def _exec_raw(
         self, arguments: Dict[str, Any], args: Sequence[str], http_timeout: float
     ) -> subprocess.CompletedProcess:
-        """``git_exec`` through git-mcp's raw endpoint: git's exact stdout bytes.
+        """``git_exec`` through the git service's raw endpoint: git's exact stdout bytes.
 
         200 is ``<stdout bytes> 0x00 <JSON trailer>``; the output is the
         WHOLE output only when the trailer parses, carries a numeric
         ``exit_code``, is neither ``truncated`` nor ``timed_out``, has no
         ``error``, and ``stdout_bytes`` equals the bytes received. Anything
         else raises -- a cut or capped stream is never returned as complete.
-        404 (a git-mcp predating the endpoint) and 503 (no shared secret
+        404 (a the git service predating the endpoint) and 503 (no shared secret
         configured) raise :class:`_RawExecUnavailable` so the caller falls
         back to MCP ``git_exec``; they are remembered for
-        ``_RAW_RETRY_SECONDS``. Any other refusal is git-mcp's answer and
+        ``_RAW_RETRY_SECONDS``. Any other refusal is the git service's answer and
         raises, as MCP ``git_exec`` would have.
         """
         req = urllib.request.Request(
@@ -458,21 +458,21 @@ class GitMcpBackend:
                 raise _RawExecUnavailable(f"{exc.code}: {detail}") from exc
             if exc.code == 504:
                 raise GitMcpTimeoutError(
-                    f"git-mcp raw exec timed out: {detail}", stderr=detail
+                    f"the git service raw exec timed out: {detail}", stderr=detail
                 ) from exc
             raise GitMcpBackendError(
-                f"git-mcp raw exec refused git {args[0] if args else ''}: {detail}",
+                f"the git service raw exec refused git {args[0] if args else ''}: {detail}",
                 stderr=detail,
                 returncode=128,
             ) from exc
         except (urllib.error.URLError, OSError) as exc:
             if _is_timeout(exc):
                 raise GitMcpTimeoutError(
-                    f"git-mcp raw exec to {self._raw_url} timed out: {exc}",
+                    f"the git service raw exec to {self._raw_url} timed out: {exc}",
                     stderr=str(exc),
                 ) from exc
             raise GitMcpBackendError(
-                f"git-mcp raw exec to {self._raw_url} failed: {exc}", stderr=str(exc)
+                f"the git service raw exec to {self._raw_url} failed: {exc}", stderr=str(exc)
             ) from exc
         return _complete_raw_output(body, args)
 
@@ -498,7 +498,7 @@ class GitMcpBackend:
             parsed = json.loads(text)
         except json.JSONDecodeError as exc:
             raise GitMcpBackendError(
-                f"git-mcp {tool} returned an unparseable body: {text[:200]!r}",
+                f"the git service {tool} returned an unparseable body: {text[:200]!r}",
                 stderr=text,
             ) from exc
         return parsed if isinstance(parsed, dict) else {"_list": parsed}
@@ -506,11 +506,11 @@ class GitMcpBackend:
     @staticmethod
     def _require(tool: str, result: Dict[str, Any], key: str) -> Any:
         """Return ``result[key]`` or fail loud — a structured read whose expected
-        key is absent means git-mcp returned a wrong-shape (but valid-JSON) 200;
+        key is absent means the git service returned a wrong-shape (but valid-JSON) 200;
         defaulting it would mask a dirty/indexed repo as clean/empty."""
         if key not in result:
             raise GitMcpBackendError(
-                f"git-mcp {tool} response missing {key!r} (got keys {sorted(result)})"
+                f"the git service {tool} response missing {key!r} (got keys {sorted(result)})"
             )
         return result[key]
 
@@ -525,7 +525,7 @@ class GitMcpBackend:
         self, url: str, timeout: Any = None, credentials_url: Any = None
     ) -> bool:
         # git_ls_remote also lists every ref; for a remote with many (~900+)
-        # that list is over git-mcp's MCP ceiling and arrives as a page cut at
+        # that list is over the git service's MCP ceiling and arrives as a page cut at
         # ``refs``. Only ``reachable`` is read, and a page keeps it whole -- so
         # that page is the answer, while a page cut anywhere else still raises.
         # (Raw exec cannot serve this: git_exec runs no network subcommand.)
@@ -576,7 +576,7 @@ class GitMcpBackend:
         credentials_url: Any = None,
     ) -> None:
         args = self._cow(repo_path, remote=remote, branch=branch)
-        # Map every documented LocalGitBackend pull mode to its git-mcp flag. A
+        # Map every documented LocalGitBackend pull mode to its the git service flag. A
         # mode that matched no branch used to degrade to a plain `git pull` (so
         # 'no-ff' silently fast-forwarded — the opposite of --no-ff); reject an
         # unrecognised mode instead of silently downgrading.
@@ -590,7 +590,7 @@ class GitMcpBackend:
         if mode not in ("default", None):
             flag = mode_flags.get(mode)
             if flag is None:
-                raise GitMcpBackendError(f"git-mcp pull: unsupported mode {mode!r}")
+                raise GitMcpBackendError(f"the git service pull: unsupported mode {mode!r}")
             args[flag] = True
         self._call("git_pull", args, timeout)
 
@@ -608,7 +608,7 @@ class GitMcpBackend:
         timeout: Any = None,
     ) -> None:
         # Forward create (-b), force_new (-B), and force (-f) as DISTINCT signals —
-        # git-mcp orders them as git does (-f, then -B|-b). Collapsing force_new
+        # the git service orders them as git does (-f, then -B|-b). Collapsing force_new
         # into create would break cidx's force-switch strategy (checkout of an
         # existing branch with force_new=True must force-reset, not fail as -b).
         self._call(
@@ -636,14 +636,14 @@ class GitMcpBackend:
         fmt: Optional[str] = None,
         timeout: Any = None,
     ) -> List[str]:
-        # git-mcp git_branch_list already returns names in `%(refname:short)` shape
+        # the git service git_branch_list already returns names in `%(refname:short)` shape
         # (local -> `main`, remote -> `origin/main`), which is the only fmt any cidx
         # caller passes, so that fmt is honoured by the reconstruction below. Any
-        # OTHER fmt cannot be reproduced (git-mcp exposes no --format), so fail loud
+        # OTHER fmt cannot be reproduced (the git service exposes no --format), so fail loud
         # rather than silently return the wrong string shape.
         if fmt not in (None, "%(refname:short)"):
             raise GitMcpBackendError(
-                f"git-mcp git_branch_list cannot honour fmt={fmt!r}; only the "
+                f"the git service git_branch_list cannot honour fmt={fmt!r}; only the "
                 "default / '%(refname:short)' shape is available"
             )
         try:
@@ -694,7 +694,7 @@ class GitMcpBackend:
         return str(self._require("git_symbolic_ref", r, "ref")).strip()
 
     def status_porcelain(self, repo_path: str, timeout: Any = None) -> str:
-        # git-mcp git_status is structured; reconstruct `git status --porcelain`
+        # the git service git_status is structured; reconstruct `git status --porcelain`
         # faithfully enough for cidx (which filters untracked `??` and warns on any
         # remaining TRACKED line).
         try:
@@ -706,7 +706,7 @@ class GitMcpBackend:
         # clean tree: a real git_status always carries these buckets.
         if not any(k in r for k in ("staged", "unstaged", "untracked", "conflicts")):
             raise GitMcpBackendError(
-                f"git-mcp git_status returned no status buckets (keys {sorted(r)})"
+                f"the git service git_status returned no status buckets (keys {sorted(r)})"
             )
         lines: List[str] = []
         for e in r.get("staged") or []:
@@ -723,7 +723,7 @@ class GitMcpBackend:
     def diff_name_only(
         self, repo_path: str, spec: str, timeout: Any = None
     ) -> List[str]:
-        # Use git-mcp's name_only mode, which returns git's OWN `git diff
+        # Use the git service's name_only mode, which returns git's OWN `git diff
         # --name-only -z` path list. Parsing the changed paths out of a unified
         # diff was lossy — a quoted path (non-ASCII / special chars) has no literal
         # `" b/"` token, so it was dropped and the file left un-reindexed. These
@@ -780,7 +780,7 @@ class GitMcpBackend:
         )
 
     # ── history (cidx temporal indexing and queries) ─────────────────────────
-    # git-mcp returns git's own stdout base64-encoded, so these hand cidx the
+    # the git service returns git's own stdout base64-encoded, so these hand cidx the
     # exact bytes a local run would; cidx decodes them as local git output.
 
     def log_raw(
@@ -839,7 +839,7 @@ class GitMcpBackend:
     ) -> bytes:
         """``git for-each-ref`` in ONE call: every matching ref with its fields.
 
-        git-mcp validates the arguments (patterns are never option-shaped and
+        the git service validates the arguments (patterns are never option-shaped and
         at most 256; ``sort`` is a key name, optionally ``-``-prefixed) and
         runs ``git for-each-ref --format=<fmt> [--sort] [--count] -- <patterns>``.
         """
@@ -928,7 +928,7 @@ class GitMcpBackend:
         items = self._require(tool, result, key)
         if not isinstance(items, list) or len(items) != expected:
             raise GitMcpBackendError(
-                f"git-mcp {tool} returned {len(items) if isinstance(items, list) else items!r} "
+                f"the git service {tool} returned {len(items) if isinstance(items, list) else items!r} "
                 f"results for {expected} items"
             )
         return [i if isinstance(i, dict) else {} for i in items]
@@ -943,10 +943,10 @@ class GitMcpBackend:
             stdout = base64.b64decode(str(encoded), validate=True)
         except ValueError as exc:
             raise GitMcpBackendError(
-                f"git-mcp {tool} returned stdout that is not base64"
+                f"the git service {tool} returned stdout that is not base64"
             ) from exc
         return subprocess.CompletedProcess(
-            args=["git-mcp", tool],
+            args=["the git service", tool],
             returncode=int(returncode),
             stdout=stdout,
             stderr=str(result.get("stderr", "")),
@@ -957,7 +957,7 @@ class GitMcpBackend:
         """Raise as a local ``check=True`` run would, with git's own stderr."""
         if out.returncode != 0:
             raise GitMcpBackendError(
-                f"git-mcp {tool}: git exited {out.returncode}: {out.stderr}",
+                f"the git service {tool}: git exited {out.returncode}: {out.stderr}",
                 stderr=out.stderr,
                 returncode=out.returncode,
             )
@@ -971,7 +971,7 @@ class GitMcpBackend:
         timeout: Any = None,
         identity: Optional[Dict[str, str]] = None,
     ) -> subprocess.CompletedProcess:
-        """``git <args>`` through git-mcp ``git_exec``: git's own output, the
+        """``git <args>`` through the git service ``git_exec``: git's own output, the
         exit code returned (not raised) exactly as a local ``check=False`` run."""
         out = self._exec_bytes(repo_path, args, timeout, identity)
         return subprocess.CompletedProcess(
@@ -1003,9 +1003,9 @@ class GitMcpBackend:
         timeout: Any = None,
         identity: Optional[Dict[str, str]] = None,
     ) -> subprocess.CompletedProcess:
-        """``git <args>`` via raw exec (MCP ``git_exec`` when git-mcp lacks
+        """``git <args>`` via raw exec (MCP ``git_exec`` when the git service lacks
         it): returncode, git's exact stdout BYTES, stderr. Whole or a raise."""
-        # Whole seconds, rounded UP and at least 1 (git-mcp's minimum): a
+        # Whole seconds, rounded UP and at least 1 (the git service's minimum): a
         # fractional remaining budget is never cut to 0 or silently shortened.
         seconds = (
             max(1, math.ceil(timeout)) if isinstance(timeout, (int, float)) else None
@@ -1037,7 +1037,7 @@ class GitMcpBackend:
         branch: Optional[str] = None,
         timeout: Any = None,
     ) -> subprocess.CompletedProcess:
-        """git-mcp ``git_push`` with git-mcp's credentials; raises on failure."""
+        """the git service ``git_push`` with the git service's credentials; raises on failure."""
         result = self._call(
             "git_push", self._cow(repo_path, remote=remote, branch=branch), timeout
         )
