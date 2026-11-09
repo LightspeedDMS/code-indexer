@@ -1,9 +1,9 @@
-"""EVO-64616: activate golden repos that are registered but not global.
+"""issue-64616: activate golden repos that are registered but not global.
 
 A golden repo is queryable as ``<alias>-global`` only once its global
 activation has run: an alias pointer plus a ``global_repos`` row. The add
 does both right after it inserts the ``golden_repos_metadata`` row, so the
-two exist together -- except for rows another writer inserted. The EVO-65484
+two exist together -- except for rows another writer inserted. The issue-65484
 registry reconcile backfills a row for every indexed clone with no row, and
 that clone is also every add still in flight (the add builds the index
 BEFORE it inserts its row) and every in-place clone a removal left for its
@@ -277,12 +277,12 @@ def _activate_one(
         )
     except NoIndexError as exc:
         result.skipped_no_index.append(alias)
-        logger.error("EVO-64616: '%s' cannot be activated globally: %s", alias, exc)
+        logger.error("issue-64616: '%s' cannot be activated globally: %s", alias, exc)
         return False
     except Exception as exc:
         result.failed[alias] = str(exc)
         _FAILED_LAST_CYCLE.add(alias)
-        logger.error("EVO-64616: global activation of '%s' failed: %s", alias, exc)
+        logger.error("issue-64616: global activation of '%s' failed: %s", alias, exc)
         return True
     _FAILED_LAST_CYCLE.discard(alias)
     if published_now:
@@ -292,7 +292,7 @@ def _activate_one(
     # never raises (a failure is logged; the activation stands).
     manager._run_meta_description_hook(alias, repo_url, clone_path)
     logger.warning(
-        "EVO-64616: activated golden repo '%s' globally as '%s%s' from its "
+        "issue-64616: activated golden repo '%s' globally as '%s%s' from its "
         "existing index (%s)",
         alias,
         alias,
@@ -357,11 +357,11 @@ def _remove_stale_alias(
             raise RuntimeError("the pointer is still there after the delete")
     except Exception as exc:
         result.failed[name] = str(exc)
-        logger.error("EVO-64616: could not remove stale pointer '%s': %s", name, exc)
+        logger.error("issue-64616: could not remove stale pointer '%s': %s", name, exc)
         return
     result.stale_aliases_removed.append(name)
     logger.warning(
-        "EVO-64616: removed stale global alias pointer '%s' (no golden row, no "
+        "issue-64616: removed stale global alias pointer '%s' (no golden row, no "
         "registry row)",
         name,
     )
@@ -378,7 +378,7 @@ def _sweep_stale_aliases(
         return
     if not stale_alias_cleanup_enabled():
         logger.warning(
-            "EVO-64616: %d global alias pointer(s) have no golden row and no "
+            "issue-64616: %d global alias pointer(s) have no golden row and no "
             "registry row: %s. Set %s=true to remove them.",
             len(result.stale_aliases),
             ",".join(result.stale_aliases),
@@ -421,19 +421,19 @@ def _report(result: ActivationRepairResult) -> None:
     """Fail loud: anything left unqueryable is logged at ERROR, by name."""
     if result.skipped_no_index:
         logger.error(
-            "EVO-64616: %d golden repo(s) have no index to activate from and "
+            "issue-64616: %d golden repo(s) have no index to activate from and "
             "stay unqueryable until re-indexed: %s",
             len(result.skipped_no_index),
             ",".join(result.skipped_no_index),
         )
     if result.failed:
         logger.error(
-            "EVO-64616: global activation repair failures: %s",
+            "issue-64616: global activation repair failures: %s",
             "; ".join(f"{name}: {error}" for name, error in result.failed.items()),
         )
     if result.deferred:
         logger.warning(
-            "EVO-64616: %d golden repo(s) left for the next cycle (%s=%d)",
+            "issue-64616: %d golden repo(s) left for the next cycle (%s=%d)",
             len(result.deferred),
             MAX_PER_CYCLE_ENV,
             max_per_cycle(),
@@ -478,7 +478,7 @@ def repair_global_activation(
     except DuplicateJobError:
         result.single_flight_skipped = True
         logger.info(
-            "EVO-64616: another pod is running the global activation repair; "
+            "issue-64616: another pod is running the global activation repair; "
             "skipping this cycle"
         )
         return result

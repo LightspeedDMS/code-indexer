@@ -12,7 +12,7 @@ seam supplies only its own names.
 
 What a seam supplies: the env var it reads, the entry-point group it scans, and
 the exception type its callers already catch. What it gets back: a resolver with
-the same contract the git seam has had since EVO-64678.
+the same contract the git seam has had since issue-64678.
 
 The contract
 ------------

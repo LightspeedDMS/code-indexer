@@ -90,7 +90,7 @@ logger = logging.getLogger(__name__)
 # crashed) and CHECKED_OUT_MARKER (present in a target this module checked
 # out; holds the version) live in utils.index_store, which listings read.
 
-#: EVO-64616: what other writers leave in an index root that holds NO index.
+#: issue-64616: what other writers leave in an index root that holds NO index.
 #: The served-index cache evicts a checkout by renaming its whole index root
 #: away; the index backfill sweeps then re-create the root for their cooldown
 #: markers (``IndexBackfillPolicy.attempt_marker``), a SCIP build writes its
@@ -152,7 +152,7 @@ def is_base_clone(path: Union[str, Path], golden_repos_dir: Union[str, Path]) ->
     directly under ``golden_repos_dir`` (``<golden_repos_dir>/<alias>``), not
     a ``.versioned`` snapshot nor cidx's own dot-directories.
 
-    EVO-64616: a base clone is not a cache entry. It is the refresh's
+    issue-64616: a base clone is not a cache entry. It is the refresh's
     incremental base and, while the golden-repos mount is on, one directory
     shared by every pod: the served-index cache never evicts it, a publish
     in place never marks it ``CHECKED_OUT_MARKER``, and the registry
@@ -220,7 +220,7 @@ def checkout_lock_path(target: Path) -> Path:
 def flock_live(lock_path: Path, operation: int) -> int:
     """Open *lock_path* (created when absent) and ``flock`` it; the held
     descriptor. Lock files are deleted once their target is gone (the
-    checkout sweep, under both locks -- EVO-64616), so a waiter can be granted
+    checkout sweep, under both locks -- issue-64616), so a waiter can be granted
     a lock on a file that no longer is the path: it then re-opens the path and
     locks again, so two holders never lock different files. A non-blocking
     *operation* that would wait raises ``BlockingIOError``; the parent missing

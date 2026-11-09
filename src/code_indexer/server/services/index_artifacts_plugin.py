@@ -3,7 +3,7 @@ Pluggable index-artifact client: the service that holds published indexes.
 
 The fourth seam to use ``backend_plugin_loader``, after git, content and
 ripgrep. Under ``index_store_backend='delegated'`` a built index is published
-to, and checked out from, an artifact service (workspace-mcp's index store);
+to, and checked out from, an artifact service (the content service's index store);
 this module resolves the client for it. With no plugin configured nothing is
 returned and the caller keeps the local store, so an existing deployment is
 unaffected.

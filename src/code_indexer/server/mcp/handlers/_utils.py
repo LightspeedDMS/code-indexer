@@ -1044,8 +1044,8 @@ def _apply_temporal_payload_truncation(
             _truncate_field(r, f, payload_cache, size, f"temporal {f}", owner=owner)
         # AC2/AC3: temporal_context.evolution entries
         temporal_context = r.get("temporal_context")
-        if temporal_context and "evolution" in temporal_context:
-            for entry in temporal_context["evolution"]:
+        if temporal_context and "example-repo-global" in temporal_context:
+            for entry in temporal_context["example-repo-global"]:
                 for f in ("content", "diff"):
                     _truncate_field(
                         entry, f, payload_cache, size, f"evolution {f}", owner=owner

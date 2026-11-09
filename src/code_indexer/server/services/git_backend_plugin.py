@@ -3,12 +3,12 @@ Pluggable git backend: let a deployment supply the delegated ``GitBackend``.
 
 Why here (the sibling of ``cli_invoker_plugin``)
 ------------------------------------------------
-EVO-64678 (EVO-64616 Phase 2) added a ``GitBackend`` seam: every internal git
+issue-64678 (issue-64616 Phase 2) added a ``GitBackend`` seam: every internal git
 operation cidx performs -- golden/activated repo lifecycle, refresh scheduling,
 git-sync, pull-updates -- routes through one ``GitBackend``, selected by the
 ``git_backend`` server-config field via ``git_backend_wiring.build_git_backend``.
 ``local`` (the default) runs git in-process; ``delegated`` must run git in the
-git-mcp spoke instead, so cidx itself performs no git work.
+the git service spoke instead, so cidx itself performs no git work.
 
 ``build_git_backend(config, *, delegated_backend=...)`` needs *something* to
 inject for the delegated slot. This module resolves that something -- the
@@ -25,7 +25,7 @@ A plugin is a zero-argument FACTORY callable::
 
 returning any object satisfying the ``GitBackend`` protocol (the ~25 git
 primitives in ``storage.shared.git_backend``). It takes no arguments: the
-git-mcp endpoint/token/timeout are read from the environment
+the git service endpoint/token/timeout are read from the environment
 (``CIDX_GIT_MCP_URL`` / ``_TOKEN`` / ``_TIMEOUT``) by the backend itself, so the
 factory needs nothing from cidx's config.
 

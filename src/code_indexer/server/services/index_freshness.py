@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 #: Shared with the cidx-scip feature (its build-commit marker) -- one convention, one filename.
 BUILD_COMMIT_MARKER = ".build_commit"
 
-#: How long a HEAD asked of git-mcp is reused while the alias is unchanged. The
+#: How long a HEAD asked of the git service is reused while the alias is unchanged. The
 #: sweeps tick every 5 minutes over ~900 golden repos; HEAD only moves when a
 #: refresh pulls, and a refresh that publishes changes the alias pointer, which
 #: misses the cache at once. The TTL bounds what an out-of-band move (a pull
@@ -68,10 +68,10 @@ def current_commit(repo_path: Path, *, fresh: bool = False) -> Optional[str]:
     say -- so correctness never depends on the fast path covering every layout.
 
     On a pod that does not hold the repository (``content_backend: delegated``)
-    there is no ``.git`` to read: HEAD is asked of git-mcp instead
+    there is no ``.git`` to read: HEAD is asked of the git service instead
     (:func:`_current_commit_through_backend`), never of this disk -- and reused
     while the golden repo's alias pointer is unchanged
-    (:func:`_cached_backend_commit`). ``fresh=True`` asks git-mcp regardless
+    (:func:`_cached_backend_commit`). ``fresh=True`` asks the git service regardless
     and refreshes the cache.
     """
     from code_indexer.server.startup.content_backend_wiring import (
@@ -178,7 +178,7 @@ def _cached_backend_commit(repo_path: Path, *, fresh: bool) -> Optional[str]:
 
 
 def _current_commit_through_backend(repo_path: Path) -> Tuple[Optional[str], bool]:
-    """``(HEAD, definitive)`` of the repository behind *repo_path*, from git-mcp.
+    """``(HEAD, definitive)`` of the repository behind *repo_path*, from the git service.
 
     ``None`` -- "cannot be determined", which callers already treat as unknown
     -- when the path is not a git repository (a ``local://`` folder, as its

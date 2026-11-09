@@ -1,4 +1,4 @@
-"""EVO-66445: one DRY engine for golden-repo index backfill.
+"""issue-66445: one DRY engine for golden-repo index backfill.
 
 Several index types (SCIP, FTS, temporal later) share the SAME reconcile shape: the
 leader periodically scans the golden-repos dir, finds repos MISSING index X that are
@@ -46,7 +46,7 @@ from code_indexer.server.services.query_analytics_export_service import (
 logger = logging.getLogger(__name__)
 
 #: Directories directly under golden-repos that hold cidx's own control state and
-#: are never a repository (EVO-64616): the alias pointer files, and the query
+#: are never a repository (issue-64616): the alias pointer files, and the query
 #: analytics exports. The directory scan used to take every non-dot directory for
 #: a repo, so ``aliases`` was enqueued for an FTS build -- whose attempt marker
 #: then created ``aliases/.code-indexer`` -- and the build failed. Dot-directories
@@ -65,7 +65,7 @@ def delegated_store_disables_backfill(kind: str) -> Optional[str]:
     it): a build there would change one pod's copy without publishing it, and
     finding "missing" would mean checking every repository out. A repository
     is indexed, FTS included, by its add and refresh, which build and publish
-    through the IndexStore (EVO-64616).
+    through the IndexStore (issue-64616).
     """
     from code_indexer.server.startup.index_store_wiring import server_index_store
 

@@ -1,6 +1,6 @@
 """An activated copy's index in the IndexStore, so any pod can serve it.
 
-A user's activated copy lives on workspace-mcp; its INDEX is pod state, built
+A user's activated copy lives on the content service; its INDEX is pod state, built
 by whichever pod activated or reindexed it. Under ``index_store_backend:
 delegated`` that index is published to the IndexStore and the version recorded
 in the copy's registry entry (``index_store_alias`` / ``index_version``), the

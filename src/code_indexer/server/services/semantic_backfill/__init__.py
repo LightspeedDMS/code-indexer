@@ -1,7 +1,7 @@
 """Semantic (vector) index self-heal backfill.
 
 Closes the reverse-fill gap for the semantic vector index: SCIP has
-``reconcile_scip_from_filesystem`` and FTS has the EVO-66445 fts_backfill, but a
+``reconcile_scip_from_filesystem`` and FTS has the issue-66445 fts_backfill, but a
 golden repo whose semantic ``.code-indexer/index/`` was wiped (e.g. a refresh that
 cleared it) had NO loop to rebuild it — ``reconcile_registry_from_filesystem`` uses
 ``detect_semantic_index`` only as a GATE and skips a repo whose index is missing

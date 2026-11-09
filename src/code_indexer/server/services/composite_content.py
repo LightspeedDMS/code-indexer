@@ -4,12 +4,12 @@ A composite repository is ``<activated_repos_dir>/<user>/<alias>/`` holding one
 working copy per member, ``<alias>/<member>``. Locally the members are
 directories on this disk and the composite listing and details walk them. Under
 ``content_backend='delegated'`` (docs/content-seam-activated-repos.md) every
-member is a working copy on workspace-mcp's storage at the same absolute path,
+member is a working copy on the content service's storage at the same absolute path,
 so its files are read through the content seam's manifest, and the member list
 comes from the registry (the activation's ``discovered_repos``) -- never from a
 walk of this pod's directory, which holds index state only.
 
-Fail-loud rule: a backend failure -- a member missing on workspace-mcp included
+Fail-loud rule: a backend failure -- a member missing on the content service included
 -- raises. It is never read as "no files".
 """
 
@@ -100,7 +100,7 @@ def modified_from_ns(mtime_ns: Optional[int], path: str) -> datetime:
     if mtime_ns is None:
         raise CompositeMemberUnreadableError(
             f"The content backend gave no modification time for '{path}' "
-            "(a workspace-mcp without manifest mtimes?)"
+            "(a the content service without manifest mtimes?)"
         )
     seconds, nanos = divmod(mtime_ns, 1_000_000_000)
     return datetime.fromtimestamp(seconds + nanos * 1e-9)

@@ -16,7 +16,7 @@ Scope -- what can be evicted:
   build carries no marker and is never a candidate; neither is anything under
   the local store (no cache is installed: every hook is a no-op);
 * golden snapshots (``.versioned/<repo>/v_*``) -- never a base clone
-  (``golden-repos/<repo>`` itself, EVO-64616: the refresh's incremental base),
+  (``golden-repos/<repo>`` itself, issue-64616: the refresh's incremental base),
   activated copies (a composite and its member indexes as ONE entry), and the
   temporal shard roots (``.temporal/<repo>``).
 
@@ -151,7 +151,7 @@ SKIP_LEASED = "leased"
 SKIP_RECENT = "recent"
 SKIP_BUSY = "busy"
 SKIP_GONE = "gone"
-#: EVO-64616: a golden base clone (``<golden_repos_dir>/<alias>``) is never
+#: issue-64616: a golden base clone (``<golden_repos_dir>/<alias>``) is never
 #: evicted: it is the refresh's incremental base, not a checkout.
 SKIP_BASE_CLONE = "base_clone"
 #: Another purge of the same key (deactivation, leftover sweep) is running.
@@ -267,7 +267,7 @@ def discover_served_checkouts(
             )
     if golden_root is not None:
         for repo, target in iter_golden_checkouts(golden_root):
-            # EVO-64616: a base clone is the refresh's incremental base (and,
+            # issue-64616: a base clone is the refresh's incremental base (and,
             # with the golden-repos mount on, shared by every pod), never a
             # cache entry -- whatever marker it carries.
             if is_base_clone(target, golden_root):

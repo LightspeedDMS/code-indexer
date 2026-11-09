@@ -1,6 +1,6 @@
-"""EVO-66445: FTS backfill sweep for golden repos.
+"""issue-66445: FTS backfill sweep for golden repos.
 
-Reverse-fix half of EVO-66445: a paced, cluster-safe background sweep that builds
+Reverse-fix half of issue-66445: a paced, cluster-safe background sweep that builds
 the Tantivy FTS index on golden repos that were registered before the forward fix
 existed (the whole fleet ended up with a semantic index but no ``tantivy_index``,
 so ``search_code(search_mode="fts")`` errored fleet-wide).

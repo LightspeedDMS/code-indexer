@@ -1,4 +1,4 @@
-"""EVO-66445: one FTS backfill cycle = discover missing-FTS golden repos and ENQUEUE
+"""issue-66445: one FTS backfill cycle = discover missing-FTS golden repos and ENQUEUE
 a per-repo build for each (bounded).
 
 This is now a thin adapter over the shared :class:`GoldenIndexBackfillReconciler`

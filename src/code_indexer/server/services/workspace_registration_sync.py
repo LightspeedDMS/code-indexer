@@ -1,11 +1,11 @@
-"""EVO-64616: cidx registers agent workspaces itself (workspace-mcp no longer
+"""issue-64616: cidx registers agent workspaces itself (the content service no longer
 registers at provision or deregisters at destroy).
 
-workspace-mcp registered each live agent workspace as a golden repository
+the content service registered each live agent workspace as a golden repository
 named by its id (``ws-<8 hex>``), from the workspace's files
 (``file://<mount_path>``, branch ``master``, description ``Workspace <id>``)
 so agents can search their own workspace, and removed it when the workspace
-was destroyed. This pass does the same from workspace-mcp's generic listing,
+was destroyed. This pass does the same from the content service's generic listing,
 ``GET {CIDX_WORKSPACE_SYNC_WORKSPACE_MCP_URL}/workspaces`` ->
 ``{authoritative, registry_backend, workspaces: [{id, status, repo_url,
 branch, mount_path, created_at, updated_at, destroyed_at?}]}``:
@@ -19,15 +19,15 @@ branch, mount_path, created_at, updated_at, destroyed_at?}]}``:
   live. A listing that is not
   authoritative, failed, or came back empty while workspaces are registered
   deregisters nothing; at most :data:`DEFAULT_MAX_DEREGISTER` per pass.
-* a workspace-mcp without the endpoint (404), no listing URL configured
+* a the content service without the endpoint (404), no listing URL configured
   (``CIDX_WORKSPACE_SYNC_WORKSPACE_MCP_URL``), or no token configured
   (``CIDX_WORKSPACE_MCP_WORKSPACES_TOKEN`` or ``..._TOKEN_FILE``): report
   only. A refusal (401, 503) or any other failure is an error: nothing is
   deregistered.
 
-WHICH workspace-mcp. The agent workspaces live in the workspace-mcp that
+WHICH the content service. The agent workspaces live in the the content service that
 provisions them, which is NOT necessarily the one cidx reads repository
-content through. ``workspace_mcp.endpoint`` names the latter (the content
+content through. ``the content service.endpoint`` names the latter (the content
 seam / clone backend), which holds no agent workspaces, so the listing has its
 own URL and never falls back to it.
 
@@ -61,11 +61,11 @@ OPERATION = "workspace_registration_sync"
 SENTINEL_ALIAS = "__workspace_registration_sync__"
 SUBMITTER = "system-workspace-sync"
 MODE_ENV = "CIDX_WORKSPACE_SYNC_MODE"
-#: workspace-mcp's WSM_WORKSPACES_SHARED_SECRET (its own secret, not the
+#: the content service's WSM_WORKSPACES_SHARED_SECRET (its own secret, not the
 #: clone-path one): the value, or a file holding it (a mounted secret).
 TOKEN_ENV = "CIDX_WORKSPACE_MCP_WORKSPACES_TOKEN"
-#: Base URL of the workspace-mcp that provisions the agent workspaces (serves
-#: ``GET /workspaces``). Deliberately separate from ``workspace_mcp.endpoint``.
+#: Base URL of the the content service that provisions the agent workspaces (serves
+#: ``GET /workspaces``). Deliberately separate from ``the content service.endpoint``.
 ENDPOINT_ENV = "CIDX_WORKSPACE_SYNC_WORKSPACE_MCP_URL"
 TOKEN_FILE_ENV = "CIDX_WORKSPACE_MCP_WORKSPACES_TOKEN_FILE"
 INTERVAL_ENV = "CIDX_WORKSPACE_SYNC_INTERVAL_SECONDS"
@@ -82,7 +82,7 @@ DEFAULT_BRANCH = "master"
 
 
 class ListingUnavailableError(RuntimeError):
-    """workspace-mcp has no ``GET /workspaces`` (an older version)."""
+    """the content service has no ``GET /workspaces`` (an older version)."""
 
 
 @dataclass(frozen=True)
@@ -124,7 +124,7 @@ def parse_listing(body: Any) -> Listing:
 
 
 class WorkspaceMcpLister:
-    """``GET {endpoint}/workspaces`` with workspace-mcp's bearer."""
+    """``GET {endpoint}/workspaces`` with the content service's bearer."""
 
     def __init__(self, endpoint: str, api_key: str, timeout: float = 30.0) -> None:
         self._endpoint = endpoint.rstrip("/")
@@ -143,11 +143,11 @@ class WorkspaceMcpLister:
         )
         if response.status_code == 404:
             raise ListingUnavailableError(
-                "workspace-mcp has no GET /workspaces; workspace sync reports only"
+                "the content service has no GET /workspaces; workspace sync reports only"
             )
         if response.status_code != 200:
             raise RuntimeError(
-                f"workspace-mcp GET /workspaces failed: HTTP {response.status_code}"
+                f"the content service GET /workspaces failed: HTTP {response.status_code}"
             )
         return parse_listing(response.json())
 
@@ -324,9 +324,9 @@ def workspaces_token() -> Optional[str]:
 
 
 def listing_endpoint() -> Optional[str]:
-    """The provisioning workspace-mcp's base URL, from
+    """The provisioning the content service's base URL, from
     ``CIDX_WORKSPACE_SYNC_WORKSPACE_MCP_URL``; None when unset. Never the
-    content seam's ``workspace_mcp.endpoint``."""
+    content seam's ``the content service.endpoint``."""
     import os
 
     return os.environ.get(ENDPOINT_ENV, "").strip() or None
@@ -362,7 +362,7 @@ def unreachable_reason(
 
 
 def deps_from_manager(manager: Any) -> WorkspaceSyncDeps:
-    """A pass over the running server: the provisioning workspace-mcp from
+    """A pass over the running server: the provisioning the content service from
     ``CIDX_WORKSPACE_SYNC_WORKSPACE_MCP_URL`` and its own bearer."""
     from code_indexer.server.services.golden_catalog_sync import positive_int_env
     from code_indexer.server.startup.content_backend_wiring import (
@@ -373,8 +373,8 @@ def deps_from_manager(manager: Any) -> WorkspaceSyncDeps:
         endpoint = listing_endpoint()
         if not endpoint:
             raise ListingUnavailableError(
-                f"{ENDPOINT_ENV} is not set (the workspace-mcp that provisions "
-                "the agent workspaces; workspace_mcp.endpoint is the content "
+                f"{ENDPOINT_ENV} is not set (the the content service that provisions "
+                "the agent workspaces; the content service.endpoint is the content "
                 "seam's and is not used); workspace sync reports only"
             )
         token = workspaces_token()

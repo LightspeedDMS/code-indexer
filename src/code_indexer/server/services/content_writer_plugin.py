@@ -4,7 +4,7 @@ Pluggable content writer: where golden-repo files are written on a mount-less po
 The fifth seam to use ``backend_plugin_loader``, after git, content, ripgrep
 and index artifacts. Under ``content_backend='delegated'`` the repository is not
 on this pod, so the write-mode file tools (create, edit, delete) write through
-the service that owns the files (workspace-mcp's ``POST /content/write``); this
+the service that owns the files (the content service's ``POST /content/write``); this
 module resolves the client for it. It is only ever resolved when the content
 backend is delegated, so a local deployment never imports a plugin.
 
@@ -50,7 +50,7 @@ from code_indexer.server.services.backend_plugin_loader import BackendPluginReso
 ENV_VAR = "CIDX_CONTENT_WRITER"
 
 # The writer codes (ECONFLICT: a failed ``expected_blob_sha`` precondition;
-# EUNAVAILABLE: workspace-mcp cannot take writes at all; ETRANSPORT: it could
+# EUNAVAILABLE: the content service cannot take writes at all; ETRANSPORT: it could
 # not be reached or answered something unreadable) are the seam's, from the SDK.
 ENTRY_POINT_GROUP = CONTENT_WRITER_ENTRY_POINT_GROUP
 

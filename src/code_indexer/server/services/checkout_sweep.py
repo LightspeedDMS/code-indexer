@@ -422,7 +422,7 @@ def _drop_residue(target: Path, *, parent_removable: bool) -> bool:
     """With *target*'s checkout and readers locks held and no reader: remove
     the emptied target directory, then both lock files beside it, then an
     emptied parent (``<user>/``, ``.versioned/<repo>/``) when
-    *parent_removable* (EVO-64616: they piled up with every removed copy).
+    *parent_removable* (issue-64616: they piled up with every removed copy).
     Lock waiters re-open the path (``flock_live``), so deleting a held lock
     file never lets two holders lock different files. False when the target
     still holds something (kept, with its locks)."""

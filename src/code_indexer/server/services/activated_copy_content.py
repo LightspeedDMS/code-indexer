@@ -2,7 +2,7 @@
 through the content and git seams when the copy is not on this pod.
 
 With ``content_backend: delegated`` a user's activated copy lives on
-workspace-mcp's storage at ``<activated_repos_dir>/<user>/<alias>`` -- the same
+the content service's storage at ``<activated_repos_dir>/<user>/<alias>`` -- the same
 absolute path the registry names -- and this pod holds only the copy's index
 state (``index_root(copy)``). The REST routes that used to walk, stat and read
 the copy on this disk (``/api/repos/{alias}``, ``/api/repos/{alias}/files``,
@@ -12,7 +12,7 @@ the copy on this disk (``/api/repos/{alias}``, ``/api/repos/{alias}/files``,
 * files, sizes and modification times come from the content backend's
   manifest (which never lists ``.git``);
 * a file's bytes come from one ``fetch``;
-* commits come from the git seam (git-mcp), never local git;
+* commits come from the git seam (the git service), never local git;
 * the copy's index state is this pod's own directory, read where it is.
 
 Every helper raises on a backend failure (:class:`CopyContentUnavailableError`
@@ -50,7 +50,7 @@ from code_indexer.utils.index_store import INDEX_DIRNAME, index_root
 _CONSUMER = "activated copy REST"
 
 #: Directory names the manifest is asked to skip: the copy's index state is
-#: this pod's, never workspace-mcp's (``.git`` is never listed at all).
+#: this pod's, never the content service's (``.git`` is never listed at all).
 _PRUNE_DIRS: Tuple[str, ...] = (INDEX_DIRNAME,)
 
 
@@ -287,7 +287,7 @@ def read_copy_file(source: ContentSeamSource, rel: str) -> bytes:
     """One file's bytes from the copy: ONE fetch, never a listing.
 
     The fetch's own per-file error says what is at *rel*: a directory, or
-    nothing (workspace-mcp answers EACCES for a file under a missing
+    nothing (the content service answers EACCES for a file under a missing
     directory; a refused symlink is absent too). Any other per-file error is
     the backend failing to read a file that is there.
 

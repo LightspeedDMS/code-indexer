@@ -6,10 +6,10 @@ keeps the outbox row and retries on a later sweep. That is the whole contract.
 
 * ``local-files``: this pod's own disk -- correct for a fleet where the
   golden-repos volume is mounted on every pod.
-* ``workspace-mcp``: the mount-less fleet. :class:`ContentWriterSink` writes
+* ``the content service``: the mount-less fleet. :class:`ContentWriterSink` writes
   through the server's content writer (the ``code_indexer.content_writer``
-  seam, workspace-mcp's ``POST /content/write``) at the same absolute path,
-  so workspace-mcp's ``WSM_CONTENT_WRITE_ROOTS`` must cover the golden-repos
+  seam, the content service's ``POST /content/write``) at the same absolute path,
+  so the content service's ``WSM_CONTENT_WRITE_ROOTS`` must cover the golden-repos
   directory (``aliases/`` and the write-mode marker directory). With no
   writer configured (a local content backend) :func:`build_sink` returns an
   :class:`UnavailableSink` that fails every call LOUDLY (an ERROR at build
@@ -35,7 +35,7 @@ from code_indexer.server.utils.config_manager import (
 logger = logging.getLogger(__name__)
 
 WORKSPACE_MCP_UNAVAILABLE = (
-    "no content writer configured: metadata_outbox_sink=workspace-mcp keeps "
+    "no content writer configured: metadata_outbox_sink=the content service keeps "
     "every outbox row (cidx_metadata_outbox_depth grows) until one is. The "
     "writer exists only under content_backend=delegated; on a fleet with the "
     "golden-repos volume mounted set metadata_outbox_sink=local-files (or auto)"
@@ -74,7 +74,7 @@ class LocalFilesSink:
 
 
 class ContentWriterSink:
-    """Adapter over the server's content writer (workspace-mcp).
+    """Adapter over the server's content writer (the content service).
 
     Unconditional writes (no ``expected_blob_sha`` is sent): the sweeper always
     writes the registry's CURRENT document for a key, so last-writer-wins is
@@ -125,7 +125,7 @@ def build_sink(
 ) -> MetadataSink:
     """The sink for a resolved ``metadata_outbox_sink`` value.
 
-    ``workspace-mcp`` adapts the writer *content_writer* returns (the one the
+    ``the content service`` adapts the writer *content_writer* returns (the one the
     running server parked at startup); with none it fails loud: logged at
     ERROR here, and every replay raises.
     """

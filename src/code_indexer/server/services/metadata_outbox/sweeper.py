@@ -35,7 +35,7 @@ fleet, on the elected leader -- replays the outbox to the old files:
   twice as long before each further sink-down sweep, up to
   ``MAX_SINK_DOWN_BACKOFF_SECONDS``, and returns to the sweep interval on the
   first sweep that is not. A per-key refusal (EFORBIDDEN, EINVAL, ...) still
-  logs that key and the sweep goes on (EVO-64616).
+  logs that key and the sweep goes on (issue-64616).
 * **Abandon.** :meth:`abandon` (``POST /api/admin/metadata-outbox/abandon``)
   logs the remaining keys by name, deletes exactly those rows and stops the
   sweeper; depth is then 0. That stop is an operator's decision, so no probe
@@ -46,7 +46,7 @@ on any node stops the leader's sweeper. Changing the sink clears it: the stop
 belongs to the sink it was reached with.
 
 ``OutboxSettings.sink`` is always a RESOLVED sink name (``local-files`` or
-``workspace-mcp``, never ``auto``): the settings provider resolves ``auto``
+``the content service``, never ``auto``): the settings provider resolves ``auto``
 from ``content_backend``. The drain bound, the stop state and an abandon all
 compare that resolved name, so ``auto`` and the explicit value it resolves to
 are the same sink, and a stop recorded under it stands across sweeps.
@@ -137,7 +137,7 @@ class SweepReport:
     failed: List[Key] = field(default_factory=list)
     stopped: Optional[str] = None
     undrained: List[Key] = field(default_factory=list)
-    #: True when the sweep stopped at a sink-down error (EVO-64616).
+    #: True when the sweep stopped at a sink-down error (issue-64616).
     sink_unavailable: bool = False
 
 
@@ -315,8 +315,8 @@ class MetadataOutboxSweeper:
         the sweep goes on; a SINK-down failure (EUNAVAILABLE / ETRANSPORT, or
         no writer at all) ends the sweep at once with ONE warning naming how
         many keys are left -- they would all fail the same way, and a restart
-        of workspace-mcp used to log one warning per key per sweep (~8,700
-        lines in ten minutes, EVO-64616). Every row is kept either way."""
+        of the content service used to log one warning per key per sweep (~8,700
+        lines in ten minutes, issue-64616). Every row is kept either way."""
         report = SweepReport()
         files = self._metadata.files
         with self._backend.claim_outbox(self._batch_size) as claim:

@@ -3,7 +3,7 @@ Golden-repo file writes through the content writer, on a pod without the reposit
 
 Under a delegated content backend the golden repositories are not on this pod:
 reads come from the content backend and writes go to the content writer (the
-``code_indexer.content_writer`` seam, workspace-mcp's ``POST /content/write``),
+``code_indexer.content_writer`` seam, the content service's ``POST /content/write``),
 both at the repository's absolute path. ``FileCRUDService`` uses this module
 for its write-exception (golden) repos ONLY when the running server's content
 backend is non-local; under the local default it is never consulted and the

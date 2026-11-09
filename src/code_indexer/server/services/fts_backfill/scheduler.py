@@ -1,4 +1,4 @@
-"""EVO-66445: paced, cluster-safe scheduler for the golden-repo FTS backfill sweep.
+"""issue-66445: paced, cluster-safe scheduler for the golden-repo FTS backfill sweep.
 
 Mirrors the established scheduler shape in this codebase (e.g. the HNSW orphan
 sweep / activated reaper): a daemon thread that, each interval, submits ONE short
@@ -33,7 +33,7 @@ from .sweep import run_fts_backfill_cycle
 logger = logging.getLogger(__name__)
 
 
-# EVO-66188 / background-work audit: the leader predicate moved to
+# issue-66188 / background-work audit: the leader predicate moved to
 # ``server/startup/leader_gate.py`` so the startup sweeps could share it instead
 # of growing a fifth copy. Re-exported here unchanged -- this is still the module
 # that wires ``leader_check=lambda: resolve_sweep_leader(app.state)``, and its
@@ -196,7 +196,7 @@ class FtsBackfillSweepScheduler:
             if not (cfg["enabled"] and self._background_job_manager is not None):
                 self._sleep_chunked(max(1, int(cfg["interval_minutes"])) * 60)
                 continue
-            # Leader-gate the WORK (EVO-66445 follow-up). The sweep spawns
+            # Leader-gate the WORK (issue-66445 follow-up). The sweep spawns
             # `cidx index --rebuild-fts-index` subprocesses that CLEAR then rewrite each
             # repo's tantivy_index, so N pods x uvicorn-workers running it concurrently
             # race on the same repo (`Failed to open file for read`, `cidx init:

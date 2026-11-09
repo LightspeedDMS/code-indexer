@@ -1,4 +1,4 @@
-"""EVO-66445: the FTS index-backfill policy + its cross-pod (POD_PULL) build executor.
+"""issue-66445: the FTS index-backfill policy + its cross-pod (POD_PULL) build executor.
 
 The FTS backfill rides the DRY :class:`GoldenIndexBackfillReconciler`: the leader
 scans + enqueues ONE ``fts_backfill_build`` job per missing repo, and — unlike the

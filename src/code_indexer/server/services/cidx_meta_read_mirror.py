@@ -8,7 +8,7 @@ repository descriptions beside them. Under the local content backend that
 directory is cidx-meta's versioned snapshot, exactly as before.
 
 Under a delegated content backend that snapshot holds index state only -- the
-content is workspace-mcp's. Rather than re-plumb a dozen parsers file by file,
+content is the content service's. Rather than re-plumb a dozen parsers file by file,
 the readers get a directory that MIRRORS the shared content they read:
 ``<golden_repos_dir>/.cidx-meta-read-mirror``, synced from the content manifest
 on access (at most every :data:`SYNC_TTL_SECONDS`), fetching only files whose

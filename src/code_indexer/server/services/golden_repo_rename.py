@@ -1,4 +1,4 @@
-"""EVO-64616: rename a golden repository's alias without re-cloning or
+"""issue-64616: rename a golden repository's alias without re-cloning or
 re-embedding.
 
 What moves (``old`` -> ``new``; ``-global`` is the query alias):
@@ -6,7 +6,7 @@ What moves (``old`` -> ``new``; ``-global`` is the query alias):
 ========================  =================================================
 clone directory           ``golden-repos/<old>`` -> ``golden-repos/<new>``:
                           ``os.rename`` locally; under the content seam
-                          workspace-mcp's ``/clone-path/move``, or where it
+                          the content service's ``/clone-path/move``, or where it
                           lacks that route a ``/clone-path`` copy (reflink),
                           the old copy deleted after the rows moved
 published index           delegated IndexStore: the current version checked
@@ -147,8 +147,8 @@ class LocalCloneDirs:
 
 
 class DelegatedCloneDirs:
-    """Clones on workspace-mcp (``/clone-path``). A move is an atomic rename
-    (``/clone-path/move``) where workspace-mcp has it; otherwise a copy (a
+    """Clones on the content service (``/clone-path``). A move is an atomic rename
+    (``/clone-path/move``) where the content service has it; otherwise a copy (a
     reflink where the volume can), the source deleted after the rows moved."""
 
     is_delegated = True
@@ -167,7 +167,7 @@ class DelegatedCloneDirs:
                 return
             self._move_route = False
             logger.info(
-                "workspace-mcp has no /clone-path/move; copying %s to %s instead",
+                "the content service has no /clone-path/move; copying %s to %s instead",
                 source,
                 dest,
             )
@@ -318,9 +318,9 @@ class GoldenRepoRenamer:
         except RenameError:
             raise
         except Exception as exc:
-            # The git error's own text is the only clue to why (git-mcp's
+            # The git error's own text is the only clue to why (the git service's
             # stderr rides on the exception); without it the refusal said
-            # just "GitMcpBackendError" (EVO-64616).
+            # just "GitMcpBackendError" (issue-64616).
             detail = redact_url_credentials(
                 str(getattr(exc, "stderr", None) or exc).strip()
             )[:300]
@@ -378,7 +378,7 @@ class GoldenRepoRenamer:
             # An empty clone (nothing pushed upstream yet) has no commit at all,
             # so none ahead of origin -- and no refs/remotes/origin/<branch> to
             # count against: rev-list fails "unknown revision" on it, which
-            # refused every rename of an empty clone (EVO-64616).
+            # refused every rename of an empty clone (issue-64616).
             return
         ahead = int(
             self.d.git.rev_list_count(

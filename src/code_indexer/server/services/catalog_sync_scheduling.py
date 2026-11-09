@@ -1,4 +1,4 @@
-"""EVO-64616: the periodic golden-catalog and workspace-registration passes.
+"""issue-64616: the periodic golden-catalog and workspace-registration passes.
 
 Each runs on its own interval, off the event loop, only when its mode
 (``CIDX_GOLDEN_CATALOG_SYNC_MODE`` / ``CIDX_WORKSPACE_SYNC_MODE``) is
@@ -42,11 +42,11 @@ async def _loop(name: str, interval: int, run: Callable[[], Dict[str, Any]]) -> 
         try:
             result = await to_thread.run_sync(run)
             if result.get("mode") != "off":
-                logger.info("EVO-64616: %s pass: %s", name, result)
+                logger.info("issue-64616: %s pass: %s", name, result)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # a pass failure never stops the loop
-            logger.error("EVO-64616: %s pass failed: %s", name, exc, exc_info=True)
+            logger.error("issue-64616: %s pass failed: %s", name, exc, exc_info=True)
         await asyncio.sleep(interval)
 
 

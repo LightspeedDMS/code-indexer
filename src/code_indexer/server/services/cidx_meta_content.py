@@ -9,7 +9,7 @@ before: :func:`shared_cidx_meta` returns None and the caller runs today's code.
 
 Under a delegated content backend the pod does not mount the volume. Its
 ``<golden_repos_dir>/cidx-meta`` is a pod-local directory holding index state
-only, and the shared content lives with workspace-mcp at the SAME absolute
+only, and the shared content lives with the content service at the SAME absolute
 path. :class:`SharedCidxMeta` is that content: reads and listings through the
 content backend (``/content/manifest`` and ``/content/fetch``), writes and
 deletes through the content writer (``POST /content/write``), at
@@ -18,7 +18,7 @@ deletes through the content writer (``POST /content/write``), at
 Failure rule: a backend or writer failure RAISES. A file that is absent reads
 as :class:`FileNotFoundError`; anything else that keeps the bytes from being
 had -- a transport error, an unreadable file, a missing writer -- is a
-:class:`CidxMetaUnavailableError`. An unreachable workspace-mcp is never
+:class:`CidxMetaUnavailableError`. An unreachable the content service is never
 "cidx-meta is empty".
 
 Compare-and-swap uses git's blob sha of the bytes, as the writer does:
@@ -64,7 +64,7 @@ class CidxMetaConflictError(RuntimeError):
 
 @dataclass(frozen=True)
 class SharedCidxMeta:
-    """cidx-meta's content as workspace-mcp holds it, at ``root``."""
+    """cidx-meta's content as the content service holds it, at ``root``."""
 
     root: str
     backend: ContentBackend
@@ -385,7 +385,7 @@ class CidxMetaBackupUnsupportedError(CidxMetaUnavailableError):
 
 BACKUP_UNSUPPORTED = (
     "cidx-meta git backup is not supported with content_backend='delegated': "
-    "cidx-meta's content lives with workspace-mcp, and this pod's {path} holds "
+    "cidx-meta's content lives with the content service, and this pod's {path} holds "
     "index state only, so a backup run here would commit and push an empty "
     "directory over the real one. Disable cidx_meta_backup on this server."
 )

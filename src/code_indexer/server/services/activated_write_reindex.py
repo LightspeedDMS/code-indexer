@@ -4,9 +4,9 @@ With ``content_backend: local`` an activated copy is on this pod's disk and the
 file tools start auto-watch (``auto_watch_manager.start_watch``) before they
 write: the watcher sees the change and re-indexes it. Nothing here runs then.
 
-With ``content_backend: delegated`` the copy lives on workspace-mcp's storage,
+With ``content_backend: delegated`` the copy lives on the content service's storage,
 there is nothing on this pod to watch (``start_watch`` answers "disabled"), and
-workspace-mcp has no change feed. So after cidx's OWN successful write -- the
+the content service has no change feed. So after cidx's OWN successful write -- the
 file tools (create/edit/delete) and the git tools that move the working tree
 (merge, merge abort, branch switch, checkout file, reset, clean, pull, stash
 push/pop/apply) -- this module enqueues an incremental reindex of the copy through
@@ -33,7 +33,7 @@ as ``reindex``; ``failed`` carries the error and is logged at ERROR
 registry: the copy must be one of THIS user's activated repositories.
 
 Edits made OUTSIDE cidx (a git push to the copy's remote does not touch the
-copy; a process writing workspace-mcp's storage directly does) are NOT seen:
+copy; a process writing the content service's storage directly does) are NOT seen:
 they reach the index only through ``trigger_reindex``, ``sync_repository`` or
 the next reindex this module enqueues for a later cidx write (whose
 incremental pass picks up every change since the last one).

@@ -1,4 +1,4 @@
-"""EVO-66445: reliable Tantivy FTS index builder for golden repos.
+"""issue-66445: reliable Tantivy FTS index builder for golden repos.
 
 Golden repos are indexed IN PLACE. Registration's ``cidx index --fts`` builds FTS
 through ``smart_indexer``, which **silently degrades to semantic-only** when FTS
@@ -170,7 +170,7 @@ def _run_or_fail(
         )
     except (OSError, subprocess.SubprocessError) as exc:
         logger.error(
-            "EVO-66445 FTS %s subprocess did not run for alias=%s at %s: %r",
+            "issue-66445 FTS %s subprocess did not run for alias=%s at %s: %r",
             phase,
             alias,
             cwd,
@@ -275,7 +275,7 @@ def ensure_fts_index(
         if init.returncode != 0:
             detail = _detail(init)
             logger.error(
-                "EVO-66445 FTS backfill: cidx init failed for alias=%s at %s: %s",
+                "issue-66445 FTS backfill: cidx init failed for alias=%s at %s: %s",
                 alias,
                 repo_path,
                 detail,
@@ -302,7 +302,7 @@ def ensure_fts_index(
             # Story #2118: every server-spawned index child names whom its
             # (here: no) embedding calls are charged to.
             attribution=_fts_backfill_attribution(repo_path, alias),
-            # A pod-local repository (local://) is never with workspace-mcp;
+            # A pod-local repository (local://) is never with the content service;
             # the caller knows its URL, the alias identifies cidx-meta, whose
             # content follows the configured content backend.
             **repo_layout_kwargs(None, alias, local_content=local_content),
@@ -326,13 +326,13 @@ def ensure_fts_index(
                 (ci / _SKIP_MARKER).touch()
             except OSError as exc:  # marking is best-effort; never fail the sweep on it
                 logger.warning(
-                    "EVO-66445 FTS backfill: could not write skip marker for alias=%s at %s: %s",
+                    "issue-66445 FTS backfill: could not write skip marker for alias=%s at %s: %s",
                     alias,
                     repo_path,
                     exc,
                 )
             logger.info(
-                "EVO-66445 FTS backfill: alias=%s at %s has no indexable files -- skipping",
+                "issue-66445 FTS backfill: alias=%s at %s has no indexable files -- skipping",
                 alias,
                 repo_path,
             )
@@ -342,7 +342,7 @@ def ensure_fts_index(
                 "no indexable files to build an FTS index",
             )
         logger.error(
-            "EVO-66445 FTS (re)build failed for alias=%s at %s: %s",
+            "issue-66445 FTS (re)build failed for alias=%s at %s: %s",
             alias,
             repo_path,
             detail,
@@ -355,7 +355,7 @@ def ensure_fts_index(
         # Non-silent guard: the command "succeeded" but produced no index -- the
         # exact silent-degradation mode this whole change eliminates.
         logger.error(
-            "EVO-66445 FTS (re)build produced no index for alias=%s at %s despite exit 0",
+            "issue-66445 FTS (re)build produced no index for alias=%s at %s despite exit 0",
             alias,
             repo_path,
         )

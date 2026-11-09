@@ -1,4 +1,4 @@
-"""The alias / write-mode marker FILES through the content seam (EVO-64616).
+"""The alias / write-mode marker FILES through the content seam (issue-64616).
 
 The pointers themselves live in the registry (content seam step 5a). Their
 file representation -- ``golden-repos/aliases/<name>.json`` and
@@ -11,14 +11,14 @@ Under ``content_backend='delegated'`` the pod does not mount the golden-repos
 volume, so that disk holds nothing: an import would "finish" having imported
 nothing, a read-through would answer "no such alias", and a rollback would
 write files nobody reads. :class:`SeamMetadataFiles` is the same file
-representation where workspace-mcp holds it, at the same absolute paths: reads
+representation where the content service holds it, at the same absolute paths: reads
 and listings through the content backend, writes and deletes through the
 content writer -- the shared-directory accessor cidx-meta already uses.
 
 Failure rule, as for cidx-meta: a file that is absent is absent (None), and
 a directory that is absent lists as empty; a backend that cannot be reached, or is not built yet, RAISES
 :class:`MetadataFilesUnavailableError` (an ``OSError``, which the import
-already reports and retries). An unreachable workspace-mcp is never "no
+already reports and retries). An unreachable the content service is never "no
 aliases".
 """
 
@@ -52,7 +52,7 @@ __all__ = ["MetadataFilesUnavailableError", "SeamMetadataFiles"]
 
 
 class SeamMetadataFiles(MetadataFiles):
-    """:class:`MetadataFiles` with workspace-mcp, not this pod's disk, as the store.
+    """:class:`MetadataFiles` with the content service, not this pod's disk, as the store.
 
     Paths are unchanged (``dir_for`` / ``path_for``); only where the bytes are
     is different. The backend and writer are resolved on every call -- the
@@ -88,7 +88,7 @@ class SeamMetadataFiles(MetadataFiles):
         (``.write_mode`` exists only after the first write session) lists as
         empty, exactly as :class:`MetadataFiles` lists a missing directory --
         otherwise the startup import could never complete on a fresh pod. Any
-        OTHER failure raises: an unreachable workspace-mcp is never "empty"."""
+        OTHER failure raises: an unreachable the content service is never "empty"."""
         try:
             return shared.list_names("", _SUFFIX)
         except CidxMetaUnavailableError as exc:

@@ -1,5 +1,5 @@
-"""EVO-64616: cidx keeps its golden-repository catalog in sync with GitLab
-itself (the workspace-mcp seeder is gone).
+"""issue-64616: cidx keeps its golden-repository catalog in sync with GitLab
+itself (the the content service seeder is gone).
 
 One pass:
 
@@ -256,7 +256,7 @@ class GitLabGroupLister:
                     continue
                 # An empty project has no commit and GitLab reports no
                 # default_branch for it; cloning one fails ("Remote branch
-                # master not found") on every pass (EVO-64616).
+                # master not found") on every pass (issue-64616).
                 project = project_for_url(
                     url,
                     item.get("default_branch") or None,
@@ -894,10 +894,10 @@ def deps_from_manager(manager: Any) -> SyncDeps:
     def add(alias: str, project: CatalogProject) -> Any:
         # No pre-flight ls-remote: the GitLab API listing already proved the
         # project exists, and under git_backend='delegated' the probe goes to
-        # git-mcp's git_ls_remote, which returns EVERY ref -- a project with
-        # many (front-end/fresca: ~900 refs, ~68 KB) gets a paginated answer
-        # the git-mcp backend refuses, and the add failed as "Invalid or
-        # inaccessible git repository" every pass (EVO-64616). A real clone
+        # the git service's git_ls_remote, which returns EVERY ref -- a project with
+        # many (front-end/fresca: ~many refs, ~a large response) gets a paginated answer
+        # the the git service backend refuses, and the add failed as "Invalid or
+        # inaccessible git repository" every pass (issue-64616). A real clone
         # failure surfaces in the add job, and failed_add_holds() keeps it
         # from being resubmitted every pass.
         return manager.add_golden_repo(

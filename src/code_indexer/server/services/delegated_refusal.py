@@ -2,9 +2,9 @@
 Features that need the repository on this pod: refused, loudly, when delegated.
 
 With ``content_backend: delegated`` the repositories are not on this pod's disk
--- workspace-mcp holds the files and git-mcp the history. Most features read
+-- the content service holds the files and the git service the history. Most features read
 them through those seams. A few have no seam to read through yet (the operation
-is not one workspace-mcp or git-mcp exposes); run against this pod's disk they
+is not one the content service or the git service exposes); run against this pod's disk they
 would see an empty directory and answer "no files", "no history", "not a git
 repository" -- a wrong answer that looks like a right one.
 

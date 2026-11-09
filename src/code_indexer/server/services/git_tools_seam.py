@@ -5,13 +5,13 @@ cidx's git TOOLS on a working copy that is not on this pod.
 git_push, git_branch_*, git_stash_*, conflicts, ...) runs git in a user's
 activated working copy and parses git's own output. Under
 ``content_backend='delegated'`` that copy exists only on the shared volume, so
-the git runs in git-mcp, addressed by the copy's path (``cow_path``):
+the git runs in the git service, addressed by the copy's path (``cow_path``):
 
-* local subcommands -> ``GitCommandRunner.run`` (git-mcp ``git_exec``): git's
+* local subcommands -> ``GitCommandRunner.run`` (the git service ``git_exec``): git's
   raw stdout, exit code and stderr, so the service's parsing is unchanged;
   commit attribution (GIT_AUTHOR_* / GIT_COMMITTER_*) travels as an identity;
 * ``fetch`` / ``pull`` / ``push`` -> the backend's structured network
-  operations, which carry git-mcp's credentials (cidx holds none);
+  operations, which carry the git service's credentials (cidx holds none);
 * working-tree file reads (conflict markers) -> the content seam.
 
 GOLDEN repositories are read-only: the history tools (blame, file history,
@@ -36,7 +36,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
 from code_indexer.server.storage.shared.git_backend import GitCommandRunner
 from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
 
-#: git's commit-identity variables -> git-mcp ``git_exec`` identity fields.
+#: git's commit-identity variables -> the git service ``git_exec`` identity fields.
 _IDENTITY_ENV = {
     "GIT_AUTHOR_NAME": "author_name",
     "GIT_AUTHOR_EMAIL": "author_email",
@@ -169,14 +169,14 @@ def require_read_only_git(cmd: Sequence[str]) -> None:
 
 
 class GoldenGitReader:
-    """Read-only git on a golden repository through git-mcp ``git_exec``.
+    """Read-only git on a golden repository through the git service ``git_exec``.
 
     ``run_git_command`` semantics -- text stdout decoded as a local run, a
     ``CalledProcessError`` for git's own non-zero exit when *check* -- so the
     history tools' parsers see exactly what local git prints. A failure to
-    reach git at all (transport, git-mcp refusal) is NOT a git exit: it raises
+    reach git at all (transport, the git service refusal) is NOT a git exit: it raises
     :class:`GitToolsUnavailableError`, never a ``CalledProcessError`` a caller
-    could read as "no commits" / "not found". A git-mcp timeout raises
+    could read as "no commits" / "not found". A the git service timeout raises
     ``subprocess.TimeoutExpired``, as the local run does.
     """
 
@@ -197,8 +197,8 @@ class GoldenGitReader:
             )
         except subprocess.CalledProcessError as e:
             detail = str(e.stderr or e)
-            # A typed timeout too, not only git-mcp's "timed out after" text:
-            # git-mcp's own kill reads "block timeout reached" and a socket
+            # A typed timeout too, not only the git service's "timed out after" text:
+            # the git service's own kill reads "block timeout reached" and a socket
             # timeout carries neither, and a caller with a budget (file
             # history's --follow) must see TimeoutExpired, not an outage.
             if timeout is not None and (
@@ -206,7 +206,7 @@ class GoldenGitReader:
             ):
                 raise subprocess.TimeoutExpired(list(cmd), timeout) from e
             raise GitToolsUnavailableError(
-                f"git-mcp could not run git {cmd[1]} on {cwd}: {detail}"
+                f"the git service could not run git {cmd[1]} on {cwd}: {detail}"
             ) from e
         if check and result.returncode != 0:
             raise subprocess.CalledProcessError(
@@ -220,7 +220,7 @@ class GoldenGitReader:
 
 def golden_git_reader(git_backend: Any) -> GoldenGitReader:
     """The read-only reader over the server's git backend, or a refusal when
-    the backend plugin cannot run git (no git-mcp ``git_exec``)."""
+    the backend plugin cannot run git (no the git service ``git_exec``)."""
     from code_indexer.server.services.delegated_refusal import (
         DelegatedRepositoryUnsupportedError,
     )
@@ -228,14 +228,14 @@ def golden_git_reader(git_backend: Any) -> GoldenGitReader:
     if not isinstance(git_backend, GitCommandRunner):
         raise DelegatedRepositoryUnsupportedError(
             "git history on golden repositories",
-            "the git backend plugin cannot run git (no git-mcp git_exec), and "
+            "the git backend plugin cannot run git (no the git service git_exec), and "
             "this pod does not hold the repository",
         )
     return GoldenGitReader(git_backend)
 
 
 class DelegatedGitTools:
-    """The git tools' git, through the git backend (git-mcp) and the content seam."""
+    """The git tools' git, through the git backend (the git service) and the content seam."""
 
     def __init__(self, backend: Any) -> None:
         self._backend = backend
@@ -347,7 +347,7 @@ def _identity(env: Optional[Mapping[str, str]]) -> Optional[Dict[str, str]]:
     """The commit identity a caller's env carries. Any OTHER git variable the
     caller SET cannot cross the seam, so it is refused rather than silently
     dropped; one merely inherited from os.environ is this process's own
-    environment (git-mcp has its own) and is not the caller's request."""
+    environment (the git service has its own) and is not the caller's request."""
     if not env:
         return None
     identity = {
@@ -389,8 +389,8 @@ def delegated_git_tools() -> Optional[DelegatedGitTools]:
         raise GitToolsUnavailableError(
             "Repositories are not on this server (content_backend='delegated') "
             "and the git backend cannot run cidx's git tools: set "
-            "git_backend='delegated' with a git-mcp plugin that provides run/push "
-            "(git-mcp git_exec)."
+            "git_backend='delegated' with a the git service plugin that provides run/push "
+            "(the git service git_exec)."
         )
     return DelegatedGitTools(backend)
 
