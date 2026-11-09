@@ -1,4 +1,4 @@
-"""Startup guard for the removed ``scip_query_backend`` setting (EVO-64616).
+"""Startup guard for the removed ``scip_query_backend`` setting (issue-64616).
 
 SCIP query delegation was removed: SCIP queries always read this pod's
 ``index.scip.db`` files. A ``config.json`` still selecting anything else was
@@ -29,7 +29,7 @@ LOCAL_SCIP_QUERY_BACKEND = "local"
 DELEGATED_SCIP_QUERY_BACKEND_REMOVED = (
     "scip_query_backend='delegated' was removed: SCIP queries always read this "
     "pod's index.scip.db files. Its DelegatedSCIPQueryService called "
-    "sandbox_scip_* tools that sandbox-mcp never had, so no delegated query "
+    "sandbox_scip_* tools that the sandbox service never had, so no delegated query "
     "ever succeeded. Delete scip_query_backend (and scip_sandbox) from "
     "config.json. With scip_backend='delegated-plugin' and "
     "index_store_backend='delegated', every pod serves SCIP queries from the "

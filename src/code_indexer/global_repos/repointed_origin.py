@@ -1,8 +1,8 @@
-"""EVO-64616: decide whether a base clone whose ``origin`` was repointed can be
+"""issue-64616: decide whether a base clone whose ``origin`` was repointed can be
 healed, reading only through the git seam.
 
-A writer sharing the golden clone directory (the workspace-mcp golden-repo
-seeder, before workspace-mcp !78) ran ``git remote set-url origin <other>``
+A writer sharing the golden clone directory (the the content service golden-repo
+seeder, before the content service a prior change) ran ``git remote set-url origin <other>``
 on a clone of another project with the same name. The refresh refuses to
 fetch such a clone (``RefreshScheduler._ensure_origin_is_registered``). It
 heals it -- origin set back to the registered URL -- only when BOTH hold:
@@ -17,14 +17,14 @@ heals it -- origin set back to the registered URL -- only when BOTH hold:
 
 Anything else -- no readable clone entry, a clone of another repository, a
 content check that cannot run -- keeps the stop. Every read goes through the
-scheduler's ``GitBackend``: local git, or git-mcp under delegated git, never
+scheduler's ``GitBackend``: local git, or the git service under delegated git, never
 this pod's disk.
 
-git-mcp: the reflog is read with ``git_exec`` (``log --walk-reflogs
---format=%gs HEAD``), which git-mcp allows from !26 on. An older git-mcp
+the git service: the reflog is read with ``git_exec`` (``log --walk-reflogs
+--format=%gs HEAD``), which the git service allows from a prior change on. An older the git service
 refuses the option; the refusal reads as "source unknown" and the stop is
-kept, so this works before and after !26 deploys with no change here. The
-probe and the repair are typed git-mcp tools (``git_symbolic_ref``,
+kept, so this works before and after a prior change deploys with no change here. The
+probe and the repair are typed the git service tools (``git_symbolic_ref``,
 ``git_fetch`` with ``ref``, ``git_rev_list_count``, ``git_set_remote``).
 """
 
@@ -62,7 +62,7 @@ def read_clone_source(backend: GitBackend, repo_path: str) -> CloneSource:
     """The ``clone: from <url>`` entry of HEAD's reflog, through the seam.
 
     Unknown when the backend cannot run git's local subcommands, git refuses
-    or fails the read (a git-mcp older than !26 refuses ``--walk-reflogs``),
+    or fails the read (a the git service older than a prior change refuses ``--walk-reflogs``),
     the reflog is empty, or its oldest entry is
     not the clone's (expired by ``gc.reflogExpire``, or never written).
     Transport errors raise."""

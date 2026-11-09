@@ -1,11 +1,11 @@
 """Startup check: under all-delegated backends nothing cidx needs is on the
-golden-repos volume (EVO-64616).
+golden-repos volume (issue-64616).
 
 With every repository seam delegated -- content, git, clone, ripgrep, and the
 seam selection of every enabled feature (X-Ray's ``xray_backend``, SCIP's
 ``scip_backend``) -- and
 ``index_store_backend: delegated``, the cidx pod reads repositories through
-workspace-mcp / git-mcp / sandbox-mcp and serves indexes it checks out of the
+the content service / the git service / the sandbox service and serves indexes it checks out of the
 IndexStore. ``<data>/golden-repos`` on the pod then holds this pod's own index
 state only, and the shared golden-repos volume can come off the StatefulSet.
 

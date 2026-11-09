@@ -65,7 +65,7 @@ def install_registry_metadata(
     Under ``content_backend='delegated'`` the alias and write-mode FILES -- the
     startup import, the read-through before it finishes, and the
     ``metadata_read_source=files`` rollback -- are read and written through
-    the content seam (workspace-mcp), never this pod's disk (EVO-64616).
+    the content seam (the content service), never this pod's disk (issue-64616).
     """
     backend = getattr(backend_registry, "control_plane_metadata", None)
     if backend is None:
@@ -111,7 +111,7 @@ def outbox_settings_from_config_service(
 ) -> Callable[[], Any]:
     """An OutboxSettings provider over the runtime (DB-backed) config.
 
-    The sink is RESOLVED here (``auto`` -> ``workspace-mcp`` under a delegated
+    The sink is RESOLVED here (``auto`` -> ``the content service`` under a delegated
     ``content_backend``, else ``local-files``), so everything the sweeper keys
     on the sink -- the drain bound, the stop state's "sink changed" check, the
     sink an abandon records -- sees the sink actually written through, and a

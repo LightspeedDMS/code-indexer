@@ -7,7 +7,7 @@ git run on THIS machine. On a pod that does not hold the repository there is
 nothing to run it against, so both read "unknown" -- and refresh, seeing an
 index that never matches HEAD, re-indexed from scratch every cycle.
 
-With a git backend (git-mcp) the same two questions go through the seam. With
+With a git backend (the git service) the same two questions go through the seam. With
 none, the commands are exactly the local ones they always were.
 
 Failures degrade to ``"unknown"`` as before; they are not silent, because the
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 UNKNOWN = "unknown"
 
 #: What git says for a path that is not inside a repository. The ONLY failure
-#: that means "not a repository"; anything else (git-mcp unreachable, a timeout)
+#: that means "not a repository"; anything else (the git service unreachable, a timeout)
 #: says nothing about the path and must not be read as an answer.
 NOT_A_REPOSITORY_MARKER = "not a git repository"
 
@@ -42,7 +42,7 @@ NOT_A_REPOSITORY_MARKER = "not a git repository"
 UNBORN_HEAD_MARKER = "ambiguous argument 'HEAD'"
 
 #: Why a golden repository with no commit -- in its clone or upstream -- is
-#: skipped, as refresh and the IndexStore backfill report it (EVO-64616).
+#: skipped, as refresh and the IndexStore backfill report it (issue-64616).
 EMPTY_REPOSITORY_REASON = (
     "empty repository: no commit in the clone or upstream; nothing to check "
     "out, pull or index until the first commit is pushed"
@@ -59,7 +59,7 @@ def is_unborn_head_stderr(stderr: object) -> bool:
 def is_unborn_head(exc: BaseException) -> bool:
     """True when *exc* is git's answer that HEAD has no commit yet.
 
-    Only a ``CalledProcessError`` -- what both the local backend and git-mcp
+    Only a ``CalledProcessError`` -- what both the local backend and the git service
     raise for a git failure -- can carry that answer; a transport failure says
     nothing about the repository and is never read as one.
     """

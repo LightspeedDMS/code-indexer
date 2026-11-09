@@ -204,7 +204,7 @@ def is_content_seam_delegated() -> bool:
 def golden_repo_content_root(repo_path: Union[str, Path], *, consumer: str) -> Path:
     """Where a delegated backend can see the repository behind *repo_path*.
 
-    A delegated backend (regex in workspace-mcp, the content seam) sees the
+    A delegated backend (regex in the content service, the content seam) sees the
     golden repos' base clones. Refresh, though, points an alias at a versioned
     snapshot it creates on THIS pod's disk -- holding only index state -- which
     the backend cannot see. So a snapshot path maps to its golden repo's
@@ -345,13 +345,13 @@ def _golden_repo_clone_path(repo_name: str) -> Optional[str]:
 
 class GoldenRepoSourceError(RuntimeError):
     """The golden repository behind a path could not be resolved (registry or
-    git-mcp failed): an agent must not be handed no repository instead."""
+    the git service failed): an agent must not be handed no repository instead."""
 
 
 class GoldenRepoEmptyError(GoldenRepoSourceError):
     """The golden repository has no commit yet (git's unborn HEAD): there is
     nothing to analyze. A state, not a failure -- callers skip it, quietly
-    (EVO-64616). Still a GoldenRepoSourceError, so no agent is ever handed
+    (issue-64616). Still a GoldenRepoSourceError, so no agent is ever handed
     "no repository" by a caller that does not know this type."""
 
 
@@ -363,13 +363,13 @@ def golden_repo_source(repo_path: Union[str, Path]) -> Optional[Dict[str, str]]:
     directory (``golden-repos/<alias>``) or a versioned snapshot of it, which
     on this pod hold index state only. The repository is named by the golden
     registry -- ``repoUrl`` (the registered remote) and ``branch`` -- and
-    ``commit`` is the commit cidx indexed, asked of git-mcp at the golden
+    ``commit`` is the commit cidx indexed, asked of the git service at the golden
     repo's base clone (as index freshness does). Returns
     ``{"alias", "repoUrl", "branch", "commit"}``.
 
     None when *repo_path* is not under the golden-repos directory (the job is
     about no repository). Raises :class:`GoldenRepoSourceError` when it IS a
-    golden repo path and the registry or git-mcp cannot answer, or the repo is
+    golden repo path and the registry or the git service cannot answer, or the repo is
     ``local://`` (its files are on this pod; nothing outside can open it) --
     never a silent "no repository".
     """
@@ -414,7 +414,7 @@ def golden_repo_source(repo_path: Union[str, Path]) -> Optional[Dict[str, str]]:
     if backend is None:
         raise GoldenRepoSourceError(
             f"the commit of {alias!r} is unknown: git_backend is 'local', so no "
-            "git-mcp holds the repository"
+            "the git service holds the repository"
         )
     clone = str(golden_repo_content_root(path, consumer="repository analysis"))
     try:
@@ -429,10 +429,10 @@ def golden_repo_source(repo_path: Union[str, Path]) -> Optional[Dict[str, str]]:
             ) from exc
         detail = getattr(exc, "stderr", None) or exc
         raise GoldenRepoSourceError(
-            f"git-mcp could not resolve HEAD of {alias!r} at {clone}: {detail}"
+            f"the git service could not resolve HEAD of {alias!r} at {clone}: {detail}"
         ) from exc
     if not head:
-        raise GoldenRepoSourceError(f"git-mcp returned no HEAD for {alias!r}")
+        raise GoldenRepoSourceError(f"the git service returned no HEAD for {alias!r}")
     return {
         "alias": alias,
         "repoUrl": str(repo.repo_url),

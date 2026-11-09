@@ -1,14 +1,14 @@
 """
-Pluggable git *invoker*: the EVO-64616 Phase 2 delegation seam, placed at the
+Pluggable git *invoker*: the issue-64616 Phase 2 delegation seam, placed at the
 one universal chokepoint every git call bottoms out at.
 
 Why here (and not the ``GitBackend`` seam)
 -------------------------------------------
-EVO-64678 added a ``GitBackend`` seam, but it only wraps cidx's INTERNAL git
+issue-64678 added a ``GitBackend`` seam, but it only wraps cidx's INTERNAL git
 (golden/activated-repo lifecycle, refresh scheduler, git-sync, pull-updates).
 The user-facing git-mutation TOOLS — ``git_commit``/``push``/``branch_*``/
 ``stage``/``reset``/``stash``/``amend``/``merge`` and the PR ops, the exact
-surface the ticket says belongs to git-mcp — funnel through
+surface the ticket says belongs to the git service — funnel through
 ``GitOperationsService``, which calls ``utils.git_runner.run_git_command``
 DIRECTLY and never touches ``GitBackend``. So the ``GitBackend`` seam is a
 *parallel* path the tools bypass.
@@ -28,7 +28,7 @@ A plugin is a zero-argument FACTORY callable::
         ...
 
 returning any object satisfying the ``GitInvoker`` protocol (a single ``run``).
-It takes no arguments: the git-mcp endpoint/token/timeout are read from the
+It takes no arguments: the the git service endpoint/token/timeout are read from the
 environment by the invoker itself, so the factory needs nothing from cidx.
 
 Selection (first match wins), mirroring ``git_backend_plugin``:
@@ -183,7 +183,7 @@ _TAG_WRITE_FLAGS = {
 # unrecognised falling through to "read, run it locally". That is fail-open in
 # the one direction that matters: an unrecognised sub-verb is either a future
 # git sub-command or one supplied at runtime, and running it locally hands it
-# the credentials this seam exists to confine to git-mcp. `branch`, `tag` and
+# the credentials this seam exists to confine to the git service. `branch`, `tag` and
 # `stash` all default the other way already; `remote` was the odd one out.
 _REMOTE_READ_SUBVERBS = {
     "show",
@@ -391,7 +391,7 @@ def get_git_invoker() -> Optional[GitInvoker]:
 
     ``run_git_command`` is called per git operation, so the invoker is resolved
     and instantiated ONCE and cached -- the factory (which may build an HTTP
-    client to git-mcp) is not re-run on every git call. Returns None when no
+    client to the git service) is not re-run on every git call. Returns None when no
     plugin is configured (the native default).
     """
     global _cached_instance

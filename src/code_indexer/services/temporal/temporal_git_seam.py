@@ -1,10 +1,10 @@
-"""Temporal history read through the git seam (git-mcp).
+"""Temporal history read through the git seam (the git service).
 
 Temporal indexing walks a repository's history: ``git log`` for the commits,
 then one ``git diff`` per commit. Temporal queries resolve ``at_commit`` and,
 for legacy pointer payloads, read a file at a commit. On a pod that does not
 hold the repository none of that can run locally. With a git backend it is
-asked of git-mcp instead -- and in pages and batches, never one round trip per
+asked of the git service instead -- and in pages and batches, never one round trip per
 commit or per file:
 
 * history: ``HISTORY_PAGE_COMMITS`` commits per ``log_raw`` call;
@@ -169,7 +169,7 @@ def commit_timestamp(backend: Any, repo_path: str, ref: str) -> int:
     """``resolve_commit_timestamp`` through the seam: the same answers and errors.
 
     ``rev-parse --verify --quiet`` says "no such commit" with exit 1 and no
-    stderr (git-mcp: an empty answer). Any other failure -- git-mcp
+    stderr (the git service: an empty answer). Any other failure -- the git service
     unreachable, a timeout -- says nothing about the ref and is reported as a
     failure to resolve, never as "not a commit".
     """
@@ -237,7 +237,7 @@ def server_history_backend(
 
     None outside a server, and on a server whose git runs locally: those keep
     local git exactly as before. A versioned snapshot path (index state only, on
-    this pod) maps to the golden repo's base clone, which git-mcp can see.
+    this pod) maps to the golden repo's base clone, which the git service can see.
     """
     from ...server.startup.content_backend_wiring import golden_repo_content_root
     from ...server.startup.git_backend_wiring import server_delegated_git_backend

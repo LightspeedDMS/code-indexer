@@ -64,7 +64,7 @@ def resolve_sweep_leader(app_state: Any) -> bool:
     fake injected at the call site.
 
     * Hold (``False``) until leader-election wiring is ready. Reuses the
-      EVO-66188 ``scip_reconcile_leader_gate_ready`` startup gate: it is set to
+      issue-66188 ``scip_reconcile_leader_gate_ready`` startup gate: it is set to
       its final value early in lifespan and flips ``True`` in the cluster block's
       ``finally``, strictly *after* ``app.state.leader_election`` is populated,
       so a reader that sees ready can trust the election attribute.

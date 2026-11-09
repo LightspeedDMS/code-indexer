@@ -61,7 +61,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 #: Error strings meaning "this file is gone". The local backend reports
-#: ``os.strerror(errno)``; workspace-mcp reports the bare errno name.
+#: ``os.strerror(errno)``; the content service reports the bare errno name.
 _VANISHED_ERRORS = frozenset({"ENOENT", os.strerror(errno.ENOENT)})
 
 #: Longest transport-failure reason kept, in the log and on each failed file.

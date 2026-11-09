@@ -1,8 +1,8 @@
-"""Chunk coverage of the text index (EVO-64616).
+"""Chunk coverage of the text index (issue-64616).
 
-Until EVO-64616 a chunk that referenced an image went to the multimodal path
+Until issue-64616 a chunk that referenced an image went to the multimodal path
 only, so its text never reached the text collection: with multimodal indexing
-off (EVO-65484) such a chunk was embedded nowhere, and with it on, a chunk
+off (issue-65484) such a chunk was embedded nowhere, and with it on, a chunk
 whose images could not be resolved or embedded was dropped. The text
 collection now holds every chunk of every indexed file
 (``FileChunkingManager``), so a file whose stored chunk indexes do not cover

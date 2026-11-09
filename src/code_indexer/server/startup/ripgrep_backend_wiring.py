@@ -120,7 +120,7 @@ def server_regex_target(
 ) -> Tuple[Path, Optional[RipgrepBackend]]:
     """Where a server regex search runs, and the backend that runs it.
 
-    A delegated backend runs ripgrep in workspace-mcp, which holds the golden
+    A delegated backend runs ripgrep in the content service, which holds the golden
     repos' base clones, so a versioned-snapshot path is searched at its golden
     repo's base clone (``golden_repo_content_root``, shared with the file
     tools). A pod-local ``local://`` golden repo (Langfuse trace folders) has

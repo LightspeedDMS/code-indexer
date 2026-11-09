@@ -108,7 +108,7 @@ _ReadT = TypeVar("_ReadT")
 
 class MetadataFilesUnavailableError(OSError):
     """The metadata files could not be read, listed or written: their store
-    (workspace-mcp, under content_backend='delegated') is unreachable or not
+    (the content service, under content_backend='delegated') is unreachable or not
     built yet. Never means "no such file" -- that is None / an empty listing."""
 
 
@@ -276,7 +276,7 @@ class ControlPlaneMetadata:
         cluster: True when *backend* is shared by several nodes (PostgreSQL).
         files: Where the file representation lives; defaults to this pod's
             disk. A server whose repositories are delegated passes the content
-            seam's (EVO-64616) so the files are never read from, or written
+            seam's (issue-64616) so the files are never read from, or written
             to, a volume the pod does not mount.
     """
 
@@ -354,7 +354,7 @@ class ControlPlaneMetadata:
 
         Best effort on top of the registry, which already answered: when the
         files' store is unreachable (MetadataFilesUnavailableError -- e.g.
-        workspace-mcp down after start_import gave up), log it and keep the
+        the content service down after start_import gave up), log it and keep the
         registry's answer instead of failing a read the registry can serve.
         In files mode (rollback) the files are authoritative and nothing is
         caught -- see get() / list_all().
@@ -567,7 +567,7 @@ def _same_directory(installed: PathLike, requested: PathLike) -> bool:
     once symlinks are resolved. Several callers derive the directory from a
     realpath'd sibling (``activated_repos_dir`` is resolved), so a lexical
     comparison alone handed them a files-only component on any server whose
-    data directory sits behind a symlink (EVO-64616)."""
+    data directory sits behind a symlink (issue-64616)."""
     if _normalized(installed) == _normalized(requested):
         return True
     try:

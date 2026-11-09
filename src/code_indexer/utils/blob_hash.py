@@ -10,7 +10,7 @@ Why this exists rather than ``git hash-object``:
   (``FileIdentifier._get_git_metadata``), so shelling out means one fork+exec per
   file. At fleet scale (~900 repos) that is the single highest-volume git
   invocation cidx makes.
-* **Seam discipline.** ``git_backend`` delegates repo-level git work to git-mcp.
+* **Seam discipline.** ``git_backend`` delegates repo-level git work to the git service.
   A per-file operation is the wrong shape for that seam -- delegating it would
   turn one fork per file into one HTTP round-trip per file. The right answer for
   this particular operation is not to delegate it but to stop needing git at all.

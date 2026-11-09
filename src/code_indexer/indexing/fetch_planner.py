@@ -18,7 +18,7 @@ strategy           requests  peak MB   biggest batch MB
 8 MB per call            30     24.1                 8.0
 =================  ========  ========  ==================
 
-workspace-mcp admits a single file up to 64 MiB, so twenty-five of them is a
+the content service admits a single file up to 64 MiB, so twenty-five of them is a
 1.6 GB request. A byte budget is flat by construction, and costs nothing to
 compute: the manifest the pass has already paged carries every file's size.
 
@@ -47,7 +47,7 @@ slower than batching on one, at twice the memory.
 Why the request is bounded too
 ------------------------------
 The request is a JSON body, ``{"source_path": ..., "paths": [...]}``, and
-workspace-mcp refuses a body over 100 KB (Nest's default JSON limit) with a 413.
+the content service refuses a body over 100 KB (Nest's default JSON limit) with a 413.
 A file COUNT does not bound that: 1000 paths of 85 bytes -- an ordinary depth
 for a TypeScript monorepo -- is 87 KB of paths alone, and measured against the
 server a batch like that from agent-e2e came back 413, failing every file in
@@ -71,7 +71,7 @@ DEFAULT_FETCH_BUDGET_BYTES = 8 * 1024 * 1024
 #: typical 40-byte path this keeps the request itself under ~40 KB.
 DEFAULT_FETCH_BUDGET_FILES = 1000
 
-#: Encoded bytes of the ``paths`` array per fetch request. workspace-mcp's body
+#: Encoded bytes of the ``paths`` array per fetch request. the content service's body
 #: limit is 100 KB; this leaves room for the envelope and ``source_path`` (at
 #: most PATH_MAX), so no batch the planner forms can be refused for its size.
 DEFAULT_FETCH_BUDGET_REQUEST_BYTES = 64 * 1024

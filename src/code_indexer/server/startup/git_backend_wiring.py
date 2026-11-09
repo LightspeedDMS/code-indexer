@@ -1,7 +1,7 @@
 """
 Git backend wiring helper for CIDX server startup.
 
-EVO-64678 (EVO-64616 Phase 2) — the git sibling of ``clone_backend_wiring``.
+issue-64678 (issue-64616 Phase 2) — the git sibling of ``clone_backend_wiring``.
 Builds the ``GitBackend`` that cidx's internal git operations run through,
 selected by the ``git_backend`` server config field.
 
@@ -9,11 +9,11 @@ Fail-fast policy (mirrors the clone wiring):
 - ``local``     : no external validation needed — git runs in-process via
                   ``utils.git_runner``. This is the DEFAULT, so an unset or
                   absent config behaves exactly as cidx does today.
-- ``delegated`` : git is executed by the git-mcp spoke. cidx itself must then
+- ``delegated`` : git is executed by the the git service spoke. cidx itself must then
                   perform NO git work, so there is deliberately **no silent
                   fallback to local** — an unavailable delegated backend raises,
                   the same way ``clone_backend='delegated'`` refuses to quietly
-                  fall back to a cidx-side copy (EVO-64615).
+                  fall back to a cidx-side copy (issue-64615).
 - anything else : raises immediately, so a typo'd config can't degrade into a
                   surprising default.
 """
@@ -47,7 +47,7 @@ def build_git_backend(
     delegated_backend:
         The plugin-supplied backend used when ``git_backend='delegated'``.
         Phase 3 resolves this from the ``code_indexer.git_backend`` entry-point
-        seam (the ``cidx_git_backend`` plugin, which talks to git-mcp). Until
+        seam (the ``cidx_git_backend`` plugin, which talks to the git service). Until
         that ships, selecting ``delegated`` without injecting one raises.
 
     Returns
@@ -73,15 +73,15 @@ def build_git_backend(
         if delegated_backend is None:
             raise RuntimeError(
                 "git_backend='delegated' selected but no delegated backend is "
-                "available. Install the cidx_git_backend plugin (EVO-64678 "
-                "Phase 3), which registers a git-mcp backend on the "
+                "available. Install the cidx_git_backend plugin (issue-64678 "
+                "Phase 3), which registers a the git service backend on the "
                 "code_indexer.git_backend entry point. Refusing to fall back to "
                 "local git: delegation exists so cidx performs no git work."
             )
         backend = GitBackendFactory.create(
             "delegated", delegated_backend=delegated_backend
         )
-        logger.info("GitBackend: using delegated backend (git-mcp)")
+        logger.info("GitBackend: using delegated backend (the git service)")
         return backend
 
     backend = GitBackendFactory.create("local")
@@ -139,7 +139,7 @@ def configured_git_backend_name() -> str:
 
 
 def server_delegated_git_backend() -> Optional[GitBackend]:
-    """The running server's git seam when it is delegated (git-mcp), else None.
+    """The running server's git seam when it is delegated (the git service), else None.
 
     None outside a server process (CLI, daemon, tests) and on a server whose git
     runs locally: callers then run local git exactly as before. Read from the

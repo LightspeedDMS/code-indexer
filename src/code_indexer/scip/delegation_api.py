@@ -2,7 +2,7 @@
 
 A SCIP backend plugin (entry point group ``code_indexer.scip_backend``)
 published before modular phase 4d imports its types from here. They are the
-SDK's (``cidx_sdk.seams.scip``) plus the core's sandbox-mcp client, exactly
+SDK's (``cidx_sdk.seams.scip``) plus the core's the sandbox service client, exactly
 what ``cidx_scip.delegation_api`` exports; this module imports no feature
 code, so a plugin loads whether or not the ``scip`` feature is installed.
 New plugins import ``cidx_sdk.seams.scip``.

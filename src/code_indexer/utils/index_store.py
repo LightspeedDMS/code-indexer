@@ -18,7 +18,7 @@ is versioned:
    tests/unit/utils/test_index_store.py fails the build on any new
    direct derivation, so the remaining ones can only migrate behind this seam.
 2. (also this module) indexes as versioned artifacts: ``DelegatedIndexStore``
-   publishes a built index to an artifact service (workspace-mcp's index store,
+   publishes a built index to an artifact service (the content service's index store,
    via the ``code_indexer.index_artifacts`` plugin) as an immutable version,
    and ``checkout`` fetches a version, verified, for readers. Selected by the
    server's ``index_store_backend``; ``LocalIndexStore`` publishes and checks
@@ -57,7 +57,7 @@ from cidx_backend_workspace.index_store import LocalIndexStore as LocalIndexStor
 #: a served target (``server/services/index_materializer`` and
 #: ``served_index_cache``): present while a checkout runs, after it finished
 #: (holds the version), and touched when it is served. Pod state, never
-#: repository content -- listings skip them like ``.code-indexer`` (EVO-64616:
+#: repository content -- listings skip them like ``.code-indexer`` (issue-64616:
 #: browse_directory on a -global alias showed ``.cidx-index-last-served``).
 IN_PROGRESS_MARKER = ".cidx-index-checkout-in-progress"
 CHECKED_OUT_MARKER = ".cidx-index-checked-out"
@@ -65,7 +65,7 @@ LAST_SERVED_STAMP = ".cidx-index-last-served"
 INDEX_STATE_FILES = (IN_PROGRESS_MARKER, CHECKED_OUT_MARKER, LAST_SERVED_STAMP)
 
 
-#: What the artifact service accepts as an alias (workspace-mcp's index store).
+#: What the artifact service accepts as an alias (the content service's index store).
 _STORE_ALIAS_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 _STORE_ALIAS_MAX = 128
 _ALIAS_HASH_CHARS = 8

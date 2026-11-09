@@ -1,10 +1,10 @@
-"""JSON-RPC client for sandbox-mcp's fixed platform tools.
+"""JSON-RPC client for the sandbox service's fixed platform tools.
 
-cidx hands executions it must not run in its own pod to sandbox-mcp: X-Ray's
+cidx hands executions it must not run in its own pod to the sandbox service: X-Ray's
 evaluator compile + run and the SCIP index build (``sandbox_run_profile``,
 through the delegated X-Ray and SCIP backend plugins). Every such call has the
 same transport -- one JSON-RPC ``tools/call`` POST carrying a bearer
-``api_key`` against the sandbox-mcp base ``endpoint``. A run tool replies with a ``SandboxRunResult`` envelope
+``api_key`` against the the sandbox service base ``endpoint``. A run tool replies with a ``SandboxRunResult`` envelope
 (``exit_code``, ``output``, ``duration_ms``, ``errors``; :meth:`call_tool`); any
 other tool (e.g. ``sandbox_result_fetch`` paging a parked result) replies with
 its own object (:meth:`call_tool_payload`). This module owns that transport so
@@ -27,7 +27,7 @@ from code_indexer.utils.remote_endpoint import RemoteServiceEndpoint
 
 logger = logging.getLogger(__name__)
 
-# Path appended to the sandbox-mcp base endpoint for the JSON-RPC front door.
+# Path appended to the the sandbox service base endpoint for the JSON-RPC front door.
 # ``SandboxMcpController`` mounts the MCP handler at ``POST /v1/sandbox/mcp``
 # (URI versioning prefix 'v', v1).
 DEFAULT_JSONRPC_PATH = "/v1/sandbox/mcp"
@@ -134,7 +134,7 @@ def _import_requests() -> Any:
 
 
 class SandboxMcpClient:
-    """Calls one sandbox-mcp deployment's fixed tools over JSON-RPC."""
+    """Calls one the sandbox service deployment's fixed tools over JSON-RPC."""
 
     def __init__(
         self,
@@ -148,8 +148,8 @@ class SandboxMcpClient:
         """
         Args:
             config: Anything exposing ``endpoint`` and ``api_key``.
-                ``endpoint`` is the sandbox-mcp *base* URL (e.g.
-                ``http://sandbox-mcp:8200``); the paths below are appended.
+                ``endpoint`` is the the sandbox service *base* URL (e.g.
+                ``http://the sandbox service:8200``); the paths below are appended.
             timeout_seconds: HTTP timeout for a ``tools/call`` POST.
             jsonrpc_path: Path of the JSON-RPC POST under ``endpoint``.
             health_path: Path of the health probe under ``endpoint``.
