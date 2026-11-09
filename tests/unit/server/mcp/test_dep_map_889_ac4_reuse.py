@@ -25,7 +25,7 @@ class TestAC4AggregateGraphReuse:
 
     def test_aggregate_graph_importable(self) -> None:
         """_aggregate_graph must be importable from dep_map_parser_graph."""
-        from code_indexer.server.services.dep_map_parser_graph import _aggregate_graph
+        from cidx_depmap.server.dep_map_parser_graph import _aggregate_graph
 
         assert callable(_aggregate_graph)
 
@@ -36,7 +36,7 @@ class TestAC4AggregateGraphReuse:
 
         edge_data must be non-empty and contain the expected (src,tgt) key.
         """
-        from code_indexer.server.services.dep_map_parser_graph import _aggregate_graph
+        from cidx_depmap.server.dep_map_parser_graph import _aggregate_graph
 
         dep_map_dir = tmp_path / "dependency-map"
         dep_map_dir.mkdir()
@@ -87,7 +87,7 @@ class TestAC4AggregateGraphReuse:
         """
         root = _make_hub_graph(tmp_path)
 
-        from code_indexer.server.services.dep_map_parser_graph import (
+        from cidx_depmap.server.dep_map_parser_graph import (
             _aggregate_graph as real_fn,
         )
 
@@ -98,11 +98,11 @@ class TestAC4AggregateGraphReuse:
             return real_fn(dep_map_dir)
 
         with patch(
-            "code_indexer.server.mcp.handlers.depmap._aggregate_graph",
+            "cidx_depmap.server.mcp.handlers._aggregate_graph",
             side_effect=recording_aggregate,
         ):
             with patch(
-                "code_indexer.server.services.dep_map_mcp_parser.DepMapMCPParser",
+                "cidx_depmap.server.dep_map_mcp_parser.DepMapMCPParser",
                 side_effect=AssertionError(
                     "AC4 violated: hub handler must not instantiate DepMapMCPParser"
                 ),

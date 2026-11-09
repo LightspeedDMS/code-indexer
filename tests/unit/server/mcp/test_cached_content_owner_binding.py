@@ -23,8 +23,8 @@ from code_indexer.server.mcp.handlers import _utils, xray_truncation
 from code_indexer.server.mcp.handlers.search.cached_content import (
     handle_get_cached_content,
 )
-from code_indexer.server.mcp.handlers.xray import _cached_payload
-from code_indexer.server.mcp.handlers.xray._cached_payload import (
+from code_indexer.server.mcp.handlers import cached_payload as _cached_payload
+from code_indexer.server.mcp.handlers.cached_payload import (
     handle_cidx_fetch_cached_payload,
 )
 from tests.unit.server.cache._owner_bound_stores import (  # noqa: F401 (fixture)

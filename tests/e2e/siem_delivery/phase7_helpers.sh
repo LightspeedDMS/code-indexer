@@ -114,7 +114,8 @@ write_siem_bootstrap_config() {
   "host": "$E2E_SIEM_SERVER_HOST",
   "port": $E2E_SIEM_SERVER_PORT,
   "fault_injection_enabled": true,
-  "fault_injection_nonprod_ack": true
+  "fault_injection_nonprod_ack": true,
+  "enabled_features": $E2E_ENABLED_FEATURES_JSON
 }
 CONFIG_EOF
     _yellow "  Wrote SIEM bootstrap config.json to $E2E_SIEM_SERVER_DATA_DIR/config.json"

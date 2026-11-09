@@ -24,7 +24,8 @@ REFRESH_FUNC_SCAN_BYTES = 2000  # Generous slice of refreshAll() body to search
 # Repository root derived from test file location (avoids repeated path construction)
 REPO_ROOT = Path(__file__).parent.parent.parent.parent.parent
 
-ROUTES_PATH = REPO_ROOT / "src/code_indexer/server/web/routes.py"
+# The dashboard routes live in web/pages/dashboard.py since web/routes.py was split.
+ROUTES_PATH = REPO_ROOT / "src/code_indexer/server/web/pages/dashboard.py"
 DASHBOARD_TEMPLATE_PATH = (
     REPO_ROOT / "src/code_indexer/server/web/templates/dashboard.html"
 )

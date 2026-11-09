@@ -58,7 +58,9 @@ def test_writer_stop_and_unbind_follow_every_emitter_stop() -> None:
         "global_lifecycle_manager.stop()",
         "data_retention_scheduler_state.stop()",
         "description_refresh_scheduler_state.stop()",
-        "dependency_map_service_state.stop_scheduler()",
+        # The dependency map's scheduler is stopped by its feature's
+        # on_shutdown (cidx-depmap, modular phase 4g), inside stop_features.
+        "stop_features(",
         "self_monitoring_service.stop()",
         "langfuse_sync_service.stop()",
     ]

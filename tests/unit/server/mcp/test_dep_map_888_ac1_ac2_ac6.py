@@ -12,9 +12,10 @@ AC6: every response includes BOTH `success` and `resolution`; invariants hold:
 import json
 from pathlib import Path
 from typing import Any, Dict, cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from code_indexer.server.auth.user_manager import User, UserRole
+from tests.unit.server._depmap_feature import depmap_service_reading, depmap_started
 
 
 # ---------------------------------------------------------------------------
@@ -29,10 +30,8 @@ def _make_user() -> User:
     return user
 
 
-def _make_app_state(read_path: Path) -> MagicMock:
-    state = MagicMock()
-    state.dependency_map_service.cidx_meta_read_path = read_path
-    return state
+def _running_service(read_path: Path) -> Any:
+    return depmap_service_reading(read_path)
 
 
 def _parse_response(result: Any) -> Dict[str, Any]:
@@ -40,59 +39,44 @@ def _parse_response(result: Any) -> Dict[str, Any]:
     return cast(Dict[str, Any], json.loads(result["content"][0]["text"]))
 
 
-def _call_find_consumers(params: dict, app_state: MagicMock) -> Any:
-    from code_indexer.server.mcp.handlers.depmap import depmap_find_consumers_handler
+def _call_find_consumers(params: dict, service: Any) -> Any:
+    from cidx_depmap.server.mcp.handlers import depmap_find_consumers_handler
 
-    with patch(
-        "code_indexer.server.mcp.handlers.depmap._utils.app_module.app.state",
-        app_state,
-    ):
+    with depmap_started(service, MagicMock()):
         return depmap_find_consumers_handler(params, _make_user())
 
 
-def _call_get_repo_domains(params: dict, app_state: MagicMock) -> Any:
-    from code_indexer.server.mcp.handlers.depmap import depmap_get_repo_domains_handler
+def _call_get_repo_domains(params: dict, service: Any) -> Any:
+    from cidx_depmap.server.mcp.handlers import depmap_get_repo_domains_handler
 
-    with patch(
-        "code_indexer.server.mcp.handlers.depmap._utils.app_module.app.state",
-        app_state,
-    ):
+    with depmap_started(service, MagicMock()):
         return depmap_get_repo_domains_handler(params, _make_user())
 
 
-def _call_get_domain_summary(params: dict, app_state: MagicMock) -> Any:
-    from code_indexer.server.mcp.handlers.depmap import (
+def _call_get_domain_summary(params: dict, service: Any) -> Any:
+    from cidx_depmap.server.mcp.handlers import (
         depmap_get_domain_summary_handler,
     )
 
-    with patch(
-        "code_indexer.server.mcp.handlers.depmap._utils.app_module.app.state",
-        app_state,
-    ):
+    with depmap_started(service, MagicMock()):
         return depmap_get_domain_summary_handler(params, _make_user())
 
 
-def _call_get_stale_domains(params: dict, app_state: MagicMock) -> Any:
-    from code_indexer.server.mcp.handlers.depmap import (
+def _call_get_stale_domains(params: dict, service: Any) -> Any:
+    from cidx_depmap.server.mcp.handlers import (
         depmap_get_stale_domains_handler,
     )
 
-    with patch(
-        "code_indexer.server.mcp.handlers.depmap._utils.app_module.app.state",
-        app_state,
-    ):
+    with depmap_started(service, MagicMock()):
         return depmap_get_stale_domains_handler(params, _make_user())
 
 
-def _call_get_cross_domain_graph(params: dict, app_state: MagicMock) -> Any:
-    from code_indexer.server.mcp.handlers.depmap import (
+def _call_get_cross_domain_graph(params: dict, service: Any) -> Any:
+    from cidx_depmap.server.mcp.handlers import (
         depmap_get_cross_domain_graph_handler,
     )
 
-    with patch(
-        "code_indexer.server.mcp.handlers.depmap._utils.app_module.app.state",
-        app_state,
-    ):
+    with depmap_started(service, MagicMock()):
         return depmap_get_cross_domain_graph_handler(params, _make_user())
 
 
@@ -145,7 +129,9 @@ class TestAC1ResolutionFieldPresent:
     def test_find_consumers_response_has_resolution(self, tmp_path: Path) -> None:
         """depmap_find_consumers response must include resolution field."""
         root = _make_valid_dep_map(tmp_path)
-        result = _call_find_consumers({"repo_name": "some-repo"}, _make_app_state(root))
+        result = _call_find_consumers(
+            {"repo_name": "some-repo"}, _running_service(root)
+        )
         data = _parse_response(result)
         assert "resolution" in data, (
             f"depmap_find_consumers response missing 'resolution' field; got keys: {list(data)}"
@@ -155,7 +141,7 @@ class TestAC1ResolutionFieldPresent:
         """depmap_get_repo_domains response must include resolution field."""
         root = _make_valid_dep_map(tmp_path)
         result = _call_get_repo_domains(
-            {"repo_name": "some-repo"}, _make_app_state(root)
+            {"repo_name": "some-repo"}, _running_service(root)
         )
         data = _parse_response(result)
         assert "resolution" in data, (
@@ -166,7 +152,7 @@ class TestAC1ResolutionFieldPresent:
         """depmap_get_domain_summary response must include resolution field."""
         root = _make_valid_dep_map(tmp_path)
         result = _call_get_domain_summary(
-            {"domain_name": "some-domain"}, _make_app_state(root)
+            {"domain_name": "some-domain"}, _running_service(root)
         )
         data = _parse_response(result)
         assert "resolution" in data, (
@@ -176,7 +162,7 @@ class TestAC1ResolutionFieldPresent:
     def test_get_stale_domains_response_has_resolution(self, tmp_path: Path) -> None:
         """depmap_get_stale_domains response must include resolution field."""
         root = _make_valid_dep_map(tmp_path)
-        result = _call_get_stale_domains({"days_threshold": 0}, _make_app_state(root))
+        result = _call_get_stale_domains({"days_threshold": 0}, _running_service(root))
         data = _parse_response(result)
         assert "resolution" in data, (
             f"depmap_get_stale_domains response missing 'resolution' field; got keys: {list(data)}"
@@ -187,7 +173,7 @@ class TestAC1ResolutionFieldPresent:
     ) -> None:
         """depmap_get_cross_domain_graph response must include resolution field."""
         root = _make_valid_dep_map(tmp_path)
-        result = _call_get_cross_domain_graph({}, _make_app_state(root))
+        result = _call_get_cross_domain_graph({}, _running_service(root))
         data = _parse_response(result)
         assert "resolution" in data, (
             f"depmap_get_cross_domain_graph response missing 'resolution' field; got keys: {list(data)}"
@@ -196,7 +182,7 @@ class TestAC1ResolutionFieldPresent:
     def test_resolution_field_is_string(self, tmp_path: Path) -> None:
         """resolution field must be a plain string (Literal, not Enum/int)."""
         root = _make_valid_dep_map(tmp_path)
-        result = _call_find_consumers({"repo_name": "x"}, _make_app_state(root))
+        result = _call_find_consumers({"repo_name": "x"}, _running_service(root))
         data = _parse_response(result)
         assert isinstance(data.get("resolution"), str), (
             f"resolution must be a plain string, got: {type(data.get('resolution'))!r}"
@@ -212,7 +198,7 @@ class TestAC1ResolutionFieldPresent:
             "repo_has_no_consumers",
         }
         root = _make_valid_dep_map(tmp_path)
-        result = _call_find_consumers({"repo_name": "x"}, _make_app_state(root))
+        result = _call_find_consumers({"repo_name": "x"}, _running_service(root))
         data = _parse_response(result)
         assert data.get("resolution") in known, (
             f"resolution value {data.get('resolution')!r} not in known literals: {known}"
@@ -235,7 +221,7 @@ class TestAC2EmptyInputBreakingChange:
     ) -> None:
         """depmap_find_consumers with empty repo_name must return success=false/invalid_input."""
         root = _make_valid_dep_map(tmp_path)
-        result = _call_find_consumers({"repo_name": ""}, _make_app_state(root))
+        result = _call_find_consumers({"repo_name": ""}, _running_service(root))
         data = _parse_response(result)
         assert data["success"] is False, (
             "BREAKING CHANGE: empty repo_name must return success=false (was success=true)"
@@ -250,7 +236,7 @@ class TestAC2EmptyInputBreakingChange:
     ) -> None:
         """depmap_get_repo_domains with empty repo_name must return success=false/invalid_input."""
         root = _make_valid_dep_map(tmp_path)
-        result = _call_get_repo_domains({"repo_name": ""}, _make_app_state(root))
+        result = _call_get_repo_domains({"repo_name": ""}, _running_service(root))
         data = _parse_response(result)
         assert data["success"] is False
         assert data.get("resolution") == "invalid_input"
@@ -261,7 +247,7 @@ class TestAC2EmptyInputBreakingChange:
     ) -> None:
         """depmap_get_domain_summary with empty domain_name must return success=false/invalid_input."""
         root = _make_valid_dep_map(tmp_path)
-        result = _call_get_domain_summary({"domain_name": ""}, _make_app_state(root))
+        result = _call_get_domain_summary({"domain_name": ""}, _running_service(root))
         data = _parse_response(result)
         assert data["success"] is False
         assert data.get("resolution") == "invalid_input"
@@ -275,13 +261,13 @@ class TestAC2EmptyInputBreakingChange:
         root = _make_valid_dep_map(tmp_path)
 
         fc_result = _parse_response(
-            _call_find_consumers({"repo_name": ""}, _make_app_state(root))
+            _call_find_consumers({"repo_name": ""}, _running_service(root))
         )
         rd_result = _parse_response(
-            _call_get_repo_domains({"repo_name": ""}, _make_app_state(root))
+            _call_get_repo_domains({"repo_name": ""}, _running_service(root))
         )
         ds_result = _parse_response(
-            _call_get_domain_summary({"domain_name": ""}, _make_app_state(root))
+            _call_get_domain_summary({"domain_name": ""}, _running_service(root))
         )
 
         # Each must be success=false — never success=true with empty result
@@ -317,7 +303,7 @@ class TestAC6SuccessResolutionInvariants:
         """
         root = _make_dep_map_with_consumer(tmp_path, "target-repo")
         result = _call_find_consumers(
-            {"repo_name": "target-repo"}, _make_app_state(root)
+            {"repo_name": "target-repo"}, _running_service(root)
         )
         data = _parse_response(result)
         # Fixture guarantees a match — resolution must be ok
@@ -333,7 +319,7 @@ class TestAC6SuccessResolutionInvariants:
     ) -> None:
         """When resolution=invalid_input, success must be false."""
         root = _make_valid_dep_map(tmp_path)
-        result = _call_find_consumers({"repo_name": ""}, _make_app_state(root))
+        result = _call_find_consumers({"repo_name": ""}, _running_service(root))
         data = _parse_response(result)
         assert data.get("resolution") == "invalid_input"
         assert data["success"] is False, (
@@ -349,20 +335,20 @@ class TestAC6SuccessResolutionInvariants:
             (
                 "find_consumers",
                 _parse_response(
-                    _call_find_consumers({"repo_name": "x"}, _make_app_state(root))
+                    _call_find_consumers({"repo_name": "x"}, _running_service(root))
                 ),
             ),
             (
                 "get_repo_domains",
                 _parse_response(
-                    _call_get_repo_domains({"repo_name": "x"}, _make_app_state(root))
+                    _call_get_repo_domains({"repo_name": "x"}, _running_service(root))
                 ),
             ),
             (
                 "get_domain_summary",
                 _parse_response(
                     _call_get_domain_summary(
-                        {"domain_name": "x"}, _make_app_state(root)
+                        {"domain_name": "x"}, _running_service(root)
                     )
                 ),
             ),
@@ -370,14 +356,14 @@ class TestAC6SuccessResolutionInvariants:
                 "get_stale_domains",
                 _parse_response(
                     _call_get_stale_domains(
-                        {"days_threshold": 0}, _make_app_state(root)
+                        {"days_threshold": 0}, _running_service(root)
                     )
                 ),
             ),
             (
                 "get_cross_domain_graph",
                 _parse_response(
-                    _call_get_cross_domain_graph({}, _make_app_state(root))
+                    _call_get_cross_domain_graph({}, _running_service(root))
                 ),
             ),
         ]
@@ -392,8 +378,8 @@ class TestAC6SuccessResolutionInvariants:
 
         Missing dep_map_path is an infrastructure error — resolution is not invalid_input.
         """
-        state = _make_app_state(tmp_path / "no-such-dir")
-        result = _call_find_consumers({"repo_name": "x"}, state)
+        service = _running_service(tmp_path / "no-such-dir")
+        result = _call_find_consumers({"repo_name": "x"}, service)
         data = _parse_response(result)
         assert data["success"] is False
         assert "resolution" in data
@@ -411,14 +397,14 @@ class TestAC1ResolutionLiteral:
 
     def test_resolution_literal_importable(self) -> None:
         """ResolutionLiteral must be importable from _depmap_aliases."""
-        from code_indexer.server.mcp.handlers._depmap_aliases import ResolutionLiteral
+        from cidx_depmap.server.mcp._depmap_aliases import ResolutionLiteral
 
         assert ResolutionLiteral is not None
 
     def test_resolution_literal_has_five_values(self) -> None:
         """ResolutionLiteral must contain exactly the 5 valid resolution strings."""
         import typing
-        from code_indexer.server.mcp.handlers._depmap_aliases import ResolutionLiteral
+        from cidx_depmap.server.mcp._depmap_aliases import ResolutionLiteral
 
         # typing.get_args works on Literal types in Python 3.8+
         args = set(typing.get_args(ResolutionLiteral))

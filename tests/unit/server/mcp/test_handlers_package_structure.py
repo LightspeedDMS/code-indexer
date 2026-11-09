@@ -26,7 +26,6 @@ EXPECTED_REGISTRY_KEYS = frozenset(
         "repository_status",
         "sync_repository",
         "switch_branch",
-        "store_xray_pattern",
         "list_files",
         "get_file_content",
         "browse_directory",
@@ -35,6 +34,8 @@ EXPECTED_REGISTRY_KEYS = frozenset(
         "check_hnsw_health",
         "add_golden_repo",
         "remove_golden_repo",
+        "rename_golden_repo",
+        "sync_golden_catalog",
         "refresh_golden_repo",
         "change_golden_repo_branch",
         "list_users",
@@ -109,14 +110,9 @@ EXPECTED_REGISTRY_KEYS = frozenset(
         "dependency_analysis_workflow",
         "admin_logs_query",
         "admin_logs_export",
-        "get_scip_audit_log",
-        "scip_definition",
-        "scip_references",
-        "scip_dependencies",
-        "scip_dependents",
-        "scip_impact",
-        "scip_callchain",
-        "scip_context",
+        # The SCIP handlers (scip_*, get_scip_audit_log) are the cidx-scip
+        # feature's since modular phase 4d: installed from its tools() only
+        # when "scip" is enabled, never part of the core registry.
         # Unified CI/CD handlers (Story #991 - replaces 12 forge-specific handlers)
         "ci_list_runs",
         "ci_get_run",
@@ -141,37 +137,24 @@ EXPECTED_REGISTRY_KEYS = frozenset(
         "manage_mcp_credential",
         "query_audit_logs",
         "get_maintenance_status",
-        "scip_pr_history",
-        "scip_cleanup_history",
-        "scip_cleanup_workspaces",
-        "scip_cleanup_status",
         "start_trace",
         "end_trace",
         "list_repo_categories",
-        "trigger_dependency_analysis",
-        "wiki_article_analytics",
+        # wiki_article_analytics is the cidx-wiki feature's tool since modular
+        # phase 4e, installed only when "wiki" is enabled.
         "manage_provider_indexes",
         "bulk_add_provider_index",
         "get_provider_health",
-        "depmap_find_consumers",
-        "depmap_get_repo_domains",
-        "depmap_get_domain_summary",
-        "depmap_get_stale_domains",
-        "depmap_get_cross_domain_graph",
-        # Story #889: hub domains handler
-        "depmap_get_hub_domains",
-        # Story #877: memory store handlers
-        "create_memory",
-        "edit_memory",
-        "delete_memory",
-        # Epic #968: X-Ray AST-aware search handlers
-        "xray_search",
-        "xray_explore",
-        "xray_dump_ast",
-        # Story #1055: cross-repo multi-expression X-Ray batch
-        "xray_search_batch",
-        # Story #1811: whole-repository graph-mode analysis (Epic #1786 front door)
-        "analyze_graph",
+        # depmap_* (Story #855/#889) and trigger_dependency_analysis are the
+        # cidx-depmap feature's tools since modular phase 4g, installed only
+        # when "depmap" is enabled.
+        # Story #877: create_memory / edit_memory / delete_memory are the
+        # cidx-memory feature's tools since modular phase 4f, installed only
+        # when "memory" is enabled.
+        # Epic #968 / #1055 / #1811: X-Ray's handlers (xray_search,
+        # xray_explore, xray_dump_ast, xray_search_batch, analyze_graph,
+        # store_xray_pattern) are the cidx-xray feature's tools() since
+        # modular phase 4c, installed only when "xray" is enabled.
         # Story #996: cancel background jobs with process termination
         "cancel_job",
         # Payload cache retrieval handler (added post-v10)
@@ -192,11 +175,9 @@ DOMAIN_MODULES = [
     "git_write",
     "pull_requests",
     "cicd",
-    "scip",
     "admin",
     "ssh_keys",
     "guides",
-    "depmap",
 ]
 
 # Short and absolute package names for the handlers package
@@ -271,7 +252,8 @@ def test_all_public_handlers_importable():
     assert hasattr(h, "git_status")
     assert hasattr(h, "git_commit")
     assert hasattr(h, "create_pull_request")
-    assert hasattr(h, "scip_definition")
+    # SCIP's handlers left with the cidx-scip feature (modular phase 4d).
+    assert not hasattr(h, "scip_definition")
     assert hasattr(h, "handle_authenticate")
     assert hasattr(h, "handle_manage_ssh_key")
     assert hasattr(h, "quick_reference")
@@ -297,8 +279,9 @@ def test_handler_registry_accessible():
 
 
 def test_scip_queries_private_helper_importable():
-    """_apply_scip_payload_truncation must be importable (used by scip_queries.py, AC1)."""
-    from code_indexer.server.mcp.handlers import _apply_scip_payload_truncation
+    """_apply_scip_payload_truncation must be importable (used by the SCIP REST
+    routes, AC1); since modular phase 4d it is the cidx-scip feature's."""
+    from cidx_scip.server.mcp._common import _apply_scip_payload_truncation
 
     assert callable(_apply_scip_payload_truncation)
 

@@ -75,7 +75,7 @@ class TestTemporalTruncationEdgeCases:
 
         # Should work without error
         assert truncated[0]["temporal_context"]["commit_hash"] == "abc123"
-        assert "evolution" not in truncated[0]["temporal_context"]
+        assert "example-repo" not in truncated[0]["temporal_context"]
 
     def test_evolution_entry_without_content(self, cache):
         """Test evolution entry with no content field (metadata only)."""
@@ -85,7 +85,7 @@ class TestTemporalTruncationEdgeCases:
             {
                 "content": "main",
                 "temporal_context": {
-                    "evolution": [
+                    "example-repo": [
                         {
                             "commit_hash": "abc123",
                             # No content field
@@ -103,7 +103,7 @@ class TestTemporalTruncationEdgeCases:
 
             truncated = _apply_temporal_payload_truncation(results)  # Sync call
 
-        evo_entry = truncated[0]["temporal_context"]["evolution"][0]
+        evo_entry = truncated[0]["temporal_context"]["example-repo"][0]
 
         # Should handle missing content gracefully
         assert "content" not in evo_entry
@@ -122,7 +122,7 @@ class TestTemporalTruncationEdgeCases:
             {
                 "content": "main",
                 "temporal_context": {
-                    "evolution": [
+                    "example-repo": [
                         {
                             "commit_hash": "abc123",
                             "content": "some content",
@@ -140,7 +140,7 @@ class TestTemporalTruncationEdgeCases:
 
             truncated = _apply_temporal_payload_truncation(results)  # Sync call
 
-        evo_entry = truncated[0]["temporal_context"]["evolution"][0]
+        evo_entry = truncated[0]["temporal_context"]["example-repo"][0]
 
         # Should handle missing diff gracefully
         assert "diff" not in evo_entry
@@ -186,7 +186,7 @@ class TestTemporalTruncationEdgeCases:
                     "commit_count": 5,
                     "commits": [{"hash": "abc"}, {"hash": "def"}],
                     "is_removed": False,
-                    "evolution": [
+                    "example-repo": [
                         {
                             "commit_hash": "abc123",
                             "content": "C" * (PREVIEW_SIZE + 1000),
@@ -214,7 +214,7 @@ class TestTemporalTruncationEdgeCases:
         assert tc["is_removed"] is False
 
         # Evolution should be truncated
-        assert tc["evolution"][0]["content_has_more"] is True
+        assert tc["example-repo"][0]["content_has_more"] is True
 
     def test_no_content_field_in_result(self, cache):
         """Test result without content field (edge case)."""

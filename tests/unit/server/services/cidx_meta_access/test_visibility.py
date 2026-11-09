@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import uuid
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Dict, Iterator, cast
 
 import pytest
 
@@ -157,7 +157,7 @@ def pg_group_manager() -> Iterator[GroupAccessManager]:
         admin.execute(f'CREATE DATABASE "{name}"')
     params = conninfo_to_dict(_DSN)
     params["dbname"] = name
-    dsn = make_conninfo(**params)  # type: ignore[arg-type]
+    dsn = make_conninfo(**cast(Dict[str, Any], params))
     pool = None
     try:
         with MigrationRunner(dsn) as runner:

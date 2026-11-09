@@ -17,6 +17,7 @@ import pytest
 
 from _audit_front_doors import ACTING_ADMIN, DoorsEnv, front_door_env
 from tests.unit.server.self_service_elevation_harness import enforcement
+from tests.unit.server.app_state_patch import patch_app_state
 
 _TARGET = "example-target-user"
 _ALIAS = "example-copy"
@@ -38,8 +39,8 @@ def env(tmp_path: Path, monkeypatch) -> Iterator[DoorsEnv]:
         monkeypatch.setattr(
             doors.manager, "activated_repo_manager", activated, raising=False
         )
-        monkeypatch.setattr(
-            app_module.app.state, "activated_repo_manager", activated, raising=False
+        patch_app_state(
+            monkeypatch, app_module.app.state, "activated_repo_manager", activated
         )
         # An on-disk copy of the target user's repository to remove.
         Path(activated.activated_repos_dir, _TARGET, _ALIAS).mkdir(parents=True)

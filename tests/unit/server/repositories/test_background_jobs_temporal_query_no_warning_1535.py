@@ -28,6 +28,7 @@ from code_indexer.server.repositories.background_jobs import (
     BackgroundJobManager,
 )
 from code_indexer.server.utils.config_manager import BackgroundJobsConfig
+from tests.unit.server._xray_feature import xray_dispatch_policy_installed
 
 pytestmark = pytest.mark.slow
 
@@ -150,6 +151,9 @@ class TestOtherIntentionalRepoAliasOmissionsAreNotWarning(_ManagerFixture):
 
     - "xray_search_batch" (xray_batch.py): "no per-repo dedup; concurrent
       batches allowed" -- an explicit design comment at the call site.
+      Since modular phase 4d the cidx-xray feature declares it
+      (``JobTypeContribution.repo_alias_optional``), so it is quiet only
+      while the feature's dispatch policy is installed.
     - "query_analytics_export" (inline_admin_ops.py): a global,
       cross-repo export job with no single owning repo_alias.
     """
@@ -157,7 +161,7 @@ class TestOtherIntentionalRepoAliasOmissionsAreNotWarning(_ManagerFixture):
     def test_xray_search_batch_without_repo_alias_does_not_warn(self, caplog):
         manager = self._make_manager()
 
-        with caplog.at_level(logging.DEBUG):
+        with xray_dispatch_policy_installed(), caplog.at_level(logging.DEBUG):
             job_id = manager.submit_job(
                 "xray_search_batch",
                 _noop_worker,

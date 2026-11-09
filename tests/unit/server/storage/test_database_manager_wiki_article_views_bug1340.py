@@ -227,7 +227,7 @@ class TestGoldenRepoRemovalWikiCleanupHookNoErrorBug1340:
             GoldenRepoManager,
             GoldenRepo,
         )
-        from code_indexer.server.wiki.wiki_cache import WikiCache
+        from cidx_wiki.server.wiki_cache import WikiCache
 
         data_dir = str(tmp_path / "data")
         Path(data_dir).mkdir(parents=True, exist_ok=True)
@@ -269,8 +269,20 @@ class TestGoldenRepoRemovalWikiCleanupHookNoErrorBug1340:
         manager.activated_repo_manager = None
         manager.group_access_manager = None
 
-        manager.remove_golden_repo(alias=alias, submitter_username="admin")
-        background_worker = mock_bg.submit_job.call_args[1]["func"]
-        background_worker()
+        # The cidx-wiki feature listens to the core's repository events
+        # (modular phase 4e): subscribe its invalidator, over this cache, as
+        # the started feature does.
+        from code_indexer.server.features import repository_events
+        from cidx_wiki.server.wiki_cache_invalidator import WikiCacheInvalidator
+
+        invalidator = WikiCacheInvalidator()
+        invalidator.set_wiki_cache(wiki_cache)
+        unsubscribe = repository_events.subscribe(invalidator)
+        try:
+            manager.remove_golden_repo(alias=alias, submitter_username="admin")
+            background_worker = mock_bg.submit_job.call_args[1]["func"]
+            background_worker()
+        finally:
+            unsubscribe()
 
         assert wiki_cache.get_all_view_counts(alias) == []

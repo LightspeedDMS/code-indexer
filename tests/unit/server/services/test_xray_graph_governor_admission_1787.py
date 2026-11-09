@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from code_indexer.server.services.xray_graph_governor.admission import (
+from cidx_xray.server.graph_governor.admission import (
     DEFAULT_SAFETY_FACTOR,
     PreBindStats,
     check_gate1,
@@ -19,10 +19,10 @@ from code_indexer.server.services.xray_graph_governor.admission import (
     estimate_gate2_bytes,
     watermark_for,
 )
-from code_indexer.server.services.xray_graph_governor.k_seed_table import (
+from cidx_xray.server.graph_governor.k_seed_table import (
     k_for_language,
 )
-from code_indexer.server.services.xray_graph_governor.status import (
+from cidx_xray.server.graph_governor.status import (
     GraphBuildAbortStatus,
     GraphBuildPhase,
 )

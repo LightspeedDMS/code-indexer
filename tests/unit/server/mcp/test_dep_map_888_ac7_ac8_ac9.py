@@ -17,7 +17,7 @@ AC9: depmap_get_cross_domain_graph: ok only (scan-based, no identifier input)
 from pathlib import Path
 from typing import get_args
 
-from code_indexer.server.mcp.handlers._depmap_aliases import ResolutionLiteral
+from cidx_depmap.server.mcp._depmap_aliases import ResolutionLiteral
 from tests.unit.server.mcp.test_dep_map_888_fixtures import (
     _assert_resolution,
     _call_handler,
@@ -64,7 +64,7 @@ class TestAC7ResolutionContractHasFiveStates:
 
 class TestAC7FindConsumersInvalidInput:
     def test_empty_repo_name_returns_invalid_input(self, tmp_path: Path) -> None:
-        from code_indexer.server.mcp.handlers.depmap import (
+        from cidx_depmap.server.mcp.handlers import (
             depmap_find_consumers_handler,
         )
 
@@ -77,7 +77,7 @@ class TestAC7FindConsumersInvalidInput:
 
 class TestAC7FindConsumersRepoNotIndexed:
     def test_unknown_repo_returns_repo_not_indexed(self, tmp_path: Path) -> None:
-        from code_indexer.server.mcp.handlers.depmap import (
+        from cidx_depmap.server.mcp.handlers import (
             depmap_find_consumers_handler,
         )
 
@@ -94,7 +94,7 @@ class TestAC7FindConsumersHasNoConsumers:
     def test_indexed_isolated_repo_returns_repo_has_no_consumers(
         self, tmp_path: Path
     ) -> None:
-        from code_indexer.server.mcp.handlers.depmap import (
+        from cidx_depmap.server.mcp.handlers import (
             depmap_find_consumers_handler,
         )
 
@@ -109,7 +109,7 @@ class TestAC7FindConsumersHasNoConsumers:
 
 class TestAC7FindConsumersOk:
     def test_repo_with_consumers_returns_ok(self, tmp_path: Path) -> None:
-        from code_indexer.server.mcp.handlers.depmap import (
+        from cidx_depmap.server.mcp.handlers import (
             depmap_find_consumers_handler,
         )
 
@@ -128,7 +128,7 @@ class TestAC7FindConsumersOk:
 
 class TestAC8RepoDomains:
     def test_empty_repo_name_returns_invalid_input(self, tmp_path: Path) -> None:
-        from code_indexer.server.mcp.handlers.depmap import (
+        from cidx_depmap.server.mcp.handlers import (
             depmap_get_repo_domains_handler,
         )
 
@@ -137,7 +137,7 @@ class TestAC8RepoDomains:
         _assert_resolution(data, "invalid_input", False, "repo_domains empty")
 
     def test_unknown_repo_returns_repo_not_indexed(self, tmp_path: Path) -> None:
-        from code_indexer.server.mcp.handlers.depmap import (
+        from cidx_depmap.server.mcp.handlers import (
             depmap_get_repo_domains_handler,
         )
 
@@ -148,7 +148,7 @@ class TestAC8RepoDomains:
         _assert_resolution(data, "repo_not_indexed", False, "repo_domains unknown")
 
     def test_known_repo_returns_ok(self, tmp_path: Path) -> None:
-        from code_indexer.server.mcp.handlers.depmap import (
+        from cidx_depmap.server.mcp.handlers import (
             depmap_get_repo_domains_handler,
         )
 
@@ -166,7 +166,7 @@ class TestAC8RepoDomains:
 
 class TestAC8DomainSummary:
     def test_empty_domain_name_returns_invalid_input(self, tmp_path: Path) -> None:
-        from code_indexer.server.mcp.handlers.depmap import (
+        from cidx_depmap.server.mcp.handlers import (
             depmap_get_domain_summary_handler,
         )
 
@@ -177,7 +177,7 @@ class TestAC8DomainSummary:
         _assert_resolution(data, "invalid_input", False, "domain_summary empty")
 
     def test_unknown_domain_returns_domain_not_indexed(self, tmp_path: Path) -> None:
-        from code_indexer.server.mcp.handlers.depmap import (
+        from cidx_depmap.server.mcp.handlers import (
             depmap_get_domain_summary_handler,
         )
 
@@ -188,7 +188,7 @@ class TestAC8DomainSummary:
         _assert_resolution(data, "domain_not_indexed", False, "domain_summary unknown")
 
     def test_known_domain_returns_ok(self, tmp_path: Path) -> None:
-        from code_indexer.server.mcp.handlers.depmap import (
+        from cidx_depmap.server.mcp.handlers import (
             depmap_get_domain_summary_handler,
         )
 
@@ -206,7 +206,7 @@ class TestAC8DomainSummary:
 
 class TestAC8StaleDomains:
     def test_negative_threshold_returns_invalid_input(self, tmp_path: Path) -> None:
-        from code_indexer.server.mcp.handlers.depmap import (
+        from cidx_depmap.server.mcp.handlers import (
             depmap_get_stale_domains_handler,
         )
 
@@ -217,7 +217,7 @@ class TestAC8StaleDomains:
         _assert_resolution(data, "invalid_input", False, "stale_domains negative")
 
     def test_valid_threshold_returns_ok(self, tmp_path: Path) -> None:
-        from code_indexer.server.mcp.handlers.depmap import (
+        from cidx_depmap.server.mcp.handlers import (
             depmap_get_stale_domains_handler,
         )
 
@@ -228,7 +228,7 @@ class TestAC8StaleDomains:
         _assert_resolution(data, "ok", True, "stale_domains valid")
 
     def test_never_returns_not_indexed_states(self, tmp_path: Path) -> None:
-        from code_indexer.server.mcp.handlers.depmap import (
+        from cidx_depmap.server.mcp.handlers import (
             depmap_get_stale_domains_handler,
         )
 
@@ -246,7 +246,7 @@ class TestAC8StaleDomains:
 
 class TestAC9CrossDomainGraph:
     def test_valid_data_returns_ok(self, tmp_path: Path) -> None:
-        from code_indexer.server.mcp.handlers.depmap import (
+        from cidx_depmap.server.mcp.handlers import (
             depmap_get_cross_domain_graph_handler,
         )
 
@@ -255,7 +255,7 @@ class TestAC9CrossDomainGraph:
         _assert_resolution(data, "ok", True, "graph valid")
 
     def test_empty_dep_map_returns_ok(self, tmp_path: Path) -> None:
-        from code_indexer.server.mcp.handlers.depmap import (
+        from cidx_depmap.server.mcp.handlers import (
             depmap_get_cross_domain_graph_handler,
         )
 
@@ -264,7 +264,7 @@ class TestAC9CrossDomainGraph:
         _assert_resolution(data, "ok", True, "graph empty")
 
     def test_never_returns_identifier_level_states(self, tmp_path: Path) -> None:
-        from code_indexer.server.mcp.handlers.depmap import (
+        from cidx_depmap.server.mcp.handlers import (
             depmap_get_cross_domain_graph_handler,
         )
 
@@ -281,7 +281,7 @@ class TestAC9CrossDomainGraph:
 
         success=False with resolution=ok violates the success/resolution invariant.
         """
-        from code_indexer.server.mcp.handlers.depmap import (
+        from cidx_depmap.server.mcp.handlers import (
             depmap_get_cross_domain_graph_handler,
         )
 

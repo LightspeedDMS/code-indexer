@@ -22,7 +22,7 @@ from code_indexer.server.services.access_filtering_service import (
     AccessFilteringService,
 )
 from code_indexer.server.services.group_access_manager import GroupAccessManager
-from code_indexer.server.services.scip_query_service import SCIPQueryService
+from cidx_scip.server.query_service import SCIPQueryService
 
 SYMBOL = "ExampleService"
 GRANTED_TAG = "repoa"
@@ -32,8 +32,8 @@ SOURCE = "class ExampleService:\n    pass\ndef run():\n    ExampleService()\n"
 
 def _build_repo(repo: Path, tag: str) -> None:
     """A repository whose index defines ExampleService and a run() caller."""
-    from code_indexer.scip.database.builder import ROLE_DEFINITION, SCIPDatabaseBuilder
-    from code_indexer.scip.protobuf import scip_pb2
+    from cidx_scip.database.builder import ROLE_DEFINITION, SCIPDatabaseBuilder
+    from cidx_scip.protobuf import scip_pb2
 
     source = f"{tag}_svc.py"
     repo.mkdir(parents=True)
@@ -66,7 +66,7 @@ def _build_repo(repo: Path, tag: str) -> None:
     (scip_dir / "index.scip").unlink()
     # One open through the real backend runs the production migration (query
     # indexes + version marker), so every later open is the fast-path check.
-    from code_indexer.scip.query.backends import DatabaseBackend
+    from cidx_scip.query.backends import DatabaseBackend
 
     DatabaseBackend(scip_dir / "index.scip.db").conn.close()
 
@@ -141,7 +141,7 @@ def _via_service(env: Dict[str, Any], kind: str, user: User, alias: Optional[str
 
 
 def _via_mcp(app: Any, kind: str, user: User, alias: Optional[str]):
-    from code_indexer.server.mcp.handlers.scip import scip_context, scip_impact
+    from cidx_scip.server.mcp.scip import scip_context, scip_impact
 
     params: Dict[str, Any] = {"symbol": SYMBOL}
     if alias is not None:
@@ -156,21 +156,31 @@ def _via_mcp(app: Any, kind: str, user: User, alias: Optional[str]):
     return payload
 
 
-def _via_rest(app: Any, kind: str, user: User, alias: Optional[str]):
+def _scip_rest_client(app: Any, user: User) -> Any:
+    """The cidx-scip feature's ``/scip`` router (modular phase 4d) over the
+    real app's state, with *user* as the caller the core authenticated."""
+    from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
-    from code_indexer.server.auth.dependencies import get_current_user
+    from cidx_scip.server import routes
+    from cidx_scip.server.route_auth import current_caller
 
+    rest = FastAPI()
+    rest.include_router(routes.router)
+    for name in ("golden_repos_dir", "access_filtering_service"):
+        if hasattr(app.state, name):
+            setattr(rest.state, name, getattr(app.state, name))
+    rest.dependency_overrides[current_caller] = lambda: user
+    return TestClient(rest)
+
+
+def _via_rest(app: Any, kind: str, user: User, alias: Optional[str]):
     query: Dict[str, Any] = {"symbol": SYMBOL}
     if alias is not None:
         query["project"] = alias
     if kind == "impact":
         query["depth"] = 1
-    app.dependency_overrides[get_current_user] = lambda: user
-    try:
-        response = TestClient(app).get(f"/scip/{kind}", params=query)
-    finally:
-        app.dependency_overrides.pop(get_current_user, None)
+    response = _scip_rest_client(app, user).get(f"/scip/{kind}", params=query)
     assert response.status_code == 200, response.text
     return response.json()
 
@@ -278,8 +288,11 @@ def app_state_without_access(app_state: Any) -> Iterator[Any]:
 
 
 def _assert_refused(payload: Dict[str, Any]) -> None:
+    """Refused by the MCP SCIP guard (QUERY-MIGRATE-015) before any query."""
+    from cidx_scip.server.mcp._common import SCIP_ACCESS_CONTROL_UNAVAILABLE
+
     assert payload["success"] is False, payload
-    assert "access control unavailable" in payload["error"].lower()
+    assert payload["error"] == SCIP_ACCESS_CONTROL_UNAVAILABLE, payload
     serialized = json.dumps(payload)
     assert GRANTED_TAG not in serialized and UNGRANTED_TAG not in serialized
 
@@ -288,7 +301,7 @@ def _assert_refused(payload: Dict[str, Any]) -> None:
 def test_mcp_handler_without_access_service_fails_closed(
     env, app_state_without_access, kind
 ):
-    from code_indexer.server.mcp.handlers.scip import scip_context, scip_impact
+    from cidx_scip.server.mcp.scip import scip_context, scip_impact
 
     handler = scip_impact if kind == "impact" else scip_context
     response = handler({"symbol": SYMBOL}, ALICE)
@@ -301,12 +314,16 @@ def _dispatch(tool: str, user: User) -> Dict[str, Any]:
     import asyncio
 
     from code_indexer.server.mcp.protocol import handle_tools_call
+    from tests.unit.server._scip_feature import scip_tools_installed
 
-    response = asyncio.run(
-        handle_tools_call(
-            params={"name": tool, "arguments": {"symbol": SYMBOL}}, user=user
+    # The SCIP tools are the cidx-scip feature's: installed as an app built
+    # with "scip" enabled has them.
+    with scip_tools_installed():
+        response = asyncio.run(
+            handle_tools_call(
+                params={"name": tool, "arguments": {"symbol": SYMBOL}}, user=user
+            )
         )
-    )
     payload: Dict[str, Any] = json.loads(response["content"][0]["text"])
     return payload
 
@@ -330,16 +347,9 @@ def test_mcp_dispatcher_without_access_service_fails_closed(
 
 @pytest.mark.parametrize("kind", KINDS)
 def test_rest_without_access_service_fails_closed(env, app_state_without_access, kind):
-    from fastapi.testclient import TestClient
-
-    from code_indexer.server.auth.dependencies import get_current_user
-
-    app = app_state_without_access
-    app.dependency_overrides[get_current_user] = lambda: ALICE
-    try:
-        response = TestClient(app).get(f"/scip/{kind}", params={"symbol": SYMBOL})
-    finally:
-        app.dependency_overrides.pop(get_current_user, None)
+    response = _scip_rest_client(app_state_without_access, ALICE).get(
+        f"/scip/{kind}", params={"symbol": SYMBOL}
+    )
 
     assert response.status_code >= 500, response.text
     assert "access_control_unavailable" in response.text

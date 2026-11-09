@@ -16,13 +16,15 @@ result into each call site as `WikiCache(db_path, storage_backend=...)`.
 These tests must FAIL before the fix (every constructed WikiCache's
 `_backend` is None even in postgres/cluster mode) and PASS after.
 
-Call sites covered:
-  1. wiki/routes.py::_get_wiki_cache (module-level singleton)
-  2. repositories/golden_repo_manager.py::remove_golden_repo (lifecycle hook)
-  3. mcp/handlers/guides.py::_get_wiki_cache_for_handler
-  4. web/routes.py::toggle_wiki_enabled
-  5. web/routes.py::refresh_wiki_cache
-  6. web/routes.py::toggle_user_wiki_enabled
+Call sites covered (the wiki is the cidx-wiki feature since modular phase
+4e; its modules are under cidx_wiki.server):
+  1. routes.py::_get_wiki_cache (module-level singleton)
+  2. lifecycle.py::_shared_wiki_cache (the invalidator's cache; the core's
+     golden repository removal reaches it through repository_events)
+  3. mcp/analytics.py::_get_wiki_cache_for_handler
+  4. admin_routes.py::toggle_wiki_enabled
+  5. admin_routes.py::refresh_wiki_cache
+  6. admin_routes.py::toggle_user_wiki_enabled
 
 For sites 1 and 3, the test's system under test IS the helper function
 (_get_wiki_cache / _get_wiki_cache_for_handler) and WikiCache is allowed to
@@ -57,7 +59,7 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 
-from code_indexer.server.wiki.wiki_cache import WikiCache
+from cidx_wiki.server.wiki_cache import WikiCache
 from code_indexer.server.storage.postgres.wiki_cache_backend import (
     WikiCachePostgresBackend,
 )
@@ -122,7 +124,7 @@ def _app_state_wiki_context(
 
 
 # ---------------------------------------------------------------------------
-# Site 1: wiki/routes.py::_get_wiki_cache (module-level singleton)
+# Site 1: routes.py::_get_wiki_cache (module-level singleton)
 #
 # System under test: _get_wiki_cache(). WikiCache is allowed to construct
 # for real -- no mocking of WikiCache itself.
@@ -131,7 +133,7 @@ def _app_state_wiki_context(
 
 class TestSite1WikiRoutesSingleton:
     def test_uses_shared_postgres_backend_in_cluster_mode(self, tmp_path):
-        from code_indexer.server.wiki.routes import _get_wiki_cache, _reset_wiki_cache
+        from cidx_wiki.server.routes import _get_wiki_cache, _reset_wiki_cache
 
         _reset_wiki_cache()
         fake_backend = MagicMock(name="fake_wiki_backend")
@@ -149,7 +151,7 @@ class TestSite1WikiRoutesSingleton:
             _reset_wiki_cache()
 
     def test_backend_is_none_in_solo_mode(self, tmp_path):
-        from code_indexer.server.wiki.routes import _get_wiki_cache, _reset_wiki_cache
+        from cidx_wiki.server.routes import _get_wiki_cache, _reset_wiki_cache
 
         _reset_wiki_cache()
         request = MagicMock()
@@ -165,16 +167,12 @@ class TestSite1WikiRoutesSingleton:
 
 
 # ---------------------------------------------------------------------------
-# Site 2: repositories/golden_repo_manager.py::remove_golden_repo lifecycle hook
-#
-# System under test: GoldenRepoManager.remove_golden_repo()'s background
-# worker. WikiCache is an external collaborator imported from another
-# module -- mocked at its import boundary; the assertion inspects the
-# constructor call arguments the hook passed to it.
+# Site 2: the invalidator's cache (lifecycle._shared_wiki_cache), which the
+# core's golden repository removal reaches through repository_events.
 # ---------------------------------------------------------------------------
 
 
-class TestSite2GoldenRepoManagerLifecycleHook:
+class TestSite2RemovalReachesTheSharedCache:
     @pytest.fixture
     def manager(self, tmp_path):
         from code_indexer.server.repositories.golden_repo_manager import (
@@ -218,45 +216,59 @@ class TestSite2GoldenRepoManagerLifecycleHook:
         )
         return clone_path
 
-    def _run_removal_worker(self, manager, alias: str) -> None:
-        manager.remove_golden_repo(alias, submitter_username="example-admin")
-        worker = manager.background_job_manager.submit_job.call_args[1]["func"]
-        worker()
+    def test_removal_announces_the_repository_to_listeners(self, manager):
+        from code_indexer.server.features import repository_events
 
-    def test_removal_hook_uses_shared_postgres_backend_in_cluster_mode(self, manager):
         self._register_repo(manager, "wiki-cluster-repo")
-        fake_backend = MagicMock(name="fake_wiki_backend")
+        listener = MagicMock()
+        unsubscribe = repository_events.subscribe(listener)
+        try:
+            manager.remove_golden_repo(
+                "wiki-cluster-repo", submitter_username="example-admin"
+            )
+            worker = manager.background_job_manager.submit_job.call_args[1]["func"]
+            worker()
+        finally:
+            unsubscribe()
+        listener.repository_removed.assert_called_once_with("wiki-cluster-repo")
 
-        with patch("code_indexer.server.wiki.wiki_cache.WikiCache") as MockWikiCache:
+    def test_shared_cache_uses_shared_postgres_backend_in_cluster_mode(self, tmp_path):
+        from cidx_wiki.server import lifecycle
+
+        fake_backend = MagicMock(name="fake_wiki_backend")
+        grm_mock = MagicMock()
+        grm_mock.db_path = str(tmp_path / "invalidator.db")
+        with TestSite3McpAnalyticsHandler.with_golden_repo_manager(grm_mock):
             with _app_state_wiki_context(
                 postgres_mode=True, wiki_cache_backend=fake_backend
             ):
-                self._run_removal_worker(manager, "wiki-cluster-repo")
+                cache = lifecycle._shared_wiki_cache()
+        assert cache is not None
+        assert cache._backend is fake_backend
 
-        MockWikiCache.assert_called_once_with(
-            manager.db_path, storage_backend=fake_backend
-        )
+    def test_shared_cache_backend_none_in_solo_mode(self, tmp_path):
+        from cidx_wiki.server import lifecycle
 
-    def test_removal_hook_backend_none_in_solo_mode(self, manager):
-        self._register_repo(manager, "wiki-solo-repo")
-
-        with patch("code_indexer.server.wiki.wiki_cache.WikiCache") as MockWikiCache:
-            self._run_removal_worker(manager, "wiki-solo-repo")
-
-        MockWikiCache.assert_called_once_with(manager.db_path, storage_backend=None)
+        grm_mock = MagicMock()
+        grm_mock.db_path = str(tmp_path / "invalidator_solo.db")
+        with TestSite3McpAnalyticsHandler.with_golden_repo_manager(grm_mock):
+            cache = lifecycle._shared_wiki_cache()
+        assert cache is not None
+        assert cache._backend is None
 
 
 # ---------------------------------------------------------------------------
-# Site 3: mcp/handlers/guides.py::_get_wiki_cache_for_handler
+# Site 3: mcp/analytics.py::_get_wiki_cache_for_handler
 #
 # System under test: _get_wiki_cache_for_handler(). WikiCache is allowed to
 # construct for real -- no mocking of WikiCache itself.
 # ---------------------------------------------------------------------------
 
 
-class TestSite3McpGuidesHandler:
+class TestSite3McpAnalyticsHandler:
+    @staticmethod
     @contextlib.contextmanager
-    def _with_golden_repo_manager(self, grm_mock) -> Generator[None, None, None]:
+    def with_golden_repo_manager(grm_mock) -> Generator[None, None, None]:
         from code_indexer.server import app as app_module
 
         # via __dict__: getattr/hasattr on the module would run its PEP 562
@@ -272,15 +284,13 @@ class TestSite3McpGuidesHandler:
                 app_module.__dict__["golden_repo_manager"] = saved
 
     def test_uses_shared_postgres_backend_in_cluster_mode(self, tmp_path):
-        from code_indexer.server.mcp.handlers.guides import (
-            _get_wiki_cache_for_handler,
-        )
+        from cidx_wiki.server.mcp.analytics import _get_wiki_cache_for_handler
 
         fake_backend = MagicMock(name="fake_wiki_backend")
         grm_mock = MagicMock()
         grm_mock.db_path = str(tmp_path / "guides.db")
 
-        with self._with_golden_repo_manager(grm_mock):
+        with self.with_golden_repo_manager(grm_mock):
             with _app_state_wiki_context(
                 postgres_mode=True, wiki_cache_backend=fake_backend
             ):
@@ -290,14 +300,12 @@ class TestSite3McpGuidesHandler:
         assert cache._backend is fake_backend
 
     def test_backend_is_none_in_solo_mode(self, tmp_path):
-        from code_indexer.server.mcp.handlers.guides import (
-            _get_wiki_cache_for_handler,
-        )
+        from cidx_wiki.server.mcp.analytics import _get_wiki_cache_for_handler
 
         grm_mock = MagicMock()
         grm_mock.db_path = str(tmp_path / "guides_solo.db")
 
-        with self._with_golden_repo_manager(grm_mock):
+        with self.with_golden_repo_manager(grm_mock):
             cache = _get_wiki_cache_for_handler()
 
         assert cache is not None
@@ -305,12 +313,15 @@ class TestSite3McpGuidesHandler:
 
 
 # ---------------------------------------------------------------------------
-# Sites 4-6: web/routes.py route handlers
+# Sites 4-6: admin_routes.py route handlers
 #
 # System under test: the route-handler functions themselves. WikiCache is
-# an external collaborator imported from another module -- mocked at its
-# import boundary; assertions inspect the constructor call arguments.
+# an external collaborator -- mocked at its import boundary; assertions
+# inspect the constructor call arguments. The Web UI session, CSRF and page
+# pieces the core lends (ServerPlatform) are stubbed.
 # ---------------------------------------------------------------------------
+
+_WIKI_CACHE_IN_ADMIN = "cidx_wiki.server.admin_routes.WikiCache"
 
 
 class TestSites4to6WebRoutes:
@@ -322,38 +333,49 @@ class TestSites4to6WebRoutes:
             username="admin", role="admin", csrf_token="tok", created_at=time.time()
         )
 
+    @contextlib.contextmanager
+    def _web_session(self) -> Generator[None, None, None]:
+        from code_indexer.server.feature_platform import ServerPlatform
+
+        with (
+            patch.object(
+                ServerPlatform, "admin_web_session", return_value=self._make_session()
+            ),
+            patch.object(ServerPlatform, "validate_login_csrf", return_value=True),
+            patch.object(
+                ServerPlatform, "golden_repos_page_response", return_value=MagicMock()
+            ),
+        ):
+            yield
+
+    @staticmethod
+    def _request(golden: Any, activated: Optional[Any] = None) -> Any:
+        request = MagicMock()
+        request.app.state.golden_repo_manager = golden
+        request.app.state.activated_repo_manager = activated
+        return request
+
     # -- Site 4: toggle_wiki_enabled -------------------------------------
 
     def test_toggle_wiki_enabled_uses_shared_postgres_backend_in_cluster_mode(
         self, tmp_path
     ):
-        from code_indexer.server.web import routes as web_routes
+        from cidx_wiki.server import admin_routes
 
         fake_backend = MagicMock(name="fake_wiki_backend")
         grm_mock = MagicMock()
         grm_mock.db_path = str(tmp_path / "toggle.db")
         grm_mock.golden_repos_dir = str(tmp_path / "golden-repos")
-        request = MagicMock()
 
-        with (
-            patch.object(
-                web_routes, "_require_admin_session", return_value=self._make_session()
-            ),
-            patch.object(web_routes, "validate_login_csrf_token", return_value=True),
-            patch.object(
-                web_routes,
-                "_create_golden_repos_page_response",
-                return_value=MagicMock(),
-            ),
-            patch("code_indexer.server.wiki.wiki_cache.WikiCache") as MockWikiCache,
-        ):
+        with self._web_session(), patch(_WIKI_CACHE_IN_ADMIN) as MockWikiCache:
             with _app_state_wiki_context(
-                postgres_mode=True,
-                wiki_cache_backend=fake_backend,
-                golden_repo_manager=grm_mock,
+                postgres_mode=True, wiki_cache_backend=fake_backend
             ):
-                web_routes.toggle_wiki_enabled(
-                    request, "some-alias", wiki_enabled="1", csrf_token="tok"
+                admin_routes.toggle_wiki_enabled(
+                    self._request(grm_mock),
+                    "some-alias",
+                    wiki_enabled="1",
+                    csrf_token="tok",
                 )
 
         assert MockWikiCache.call_args == call(
@@ -361,28 +383,19 @@ class TestSites4to6WebRoutes:
         )
 
     def test_toggle_wiki_enabled_backend_none_in_solo_mode(self, tmp_path):
-        from code_indexer.server.web import routes as web_routes
+        from cidx_wiki.server import admin_routes
 
         grm_mock = MagicMock()
         grm_mock.db_path = str(tmp_path / "toggle_solo.db")
         grm_mock.golden_repos_dir = str(tmp_path / "golden-repos-solo")
-        request = MagicMock()
 
-        with (
-            patch.object(
-                web_routes, "_require_admin_session", return_value=self._make_session()
-            ),
-            patch.object(web_routes, "validate_login_csrf_token", return_value=True),
-            patch.object(
-                web_routes,
-                "_create_golden_repos_page_response",
-                return_value=MagicMock(),
-            ),
-            patch("code_indexer.server.wiki.wiki_cache.WikiCache") as MockWikiCache,
-        ):
-            with _app_state_wiki_context(golden_repo_manager=grm_mock):
-                web_routes.toggle_wiki_enabled(
-                    request, "some-alias", wiki_enabled="1", csrf_token="tok"
+        with self._web_session(), patch(_WIKI_CACHE_IN_ADMIN) as MockWikiCache:
+            with _app_state_wiki_context():
+                admin_routes.toggle_wiki_enabled(
+                    self._request(grm_mock),
+                    "some-alias",
+                    wiki_enabled="1",
+                    csrf_token="tok",
                 )
 
         assert MockWikiCache.call_args == call(grm_mock.db_path, storage_backend=None)
@@ -392,57 +405,35 @@ class TestSites4to6WebRoutes:
     def test_refresh_wiki_cache_uses_shared_postgres_backend_in_cluster_mode(
         self, tmp_path
     ):
-        from code_indexer.server.web import routes as web_routes
+        from cidx_wiki.server import admin_routes
 
         fake_backend = MagicMock(name="fake_wiki_backend")
         grm_mock = MagicMock()
         grm_mock.db_path = str(tmp_path / "refresh.db")
-        request = MagicMock()
 
-        with (
-            patch.object(
-                web_routes, "_require_admin_session", return_value=self._make_session()
-            ),
-            patch.object(web_routes, "validate_login_csrf_token", return_value=True),
-            patch.object(
-                web_routes,
-                "_create_golden_repos_page_response",
-                return_value=MagicMock(),
-            ),
-            patch("code_indexer.server.wiki.wiki_cache.WikiCache") as MockWikiCache,
-        ):
+        with self._web_session(), patch(_WIKI_CACHE_IN_ADMIN) as MockWikiCache:
             with _app_state_wiki_context(
-                postgres_mode=True,
-                wiki_cache_backend=fake_backend,
-                golden_repo_manager=grm_mock,
+                postgres_mode=True, wiki_cache_backend=fake_backend
             ):
-                web_routes.refresh_wiki_cache(request, "some-alias", csrf_token="tok")
+                admin_routes.refresh_wiki_cache(
+                    self._request(grm_mock), "some-alias", csrf_token="tok"
+                )
 
         assert MockWikiCache.call_args == call(
             grm_mock.db_path, storage_backend=fake_backend
         )
 
     def test_refresh_wiki_cache_backend_none_in_solo_mode(self, tmp_path):
-        from code_indexer.server.web import routes as web_routes
+        from cidx_wiki.server import admin_routes
 
         grm_mock = MagicMock()
         grm_mock.db_path = str(tmp_path / "refresh_solo.db")
-        request = MagicMock()
 
-        with (
-            patch.object(
-                web_routes, "_require_admin_session", return_value=self._make_session()
-            ),
-            patch.object(web_routes, "validate_login_csrf_token", return_value=True),
-            patch.object(
-                web_routes,
-                "_create_golden_repos_page_response",
-                return_value=MagicMock(),
-            ),
-            patch("code_indexer.server.wiki.wiki_cache.WikiCache") as MockWikiCache,
-        ):
-            with _app_state_wiki_context(golden_repo_manager=grm_mock):
-                web_routes.refresh_wiki_cache(request, "some-alias", csrf_token="tok")
+        with self._web_session(), patch(_WIKI_CACHE_IN_ADMIN) as MockWikiCache:
+            with _app_state_wiki_context():
+                admin_routes.refresh_wiki_cache(
+                    self._request(grm_mock), "some-alias", csrf_token="tok"
+                )
 
         assert MockWikiCache.call_args == call(grm_mock.db_path, storage_backend=None)
 
@@ -451,33 +442,18 @@ class TestSites4to6WebRoutes:
     def test_toggle_user_wiki_enabled_uses_shared_postgres_backend_in_cluster_mode(
         self, tmp_path
     ):
-        from code_indexer.server.web import routes as web_routes
+        from cidx_wiki.server import admin_routes
 
         fake_backend = MagicMock(name="fake_wiki_backend")
         golden_grm_mock = MagicMock()
         golden_grm_mock.db_path = str(tmp_path / "golden.db")
-        activated_grm_mock = MagicMock()
-        request = MagicMock()
 
-        with (
-            patch.object(
-                web_routes, "_require_admin_session", return_value=self._make_session()
-            ),
-            patch.object(web_routes, "validate_login_csrf_token", return_value=True),
-            patch.object(
-                web_routes,
-                "_get_activated_repo_manager",
-                return_value=activated_grm_mock,
-            ),
-            patch("code_indexer.server.wiki.wiki_cache.WikiCache") as MockWikiCache,
-        ):
+        with self._web_session(), patch(_WIKI_CACHE_IN_ADMIN) as MockWikiCache:
             with _app_state_wiki_context(
-                postgres_mode=True,
-                wiki_cache_backend=fake_backend,
-                golden_repo_manager=golden_grm_mock,
+                postgres_mode=True, wiki_cache_backend=fake_backend
             ):
-                web_routes.toggle_user_wiki_enabled(
-                    request,
+                admin_routes.toggle_user_wiki_enabled(
+                    self._request(golden_grm_mock, MagicMock()),
                     "someuser",
                     "some-alias",
                     wiki_enabled="0",
@@ -489,28 +465,15 @@ class TestSites4to6WebRoutes:
         )
 
     def test_toggle_user_wiki_enabled_backend_none_in_solo_mode(self, tmp_path):
-        from code_indexer.server.web import routes as web_routes
+        from cidx_wiki.server import admin_routes
 
         golden_grm_mock = MagicMock()
         golden_grm_mock.db_path = str(tmp_path / "golden_solo.db")
-        activated_grm_mock = MagicMock()
-        request = MagicMock()
 
-        with (
-            patch.object(
-                web_routes, "_require_admin_session", return_value=self._make_session()
-            ),
-            patch.object(web_routes, "validate_login_csrf_token", return_value=True),
-            patch.object(
-                web_routes,
-                "_get_activated_repo_manager",
-                return_value=activated_grm_mock,
-            ),
-            patch("code_indexer.server.wiki.wiki_cache.WikiCache") as MockWikiCache,
-        ):
-            with _app_state_wiki_context(golden_repo_manager=golden_grm_mock):
-                web_routes.toggle_user_wiki_enabled(
-                    request,
+        with self._web_session(), patch(_WIKI_CACHE_IN_ADMIN) as MockWikiCache:
+            with _app_state_wiki_context():
+                admin_routes.toggle_user_wiki_enabled(
+                    self._request(golden_grm_mock, MagicMock()),
                     "someuser",
                     "some-alias",
                     wiki_enabled="0",

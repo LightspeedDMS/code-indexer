@@ -26,13 +26,13 @@ import json
 from pathlib import Path
 from typing import Callable, List, Optional, Sequence, Tuple
 
-from code_indexer.server.services.dep_map_health_detector import (
+from cidx_depmap.server.dep_map_health_detector import (
     Anomaly,
     DepMapHealthDetector,
     HealthReport,
 )
-from code_indexer.server.services.dep_map_index_regenerator import IndexRegenerator
-from code_indexer.server.services.dep_map_repair_executor import (
+from cidx_depmap.server.dep_map_index_regenerator import IndexRegenerator
+from cidx_depmap.server.dep_map_repair_executor import (
     DepMapRepairExecutor,
     RepairResult,
 )

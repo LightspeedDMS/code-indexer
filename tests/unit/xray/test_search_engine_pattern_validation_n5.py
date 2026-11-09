@@ -22,7 +22,7 @@ _NOOP_EVALUATOR = "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { vec!
 
 
 def _engine():
-    from code_indexer.xray.search_engine import XRaySearchEngine
+    from cidx_xray.search_engine import XRaySearchEngine
 
     return XRaySearchEngine()
 

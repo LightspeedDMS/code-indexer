@@ -14,7 +14,7 @@ import pytest
 from code_indexer.server.storage.sqlite_backends import (
     DependencyMapDashboardCacheBackend,
 )
-from code_indexer.server.services.dependency_map_dashboard_job_runner import (
+from cidx_depmap.server.dependency_map_dashboard_job_runner import (
     DependencyMapDashboardJobRunner,
 )
 

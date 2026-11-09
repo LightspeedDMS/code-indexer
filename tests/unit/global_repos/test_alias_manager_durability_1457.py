@@ -18,7 +18,10 @@ that the alias file content is correct (which passed even before this fix).
 import os
 import stat
 
-from code_indexer.global_repos import alias_manager as alias_manager_module
+# Content seam step 5a: the durable write moved from AliasManager into the
+# shared file representation (MetadataFiles.write_bytes), which every alias
+# and write-mode file write -- including dual-write -- now goes through.
+from code_indexer.global_repos import control_plane_metadata as file_writer_module
 from code_indexer.global_repos.alias_manager import AliasManager
 
 
@@ -29,7 +32,7 @@ def _install_fd_kind_spy(monkeypatch):
     durability behavior is unchanged; only observes fd kind.
     """
     calls = []
-    original = alias_manager_module.nfs_safe_fsync
+    original = file_writer_module.nfs_safe_fsync
 
     def spy(fd):
         try:
@@ -39,7 +42,7 @@ def _install_fd_kind_spy(monkeypatch):
         calls.append(is_dir)
         return original(fd)
 
-    monkeypatch.setattr(alias_manager_module, "nfs_safe_fsync", spy)
+    monkeypatch.setattr(file_writer_module, "nfs_safe_fsync", spy)
     return calls
 
 

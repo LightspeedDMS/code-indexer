@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import pytest
 
-from code_indexer.global_repos.dependency_map_analyzer import DependencyMapAnalyzer
+from cidx_depmap.server.dependency_map_analyzer import DependencyMapAnalyzer
 
 
 @pytest.fixture
@@ -1137,7 +1137,7 @@ def _make_no_edit_side_effect():
     return _side_effect
 
 
-_SUBPROCESS_PATH = "code_indexer.global_repos.dependency_map_analyzer.subprocess.run"
+_SUBPROCESS_PATH = "cidx_depmap.server.dependency_map_analyzer.subprocess.run"
 
 # Fixed prefix ClaudeInvoker._build_claude_command always emits: the full cmd
 # is [*_CLAUDE_CLI_CMD_PREFIX, <shell_str>, os.devnull] -- prefix elements
@@ -1260,7 +1260,7 @@ class TestInvokeDeltaMergeFile:
         Bug #1069: when subprocess does not modify the file, returns _DELTA_NOOP
         (not None).  Returning None wrongly triggered the retry loop.
         """
-        from code_indexer.global_repos.dependency_map_analyzer import _DELTA_NOOP
+        from cidx_depmap.server.dependency_map_analyzer import _DELTA_NOOP
 
         with patch(_SUBPROCESS_PATH, side_effect=_make_no_edit_side_effect()):
             result = self._call(analyzer, tmp_path)
@@ -1271,7 +1271,7 @@ class TestInvokeDeltaMergeFile:
         Bug #1069: when subprocess writes back identical content, returns
         _DELTA_NOOP (not None).  Returning None wrongly triggered the retry loop.
         """
-        from code_indexer.global_repos.dependency_map_analyzer import _DELTA_NOOP
+        from cidx_depmap.server.dependency_map_analyzer import _DELTA_NOOP
 
         with patch(
             _SUBPROCESS_PATH,
@@ -1397,7 +1397,7 @@ class TestInvokeDeltaMergeFileBug1069:
         None.  Returning None caused wrongful retries (each retry = new Claude
         agentic call costing ~20 min).
         """
-        from code_indexer.global_repos.dependency_map_analyzer import _DELTA_NOOP
+        from cidx_depmap.server.dependency_map_analyzer import _DELTA_NOOP
 
         with patch(_SUBPROCESS_PATH, side_effect=_make_no_edit_side_effect()):
             result = self._call(analyzer, tmp_path)
@@ -1412,7 +1412,7 @@ class TestInvokeDeltaMergeFileBug1069:
         (mtime changes but content == existing), invoke_delta_merge_file must
         return _DELTA_NOOP, not None.
         """
-        from code_indexer.global_repos.dependency_map_analyzer import _DELTA_NOOP
+        from cidx_depmap.server.dependency_map_analyzer import _DELTA_NOOP
 
         with patch(
             _SUBPROCESS_PATH,
@@ -1444,7 +1444,7 @@ class TestInvokeDeltaMergeFileBug1069:
         and does not edit the file, invoke_delta_merge_file must still return
         _DELTA_NOOP.
         """
-        from code_indexer.global_repos.dependency_map_analyzer import _DELTA_NOOP
+        from cidx_depmap.server.dependency_map_analyzer import _DELTA_NOOP
 
         def _file_unchanged_stdout(*args, **kwargs):
             import subprocess as _sp

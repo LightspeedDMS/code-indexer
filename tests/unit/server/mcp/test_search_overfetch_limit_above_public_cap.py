@@ -52,7 +52,6 @@ def _make_config_service() -> MagicMock:
         cohere_reranker_model="rerank-v3.5",
         overfetch_multiplier=_OVERFETCH_MULTIPLIER,
     )
-    config.memory_retrieval_config.memory_retrieval_enabled = False
     svc = MagicMock()
     svc.get_config.return_value = config
     return svc
@@ -152,7 +151,6 @@ def _global_repo_env(manager, repo_dir, recorder: _Recorder) -> Iterator[None]:
             f"{_SEARCH_PKG}.repo_search._resolve_global_repo_target",
             return_value=({"repo_name": "example-repo"}, str(repo_dir), None),
         ),
-        patch(f"{_SEARCH_PKG}.repo_search.get_config_service", return_value=cfg),
         patch(f"{_SEARCH_PKG}._shared.get_config_service", return_value=cfg),
         patch(
             f"{_SEARCH_PKG}._shared._get_access_filtering_service", return_value=None
@@ -257,7 +255,6 @@ class TestMcpActivatedRepoOverfetch:
         }
         with (
             patch(f"{_SEARCH_PKG}.repo_search._utils", utils_mock),
-            patch(f"{_SEARCH_PKG}.repo_search.get_config_service", return_value=cfg),
             patch(f"{_SEARCH_PKG}._shared.get_config_service", return_value=cfg),
             patch(
                 f"{_SEARCH_PKG}._shared._get_access_filtering_service",
@@ -482,6 +479,9 @@ class TestMcpOmniConfiguredPerRepoCap:
         access_svc = AccessFilteringService(MagicMock())
         fake_app = MagicMock()
         fake_app.state.payload_cache = None
+        # No delegated search backend (issue-69846): a MagicMock attribute would
+        # read as one and route the omni search away from the local leaf.
+        fake_app.state.search_backend = None
         recorder = _Recorder()
         params = {
             "repository_alias": ["example-repo-global"],

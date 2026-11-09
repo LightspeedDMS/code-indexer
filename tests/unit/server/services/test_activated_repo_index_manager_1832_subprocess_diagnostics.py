@@ -34,6 +34,7 @@ from code_indexer.server.services.activated_repo_index_manager import (
     ActivatedRepoIndexManager,
 )
 from code_indexer.server.utils.config_manager import ServerConfig
+from tests.unit.server._scip_feature import scip_pipeline_installed
 
 _DISCRIMINATING_STDOUT = (
     "ERROR: embedding provider rejected request: quota exceeded for voyage-code-3"
@@ -64,6 +65,14 @@ def mock_activated_repo_manager(temp_data_dir):
     repo_path = str(Path(temp_data_dir) / "activated-repos" / "testuser" / "test-repo")
     manager.get_activated_repo_path = Mock(return_value=repo_path)
     return manager
+
+
+@pytest.fixture(autouse=True)
+def _scip_builder() -> Any:
+    """The ``scip`` index type is the cidx-scip feature's (modular phase 4d):
+    the SCIP site runs only with its builder installed."""
+    with scip_pipeline_installed():
+        yield
 
 
 @pytest.fixture

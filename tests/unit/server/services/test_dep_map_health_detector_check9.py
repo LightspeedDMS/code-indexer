@@ -21,7 +21,7 @@ from typing import Any, Dict, List
 
 import pytest
 
-from code_indexer.server.services.dep_map_health_detector import (
+from cidx_depmap.server.dep_map_health_detector import (
     REPAIRABLE_ANOMALY_TYPES,
     Anomaly,
     DepMapHealthDetector,

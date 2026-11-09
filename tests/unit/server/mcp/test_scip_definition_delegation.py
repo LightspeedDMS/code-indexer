@@ -34,7 +34,7 @@ class TestSCIPDefinitionDelegatesToService:
         self, mock_user: User
     ) -> None:
         """AC: scip_definition handler delegates to SCIPQueryService.find_definition()."""
-        from code_indexer.server.mcp.handlers import scip_definition
+        from cidx_scip.server.mcp.scip import scip_definition
 
         mock_service = MagicMock()
         mock_service.find_definition.return_value = [
@@ -51,7 +51,7 @@ class TestSCIPDefinitionDelegatesToService:
         ]
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            "cidx_scip.server.mcp.scip._get_scip_query_service",
             return_value=mock_service,
         ):
             params = {"symbol": "UserService", "exact": False}
@@ -76,13 +76,13 @@ class TestSCIPDefinitionDelegatesToService:
         self, mock_user: User
     ) -> None:
         """Verify repository_alias is passed to service."""
-        from code_indexer.server.mcp.handlers import scip_definition
+        from cidx_scip.server.mcp.scip import scip_definition
 
         mock_service = MagicMock()
         mock_service.find_definition.return_value = []
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            "cidx_scip.server.mcp.scip._get_scip_query_service",
             return_value=mock_service,
         ):
             params = {
@@ -103,13 +103,13 @@ class TestSCIPDefinitionDelegatesToService:
         self, mock_user: User
     ) -> None:
         """AC: Verify username is passed to service for access control filtering."""
-        from code_indexer.server.mcp.handlers import scip_definition
+        from cidx_scip.server.mcp.scip import scip_definition
 
         mock_service = MagicMock()
         mock_service.find_definition.return_value = []
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            "cidx_scip.server.mcp.scip._get_scip_query_service",
             return_value=mock_service,
         ):
             scip_definition({"symbol": "Symbol"}, mock_user)
@@ -121,7 +121,7 @@ class TestSCIPDefinitionDelegatesToService:
         self, mock_user: User
     ) -> None:
         """AC: Verify error response for missing symbol parameter."""
-        from code_indexer.server.mcp.handlers import scip_definition
+        from cidx_scip.server.mcp.scip import scip_definition
 
         response = scip_definition({}, mock_user)
 
@@ -132,13 +132,13 @@ class TestSCIPDefinitionDelegatesToService:
 
     def test_scip_definition_catches_service_exceptions(self, mock_user: User) -> None:
         """Verify handler catches and returns errors when service raises exception."""
-        from code_indexer.server.mcp.handlers import scip_definition
+        from cidx_scip.server.mcp.scip import scip_definition
 
         mock_service = MagicMock()
         mock_service.find_definition.side_effect = Exception("Database error")
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            "cidx_scip.server.mcp.scip._get_scip_query_service",
             return_value=mock_service,
         ):
             response = scip_definition({"symbol": "test"}, mock_user)

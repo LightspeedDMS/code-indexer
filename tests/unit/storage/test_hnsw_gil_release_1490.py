@@ -84,6 +84,17 @@ BINDINGS_CPP_PATH = (
     / "bindings.cpp"
 )
 
+# The source guards read the vendored fork's C++ source, which exists only
+# where the third_party/hnswlib submodule is checked out: CI clones with
+# GIT_SUBMODULE_STRATEGY: none (.gitlab-ci.yml) and a `git worktree add`
+# does not initialise submodules. The runtime GIL tests in this file cover
+# the installed binding either way.
+_NEEDS_BINDINGS_SOURCE = pytest.mark.skipif(
+    not BINDINGS_CPP_PATH.exists(),
+    reason="third_party/hnswlib submodule not checked out "
+    "(git submodule update --init third_party/hnswlib)",
+)
+
 
 def _max_recorder_gap(
     blocking_fn: Callable[[], None], *, min_call_seconds: float
@@ -510,6 +521,7 @@ class TestGetItemsGuardApplied:
     Verified instead via a structural check that the fix is genuinely
     present in the vendored source, plus the correctness test below."""
 
+    @_NEEDS_BINDINGS_SOURCE
     def test_get_items_body_has_gil_release_scope_in_source(self):
         source = BINDINGS_CPP_PATH.read_text()
         def_marker = "py::object getData("
@@ -750,6 +762,7 @@ class TestBFIndexLoadIndexReleasesGIL:
 
 
 class TestMarkDeletedGuardApplied:
+    @_NEEDS_BINDINGS_SOURCE
     def test_mark_deleted_binding_has_gil_release_guard_in_source(self):
         source = BINDINGS_CPP_PATH.read_text()
         def_marker = '.def("mark_deleted"'

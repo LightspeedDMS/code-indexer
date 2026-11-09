@@ -294,12 +294,11 @@ XRAY_REFUSAL = CatalogSurface.XRAY.refusal
 
 @pytest.fixture(scope="module")
 def xray_server(fx: CidxMetaFixture) -> Iterator[SimpleNamespace]:
-    from code_indexer.server.mcp.handlers import xray_batch
-    from code_indexer.server.routes import xray_routes
+    from cidx_xray.server.mcp import xray_batch
+    from tests.unit.server._xray_feature import mount_xray_routes
 
     current: Dict[str, User] = {}
-    app = FastAPI()
-    app.include_router(xray_routes.router)
+    app = mount_xray_routes(FastAPI())
     app.state.access_filtering_service = fx.access_service
     app.dependency_overrides[get_current_user] = lambda: current["user"]
     with pytest.MonkeyPatch.context() as mp:

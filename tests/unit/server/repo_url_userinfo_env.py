@@ -105,21 +105,22 @@ def init_cloned_repo(path: Path, origin_url: str) -> None:
 
 def _wire_lifespan_state(app: Any, server_dir: Path) -> ThreadPoolExecutor:
     """Attach what the lifespan attaches (TestClient(app) never runs it),
-    including the dedicated X-Ray executor and cell limiter; returns the
-    executor for shutdown."""
-    from code_indexer.server.mcp.handlers.xray import (
+    including what the xray feature's on_startup installs (its executor and
+    cell limiter) and its MCP tools, as an app with "xray" enabled has them;
+    returns the executor for shutdown."""
+    from cidx_xray.server.mcp.xray import (
         set_xray_cell_limiter,
         set_xray_executor,
     )
+    from code_indexer.server.features.tools import install_feature_tools
     from code_indexer.server.routers.groups import set_group_manager
     from code_indexer.server.services.resizable_limiter import ResizableLimiter
+    from tests.unit.server._xray_feature import loaded_xray
 
     xray_executor = ThreadPoolExecutor(max_workers=2)
-    app.state.xray_executor = xray_executor
     set_xray_executor(xray_executor)
-    limiter = ResizableLimiter(initial=4, k_min=1, k_max=50)
-    app.state.xray_cell_limiter = limiter
-    set_xray_cell_limiter(limiter)
+    set_xray_cell_limiter(ResizableLimiter(initial=4, k_min=1, k_max=50))
+    install_feature_tools([loaded_xray()])
 
     registry = StorageFactory.create_backends(
         config={"storage_mode": "sqlite"}, data_dir=str(app.state.data_dir)
@@ -135,6 +136,20 @@ def _wire_lifespan_state(app: Any, server_dir: Path) -> ThreadPoolExecutor:
         group_manager, activated_repo_manager=app.state.activated_repo_manager
     )
     return xray_executor
+
+
+def _unwire_xray(xray_executor: ThreadPoolExecutor) -> None:
+    """Undo what _wire_lifespan_state installed for the xray feature."""
+    from code_indexer.server.features.tools import install_feature_tools
+    from cidx_xray.server.mcp.xray import (
+        set_xray_cell_limiter,
+        set_xray_executor,
+    )
+
+    install_feature_tools([])
+    set_xray_executor(None)
+    set_xray_cell_limiter(None)
+    xray_executor.shutdown(wait=True)
 
 
 def _seed_repository(app: Any) -> Path:
@@ -185,6 +200,11 @@ def app(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Any]:
         accounts.create_user(ADMIN, PASSWORD, UserRole.ADMIN)
         accounts.create_user(USER, PASSWORD, UserRole.NORMAL_USER)
         xray_executor = _wire_lifespan_state(real_app, root / "server")
+        # The wiki's routes, as an app with "wiki" enabled mounts them
+        # (cidx-wiki feature, modular phase 4e).
+        from tests.unit.server._wiki_feature import mount_wiki_routes
+
+        mount_wiki_routes(real_app)
         # The process-wide git service resolves activations through THIS
         # app's manager, whatever an earlier test module bound it to.
         service_binding = pytest.MonkeyPatch()
@@ -199,7 +219,7 @@ def app(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Any]:
             yield real_app
         finally:
             service_binding.undo()
-            xray_executor.shutdown(wait=True)
+            _unwire_xray(xray_executor)
 
 
 @pytest.fixture(scope="module")

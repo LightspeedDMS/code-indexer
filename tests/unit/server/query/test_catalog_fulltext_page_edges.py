@@ -55,6 +55,7 @@ from tests.unit.server.query.catalog_search_env import (
     dump,
 )
 from tests.unit.server.query.extension_filter_env_2047 import ranked_store_search
+from tests.unit.server.app_state_patch import patch_app_state
 
 pytestmark = pytest.mark.timeout(90)
 
@@ -90,7 +91,7 @@ def test_rest_rows_refuse_an_unevaluable_form(env: CatalogEnv) -> None:
 def test_rest_rows_need_the_registry(
     env: CatalogEnv, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(env.app.state, "backend_registry", None)
+    patch_app_state(monkeypatch, env.app.state, "backend_registry", None)
     with pytest.raises(CatalogProjectionUnavailable):
         _rest(env, RESTRICTED_USER, _RestQuery("payments"))
 
@@ -141,7 +142,7 @@ def test_multi_leaves_unrestricted_callers_and_failed_aliases(
 def test_multi_drops_a_catalog_group_it_cannot_project(
     env: CatalogEnv, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(env.app.state, "backend_registry", None)
+    patch_app_state(monkeypatch, env.app.state, "backend_registry", None)
     response = _multi()
     _project(env, RESTRICTED_USER, response)
     assert CATALOG_ALIAS not in response.results

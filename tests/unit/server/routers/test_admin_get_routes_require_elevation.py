@@ -27,6 +27,7 @@ from fastapi.routing import APIRoute
 
 from code_indexer.server.auth import dependencies
 from tests.unit.server._isolated_app import isolated_app
+from code_indexer.server.utils.route_table import iter_routes
 
 _PREFIXES = ("/api/admin", "/api/v1")
 
@@ -57,6 +58,12 @@ ALLOWLIST: Dict[str, str] = {
     ),
     "/api/admin/hnsw-orphan-sweep/stats": "maintenance sweep counters",
     "/api/admin/jobs/stats": "aggregate job counts by status and type",
+    "/api/admin/jobs/{job_id}": (
+        "status of one background job by id (the issue-64609 alias of "
+        "/api/jobs/{job_id}), polled with non-elevated service tokens by the "
+        "golden-repo seeder and orchestrator workers; one job's submitter, "
+        "no user list"
+    ),
     "/api/admin/maintenance/status": "maintenance mode flag",
     "/api/admin/maintenance/drain-status": (
         "running-job counts and progress, polled by the auto-updater's restart "
@@ -67,7 +74,6 @@ ALLOWLIST: Dict[str, str] = {
     "/api/admin/provider-indexes/health": "provider index health",
     "/api/admin/provider-indexes/providers": "configured provider names",
     "/api/admin/provider-indexes/status": "provider index status of a repository",
-    "/api/admin/scip-cleanup-status": "SCIP workspace cleanup job status",
     "/api/admin/siem-delivery/stats": "SIEM delivery counters",
     "/api/admin/siem-delivery/quarantine": (
         "quarantined delivery metadata (event id, action type, reason); "
@@ -98,11 +104,11 @@ def get_routes(tmp_path_factory: pytest.TempPathFactory) -> Iterator[List[APIRou
     with isolated_app(tmp_path_factory.mktemp("admin-get-routes-app")) as app:
         yield [
             route
-            for route in app.routes
+            for route_path, route in iter_routes(app.routes)
             if isinstance(route, APIRoute)
             and "GET" in route.methods
             and any(
-                route.path == p or route.path.startswith(p + "/") for p in _PREFIXES
+                route_path == p or route_path.startswith(p + "/") for p in _PREFIXES
             )
         ]
 

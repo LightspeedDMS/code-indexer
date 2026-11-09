@@ -34,6 +34,10 @@ import pytest
 from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
 from code_indexer.global_repos.query_tracker import QueryTracker
 from code_indexer.global_repos.cleanup_manager import CleanupManager
+from code_indexer.services.chunk_coverage import (
+    CHUNK_COVERAGE_KEY,
+    CHUNK_COVERAGE_VERSION,
+)
 
 REFRESH_INTERVAL_SECONDS = 3600
 
@@ -88,6 +92,8 @@ def _actual_head(repo_dir: Path) -> str:
 
 
 def _write_metadata(source_path: Path, filename: str, **fields):
+    # issue-64616: an index checked for missing chunks, unless a test says not.
+    fields.setdefault(CHUNK_COVERAGE_KEY, CHUNK_COVERAGE_VERSION)
     meta_dir = source_path / ".code-indexer"
     meta_dir.mkdir(parents=True, exist_ok=True)
     with open(meta_dir / filename, "w") as f:

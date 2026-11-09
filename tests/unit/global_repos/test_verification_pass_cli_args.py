@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from code_indexer.global_repos.dependency_map_analyzer import (
+from cidx_depmap.server.dependency_map_analyzer import (
     DependencyMapAnalyzer,
     _VERIFICATION_SEMAPHORE_STATE,
 )
@@ -71,7 +71,7 @@ def reset_semaphore():
     """
     _VERIFICATION_SEMAPHORE_STATE.clear()
     with patch(
-        "code_indexer.global_repos.dependency_map_analyzer._get_verification_semaphore",
+        "cidx_depmap.server.dependency_map_analyzer._get_verification_semaphore",
         side_effect=lambda max_concurrent: threading.Semaphore(max_concurrent),
     ):
         yield

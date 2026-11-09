@@ -37,6 +37,7 @@ from tests.unit.server.query.query_repo_access_env import (
     QueryAccessEnv,
     build_server_db_template,
 )
+from tests.unit.server.app_state_patch import patch_app_state
 
 PASSWORD = "Example-Activation-Passw0rd!"
 # A second non-admin in USER's group: granted the same repositories.
@@ -67,6 +68,7 @@ _MANAGER_STATE = (
     "golden_repo_manager",
     "background_job_manager",
     "_clone_backend",
+    "_git_backend",
     "_index_manager",
     "_query_tracker",
 )
@@ -126,14 +128,11 @@ def _route_to_env(
     # env's access service but not these two names, so they are ADDED
     # (raising=False: the attribute does not exist yet).
     stand_in = vars(importlib.import_module("code_indexer.server.app"))["app"]
-    monkeypatch.setattr(
-        stand_in.state,
-        "activated_repo_manager",
-        e.activated_repo_manager,
-        raising=False,
+    patch_app_state(
+        monkeypatch, stand_in.state, "activated_repo_manager", e.activated_repo_manager
     )
-    monkeypatch.setattr(
-        stand_in.state, "background_job_manager", e.job_manager, raising=False
+    patch_app_state(
+        monkeypatch, stand_in.state, "background_job_manager", e.job_manager
     )
     # Routers that read the request's app (inline repos, v1/v2, wiki). The
     # access service is installed by the lifespan, which TestClient(app)

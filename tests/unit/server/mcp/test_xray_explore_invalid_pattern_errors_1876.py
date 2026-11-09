@@ -44,7 +44,7 @@ VALID_PARAMS: Dict[str, Any] = {
 
 
 def _import_handler():
-    from code_indexer.server.mcp.handlers.xray import handle_xray_explore
+    from cidx_xray.server.mcp.xray import handle_xray_explore
 
     return handle_xray_explore
 
@@ -57,7 +57,7 @@ async def test_invalid_include_patterns_rejected_by_real_handler():
     params = {**VALID_PARAMS, "include_patterns": [None]}
 
     with patch(
-        "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
+        "cidx_xray.server.mcp.xray._explore._resolve_repo_path",
         return_value="/some/path",
     ):
         result = await _import_handler()(params, user)
@@ -73,7 +73,7 @@ async def test_invalid_exclude_patterns_rejected_by_real_handler():
     params = {**VALID_PARAMS, "exclude_patterns": ["*.{ts,md"]}
 
     with patch(
-        "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
+        "cidx_xray.server.mcp.xray._explore._resolve_repo_path",
         return_value="/some/path",
     ):
         result = await _import_handler()(params, user)
@@ -90,7 +90,7 @@ async def test_bare_string_include_patterns_rejected_not_iterated_per_character(
     params = {**VALID_PARAMS, "include_patterns": "*.md"}
 
     with patch(
-        "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
+        "cidx_xray.server.mcp.xray._explore._resolve_repo_path",
         return_value="/some/path",
     ):
         result = await _import_handler()(params, user)
@@ -104,7 +104,7 @@ async def test_bare_string_exclude_patterns_rejected_not_iterated_per_character(
     params = {**VALID_PARAMS, "exclude_patterns": "*.md"}
 
     with patch(
-        "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
+        "cidx_xray.server.mcp.xray._explore._resolve_repo_path",
         return_value="/some/path",
     ):
         result = await _import_handler()(params, user)

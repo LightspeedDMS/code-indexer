@@ -41,13 +41,13 @@ class TestReferencesCompactOutput:
         mock_result.column = 10
 
         # Mock the query engine (imported inside function)
-        with patch("code_indexer.scip.query.SCIPQueryEngine") as mock_engine_cls:
+        with patch("cidx_scip.query.SCIPQueryEngine") as mock_engine_cls:
             mock_engine = Mock()
             mock_engine.find_references.return_value = [mock_result]
             mock_engine_cls.return_value = mock_engine
 
             # Mock StatusTracker (imported inside function)
-            with patch("code_indexer.scip.status.StatusTracker") as mock_tracker_cls:
+            with patch("cidx_scip.status.StatusTracker") as mock_tracker_cls:
                 mock_tracker = Mock()
                 mock_status = Mock()
                 mock_status.projects = {"test": "project"}
@@ -55,7 +55,7 @@ class TestReferencesCompactOutput:
                 mock_tracker_cls.return_value = mock_tracker
 
                 # Invoke the command
-                from code_indexer.cli_scip import scip_references
+                from cidx_scip.cli import scip_references
 
                 runner = click.testing.CliRunner()
                 result = runner.invoke(scip_references, ["authenticate"])
@@ -82,7 +82,7 @@ class TestReferencesCompactOutput:
 
     def test_references_uses_extract_display_name_helper(self):
         """Test that _extract_display_name() correctly formats SCIP symbols."""
-        from code_indexer.cli_scip import _extract_display_name
+        from cidx_scip.cli import _extract_display_name
 
         test_cases = [
             (
@@ -121,19 +121,19 @@ class TestReferencesCompactOutput:
             ),
         ]
 
-        with patch("code_indexer.scip.query.SCIPQueryEngine") as mock_engine_cls:
+        with patch("cidx_scip.query.SCIPQueryEngine") as mock_engine_cls:
             mock_engine = Mock()
             mock_engine.find_references.return_value = mock_results
             mock_engine_cls.return_value = mock_engine
 
-            with patch("code_indexer.scip.status.StatusTracker") as mock_tracker_cls:
+            with patch("cidx_scip.status.StatusTracker") as mock_tracker_cls:
                 mock_tracker = Mock()
                 mock_status = Mock()
                 mock_status.projects = {"test": "project"}
                 mock_tracker.load.return_value = mock_status
                 mock_tracker_cls.return_value = mock_tracker
 
-                from code_indexer.cli_scip import scip_references
+                from cidx_scip.cli import scip_references
 
                 runner = click.testing.CliRunner()
                 result = runner.invoke(scip_references, ["auth"])
@@ -167,19 +167,19 @@ class TestDependenciesCompactOutput:
         mock_result.line = 67
         mock_result.relationship = "reference"
 
-        with patch("code_indexer.scip.query.SCIPQueryEngine") as mock_engine_cls:
+        with patch("cidx_scip.query.SCIPQueryEngine") as mock_engine_cls:
             mock_engine = Mock()
             mock_engine.get_dependencies.return_value = [mock_result]
             mock_engine_cls.return_value = mock_engine
 
-            with patch("code_indexer.scip.status.StatusTracker") as mock_tracker_cls:
+            with patch("cidx_scip.status.StatusTracker") as mock_tracker_cls:
                 mock_tracker = Mock()
                 mock_status = Mock()
                 mock_status.projects = {"test": "project"}
                 mock_tracker.load.return_value = mock_status
                 mock_tracker_cls.return_value = mock_tracker
 
-                from code_indexer.cli_scip import scip_dependencies
+                from cidx_scip.cli import scip_dependencies
 
                 runner = click.testing.CliRunner()
                 result = runner.invoke(scip_dependencies, ["UserService"])
@@ -214,19 +214,19 @@ class TestDependenciesCompactOutput:
             ),
         ]
 
-        with patch("code_indexer.scip.query.SCIPQueryEngine") as mock_engine_cls:
+        with patch("cidx_scip.query.SCIPQueryEngine") as mock_engine_cls:
             mock_engine = Mock()
             mock_engine.get_dependencies.return_value = mock_results
             mock_engine_cls.return_value = mock_engine
 
-            with patch("code_indexer.scip.status.StatusTracker") as mock_tracker_cls:
+            with patch("cidx_scip.status.StatusTracker") as mock_tracker_cls:
                 mock_tracker = Mock()
                 mock_status = Mock()
                 mock_status.projects = {"test": "project"}
                 mock_tracker.load.return_value = mock_status
                 mock_tracker_cls.return_value = mock_tracker
 
-                from code_indexer.cli_scip import scip_dependencies
+                from cidx_scip.cli import scip_dependencies
 
                 runner = click.testing.CliRunner()
                 result = runner.invoke(scip_dependencies, ["UserService"])
@@ -260,19 +260,19 @@ class TestDependentsCompactOutput:
         mock_result.line = 89
         mock_result.relationship = "call"
 
-        with patch("code_indexer.scip.query.SCIPQueryEngine") as mock_engine_cls:
+        with patch("cidx_scip.query.SCIPQueryEngine") as mock_engine_cls:
             mock_engine = Mock()
             mock_engine.get_dependents.return_value = [mock_result]
             mock_engine_cls.return_value = mock_engine
 
-            with patch("code_indexer.scip.status.StatusTracker") as mock_tracker_cls:
+            with patch("cidx_scip.status.StatusTracker") as mock_tracker_cls:
                 mock_tracker = Mock()
                 mock_status = Mock()
                 mock_status.projects = {"test": "project"}
                 mock_tracker.load.return_value = mock_status
                 mock_tracker_cls.return_value = mock_tracker
 
-                from code_indexer.cli_scip import scip_dependents
+                from cidx_scip.cli import scip_dependents
 
                 runner = click.testing.CliRunner()
                 result = runner.invoke(scip_dependents, ["UserRepo"])
@@ -309,19 +309,19 @@ class TestDependentsCompactOutput:
             ),
         ]
 
-        with patch("code_indexer.scip.query.SCIPQueryEngine") as mock_engine_cls:
+        with patch("cidx_scip.query.SCIPQueryEngine") as mock_engine_cls:
             mock_engine = Mock()
             mock_engine.get_dependents.return_value = mock_results
             mock_engine_cls.return_value = mock_engine
 
-            with patch("code_indexer.scip.status.StatusTracker") as mock_tracker_cls:
+            with patch("cidx_scip.status.StatusTracker") as mock_tracker_cls:
                 mock_tracker = Mock()
                 mock_status = Mock()
                 mock_status.projects = {"test": "project"}
                 mock_tracker.load.return_value = mock_status
                 mock_tracker_cls.return_value = mock_tracker
 
-                from code_indexer.cli_scip import scip_dependents
+                from cidx_scip.cli import scip_dependents
 
                 runner = click.testing.CliRunner()
                 result = runner.invoke(scip_dependents, ["UserRepo"])
@@ -362,17 +362,17 @@ class TestImpactCompactOutput:
         mock_impact_result.affected_files = [Mock(path="src/auth.py")]
         mock_impact_result.affected_symbols = [mock_result]
 
-        with patch("code_indexer.scip.query.composites.analyze_impact") as mock_analyze:
+        with patch("cidx_scip.query.composites.analyze_impact") as mock_analyze:
             mock_analyze.return_value = mock_impact_result
 
-            with patch("code_indexer.scip.status.StatusTracker") as mock_tracker_cls:
+            with patch("cidx_scip.status.StatusTracker") as mock_tracker_cls:
                 mock_tracker = Mock()
                 mock_status = Mock()
                 mock_status.projects = {"test": "project"}
                 mock_tracker.load.return_value = mock_status
                 mock_tracker_cls.return_value = mock_tracker
 
-                from code_indexer.cli_scip import scip_impact
+                from cidx_scip.cli import scip_impact
 
                 runner = click.testing.CliRunner()
                 result = runner.invoke(scip_impact, ["validate_token"])
@@ -415,17 +415,17 @@ class TestImpactCompactOutput:
         ]
         mock_impact_result.affected_symbols = mock_results
 
-        with patch("code_indexer.scip.query.composites.analyze_impact") as mock_analyze:
+        with patch("cidx_scip.query.composites.analyze_impact") as mock_analyze:
             mock_analyze.return_value = mock_impact_result
 
-            with patch("code_indexer.scip.status.StatusTracker") as mock_tracker_cls:
+            with patch("cidx_scip.status.StatusTracker") as mock_tracker_cls:
                 mock_tracker = Mock()
                 mock_status = Mock()
                 mock_status.projects = {"test": "project"}
                 mock_tracker.load.return_value = mock_status
                 mock_tracker_cls.return_value = mock_tracker
 
-                from code_indexer.cli_scip import scip_impact
+                from cidx_scip.cli import scip_impact
 
                 runner = click.testing.CliRunner()
                 result = runner.invoke(scip_impact, ["validate_token"])
@@ -463,19 +463,17 @@ class TestContextCompactOutput:
         mock_context_result.total_files = 1
         mock_context_result.files = [mock_file]
 
-        with patch(
-            "code_indexer.scip.query.composites.get_smart_context"
-        ) as mock_get_context:
+        with patch("cidx_scip.query.composites.get_smart_context") as mock_get_context:
             mock_get_context.return_value = mock_context_result
 
-            with patch("code_indexer.scip.status.StatusTracker") as mock_tracker_cls:
+            with patch("cidx_scip.status.StatusTracker") as mock_tracker_cls:
                 mock_tracker = Mock()
                 mock_status = Mock()
                 mock_status.projects = {"test": "project"}
                 mock_tracker.load.return_value = mock_status
                 mock_tracker_cls.return_value = mock_tracker
 
-                from code_indexer.cli_scip import scip_context
+                from cidx_scip.cli import scip_context
 
                 runner = click.testing.CliRunner()
                 result = runner.invoke(scip_context, ["validate_token"])
@@ -519,19 +517,17 @@ class TestContextCompactOutput:
         mock_context_result.total_files = 1
         mock_context_result.files = [mock_file]
 
-        with patch(
-            "code_indexer.scip.query.composites.get_smart_context"
-        ) as mock_get_context:
+        with patch("cidx_scip.query.composites.get_smart_context") as mock_get_context:
             mock_get_context.return_value = mock_context_result
 
-            with patch("code_indexer.scip.status.StatusTracker") as mock_tracker_cls:
+            with patch("cidx_scip.status.StatusTracker") as mock_tracker_cls:
                 mock_tracker = Mock()
                 mock_status = Mock()
                 mock_status.projects = {"test": "project"}
                 mock_tracker.load.return_value = mock_status
                 mock_tracker_cls.return_value = mock_tracker
 
-                from code_indexer.cli_scip import scip_context
+                from cidx_scip.cli import scip_context
 
                 runner = click.testing.CliRunner()
                 result = runner.invoke(scip_context, ["validate_token"])
@@ -581,19 +577,17 @@ class TestContextCompactOutput:
         mock_context_result.total_files = 1
         mock_context_result.files = [mock_file]
 
-        with patch(
-            "code_indexer.scip.query.composites.get_smart_context"
-        ) as mock_get_context:
+        with patch("cidx_scip.query.composites.get_smart_context") as mock_get_context:
             mock_get_context.return_value = mock_context_result
 
-            with patch("code_indexer.scip.status.StatusTracker") as mock_tracker_cls:
+            with patch("cidx_scip.status.StatusTracker") as mock_tracker_cls:
                 mock_tracker = Mock()
                 mock_status = Mock()
                 mock_status.projects = {"test": "project"}
                 mock_tracker.load.return_value = mock_status
                 mock_tracker_cls.return_value = mock_tracker
 
-                from code_indexer.cli_scip import scip_context
+                from cidx_scip.cli import scip_context
 
                 runner = click.testing.CliRunner()
                 result = runner.invoke(scip_context, ["validate_token"])

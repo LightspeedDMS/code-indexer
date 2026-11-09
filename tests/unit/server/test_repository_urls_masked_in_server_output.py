@@ -69,8 +69,13 @@ def test_fetch_decision_for_unrecognised_origin_omits_userinfo(
     # An upper-case scheme falls outside the remote prefixes.
     origin = f"HTTPS://example-user:{SECRET}@git.example.com/example/repo.git"
     subprocess.run(["git", "remote", "add", "origin", origin], cwd=tmp_path, check=True)
+    from code_indexer.server.storage.shared.git_backend import local_git_backend
+
     manager = ActivatedRepoManager.__new__(ActivatedRepoManager)
     manager.logger = logging.getLogger("test.activated_repo_manager")
+    # issue-64678: the manager reads the origin through its git seam; the local
+    # backend is what __init__ installs by default.
+    manager._git_backend = local_git_backend()
     caplog.set_level(logging.DEBUG)
 
     should_fetch, info = manager._should_fetch_from_remote(str(tmp_path))

@@ -206,43 +206,6 @@ class TestFileIdentifier:
         assert isinstance(metadata["file_mtime"], int)
         assert isinstance(metadata["file_size"], int)
 
-    def test_get_current_files_git(self, git_repo, config):
-        """Test getting current files in git repository."""
-        # Add more files
-        (git_repo / "src" / "main.py").parent.mkdir(exist_ok=True)
-        (git_repo / "src" / "main.py").write_text("# main file")
-        (git_repo / "ignore.txt").write_text("should be ignored")
-
-        # Commit the new python file only
-        subprocess.run(["git", "add", "src/main.py"], cwd=git_repo, check=True)
-        subprocess.run(["git", "commit", "-m", "Add main.py"], cwd=git_repo, check=True)
-
-        identifier = FileIdentifier(git_repo, config)
-        current_files = identifier.get_current_files()
-
-        # Should include committed files that match extensions
-        file_paths = set(current_files.keys())
-        assert "test.py" in file_paths
-        assert "src/main.py" in file_paths
-
-        # Should not include uncommitted or ignored files
-        assert "ignore.txt" not in file_paths
-
-    def test_get_current_files_non_git(self, non_git_dir, config):
-        """Test getting current files in non-git directory."""
-        identifier = FileIdentifier(non_git_dir, config)
-        current_files = identifier.get_current_files()
-
-        file_paths = set(current_files.keys())
-
-        # Should include files with allowed extensions
-        assert "test.py" in file_paths
-        assert "test.js" in file_paths
-        assert "README.md" in file_paths
-
-        # Should not include files with disallowed extensions
-        assert "ignore.txt" not in file_paths
-
     def test_file_signature_git_vs_non_git(self, temp_dir, config):
         """Test that file signatures work correctly for git and non-git."""
         # Create identical file content

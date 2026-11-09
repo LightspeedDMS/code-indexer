@@ -14,7 +14,7 @@ import pytest
 import yaml
 
 from code_indexer.server.auth.user_manager import User, UserRole
-from code_indexer.xray.rust_backend import _XRAY_CLI_DEFAULT
+from cidx_xray.rust_backend import resolve_xray_cli_path
 
 
 GRAPH_EVALUATOR = """\
@@ -81,7 +81,7 @@ async def test_legacy_pattern_rejected_by_analyze_graph(tmp_path: Path) -> None:
     cidx_meta = tmp_path / "cidx-meta"
     _write_pattern(cidx_meta, name="legacy-only", code=LEGACY_EVALUATOR)
 
-    from code_indexer.server.mcp.handlers.xray_graph import handle_analyze_graph
+    from cidx_xray.server.mcp.xray_graph import handle_analyze_graph
 
     params = {
         "repository_alias": "repo-global",
@@ -91,12 +91,12 @@ async def test_legacy_pattern_rejected_by_analyze_graph(tmp_path: Path) -> None:
     with (
         ThreadPoolExecutor(max_workers=1) as executor,
         patch(
-            "code_indexer.server.mcp.handlers.xray._infra._get_cidx_meta_path",
+            "cidx_xray.server.mcp.xray._infra._get_cidx_meta_path",
             return_value=cidx_meta,
         ),
-        patch("code_indexer.server.mcp.handlers.xray._infra._seeds_ensured", True),
+        patch("cidx_xray.server.mcp.xray._infra._seeds_ensured", True),
         patch(
-            "code_indexer.server.mcp.handlers.xray._infra._get_xray_executor",
+            "cidx_xray.server.mcp.xray._infra._get_xray_executor",
             return_value=executor,
         ),
     ):
@@ -116,7 +116,7 @@ async def test_graph_pattern_rejected_by_legacy_xray_search(tmp_path: Path) -> N
         execution_mode="graph",
     )
 
-    from code_indexer.server.mcp.handlers.xray import handle_xray_search
+    from cidx_xray.server.mcp.xray import handle_xray_search
 
     params = {
         "repository_alias": "repo-global",
@@ -153,24 +153,24 @@ async def test_graph_pattern_rejected_by_legacy_xray_search(tmp_path: Path) -> N
 
     with (
         patch(
-            "code_indexer.server.mcp.handlers.xray._infra._get_cidx_meta_path",
+            "cidx_xray.server.mcp.xray._infra._get_cidx_meta_path",
             return_value=cidx_meta,
         ),
-        patch("code_indexer.server.mcp.handlers.xray._infra._seeds_ensured", True),
+        patch("cidx_xray.server.mcp.xray._infra._seeds_ensured", True),
         patch(
-            "code_indexer.server.mcp.handlers.xray._infra._get_xray_executor",
+            "cidx_xray.server.mcp.xray._infra._get_xray_executor",
             return_value=MagicMock(),
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._search._resolve_repo_path",
+            "cidx_xray.server.mcp.xray._search._resolve_repo_path",
             return_value="/fake/repo/path",
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._search._get_background_job_manager",
+            "cidx_xray.server.mcp.xray._search._get_background_job_manager",
             return_value=mock_bjm,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._search._get_job_tracker",
+            "cidx_xray.server.mcp.xray._search._get_job_tracker",
             return_value=mock_jt,
         ),
         patch("asyncio.get_running_loop", return_value=loop_instance),
@@ -192,7 +192,7 @@ async def test_analyze_graph_pattern_and_evaluator_are_mutually_exclusive(
     """
     cidx_meta = tmp_path / "cidx-meta"
 
-    from code_indexer.server.mcp.handlers.xray_graph import handle_analyze_graph
+    from cidx_xray.server.mcp.xray_graph import handle_analyze_graph
 
     params = {
         "repository_alias": "repo-global",
@@ -202,12 +202,12 @@ async def test_analyze_graph_pattern_and_evaluator_are_mutually_exclusive(
     with (
         ThreadPoolExecutor(max_workers=1) as executor,
         patch(
-            "code_indexer.server.mcp.handlers.xray._infra._get_cidx_meta_path",
+            "cidx_xray.server.mcp.xray._infra._get_cidx_meta_path",
             return_value=cidx_meta,
         ),
-        patch("code_indexer.server.mcp.handlers.xray._infra._seeds_ensured", True),
+        patch("cidx_xray.server.mcp.xray._infra._seeds_ensured", True),
         patch(
-            "code_indexer.server.mcp.handlers.xray._infra._get_xray_executor",
+            "cidx_xray.server.mcp.xray._infra._get_xray_executor",
             return_value=executor,
         ),
     ):
@@ -218,7 +218,7 @@ async def test_analyze_graph_pattern_and_evaluator_are_mutually_exclusive(
 
 @pytest.mark.asyncio
 async def test_graph_pattern_name_and_params_resolve_and_run(tmp_path: Path) -> None:
-    if not _XRAY_CLI_DEFAULT.exists():
+    if not resolve_xray_cli_path().exists():
         pytest.skip("xray-cli binary is required for graph execution")
     cidx_meta = tmp_path / "cidx-meta"
     _write_pattern(
@@ -231,7 +231,7 @@ async def test_graph_pattern_name_and_params_resolve_and_run(tmp_path: Path) -> 
     repo.mkdir()
     (repo / "Main.java").write_text("class Main { void run() {} }\n", encoding="utf-8")
 
-    from code_indexer.server.mcp.handlers.xray_graph import handle_analyze_graph
+    from cidx_xray.server.mcp.xray_graph import handle_analyze_graph
 
     params = {
         "repository_alias": "repo-global",
@@ -242,16 +242,16 @@ async def test_graph_pattern_name_and_params_resolve_and_run(tmp_path: Path) -> 
     with (
         ThreadPoolExecutor(max_workers=1) as executor,
         patch(
-            "code_indexer.server.mcp.handlers.xray._infra._get_cidx_meta_path",
+            "cidx_xray.server.mcp.xray._infra._get_cidx_meta_path",
             return_value=cidx_meta,
         ),
-        patch("code_indexer.server.mcp.handlers.xray._infra._seeds_ensured", True),
+        patch("cidx_xray.server.mcp.xray._infra._seeds_ensured", True),
         patch(
-            "code_indexer.server.mcp.handlers.xray._infra._get_xray_executor",
+            "cidx_xray.server.mcp.xray._infra._get_xray_executor",
             return_value=executor,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path",
+            "cidx_xray.server.mcp.xray_graph._resolve_repo_path",
             return_value=str(repo),
         ),
     ):
@@ -263,13 +263,13 @@ async def test_graph_pattern_name_and_params_resolve_and_run(tmp_path: Path) -> 
 
 @pytest.mark.asyncio
 async def test_graph_non_java_input_reports_no_supported_files(tmp_path: Path) -> None:
-    if not _XRAY_CLI_DEFAULT.exists():
+    if not resolve_xray_cli_path().exists():
         pytest.skip("xray-cli binary is required for graph execution")
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "main.py").write_text("def run():\n    return 1\n", encoding="utf-8")
 
-    from code_indexer.server.mcp.handlers.xray_graph import handle_analyze_graph
+    from cidx_xray.server.mcp.xray_graph import handle_analyze_graph
 
     params = {
         "repository_alias": "repo-global",
@@ -277,7 +277,7 @@ async def test_graph_non_java_input_reports_no_supported_files(tmp_path: Path) -
         "timeout_seconds": 60,
     }
     with patch(
-        "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path",
+        "cidx_xray.server.mcp.xray_graph._resolve_repo_path",
         return_value=str(repo),
     ):
         result = await handle_analyze_graph(params, _user())
@@ -292,13 +292,13 @@ async def test_graph_non_java_input_reports_no_supported_files(tmp_path: Path) -
 async def test_graph_java_input_does_not_report_no_supported_files(
     tmp_path: Path,
 ) -> None:
-    if not _XRAY_CLI_DEFAULT.exists():
+    if not resolve_xray_cli_path().exists():
         pytest.skip("xray-cli binary is required for graph execution")
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "Main.java").write_text("class Main { void run() {} }\n", encoding="utf-8")
 
-    from code_indexer.server.mcp.handlers.xray_graph import handle_analyze_graph
+    from cidx_xray.server.mcp.xray_graph import handle_analyze_graph
 
     params = {
         "repository_alias": "repo-global",
@@ -306,7 +306,7 @@ async def test_graph_java_input_does_not_report_no_supported_files(
         "timeout_seconds": 60,
     }
     with patch(
-        "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path",
+        "cidx_xray.server.mcp.xray_graph._resolve_repo_path",
         return_value=str(repo),
     ):
         result = await handle_analyze_graph(params, _user())
@@ -329,7 +329,7 @@ async def _run_graph_analysis_over_files(
     for relative_path, content in files.items():
         (repo / relative_path).write_text(content, encoding="utf-8")
 
-    from code_indexer.server.mcp.handlers.xray_graph import handle_analyze_graph
+    from cidx_xray.server.mcp.xray_graph import handle_analyze_graph
 
     params = {
         "repository_alias": "repo-global",
@@ -337,7 +337,7 @@ async def _run_graph_analysis_over_files(
         "timeout_seconds": 60,
     }
     with patch(
-        "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path",
+        "cidx_xray.server.mcp.xray_graph._resolve_repo_path",
         return_value=str(repo),
     ):
         result = await handle_analyze_graph(params, _user())
@@ -360,7 +360,7 @@ async def test_graph_mixed_unsupported_language_and_unrecognized_extension_repor
     (#1860's own repro: files_with_unsupported_language=41,
     unreadable_or_unsupported_files=11, neither equal to the file count).
     """
-    if not _XRAY_CLI_DEFAULT.exists():
+    if not resolve_xray_cli_path().exists():
         pytest.skip("xray-cli binary is required for graph execution")
 
     parsed = await _run_graph_analysis_over_files(
@@ -385,7 +385,7 @@ async def test_graph_java_with_unrecognized_extension_file_does_not_report_no_su
     files` -- at least one candidate file did reach the extractor with a
     supported language.
     """
-    if not _XRAY_CLI_DEFAULT.exists():
+    if not resolve_xray_cli_path().exists():
         pytest.skip("xray-cli binary is required for graph execution")
 
     parsed = await _run_graph_analysis_over_files(
@@ -412,7 +412,7 @@ async def test_graph_analyze_response_surfaces_new_completeness_fields_for_a_cle
     pipeline (same pattern every other test in this file already uses),
     never a stub of `RustNativeBackend.run_graph_analysis`.
     """
-    if not _XRAY_CLI_DEFAULT.exists():
+    if not resolve_xray_cli_path().exists():
         pytest.skip("xray-cli binary is required for graph execution")
 
     parsed = await _run_graph_analysis_over_files(
@@ -441,7 +441,7 @@ async def test_graph_analyze_response_surfaces_completeness_reasons_for_a_degrad
     ["repo_index_incomplete"]` at the TOP level of the MCP response, not
     only inside `degradation`.
     """
-    if not _XRAY_CLI_DEFAULT.exists():
+    if not resolve_xray_cli_path().exists():
         pytest.skip("xray-cli binary is required for graph execution")
 
     parsed = await _run_graph_analysis_over_files(
@@ -480,7 +480,7 @@ async def test_graph_analyze_response_surfaces_repo_index_incomplete_for_python_
     CAP` patched down to 1 so the walk genuinely truncates (reviewer-
     suggested approach -- avoids writing 50,000 real files).
     """
-    if not _XRAY_CLI_DEFAULT.exists():
+    if not resolve_xray_cli_path().exists():
         pytest.skip("xray-cli binary is required for graph execution")
 
     repo = tmp_path / "repo"
@@ -488,7 +488,7 @@ async def test_graph_analyze_response_surfaces_repo_index_incomplete_for_python_
     (repo / "A.java").write_text("class A { void run() {} }\n", encoding="utf-8")
     (repo / "B.java").write_text("class B { void helper() {} }\n", encoding="utf-8")
 
-    from code_indexer.server.mcp.handlers.xray_graph import handle_analyze_graph
+    from cidx_xray.server.mcp.xray_graph import handle_analyze_graph
 
     params = {
         "repository_alias": "repo-global",
@@ -497,11 +497,11 @@ async def test_graph_analyze_response_surfaces_repo_index_incomplete_for_python_
     }
     with (
         patch(
-            "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path",
+            "cidx_xray.server.mcp.xray_graph._resolve_repo_path",
             return_value=str(repo),
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray_graph._GRAPH_CANDIDATE_FILES_CAP",
+            "cidx_xray.server.mcp.xray_graph._GRAPH_CANDIDATE_FILES_CAP",
             1,
         ),
     ):
@@ -538,7 +538,7 @@ async def test_graph_unsupported_language_file_with_a_genuine_parse_error_does_n
     error; the fix's `files_with_parse_errors == 0` guard must prevent
     that, since a genuine parse failure happened.
     """
-    if not _XRAY_CLI_DEFAULT.exists():
+    if not resolve_xray_cli_path().exists():
         pytest.skip("xray-cli binary is required for graph execution")
 
     parsed = await _run_graph_analysis_over_files(

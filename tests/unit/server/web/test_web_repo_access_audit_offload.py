@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient
 from code_indexer.server.services import audit_capture
 from code_indexer.server.services.audit_log_service import AuditLogService
 from code_indexer.server.services.group_access_manager import GroupAccessManager
+from code_indexer.server.utils.route_table import iter_routes
 
 CAPTURE_LOGGER = "code_indexer.server.services.audit_capture"
 _CSRF = "example-csrf-token"
@@ -76,7 +77,7 @@ def env(tmp_path: Path, monkeypatch) -> Iterator[_Env]:
     app = FastAPI()
     app.add_middleware(AuditRequestContextMiddleware)
     app.include_router(web_router, prefix="/admin")
-    for route in web_router.routes:
+    for route_path, route in iter_routes(web_router.routes):
         if isinstance(route, APIRoute):
             for dep in route.dependencies or []:
                 fn = getattr(dep, "dependency", None)

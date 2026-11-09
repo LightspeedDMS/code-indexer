@@ -15,7 +15,7 @@ Tests:
 
 from unittest.mock import MagicMock, Mock
 
-from code_indexer.server.web.dependency_map_routes import _get_progress_from_service
+from cidx_depmap.server.web.routes import _get_progress_from_service
 
 # ---------------------------------------------------------------------------
 # Named constants — no magic numbers

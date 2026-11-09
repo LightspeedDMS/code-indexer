@@ -88,3 +88,31 @@ class TestLaunchRestartGenerationOrphanKey:
         assert any("totally_bogus_key_xyz" in msg for msg in warning_messages), (
             f"Expected WARNING for truly unknown key 'totally_bogus_key_xyz', got: {warning_messages}"
         )
+
+
+class TestQueryVectorCacheConfigOrphanKey:
+    """issue-70528 -- the fork-only query_vector_cache_config key is gone from
+    ServerConfig but is still in persisted config.json files; it must not log a
+    WARNING on every process start (the runtime QueryEmbeddingCacheConfig
+    replaced it, with a different shape, so there is nothing to migrate)."""
+
+    def test_query_vector_cache_config_no_warning(self, tmp_path, caplog):
+        config_manager = ServerConfigManager(str(tmp_path))
+        config_manager.save_config(config_manager.create_default_config())
+        config_path = tmp_path / "config.json"
+        raw = json.loads(config_path.read_text())
+        raw["query_vector_cache_config"] = {"enabled": False, "max_entries": 10000}
+        config_path.write_text(json.dumps(raw))
+
+        with caplog.at_level(
+            logging.WARNING, logger="code_indexer.server.utils.config_manager"
+        ):
+            loaded = config_manager.load_config()
+
+        assert loaded is not None
+        assert not [
+            r.message
+            for r in caplog.records
+            if r.levelno == logging.WARNING and "query_vector_cache_config" in r.message
+        ]
+        assert not hasattr(loaded, "query_vector_cache_config")

@@ -69,13 +69,13 @@ class TestAC2Phase1Fallback:
         def counting_analyzer(out_dir, d_info, d_list, repo_list):
             call_count[0] += 1
 
-        from code_indexer.server.services.dep_map_health_detector import (
+        from cidx_depmap.server.dep_map_health_detector import (
             DepMapHealthDetector,
         )
-        from code_indexer.server.services.dep_map_index_regenerator import (
+        from cidx_depmap.server.dep_map_index_regenerator import (
             IndexRegenerator,
         )
-        from code_indexer.server.services.dep_map_repair_executor import (
+        from cidx_depmap.server.dep_map_repair_executor import (
             DepMapRepairExecutor,
         )
 
@@ -118,13 +118,13 @@ class TestAC2Phase1Fallback:
         def falsy_analyzer(out_dir, d_info, d_list, repo_list):
             return None  # falsy — analysis produced no result
 
-        from code_indexer.server.services.dep_map_health_detector import (
+        from cidx_depmap.server.dep_map_health_detector import (
             DepMapHealthDetector,
         )
-        from code_indexer.server.services.dep_map_index_regenerator import (
+        from cidx_depmap.server.dep_map_index_regenerator import (
             IndexRegenerator,
         )
-        from code_indexer.server.services.dep_map_repair_executor import (
+        from cidx_depmap.server.dep_map_repair_executor import (
             DepMapRepairExecutor,
         )
 
@@ -149,13 +149,13 @@ class TestAC2Phase1Fallback:
         def failing_analyzer(out_dir, d_info, d_list, repo_list):
             raise RuntimeError("Claude CLI timeout")
 
-        from code_indexer.server.services.dep_map_health_detector import (
+        from cidx_depmap.server.dep_map_health_detector import (
             DepMapHealthDetector,
         )
-        from code_indexer.server.services.dep_map_index_regenerator import (
+        from cidx_depmap.server.dep_map_index_regenerator import (
             IndexRegenerator,
         )
-        from code_indexer.server.services.dep_map_repair_executor import (
+        from cidx_depmap.server.dep_map_repair_executor import (
             DepMapRepairExecutor,
         )
 

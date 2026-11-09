@@ -14,8 +14,8 @@ from typing import Any, Dict, List, Set, Tuple
 
 import pytest
 
-import code_indexer.server.services.dep_map_parser_graph as dep_map_parser_graph
-from code_indexer.server.services.dep_map_parser_graph import (
+import cidx_depmap.server.dep_map_parser_graph as dep_map_parser_graph
+from cidx_depmap.server.dep_map_parser_graph import (
     parse_domain_file_for_graph,
 )
 from code_indexer.server.services.dep_map_parser_hygiene import AnomalyEntry
@@ -49,7 +49,7 @@ def _call_parse_for_missing(
         def emit(self, record: logging.LogRecord) -> None:
             captured.append((record.levelname, record.exc_info is not None))
 
-    logger = logging.getLogger("code_indexer.server.services.dep_map_parser_graph")
+    logger = logging.getLogger("cidx_depmap.server.dep_map_parser_graph")
     handler = _Handler()
     logger.addHandler(handler)
     old_level = logger.level
@@ -128,7 +128,7 @@ class TestMissingFileWarningOnce:
                     )
                 )
 
-        logger = logging.getLogger("code_indexer.server.services.dep_map_parser_graph")
+        logger = logging.getLogger("cidx_depmap.server.dep_map_parser_graph")
         handler = _Handler()
         logger.addHandler(handler)
         old_level = logger.level
@@ -203,7 +203,7 @@ class TestExistingFileStillParsesNormally:
             def emit(self, record: logging.LogRecord) -> None:
                 captured_levels.append(record.levelname)
 
-        logger = logging.getLogger("code_indexer.server.services.dep_map_parser_graph")
+        logger = logging.getLogger("cidx_depmap.server.dep_map_parser_graph")
         handler = _Handler()
         logger.addHandler(handler)
         logger.setLevel(logging.DEBUG)

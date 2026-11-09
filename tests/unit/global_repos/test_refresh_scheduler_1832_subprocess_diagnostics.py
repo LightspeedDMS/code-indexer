@@ -14,6 +14,7 @@ test_refresh_scheduler_backoff.py.
 from __future__ import annotations
 
 import logging
+import subprocess
 from unittest.mock import Mock, patch
 
 import pytest
@@ -52,6 +53,24 @@ def scheduler(tmp_path):
     )
 
 
+def _failing_clone():
+    """subprocess.run fake for a clone that fails with stdout-only output.
+
+    `_attempt_reclone` calls subprocess.run(..., check=True), so the fake must
+    RAISE CalledProcessError the way the real call does -- a Mock that merely
+    carries returncode=1 is read as success and the failure never surfaces.
+    """
+
+    def _run(cmd, *args, **kwargs):
+        if kwargs.get("check"):
+            raise subprocess.CalledProcessError(
+                1, cmd, output=_DISCRIMINATING_STDOUT, stderr=""
+            )
+        return Mock(args=cmd, returncode=1, stdout=_DISCRIMINATING_STDOUT, stderr="")
+
+    return _run
+
+
 class TestAttemptRecloneDiagnostic:
     def test_empty_stderr_nonempty_stdout_surfaces_in_critical_log(
         self, scheduler, tmp_path, caplog
@@ -61,12 +80,7 @@ class TestAttemptRecloneDiagnostic:
         with (
             patch(
                 "code_indexer.global_repos.refresh_scheduler.subprocess.run",
-                return_value=Mock(
-                    args=["git", "clone", REPO_URL, "dest"],
-                    returncode=1,
-                    stdout=_DISCRIMINATING_STDOUT,
-                    stderr="",
-                ),
+                side_effect=_failing_clone(),
             ),
             caplog.at_level(logging.CRITICAL),
         ):

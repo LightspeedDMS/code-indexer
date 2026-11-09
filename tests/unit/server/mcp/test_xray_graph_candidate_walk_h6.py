@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import List
 from unittest.mock import patch
 
-from code_indexer.server.mcp.handlers.xray_graph import _collect_graph_candidate_files
+from cidx_xray.server.mcp.xray_graph import _collect_graph_candidate_files
 
 
 def _build_fixture(repo_root: Path) -> None:

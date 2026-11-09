@@ -12,7 +12,7 @@ the external Claude CLI process editing the staged temp file in place.
 
 Bug #1375: this file previously simulated Claude's edit by patching
 ``subprocess.run`` via
-``unittest.mock.patch("code_indexer.global_repos.dependency_map_analyzer.subprocess.run")``.
+``unittest.mock.patch("cidx_depmap.server.dependency_map_analyzer.subprocess.run")``.
 Because ``subprocess`` is imported as a plain module (``import subprocess``)
 and Python caches modules as singletons in ``sys.modules``, patching ``run``
 via *any* module's dotted attribute path mutates the single shared
@@ -39,7 +39,7 @@ from pathlib import Path
 
 import pytest
 
-from code_indexer.global_repos.dependency_map_analyzer import (
+from cidx_depmap.server.dependency_map_analyzer import (
     DependencyMapAnalyzer,
     _strip_leading_yaml_frontmatter,
 )
@@ -266,7 +266,7 @@ def test_no_op_edit_with_frontmatter_existing_returns_delta_noop(analyzer, tmp_p
     Bug #1069 update: identical content is a legitimate no-op, so _DELTA_NOOP is
     returned instead of None to prevent the service retry loop from re-invoking Claude.
     """
-    from code_indexer.global_repos.dependency_map_analyzer import _DELTA_NOOP
+    from cidx_depmap.server.dependency_map_analyzer import _DELTA_NOOP
 
     body_only = "# Cloud Infrastructure\n\nExisting analysis without frontmatter."
 
@@ -331,7 +331,7 @@ def test_invoke_delta_merge_strips_frontmatter_claude_returns_inadvertently(
 
     analyzer._cli_dispatcher = _TempFileEditingDispatcher(_frontmatter_action)
     with caplog.at_level(
-        logging.WARNING, logger="code_indexer.global_repos.dependency_map_analyzer"
+        logging.WARNING, logger="cidx_depmap.server.dependency_map_analyzer"
     ):
         result = analyzer.invoke_delta_merge_file(
             domain_name="cloud-infrastructure-platform",

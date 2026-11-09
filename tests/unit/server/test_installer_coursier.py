@@ -62,6 +62,21 @@ class TestIsCoursierInstalled:
 
         assert result is False
 
+    def test_returns_false_when_cs_is_not_an_executable(self, installer, tmp_path):
+        """A `cs` on PATH that cannot be executed (an empty file left by an
+        interrupted download: ENOEXEC "Exec format error") is not an
+        installed Coursier -- install-server then reinstalls it instead of
+        failing on the probe."""
+        broken = tmp_path / "bin" / "cs"
+        broken.parent.mkdir()
+        broken.write_bytes(b"")
+        broken.chmod(0o755)
+
+        with patch.dict("os.environ", {"PATH": str(broken.parent)}):
+            result = installer._is_coursier_installed()
+
+        assert result is False
+
 
 class TestInstallCoursier:
     """Tests for install_coursier method."""

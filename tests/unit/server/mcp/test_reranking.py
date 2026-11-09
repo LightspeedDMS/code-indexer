@@ -933,7 +933,7 @@ class TestTagAndPool:
     def _make_memory_candidate(
         self, memory_id, hnsw_score, memory_path="", title="", summary=""
     ):
-        from code_indexer.server.services.memory_candidate_retriever import (
+        from cidx_memory.server.memory_candidate_retriever import (
             MemoryCandidate,
         )
 

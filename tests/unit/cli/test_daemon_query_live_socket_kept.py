@@ -267,7 +267,11 @@ def test_daemon_result_copy_never_unpickles(
 
 
 @pytest.mark.parametrize(
-    "value", [object(), {1, 2}, {"nested": [frozenset({1})]}], ids=repr
+    "value",
+    [object(), {1, 2}, {"nested": [frozenset({1})]}],
+    # Stable ids: repr(object()) names its address, which differs per
+    # process, so pytest-xdist workers would collect different tests.
+    ids=["object", "set", "nested-frozenset"],
 )
 def test_obtain_daemon_result_rejects_unexpected_type(value: Any) -> None:
     with pytest.raises(TypeError, match="unexpected daemon result type"):

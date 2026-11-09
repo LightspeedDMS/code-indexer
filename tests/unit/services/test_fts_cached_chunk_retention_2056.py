@@ -80,8 +80,13 @@ class _SeparatorChunker:
     """Deterministic chunker: one chunk per CHUNK_SEPARATOR-delimited block,
     with the real chunker's dict shape and 1-based line ranges."""
 
-    def chunk_file(self, file_path: Path, repo_root: Path = None) -> List[Dict]:
-        blocks = file_path.read_text().split(CHUNK_SEPARATOR)
+    def chunk_file(
+        self, file_path: Path, repo_root: Path = None, content: bytes = None
+    ) -> List[Dict]:
+        # `content`: the bytes FileChunkingManager already read (the content
+        # seam's one read per file); None reads the file, as before.
+        text = file_path.read_text() if content is None else content.decode()
+        blocks = text.split(CHUNK_SEPARATOR)
         chunks = []
         line = 1
         for index, block in enumerate(blocks):

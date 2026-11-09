@@ -48,6 +48,9 @@ EXPECTED_HEADERS = {
 def app():
     """Create FastAPI app with minimal startup."""
     from code_indexer.server.app import app as _app
+    from tests.unit.server._depmap_feature import ensure_depmap_routes
+
+    ensure_depmap_routes(_app)
 
     return _app
 
@@ -133,7 +136,7 @@ class TestLifecycleBackfillJournalRoute:
         """Admin session → HTTP 200."""
         seeded_svc = _make_seeded_svc("lifecycle", seeded_journal_dir)
         with patch(
-            "code_indexer.server.web.dependency_map_routes._lifecycle_backfill_journal_svc",
+            "cidx_depmap.server.web.routes._lifecycle_backfill_journal_svc",
             return_value=seeded_svc,
         ):
             resp = client.get(self.ENDPOINT, cookies=admin_session_cookie)
@@ -145,7 +148,7 @@ class TestLifecycleBackfillJournalRoute:
         """Admin session → all 6 X-Backfill-* + X-Journal-Offset headers present."""
         seeded_svc = _make_seeded_svc("lifecycle", seeded_journal_dir)
         with patch(
-            "code_indexer.server.web.dependency_map_routes._lifecycle_backfill_journal_svc",
+            "cidx_depmap.server.web.routes._lifecycle_backfill_journal_svc",
             return_value=seeded_svc,
         ):
             resp = client.get(self.ENDPOINT, cookies=admin_session_cookie)
@@ -159,7 +162,7 @@ class TestLifecycleBackfillJournalRoute:
         """Header values match the seeded _status.json (total=7, done=3, failed=1, active=1)."""
         seeded_svc = _make_seeded_svc("lifecycle", seeded_journal_dir)
         with patch(
-            "code_indexer.server.web.dependency_map_routes._lifecycle_backfill_journal_svc",
+            "cidx_depmap.server.web.routes._lifecycle_backfill_journal_svc",
             return_value=seeded_svc,
         ):
             resp = client.get(self.ENDPOINT, cookies=admin_session_cookie)
@@ -181,7 +184,7 @@ class TestLifecycleBackfillJournalRoute:
         """?offset= query param is accepted without error."""
         seeded_svc = _make_seeded_svc("lifecycle", seeded_journal_dir)
         with patch(
-            "code_indexer.server.web.dependency_map_routes._lifecycle_backfill_journal_svc",
+            "cidx_depmap.server.web.routes._lifecycle_backfill_journal_svc",
             return_value=seeded_svc,
         ):
             resp = client.get(
@@ -190,10 +193,12 @@ class TestLifecycleBackfillJournalRoute:
         assert resp.status_code == 200
 
     def test_non_admin_gets_401_empty_body(self, client):
-        """Unauthenticated request → 401 with empty body."""
+        """Unauthenticated request → 401 and no partial. Since modular phase
+        4g the core's authentication of the cidx-depmap feature's routes
+        answers it (its JSON refusal) before the route runs."""
         resp = client.get(self.ENDPOINT, follow_redirects=False)
         assert resp.status_code == 401
-        assert resp.text == ""
+        assert "<" not in resp.text
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -208,7 +213,7 @@ class TestDescriptionBackfillJournalRoute:
         """Admin session → HTTP 200."""
         seeded_svc = _make_seeded_svc("description", seeded_journal_dir)
         with patch(
-            "code_indexer.server.web.dependency_map_routes._description_backfill_journal_svc",
+            "cidx_depmap.server.web.routes._description_backfill_journal_svc",
             return_value=seeded_svc,
         ):
             resp = client.get(self.ENDPOINT, cookies=admin_session_cookie)
@@ -220,7 +225,7 @@ class TestDescriptionBackfillJournalRoute:
         """Admin session → all 6 X-Backfill-* + X-Journal-Offset headers present."""
         seeded_svc = _make_seeded_svc("description", seeded_journal_dir)
         with patch(
-            "code_indexer.server.web.dependency_map_routes._description_backfill_journal_svc",
+            "cidx_depmap.server.web.routes._description_backfill_journal_svc",
             return_value=seeded_svc,
         ):
             resp = client.get(self.ENDPOINT, cookies=admin_session_cookie)
@@ -234,7 +239,7 @@ class TestDescriptionBackfillJournalRoute:
         """Header values match the seeded _status.json (total=7, done=3, failed=1, active=1)."""
         seeded_svc = _make_seeded_svc("description", seeded_journal_dir)
         with patch(
-            "code_indexer.server.web.dependency_map_routes._description_backfill_journal_svc",
+            "cidx_depmap.server.web.routes._description_backfill_journal_svc",
             return_value=seeded_svc,
         ):
             resp = client.get(self.ENDPOINT, cookies=admin_session_cookie)
@@ -253,7 +258,7 @@ class TestDescriptionBackfillJournalRoute:
         """?offset= query param is accepted without error."""
         seeded_svc = _make_seeded_svc("description", seeded_journal_dir)
         with patch(
-            "code_indexer.server.web.dependency_map_routes._description_backfill_journal_svc",
+            "cidx_depmap.server.web.routes._description_backfill_journal_svc",
             return_value=seeded_svc,
         ):
             resp = client.get(
@@ -262,7 +267,9 @@ class TestDescriptionBackfillJournalRoute:
         assert resp.status_code == 200
 
     def test_non_admin_gets_401_empty_body(self, client):
-        """Unauthenticated request → 401 with empty body."""
+        """Unauthenticated request → 401 and no partial. Since modular phase
+        4g the core's authentication of the cidx-depmap feature's routes
+        answers it (its JSON refusal) before the route runs."""
         resp = client.get(self.ENDPOINT, follow_redirects=False)
         assert resp.status_code == 401
-        assert resp.text == ""
+        assert "<" not in resp.text

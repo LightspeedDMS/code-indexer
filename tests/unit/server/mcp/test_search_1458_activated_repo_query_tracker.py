@@ -81,23 +81,10 @@ class TestSearchActivatedRepoQueryTrackerWiring:
                     ),
                 ),
                 patch(
-                    "code_indexer.server.mcp.handlers.search.repo_search._run_memory_retrieval",
-                    return_value=None,
-                ),
-                patch(
                     "code_indexer.server.mcp.handlers.search.repo_search._load_category_map",
                     return_value={},
                 ),
-                patch(
-                    "code_indexer.server.mcp.handlers.search.repo_search.get_config_service"
-                ) as mock_cfg_svc,
             ):
-                mock_mem_cfg = MagicMock()
-                mock_mem_cfg.memory_retrieval_enabled = False
-                mock_mem_cfg_obj = MagicMock()
-                mock_mem_cfg_obj.memory_retrieval_config = mock_mem_cfg
-                mock_cfg_svc.return_value.get_config.return_value = mock_mem_cfg_obj
-
                 from code_indexer.server.mcp.handlers.search import (
                     _search_activated_repo,
                 )

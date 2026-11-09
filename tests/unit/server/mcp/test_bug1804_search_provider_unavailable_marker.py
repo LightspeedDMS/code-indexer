@@ -230,14 +230,6 @@ def _enter_activated_repo_prereqs(stack: ExitStack, tmp_path: Path) -> MagicMock
             return_value={},
         )
     )
-    mock_cfg_svc = stack.enter_context(
-        patch("code_indexer.server.mcp.handlers.search.repo_search.get_config_service")
-    )
-    mock_mem_cfg = MagicMock()
-    mock_mem_cfg.memory_retrieval_enabled = False
-    mock_mem_cfg_obj = MagicMock()
-    mock_mem_cfg_obj.memory_retrieval_config = mock_mem_cfg
-    mock_cfg_svc.return_value.get_config.return_value = mock_mem_cfg_obj
     return mock_app
 
 

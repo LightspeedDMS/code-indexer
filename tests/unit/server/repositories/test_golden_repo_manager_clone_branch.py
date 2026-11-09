@@ -38,6 +38,12 @@ def _make_manager():
     resource_config.git_pull_timeout = 60
     resource_config.git_clone_timeout = 120
     manager.resource_config = resource_config
+    # issue-64678: __init__ is bypassed here, so wire the git seam explicitly.
+    # LocalGitBackend still reaches subprocess.run (via git_runner), which these
+    # tests patch, so the command-line assertions below are unchanged.
+    from code_indexer.server.storage.shared.git_backend import local_git_backend
+
+    manager._git_backend = local_git_backend()
     return manager
 
 

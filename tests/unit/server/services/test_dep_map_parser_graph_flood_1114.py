@@ -49,7 +49,7 @@ def _parse_domain(
     incoming_claims: Set,
     anomalies: list,
 ) -> None:
-    from code_indexer.server.services.dep_map_parser_graph import (
+    from cidx_depmap.server.dep_map_parser_graph import (
         parse_domain_file_for_graph,
     )
     from code_indexer.server.services.dep_map_source import FilesystemDepMapSource
@@ -65,7 +65,7 @@ def _parse_domain(
 
 def _reset_warned_set(paths: list[str]) -> None:
     """Remove paths from the module-level malformed-domain seen set."""
-    from code_indexer.server.services import dep_map_parser_graph
+    from cidx_depmap.server import dep_map_parser_graph
 
     with dep_map_parser_graph._warned_malformed_domains_lock:
         for p in paths:
@@ -155,7 +155,7 @@ class TestParseGraphFloodDespam:
         N = 5
         all_anomalies: list = []
 
-        with caplog.at_level(logging.DEBUG, logger="code_indexer"):
+        with caplog.at_level(logging.DEBUG, logger="cidx_depmap"):
             for _ in range(N):
                 anomalies: list = []
                 _parse_domain(tmp_path, "bad-domain", {}, set(), anomalies)
@@ -205,7 +205,7 @@ class TestParseGraphFloodDespam:
         _reset_warned_set([str(file_a.resolve()), str(file_b.resolve())])
 
         N = 3
-        with caplog.at_level(logging.DEBUG, logger="code_indexer"):
+        with caplog.at_level(logging.DEBUG, logger="cidx_depmap"):
             for _ in range(N):
                 _parse_domain(tmp_path, "domain-alpha", {}, set(), [])
                 _parse_domain(tmp_path, "domain-beta", {}, set(), [])
@@ -237,7 +237,7 @@ class TestParseGraphFloodDespam:
 
         N = 7
         all_anomalies: list = []
-        with caplog.at_level(logging.CRITICAL, logger="code_indexer"):
+        with caplog.at_level(logging.CRITICAL, logger="cidx_depmap"):
             for _ in range(N):
                 anomalies: list = []
                 _parse_domain(tmp_path, "silent-domain", {}, set(), anomalies)
@@ -259,7 +259,7 @@ class TestParseGraphFloodDespam:
         _reset_warned_set([str(domain_file.resolve())])
 
         all_anomalies: list = []
-        with caplog.at_level(logging.DEBUG, logger="code_indexer"):
+        with caplog.at_level(logging.DEBUG, logger="cidx_depmap"):
             _parse_domain(tmp_path, "good-domain", {}, set(), all_anomalies)
 
         from code_indexer.server.services.dep_map_parser_hygiene import AnomalyType
@@ -291,7 +291,7 @@ class TestUpdateFrontmatterTimestamp:
     """Defect 2: _update_frontmatter_timestamp must produce valid YAML frontmatter."""
 
     def _call(self, existing_content: str, new_body: str, domain_name: str) -> str:
-        from code_indexer.server.services.dependency_map_service import (
+        from cidx_depmap.server.dependency_map_service import (
             DependencyMapService,
         )
         from unittest.mock import MagicMock
@@ -395,7 +395,7 @@ class TestUpdateFrontmatterTimestamp:
             "---\n\n"
             "Body text.\n"
         )
-        with caplog.at_level(logging.WARNING, logger="code_indexer"):
+        with caplog.at_level(logging.WARNING, logger="cidx_depmap"):
             result = self._call(invalid, "New body.\n", "broken-svc")
 
         # Must not raise — result must be a non-empty string
@@ -417,7 +417,7 @@ class TestBuildRefinementFrontmatter:
     """Defect 2: _build_refinement_frontmatter must produce valid YAML frontmatter."""
 
     def _call(self, existing_content: str, new_body: str, domain_name: str) -> str:
-        from code_indexer.server.services.dependency_map_service import (
+        from cidx_depmap.server.dependency_map_service import (
             DependencyMapService,
         )
         from unittest.mock import MagicMock
@@ -504,7 +504,7 @@ class TestBuildRefinementFrontmatter:
             "---\n\n"
             "Body text.\n"
         )
-        with caplog.at_level(logging.WARNING, logger="code_indexer"):
+        with caplog.at_level(logging.WARNING, logger="cidx_depmap"):
             result = self._call(invalid, "Refined body.\n", "broken-svc")
 
         assert isinstance(result, str) and len(result) > 0
@@ -527,7 +527,7 @@ class TestRenderMdDeltaPath:
         """render_md serializes the complete frontmatter dict via yaml.safe_dump,
         then write_atomic persists it; the file read back must parse to a valid
         dict with participating_repos as a proper list (not duplicated/un-indented)."""
-        from code_indexer.server.services.dep_map_delta_journal import (
+        from cidx_depmap.server.dep_map_delta_journal import (
             render_md,
             write_atomic,
         )
@@ -581,7 +581,7 @@ class TestTimestampPreservation:
     ) -> str:
         from unittest.mock import MagicMock
 
-        from code_indexer.server.services.dependency_map_service import (
+        from cidx_depmap.server.dependency_map_service import (
             DependencyMapService,
         )
 
@@ -597,7 +597,7 @@ class TestTimestampPreservation:
     ) -> str:
         from unittest.mock import MagicMock
 
-        from code_indexer.server.services.dependency_map_service import (
+        from cidx_depmap.server.dependency_map_service import (
             DependencyMapService,
         )
 
@@ -674,7 +674,7 @@ class TestTimestampPreservation:
 
     def test_render_md_last_applied_at_has_T_no_quotes(self):
         """render_md (delta path) must emit last_applied_at with T and no quotes."""
-        from code_indexer.server.services.dep_map_delta_journal import render_md
+        from cidx_depmap.server.dep_map_delta_journal import render_md
 
         frontmatter = {
             "domain": "data-domain",

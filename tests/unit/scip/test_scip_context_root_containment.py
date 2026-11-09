@@ -20,9 +20,9 @@ from typing import List, Optional
 
 import pytest
 
-from code_indexer.scip.database.schema import DatabaseManager
-from code_indexer.scip.query.backends import DatabaseBackend
-from code_indexer.scip.query.primitives import SCIPQueryEngine
+from cidx_scip.database.schema import DatabaseManager
+from cidx_scip.query.backends import DatabaseBackend
+from cidx_scip.query.primitives import SCIPQueryEngine
 from tests.unit.server._scip_access import GRANT_ALL, TEST_USER
 
 # Full SCIP symbol (language-prefixed) so exact lookup is a plain equality.
@@ -30,8 +30,8 @@ SYMBOL = "python example 1.0 example/ExampleService#"
 DEFINITION_ROLE = 1
 INSIDE_LINE = "class ExampleService:"
 OUTSIDE_LINE = "OUTSIDE_VALUE = 1"
-BACKENDS_LOGGER = "code_indexer.scip.query.backends"
-COMPOSITES_LOGGER = "code_indexer.scip.query.composites"
+BACKENDS_LOGGER = "cidx_scip.query.backends"
+COMPOSITES_LOGGER = "cidx_scip.query.composites"
 
 # Returning context needs opened-file verification through /proc/self/fd.
 requires_proc_fd = pytest.mark.skipif(
@@ -233,7 +233,7 @@ class TestServerQueryServiceSurface:
     the repository; its serialized results carry only in-root context."""
 
     def _service_results(self, golden_repos_dir: Path) -> list:
-        from code_indexer.server.services.scip_query_service import (
+        from cidx_scip.server.query_service import (
             SCIPQueryService,
         )
 
@@ -269,7 +269,7 @@ class TestServerQueryServiceSurface:
 
 
 def _service(golden_repos_dir: Path):
-    from code_indexer.server.services.scip_query_service import SCIPQueryService
+    from cidx_scip.server.query_service import SCIPQueryService
 
     return SCIPQueryService(
         golden_repos_dir=golden_repos_dir, access_filtering_service=GRANT_ALL
@@ -279,7 +279,7 @@ def _service(golden_repos_dir: Path):
 def _write_index_metadata(scip_dir: Path, project_root: str) -> None:
     """Write the ``index.scip`` protobuf beside the db with the given
     ``metadata.project_root`` (repository-supplied data)."""
-    from code_indexer.scip.protobuf import scip_pb2
+    from cidx_scip.protobuf import scip_pb2
 
     # scip_pb2 is protoc-generated: its message classes are built at runtime,
     # so mypy cannot see them.
@@ -377,7 +377,7 @@ class TestConfinementRootIsNotSteerable:
             SCIPQueryEngine(scip_dir / "index.scip.db")
 
     def test_composite_impact_refuses_index_of_another_repository(self, tmp_path):
-        from code_indexer.scip.query.composites import analyze_impact
+        from cidx_scip.query.composites import analyze_impact
 
         golden = tmp_path / "golden-repos"
         scip_dir = _two_repositories_sharing_one_index(golden)
@@ -406,7 +406,7 @@ class TestConfinementRootIsNotSteerable:
         assert len(results) == 1 and results[0].context == INSIDE_LINE
 
     def test_composite_opt_out_queries_relocated_index(self, tmp_path):
-        from code_indexer.scip.query.composites import analyze_impact
+        from cidx_scip.query.composites import analyze_impact
 
         repo = tmp_path / "repo"
         repo.mkdir()
@@ -455,7 +455,7 @@ class TestLocalCliFollowsRelocatedIndex:
 
     @pytest.fixture
     def relocated_checkout(self, tmp_path, monkeypatch):
-        from code_indexer.scip.status import (
+        from cidx_scip.status import (
             GenerationStatus,
             OverallStatus,
             ProjectStatus,
@@ -490,7 +490,7 @@ class TestLocalCliFollowsRelocatedIndex:
     def test_cli_definition_reads_relocated_index(self, relocated_checkout):
         import click.testing
 
-        from code_indexer.cli_scip import scip_definition
+        from cidx_scip.cli import scip_definition
 
         result = click.testing.CliRunner().invoke(scip_definition, [SYMBOL, "--exact"])
 
@@ -500,7 +500,7 @@ class TestLocalCliFollowsRelocatedIndex:
     def test_cli_context_reads_relocated_index(self, relocated_checkout):
         import click.testing
 
-        from code_indexer.cli_scip import scip_context
+        from cidx_scip.cli import scip_context
 
         result = click.testing.CliRunner().invoke(scip_context, ["ExampleService"])
 
@@ -618,7 +618,7 @@ class TestRefusalLogging:
         ]
 
     def test_impact_target_lookup_summarises_refused_indexes(self, tmp_path, caplog):
-        from code_indexer.scip.query.composites import analyze_impact
+        from cidx_scip.query.composites import analyze_impact
 
         scip_dir = self._scip_dir_borrowing_two_indexes(tmp_path / "golden-repos")
 
@@ -631,7 +631,7 @@ class TestRefusalLogging:
         assert len(warnings) == 1 and "2" in warnings[0].getMessage()
 
     def test_dependents_walk_summarises_refused_indexes(self, tmp_path, caplog):
-        from code_indexer.scip.query.composites import _bfs_traverse_dependents
+        from cidx_scip.query.composites import _bfs_traverse_dependents
 
         scip_dir = self._scip_dir_borrowing_two_indexes(tmp_path / "golden-repos")
 

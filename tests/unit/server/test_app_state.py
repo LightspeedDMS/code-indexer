@@ -121,10 +121,12 @@ class TestAppStateAttributes:
 
         assert "data_retention_scheduler" in AppState.__annotations__
 
-    def test_app_state_has_dependency_map_service(self):
+    def test_app_state_has_no_dependency_map_service(self):
+        """The dependency map is the cidx-depmap feature's (modular phase 4g):
+        the core's AppState names none of it."""
         from code_indexer.server.app_state import AppState
 
-        assert "dependency_map_service" in AppState.__annotations__
+        assert "dependency_map_service" not in AppState.__annotations__
 
     def test_app_state_has_self_monitoring_service(self):
         from code_indexer.server.app_state import AppState

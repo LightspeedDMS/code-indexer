@@ -70,7 +70,7 @@ def test_append_garbage_journal_failure_surfaces_to_errors():
     callers on the ambiguous, no-candidate, and unsafe-target paths are informed
     of journal failures (MESSI Rule 13 — no silent failures).
     """
-    from code_indexer.server.services.dep_map_repair_phase37 import Action
+    from cidx_depmap.server.dep_map_repair_phase37 import Action
     from tests.unit.server.services.test_dep_map_911_builders import make_executor_911
 
     class FailJournal:

@@ -62,7 +62,7 @@ class TestAC2BootstrapFlag:
             progress_callback=lambda p, i: progress_events.append((p, i)),
         )
 
-        from code_indexer.server.services.dep_map_health_detector import (
+        from cidx_depmap.server.dep_map_health_detector import (
             DepMapHealthDetector,
         )
 
@@ -87,7 +87,7 @@ def test_factory_wires_enable_graph_channel_repair_from_config(tmp_path):
     """
     from unittest.mock import MagicMock, patch
 
-    from code_indexer.server.web.dependency_map_routes import _build_repair_executor
+    from cidx_depmap.server.web.routes import _build_repair_executor
 
     fake_config = MagicMock()
     fake_config.enable_graph_channel_repair = False

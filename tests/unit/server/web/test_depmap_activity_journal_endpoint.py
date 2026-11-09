@@ -26,6 +26,9 @@ from fastapi.testclient import TestClient
 def app():
     """Create FastAPI app with minimal startup."""
     from code_indexer.server.app import app as _app
+    from tests.unit.server._depmap_feature import ensure_depmap_routes
+
+    ensure_depmap_routes(_app)
 
     return _app
 
@@ -81,7 +84,7 @@ class TestRenderJournalHtml:
 
     def _get_render_fn(self):
         """Import helper after it is implemented."""
-        from code_indexer.server.web.dependency_map_routes import _render_journal_html
+        from cidx_depmap.server.web.routes import _render_journal_html
 
         return _render_journal_html
 
@@ -294,7 +297,7 @@ class TestRenderJournalHtmlRealistic:
     """Tests with realistic journal entry format from ActivityJournalService."""
 
     def _get_render_fn(self):
-        from code_indexer.server.web.dependency_map_routes import _render_journal_html
+        from cidx_depmap.server.web.routes import _render_journal_html
 
         return _render_journal_html
 

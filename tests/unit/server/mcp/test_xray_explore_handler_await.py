@@ -16,7 +16,7 @@ from typing import Any, Dict
 import pytest
 
 from code_indexer.server.auth.user_manager import UserRole
-from code_indexer.server.mcp.handlers.xray import _AWAIT_SECONDS_MAX
+from cidx_xray.server.mcp.xray import _AWAIT_SECONDS_MAX
 
 from .test_xray_explore_handler import (
     VALID_PARAMS,

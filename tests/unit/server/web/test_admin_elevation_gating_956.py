@@ -35,6 +35,7 @@ from typing import Optional, cast
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from code_indexer.server.utils.route_table import iter_routes
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -142,7 +143,7 @@ def _admin_routers():
     """Return all routers that handle /admin-prefixed mutation endpoints."""
     from code_indexer.server.web.routes import web_router
     from code_indexer.server.web.repo_category_routes import repo_category_web_router
-    from code_indexer.server.web.dependency_map_routes import dependency_map_router
+    from cidx_depmap.server.web.routes import dependency_map_router
     from code_indexer.server.routers.research_assistant import (
         router as research_assistant_router,
     )
@@ -171,16 +172,16 @@ def _find_ungated_admin_mutations(routers) -> list:
 
     ungated = []
     for router in routers:
-        for route in router.routes:
+        for route_path, route in iter_routes(router.routes):
             if not isinstance(route, APIRoute):
                 continue
             for method in route.methods or []:
                 if method.upper() not in ("POST", "PUT", "DELETE", "PATCH"):
                     continue
-                if _is_exempt(method, route.path):
+                if _is_exempt(method, route_path):
                     continue
                 if not _route_has_elevation_dep(route):
-                    ungated.append(f"{method.upper()} {route.path}")
+                    ungated.append(f"{method.upper()} {route_path}")
     return ungated
 
 
@@ -190,10 +191,10 @@ def _find_route(path: str, method: Optional[str] = None):
 
     from code_indexer.server.web.routes import web_router
 
-    for route in web_router.routes:
+    for route_path, route in iter_routes(web_router.routes):
         if not isinstance(route, APIRoute):
             continue
-        if route.path != path:
+        if route_path != path:
             continue
         if method is not None and method.upper() not in (route.methods or []):
             continue
@@ -380,9 +381,9 @@ class TestAdminElevationGating:
         # Verify GET specifically (not POST or any other method).
         elev_routes = [
             r
-            for r in elevation_web_routes.router.routes
+            for route_path, r in iter_routes(elevation_web_routes.router.routes)
             if isinstance(r, APIRoute)
-            and r.path == "/admin/elevate"
+            and route_path == "/admin/elevate"
             and "GET" in (r.methods or set())
         ]
         assert elev_routes, (

@@ -13,7 +13,7 @@ defining them in multiple places.
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Tuple
 
-from code_indexer.server.services.dep_map_repair_executor import DepMapRepairExecutor
+from cidx_depmap.server.dep_map_repair_executor import DepMapRepairExecutor
 from tests.unit.server.services.test_dep_map_910_builders import (
     _CLOSING_DELIM,
     _CLOSING_DELIM_LEN,

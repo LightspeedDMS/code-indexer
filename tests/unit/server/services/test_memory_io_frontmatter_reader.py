@@ -106,3 +106,34 @@ def test_rejects_non_path(tmp_path: Path) -> None:
 def test_rejects_non_positive_bound(tmp_path: Path, max_bytes: int) -> None:
     with pytest.raises(ValueError):
         read_memory_frontmatter(tmp_path / "x.md", max_bytes=max_bytes)
+
+
+# ── delegated content backend: cidx-meta is shared content ────────────────
+
+
+def test_delegated_frontmatter_comes_from_the_content_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Under a delegated content backend the memory lives with the content service:
+    the read goes through the content seam and never touches this pod's
+    disk, with the same bound and body-free result."""
+    from tests.unit.server.cidx_meta_seam_fakes import MetaWorld
+
+    world = MetaWorld(tmp_path, monkeypatch)
+    memories = world.remote_meta / "memories"
+    memories.mkdir(parents=True)
+    (memories / "m.md").write_bytes(
+        b"---\nscope: repo\nreferenced_repo: repo-a\n---\n" + b"x" * 4096
+    )
+    world.delegated()
+    path = world.pod_meta / "memories" / "m.md"
+
+    with world.forbid_local_io():
+        assert read_memory_frontmatter(path) == {
+            "scope": "repo",
+            "referenced_repo": "repo-a",
+        }
+        with pytest.raises(MemoryFileCorruptError):
+            read_memory_frontmatter(path, max_bytes=16)
+        with pytest.raises(MemoryFileNotFoundError):
+            read_memory_frontmatter(world.pod_meta / "memories" / "absent.md")

@@ -421,6 +421,12 @@ def test_a_stale_failure_counter_is_reported_but_never_retried(
     child: FakeIndexChild,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """issue-64616: a provider counting failures it recorded no path for
+    (``stale``: failed_files=5, failed_file_paths=[]) used to be "reported
+    but never retried", so the count -- and the missing files -- stayed
+    forever. It now owes a retry like any recorded failure (same owed-retry
+    record and backoff), and that retry runs ``--reconcile``, which
+    re-indexes whatever is missing; a clean run clears it."""
     harness = build_harness(tmp_path, metadata, snapshot_mode="clean")
 
     with caplog.at_level("WARNING"):
@@ -428,8 +434,19 @@ def test_a_stale_failure_counter_is_reported_but_never_retried(
 
     assert result.get("partial") is True
     assert result.get("failed_files") == STALE_FAILED_FILES
-    assert _state(metadata) is None, "a stale counter scheduled a retry"
-    assert any("not retried" in m for m in _warnings_about_alias(caplog))
+    state = _state(metadata)
+    assert state is not None, "a count without paths scheduled no retry"
+    assert state["pending_trigger"] is True
+    assert "full reconcile owed" in state["last_detail"]
+    assert any("full reconcile at" in m for m in _warnings_about_alias(caplog))
+    assert "--reconcile" not in child.index_args()[0]
+
+    _age_source_files(harness)
+    result = _refresh_with_outcome(harness, child, "recover")
+
+    assert "--reconcile" in child.index_args()[1], "the retry was not a reconcile"
+    assert not result.get("partial"), result
+    assert _state(metadata) is None
 
 
 # Runs real snapshot/indexing subprocesses: seconds alone, slower under load.

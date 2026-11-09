@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 
 from code_indexer.server.services.job_tracker import JobTracker
-from code_indexer.server.services.scip_resolution_queue import SCIPResolutionQueue
+from cidx_scip.server.resolution_queue import SCIPResolutionQueue
 
 
 # ---------------------------------------------------------------------------

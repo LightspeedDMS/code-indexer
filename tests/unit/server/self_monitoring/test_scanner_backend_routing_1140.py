@@ -699,7 +699,9 @@ class TestManualScanTriggerBackendWiring:
         import inspect
         import importlib
 
-        mod = importlib.import_module("code_indexer.server.web.routes")
+        # The self-monitoring routes live in web/pages/self_monitoring.py since
+        # web/routes.py was split.
+        mod = importlib.import_module("code_indexer.server.web.pages.self_monitoring")
         return inspect.getsource(mod)
 
     def test_trigger_manual_scan_passes_storage_backend(self) -> None:

@@ -16,7 +16,7 @@ Test discipline:
     existing to_dict() top-level keys.
 """
 
-from code_indexer.server.services.dep_map_health_detector import HealthReport
+from cidx_depmap.server.dep_map_health_detector import HealthReport
 
 
 def test_health_report_lifecycle_field_defaults_to_empty_list():

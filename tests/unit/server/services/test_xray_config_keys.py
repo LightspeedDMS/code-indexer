@@ -1,11 +1,14 @@
 """
 Unit tests for Story #977: X-Ray Config Keys (Web UI Config Screen Integration).
 
-TDD: Tests written BEFORE implementation (Red phase). All should fail until
-XRayConfig is added to config_manager.py and ConfigService/routes are updated.
+Since modular plan phase 4c the keys are the cidx-xray feature's config
+section (``cidx_xray.config``): runtime values in
+``ServerConfig.feature_settings["xray"]``, shown and changed only through the
+feature config door (the config screen's Feature Settings block and the
+config API; ``features/config.commit_runtime_update``).
 
 Acceptance Criteria covered:
-  AC1 - Defaults: xray_timeout_seconds=120, xray_worker_threads=2
+  AC1 - Defaults: xray_timeout_seconds=120, xray_worker_threads=4
   AC2 - Admin saves new values; they persist via get_config_service().get_config()
   AC3 - timeout out of range rejected (10..600)
   AC4 - worker_threads out of range rejected (1..8)
@@ -14,326 +17,165 @@ Acceptance Criteria covered:
 """
 
 import os
+from typing import Any
+
 import pytest
 
-
-# ---------------------------------------------------------------------------
-# XRayConfig dataclass
-# ---------------------------------------------------------------------------
-
-
-class TestXRayConfigDefaults:
-    """XRayConfig must have correct default values."""
-
-    def test_xray_timeout_seconds_default_120(self):
-        """XRayConfig default xray_timeout_seconds is 120."""
-        from code_indexer.server.utils.config_manager import XRayConfig
-
-        cfg = XRayConfig()
-        assert cfg.xray_timeout_seconds == 120
-
-    def test_xray_worker_threads_default_2(self):
-        """XRayConfig default xray_worker_threads is 2."""
-        from code_indexer.server.utils.config_manager import XRayConfig
-
-        cfg = XRayConfig()
-        assert cfg.xray_worker_threads == 4
-
-    def test_can_override_defaults(self):
-        """XRayConfig accepts custom values."""
-        from code_indexer.server.utils.config_manager import XRayConfig
-
-        cfg = XRayConfig(xray_timeout_seconds=60, xray_worker_threads=4)
-        assert cfg.xray_timeout_seconds == 60
-        assert cfg.xray_worker_threads == 4
+from code_indexer.server.features import config as feature_config
 
 
 # ---------------------------------------------------------------------------
-# Range validation at the dataclass level (accepts in-range values)
+# The feature's section: defaults and kinds
 # ---------------------------------------------------------------------------
 
 
-class TestXRayConfigAcceptsValidRanges:
-    """XRayConfig accepts all in-range values without error."""
+class TestXRaySectionDefaults:
+    """The feature section's keys and default values."""
 
-    def test_xray_timeout_seconds_accepts_min_10(self):
-        """xray_timeout_seconds=10 is valid (minimum boundary)."""
-        from code_indexer.server.utils.config_manager import XRayConfig
+    def test_defaults(self):
+        from cidx_xray.config import default_values
 
-        cfg = XRayConfig(xray_timeout_seconds=10)
-        assert cfg.xray_timeout_seconds == 10
+        values = default_values()
+        assert values["xray_timeout_seconds"] == 120
+        assert values["xray_worker_threads"] == 4
 
-    def test_xray_timeout_seconds_accepts_120(self):
-        """xray_timeout_seconds=120 is valid (default)."""
-        from code_indexer.server.utils.config_manager import XRayConfig
+    def test_timeout_and_worker_threads_are_runtime_keys(self):
+        from cidx_xray.config import XRAY_CONFIG_SECTION
 
-        cfg = XRayConfig(xray_timeout_seconds=120)
-        assert cfg.xray_timeout_seconds == 120
-
-    def test_xray_timeout_seconds_accepts_max_600(self):
-        """xray_timeout_seconds=600 is valid (maximum boundary)."""
-        from code_indexer.server.utils.config_manager import XRayConfig
-
-        cfg = XRayConfig(xray_timeout_seconds=600)
-        assert cfg.xray_timeout_seconds == 600
-
-    def test_xray_worker_threads_accepts_min_1(self):
-        """xray_worker_threads=1 is valid (minimum boundary)."""
-        from code_indexer.server.utils.config_manager import XRayConfig
-
-        cfg = XRayConfig(xray_worker_threads=1)
-        assert cfg.xray_worker_threads == 1
-
-    def test_xray_worker_threads_accepts_4(self):
-        """xray_worker_threads=4 is valid (midrange)."""
-        from code_indexer.server.utils.config_manager import XRayConfig
-
-        cfg = XRayConfig(xray_worker_threads=4)
-        assert cfg.xray_worker_threads == 4
-
-    def test_xray_worker_threads_accepts_max_8(self):
-        """xray_worker_threads=8 is valid (maximum boundary)."""
-        from code_indexer.server.utils.config_manager import XRayConfig
-
-        cfg = XRayConfig(xray_worker_threads=8)
-        assert cfg.xray_worker_threads == 8
+        assert XRAY_CONFIG_SECTION.runtime_keys == {
+            "xray_timeout_seconds",
+            "xray_worker_threads",
+        }
+        assert XRAY_CONFIG_SECTION.bootstrap_keys == {"xray_backend"}
 
 
-# ---------------------------------------------------------------------------
-# ServerConfig field presence
-# ---------------------------------------------------------------------------
+class TestServerConfigNoLongerOwnsXRay:
+    """ServerConfig has no X-Ray fields; stored values move into the section."""
 
-
-class TestServerConfigXRayField:
-    """ServerConfig must declare xray_config field."""
-
-    def test_server_config_has_xray_config_field(self):
-        """ServerConfig dataclass must have an xray_config field."""
+    def test_server_config_has_no_xray_fields(self):
         from code_indexer.server.utils.config_manager import ServerConfig
 
-        assert hasattr(ServerConfig, "__dataclass_fields__")
-        assert "xray_config" in ServerConfig.__dataclass_fields__
+        fields = ServerConfig.__dataclass_fields__
+        assert "xray_config" not in fields
+        assert "xray_backend" not in fields
 
-    def test_post_init_initializes_xray_config(self, tmp_path):
-        """ServerConfig.__post_init__ sets xray_config to default when None."""
-        from code_indexer.server.utils.config_manager import (
-            XRayConfig,
-            ServerConfigManager,
-        )
+    def test_dict_to_server_config_moves_xray_config(self, tmp_path):
+        from code_indexer.server.utils.config_manager import ServerConfigManager
 
         manager = ServerConfigManager(str(tmp_path))
-        config = manager.create_default_config()
-
-        assert config.xray_config is not None
-        assert isinstance(config.xray_config, XRayConfig)
-        assert config.xray_config.xray_timeout_seconds == 120
-        assert config.xray_config.xray_worker_threads == 4
-
-    def test_dict_to_server_config_deserializes_xray(self, tmp_path):
-        """_dict_to_server_config converts xray_config dict to XRayConfig dataclass."""
-        from code_indexer.server.utils.config_manager import (
-            XRayConfig,
-            ServerConfigManager,
+        config = manager._dict_to_server_config(
+            {
+                "server_dir": str(tmp_path),
+                "xray_config": {"xray_timeout_seconds": 30, "xray_worker_threads": 6},
+            }
         )
-
-        manager = ServerConfigManager(str(tmp_path))
-        config_dict = {
-            "server_dir": str(tmp_path),
-            "xray_config": {"xray_timeout_seconds": 30, "xray_worker_threads": 6},
+        assert config.feature_settings["xray"] == {
+            "xray_timeout_seconds": 30,
+            "xray_worker_threads": 6,
         }
-        config = manager._dict_to_server_config(config_dict)
-
-        assert isinstance(config.xray_config, XRayConfig)
-        assert config.xray_config.xray_timeout_seconds == 30
-        assert config.xray_config.xray_worker_threads == 6
 
 
 # ---------------------------------------------------------------------------
-# ConfigService persistence
+# Persistence through the feature config door
 # ---------------------------------------------------------------------------
 
 
-class TestXRayConfigServicePersistence:
-    """ConfigService.get_all_settings() and update_setting() for xray."""
+def _set_xray(service: Any, **updates: Any) -> None:
+    from cidx_xray.config import XRAY_CONFIG_SECTION
 
-    def test_get_settings_includes_xray_section(self, tmp_path):
-        """ConfigService.get_all_settings() includes xray section."""
+    feature_config.commit_runtime_update(
+        service, "xray", XRAY_CONFIG_SECTION, updates, "admin"
+    )
+
+
+class TestXRayConfigPersistence:
+    """The door commits the keys through the config service."""
+
+    def _service(self, tmp_path):
         from code_indexer.server.services.config_service import ConfigService
         from code_indexer.server.utils.config_manager import ServerConfigManager
 
         mgr = ServerConfigManager(str(tmp_path))
         mgr.save_config(mgr.create_default_config())
+        return ConfigService(str(tmp_path))
 
-        config_service = ConfigService(str(tmp_path))
-        settings = config_service.get_all_settings()
+    def test_listed_default_values(self, tmp_path):
+        from cidx_xray.config import XRAY_CONFIG_SECTION
 
-        assert "xray" in settings
-
-    def test_get_settings_xray_has_required_keys(self, tmp_path):
-        """xray section must have xray_timeout_seconds and xray_worker_threads keys."""
-        from code_indexer.server.services.config_service import ConfigService
-        from code_indexer.server.utils.config_manager import ServerConfigManager
-
-        mgr = ServerConfigManager(str(tmp_path))
-        mgr.save_config(mgr.create_default_config())
-
-        config_service = ConfigService(str(tmp_path))
-        xray = config_service.get_all_settings()["xray"]
-
-        assert "xray_timeout_seconds" in xray
-        assert "xray_worker_threads" in xray
-
-    def test_get_settings_xray_default_values(self, tmp_path):
-        """xray section returns correct default values."""
-        from code_indexer.server.services.config_service import ConfigService
-        from code_indexer.server.utils.config_manager import ServerConfigManager
-
-        mgr = ServerConfigManager(str(tmp_path))
-        mgr.save_config(mgr.create_default_config())
-
-        config_service = ConfigService(str(tmp_path))
-        xray = config_service.get_all_settings()["xray"]
-
-        assert xray["xray_timeout_seconds"] == 120
-        assert xray["xray_worker_threads"] == 4
+        (section,) = feature_config.describe_sections(
+            [("xray", XRAY_CONFIG_SECTION)], self._service(tmp_path).get_config()
+        )
+        values = {key["name"]: key["value"] for key in section["keys"]}
+        assert values["xray_timeout_seconds"] == 120
+        assert values["xray_worker_threads"] == 4
 
     def test_update_xray_timeout_seconds_persists(self, tmp_path):
-        """update_setting('xray', 'xray_timeout_seconds', 60) persists to config."""
-        from code_indexer.server.services.config_service import ConfigService
-        from code_indexer.server.utils.config_manager import ServerConfigManager
-
-        mgr = ServerConfigManager(str(tmp_path))
-        mgr.save_config(mgr.create_default_config())
-
-        config_service = ConfigService(str(tmp_path))
-        config_service.update_setting("xray", "xray_timeout_seconds", 60)
-
-        assert config_service.get_config().xray_config.xray_timeout_seconds == 60
-
-    def test_update_xray_worker_threads_persists(self, tmp_path):
-        """update_setting('xray', 'xray_worker_threads', 4) persists to config."""
-        from code_indexer.server.services.config_service import ConfigService
-        from code_indexer.server.utils.config_manager import ServerConfigManager
-
-        mgr = ServerConfigManager(str(tmp_path))
-        mgr.save_config(mgr.create_default_config())
-
-        config_service = ConfigService(str(tmp_path))
-        config_service.update_setting("xray", "xray_worker_threads", 4)
-
-        assert config_service.get_config().xray_config.xray_worker_threads == 4
+        config_service = self._service(tmp_path)
+        _set_xray(config_service, xray_timeout_seconds=60)
+        stored = config_service.get_config().feature_settings["xray"]
+        assert stored["xray_timeout_seconds"] == 60
 
     def test_save_and_reload_persists_xray_keys(self, tmp_path):
         """Write values, create a new ConfigService, assert they persist after reload."""
         from code_indexer.server.services.config_service import ConfigService
-        from code_indexer.server.utils.config_manager import ServerConfigManager
 
-        mgr = ServerConfigManager(str(tmp_path))
-        mgr.save_config(mgr.create_default_config())
+        svc1 = self._service(tmp_path)
+        _set_xray(svc1, xray_timeout_seconds=300, xray_worker_threads=6)
 
-        svc1 = ConfigService(str(tmp_path))
-        svc1.update_setting("xray", "xray_timeout_seconds", 300)
-        svc1.update_setting("xray", "xray_worker_threads", 6)
-
-        # Simulate restart: new service instance loads from disk
         svc2 = ConfigService(str(tmp_path))
-        config = svc2.get_config()
-        assert config.xray_config.xray_timeout_seconds == 300
-        assert config.xray_config.xray_worker_threads == 6
+        assert svc2.get_config().feature_settings["xray"] == {
+            "xray_timeout_seconds": 300,
+            "xray_worker_threads": 6,
+        }
 
-    def test_update_unknown_xray_key_raises_value_error(self, tmp_path):
-        """update_setting('xray', 'unknown_key', 99) raises ValueError."""
-        from code_indexer.server.services.config_service import ConfigService
-        from code_indexer.server.utils.config_manager import ServerConfigManager
+    def test_update_unknown_xray_key_refused(self, tmp_path):
+        with pytest.raises(feature_config.FeatureConfigError):
+            _set_xray(self._service(tmp_path), unknown_key=99)
 
-        mgr = ServerConfigManager(str(tmp_path))
-        mgr.save_config(mgr.create_default_config())
+    def test_update_bootstrap_key_refused(self, tmp_path):
+        with pytest.raises(feature_config.FeatureConfigError, match="bootstrap"):
+            _set_xray(self._service(tmp_path), xray_backend="delegated")
 
-        config_service = ConfigService(str(tmp_path))
-
-        with pytest.raises(ValueError):
-            config_service.update_setting("xray", "unknown_key", 99)
+    def test_the_core_has_no_xray_category(self, tmp_path):
+        """Only the feature config door changes a feature's settings."""
+        service = self._service(tmp_path)
+        assert "xray" not in service.get_all_settings()
+        with pytest.raises(ValueError, match="Unknown category"):
+            service.update_setting("xray", "xray_timeout_seconds", 60)
 
 
 # ---------------------------------------------------------------------------
-# Route validation (matches _validate_config_section in routes.py)
+# AC3/AC4 - ranges (the section's bounds, enforced by the door)
 # ---------------------------------------------------------------------------
 
 
-class TestXRayRouteValidation:
-    """Route-level validation for xray section must enforce ranges."""
+@pytest.mark.parametrize(
+    "key,value,accepted",
+    [
+        ("xray_timeout_seconds", 5, False),
+        ("xray_timeout_seconds", 0, False),
+        ("xray_timeout_seconds", 900, False),
+        ("xray_timeout_seconds", 10, True),
+        ("xray_timeout_seconds", 600, True),
+        ("xray_worker_threads", 0, False),
+        ("xray_worker_threads", 9, False),
+        ("xray_worker_threads", 1, True),
+        ("xray_worker_threads", 8, True),
+        ("xray_worker_threads", "abc", False),
+    ],
+)
+def test_xray_ranges(key: str, value: Any, accepted: bool) -> None:
+    from cidx_xray.config import XRAY_CONFIG_SECTION
 
-    def _validate(self, data: dict):
-        """Call the routes._validate_config_section helper directly."""
-        from code_indexer.server.web.routes import _validate_config_section
-
-        return _validate_config_section("xray", data)
-
-    def test_xray_timeout_seconds_rejects_below_10(self):
-        """timeout_seconds=5 is below range, returns error message."""
-        error = self._validate({"xray_timeout_seconds": "5"})
-        assert error is not None
-        assert "10" in error or "timeout" in error.lower()
-
-    def test_xray_timeout_seconds_rejects_above_600(self):
-        """timeout_seconds=900 is above range, returns error message."""
-        error = self._validate({"xray_timeout_seconds": "900"})
-        assert error is not None
-        assert "600" in error or "timeout" in error.lower()
-
-    def test_xray_timeout_seconds_rejects_zero(self):
-        """timeout_seconds=0 is below range, returns error message."""
-        error = self._validate({"xray_timeout_seconds": "0"})
-        assert error is not None
-
-    def test_xray_timeout_seconds_accepts_boundary_10(self):
-        """timeout_seconds=10 at minimum boundary is valid (no error)."""
-        error = self._validate({"xray_timeout_seconds": "10"})
-        assert error is None
-
-    def test_xray_timeout_seconds_accepts_boundary_600(self):
-        """timeout_seconds=600 at maximum boundary is valid (no error)."""
-        error = self._validate({"xray_timeout_seconds": "600"})
-        assert error is None
-
-    def test_xray_worker_threads_rejects_below_1(self):
-        """worker_threads=0 is below range, returns error message."""
-        error = self._validate({"xray_worker_threads": "0"})
-        assert error is not None
-        assert "1" in error or "thread" in error.lower() or "worker" in error.lower()
-
-    def test_xray_worker_threads_rejects_above_8(self):
-        """worker_threads=9 is above range, returns error message."""
-        error = self._validate({"xray_worker_threads": "9"})
-        assert error is not None
-        assert "8" in error or "thread" in error.lower() or "worker" in error.lower()
-
-    def test_xray_worker_threads_accepts_boundary_1(self):
-        """worker_threads=1 at minimum boundary is valid (no error)."""
-        error = self._validate({"xray_worker_threads": "1"})
-        assert error is None
-
-    def test_xray_worker_threads_accepts_boundary_8(self):
-        """worker_threads=8 at maximum boundary is valid (no error)."""
-        error = self._validate({"xray_worker_threads": "8"})
-        assert error is None
-
-    def test_xray_valid_section_returns_none(self):
-        """Valid data for xray section returns None (no error)."""
-        error = self._validate(
-            {"xray_timeout_seconds": "120", "xray_worker_threads": "2"}
-        )
-        assert error is None
-
-    def test_xray_timeout_seconds_rejects_non_numeric(self):
-        """Non-numeric timeout_seconds value returns error."""
-        error = self._validate({"xray_timeout_seconds": "abc"})
-        assert error is not None
-
-    def test_xray_worker_threads_rejects_non_numeric(self):
-        """Non-numeric worker_threads value returns error."""
-        error = self._validate({"xray_worker_threads": "abc"})
-        assert error is not None
+    if accepted:
+        assert feature_config.validate_runtime_update(
+            "xray", XRAY_CONFIG_SECTION, {key: value}
+        ) == {key: value}
+    else:
+        with pytest.raises(feature_config.FeatureConfigError):
+            feature_config.validate_runtime_update(
+                "xray", XRAY_CONFIG_SECTION, {key: value}
+            )
 
 
 # ---------------------------------------------------------------------------

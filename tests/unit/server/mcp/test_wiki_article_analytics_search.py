@@ -92,7 +92,7 @@ class TestSearchQueryFilter:
         self, mock_grm_wiki_enabled, multi_article_cache, mock_user
     ):
         """AC4: search_query must filter articles to only those matching search results."""
-        from code_indexer.server.mcp.handlers import handle_wiki_article_analytics
+        from cidx_wiki.server.mcp.analytics import handle_wiki_article_analytics
 
         mock_sqm = Mock()
         mock_sqm.query_user_repositories.return_value = {
@@ -104,7 +104,7 @@ class TestSearchQueryFilter:
         with (
             patch("code_indexer.server.app.golden_repo_manager", mock_grm_wiki_enabled),
             patch(
-                "code_indexer.server.mcp.handlers._get_wiki_cache_for_handler",
+                "cidx_wiki.server.mcp.analytics._get_wiki_cache_for_handler",
                 return_value=multi_article_cache,
             ),
             patch(
@@ -129,7 +129,7 @@ class TestSearchQueryFilter:
         self, mock_grm_wiki_enabled, mock_user
     ):
         """AC4: After search filter, results must be sorted by view count, not relevance."""
-        from code_indexer.server.mcp.handlers import handle_wiki_article_analytics
+        from cidx_wiki.server.mcp.analytics import handle_wiki_article_analytics
 
         two_views = [
             {
@@ -160,7 +160,7 @@ class TestSearchQueryFilter:
         with (
             patch("code_indexer.server.app.golden_repo_manager", mock_grm_wiki_enabled),
             patch(
-                "code_indexer.server.mcp.handlers._get_wiki_cache_for_handler",
+                "cidx_wiki.server.mcp.analytics._get_wiki_cache_for_handler",
                 return_value=mock_cache,
             ),
             patch(
@@ -188,7 +188,7 @@ class TestSearchQueryFilter:
         self, mock_grm_wiki_enabled, multi_article_cache, mock_user
     ):
         """AC4: search_query with no matches returns empty articles list."""
-        from code_indexer.server.mcp.handlers import handle_wiki_article_analytics
+        from cidx_wiki.server.mcp.analytics import handle_wiki_article_analytics
 
         mock_sqm = Mock()
         mock_sqm.query_user_repositories.return_value = {"results": []}
@@ -196,7 +196,7 @@ class TestSearchQueryFilter:
         with (
             patch("code_indexer.server.app.golden_repo_manager", mock_grm_wiki_enabled),
             patch(
-                "code_indexer.server.mcp.handlers._get_wiki_cache_for_handler",
+                "cidx_wiki.server.mcp.analytics._get_wiki_cache_for_handler",
                 return_value=multi_article_cache,
             ),
             patch(
@@ -221,14 +221,14 @@ class TestSearchQueryFilter:
         self, mock_grm_wiki_enabled, multi_article_cache, mock_user
     ):
         """AC4: search_query shorter than 2 chars must be ignored (no search call)."""
-        from code_indexer.server.mcp.handlers import handle_wiki_article_analytics
+        from cidx_wiki.server.mcp.analytics import handle_wiki_article_analytics
 
         mock_sqm = Mock()
 
         with (
             patch("code_indexer.server.app.golden_repo_manager", mock_grm_wiki_enabled),
             patch(
-                "code_indexer.server.mcp.handlers._get_wiki_cache_for_handler",
+                "cidx_wiki.server.mcp.analytics._get_wiki_cache_for_handler",
                 return_value=multi_article_cache,
             ),
             patch(
@@ -252,14 +252,14 @@ class TestSearchQueryFilter:
         self, mock_grm_wiki_enabled, multi_article_cache, mock_user
     ):
         """AC4: Empty string search_query must be ignored (no search call)."""
-        from code_indexer.server.mcp.handlers import handle_wiki_article_analytics
+        from cidx_wiki.server.mcp.analytics import handle_wiki_article_analytics
 
         mock_sqm = Mock()
 
         with (
             patch("code_indexer.server.app.golden_repo_manager", mock_grm_wiki_enabled),
             patch(
-                "code_indexer.server.mcp.handlers._get_wiki_cache_for_handler",
+                "cidx_wiki.server.mcp.analytics._get_wiki_cache_for_handler",
                 return_value=multi_article_cache,
             ),
             patch(
@@ -281,14 +281,14 @@ class TestSearchQueryFilter:
         self, mock_grm_wiki_enabled, multi_article_cache, mock_user
     ):
         """AC4: No search_query must return all articles (no CIDX call)."""
-        from code_indexer.server.mcp.handlers import handle_wiki_article_analytics
+        from cidx_wiki.server.mcp.analytics import handle_wiki_article_analytics
 
         mock_sqm = Mock()
 
         with (
             patch("code_indexer.server.app.golden_repo_manager", mock_grm_wiki_enabled),
             patch(
-                "code_indexer.server.mcp.handlers._get_wiki_cache_for_handler",
+                "cidx_wiki.server.mcp.analytics._get_wiki_cache_for_handler",
                 return_value=multi_article_cache,
             ),
             patch(
@@ -310,7 +310,7 @@ class TestSearchQueryFilter:
         self, mock_grm_wiki_enabled, multi_article_cache, mock_user
     ):
         """AC4: Default search_mode=semantic is passed to query_user_repositories."""
-        from code_indexer.server.mcp.handlers import handle_wiki_article_analytics
+        from cidx_wiki.server.mcp.analytics import handle_wiki_article_analytics
 
         mock_sqm = Mock()
         mock_sqm.query_user_repositories.return_value = {
@@ -322,7 +322,7 @@ class TestSearchQueryFilter:
         with (
             patch("code_indexer.server.app.golden_repo_manager", mock_grm_wiki_enabled),
             patch(
-                "code_indexer.server.mcp.handlers._get_wiki_cache_for_handler",
+                "cidx_wiki.server.mcp.analytics._get_wiki_cache_for_handler",
                 return_value=multi_article_cache,
             ),
             patch(
@@ -352,7 +352,7 @@ class TestSearchQueryFilter:
         self, mock_grm_wiki_enabled, multi_article_cache, mock_user
     ):
         """AC4: Explicit search_mode=fts is passed to query_user_repositories."""
-        from code_indexer.server.mcp.handlers import handle_wiki_article_analytics
+        from cidx_wiki.server.mcp.analytics import handle_wiki_article_analytics
 
         mock_sqm = Mock()
         mock_sqm.query_user_repositories.return_value = {
@@ -364,7 +364,7 @@ class TestSearchQueryFilter:
         with (
             patch("code_indexer.server.app.golden_repo_manager", mock_grm_wiki_enabled),
             patch(
-                "code_indexer.server.mcp.handlers._get_wiki_cache_for_handler",
+                "cidx_wiki.server.mcp.analytics._get_wiki_cache_for_handler",
                 return_value=multi_article_cache,
             ),
             patch(

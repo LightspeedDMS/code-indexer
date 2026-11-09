@@ -43,7 +43,7 @@ class TestDuplicateFunctionsRemoved:
 
     def test_find_scip_files_not_in_module(self):
         """AC: Verify _find_scip_files function is removed from scip_queries.py."""
-        import code_indexer.server.routers.scip_queries as scip_queries
+        import cidx_scip.server.routes as scip_queries
 
         # The function should not exist as a public or private function
         assert not hasattr(scip_queries, "_find_scip_files"), (
@@ -52,7 +52,7 @@ class TestDuplicateFunctionsRemoved:
 
     def test_get_accessible_repos_not_in_module(self):
         """AC: Verify _get_accessible_repos function is removed from scip_queries.py."""
-        import code_indexer.server.routers.scip_queries as scip_queries
+        import cidx_scip.server.routes as scip_queries
 
         assert not hasattr(scip_queries, "_get_accessible_repos"), (
             "_get_accessible_repos should be removed from scip_queries.py"
@@ -60,7 +60,7 @@ class TestDuplicateFunctionsRemoved:
 
     def test_filter_scip_results_not_in_module(self):
         """AC: Verify _filter_scip_results function is removed from scip_queries.py."""
-        import code_indexer.server.routers.scip_queries as scip_queries
+        import cidx_scip.server.routes as scip_queries
 
         assert not hasattr(scip_queries, "_filter_scip_results"), (
             "_filter_scip_results should be removed from scip_queries.py"
@@ -68,7 +68,7 @@ class TestDuplicateFunctionsRemoved:
 
     def test_get_golden_repos_dir_not_in_module(self):
         """Verify _get_golden_repos_dir function is removed from scip_queries.py."""
-        import code_indexer.server.routers.scip_queries as scip_queries
+        import cidx_scip.server.routes as scip_queries
 
         assert not hasattr(scip_queries, "_get_golden_repos_dir"), (
             "_get_golden_repos_dir should be removed from scip_queries.py"
@@ -76,7 +76,7 @@ class TestDuplicateFunctionsRemoved:
 
     def test_filter_impact_results_not_in_module(self):
         """Verify _filter_impact_results function is removed from scip_queries.py."""
-        import code_indexer.server.routers.scip_queries as scip_queries
+        import cidx_scip.server.routes as scip_queries
 
         assert not hasattr(scip_queries, "_filter_impact_results"), (
             "_filter_impact_results should be removed from scip_queries.py"
@@ -84,7 +84,7 @@ class TestDuplicateFunctionsRemoved:
 
     def test_filter_callchain_results_not_in_module(self):
         """Verify _filter_callchain_results function is removed from scip_queries.py."""
-        import code_indexer.server.routers.scip_queries as scip_queries
+        import cidx_scip.server.routes as scip_queries
 
         assert not hasattr(scip_queries, "_filter_callchain_results"), (
             "_filter_callchain_results should be removed from scip_queries.py"
@@ -92,7 +92,7 @@ class TestDuplicateFunctionsRemoved:
 
     def test_filter_context_results_not_in_module(self):
         """Verify _filter_context_results function is removed from scip_queries.py."""
-        import code_indexer.server.routers.scip_queries as scip_queries
+        import cidx_scip.server.routes as scip_queries
 
         assert not hasattr(scip_queries, "_filter_context_results"), (
             "_filter_context_results should be removed from scip_queries.py"
@@ -100,7 +100,7 @@ class TestDuplicateFunctionsRemoved:
 
     def test_extract_repo_name_from_project_not_in_module(self):
         """Verify _extract_repo_name_from_project is removed from scip_queries.py."""
-        import code_indexer.server.routers.scip_queries as scip_queries
+        import cidx_scip.server.routes as scip_queries
 
         assert not hasattr(scip_queries, "_extract_repo_name_from_project"), (
             "_extract_repo_name_from_project should be removed from scip_queries.py"
@@ -118,7 +118,7 @@ class TestBackwardCompatibility:
     ):
         """AC: Verify /scip/definition response structure is unchanged."""
         from fastapi import Request
-        from code_indexer.server.routers.scip_queries import get_definition
+        from cidx_scip.server.routes import get_definition
 
         mock_scip_service.find_definition.return_value = [
             {
@@ -136,11 +136,11 @@ class TestBackwardCompatibility:
         mock_request = MagicMock(spec=Request)
 
         with patch(
-            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            "cidx_scip.server.routes._get_scip_query_service",
             return_value=mock_scip_service,
         ):
             with patch(
-                "code_indexer.server.routers.scip_queries._apply_scip_payload_truncation",
+                "cidx_scip.server.routes._apply_scip_payload_truncation",
             ) as mock_truncate:
                 mock_truncate.return_value = (
                     mock_scip_service.find_definition.return_value
@@ -176,18 +176,18 @@ class TestBackwardCompatibility:
     ):
         """AC: Verify /scip/references response structure is unchanged."""
         from fastapi import Request
-        from code_indexer.server.routers.scip_queries import get_references
+        from cidx_scip.server.routes import get_references
 
         mock_scip_service.find_references.return_value = []
 
         mock_request = MagicMock(spec=Request)
 
         with patch(
-            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            "cidx_scip.server.routes._get_scip_query_service",
             return_value=mock_scip_service,
         ):
             with patch(
-                "code_indexer.server.routers.scip_queries._apply_scip_payload_truncation",
+                "cidx_scip.server.routes._apply_scip_payload_truncation",
             ) as mock_truncate:
                 mock_truncate.return_value = []
                 # Sync call - no await needed
@@ -208,7 +208,7 @@ class TestBackwardCompatibility:
     def test_impact_response_structure_unchanged(self, mock_user, mock_scip_service):
         """AC: Verify /scip/impact response structure is unchanged."""
         from fastapi import Request
-        from code_indexer.server.routers.scip_queries import get_impact
+        from cidx_scip.server.routes import get_impact
 
         mock_scip_service.analyze_impact.return_value = {
             "target_symbol": "UserService",
@@ -222,7 +222,7 @@ class TestBackwardCompatibility:
         mock_request = MagicMock(spec=Request)
 
         with patch(
-            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            "cidx_scip.server.routes._get_scip_query_service",
             return_value=mock_scip_service,
         ):
             response = get_impact(
@@ -245,14 +245,14 @@ class TestBackwardCompatibility:
     def test_callchain_response_structure_unchanged(self, mock_user, mock_scip_service):
         """AC: Verify /scip/callchain response structure is unchanged."""
         from fastapi import Request
-        from code_indexer.server.routers.scip_queries import get_callchain
+        from cidx_scip.server.routes import get_callchain
 
         mock_scip_service.trace_callchain.return_value = ([], [])
 
         mock_request = MagicMock(spec=Request)
 
         with patch(
-            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            "cidx_scip.server.routes._get_scip_query_service",
             return_value=mock_scip_service,
         ):
             response = get_callchain(
@@ -274,7 +274,7 @@ class TestBackwardCompatibility:
     def test_context_response_structure_unchanged(self, mock_user, mock_scip_service):
         """AC: Verify /scip/context response structure is unchanged."""
         from fastapi import Request
-        from code_indexer.server.routers.scip_queries import get_context
+        from cidx_scip.server.routes import get_context
 
         mock_scip_service.get_context.return_value = {
             "target_symbol": "UserService",
@@ -288,7 +288,7 @@ class TestBackwardCompatibility:
         mock_request = MagicMock(spec=Request)
 
         with patch(
-            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            "cidx_scip.server.routes._get_scip_query_service",
             return_value=mock_scip_service,
         ):
             response = get_context(
@@ -319,13 +319,13 @@ class TestErrorHandling:
     def test_definition_catches_service_exception(self, mock_user, mock_scip_service):
         """Verify route catches and returns errors when service raises exception."""
         from fastapi import Request
-        from code_indexer.server.routers.scip_queries import get_definition
+        from cidx_scip.server.routes import get_definition
 
         mock_scip_service.find_definition.side_effect = Exception("Database error")
         mock_request = MagicMock(spec=Request)
 
         with patch(
-            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            "cidx_scip.server.routes._get_scip_query_service",
             return_value=mock_scip_service,
         ):
             # Sync call - no await needed
@@ -343,13 +343,13 @@ class TestErrorHandling:
     def test_references_catches_service_exception(self, mock_user, mock_scip_service):
         """Verify references route catches and returns errors."""
         from fastapi import Request
-        from code_indexer.server.routers.scip_queries import get_references
+        from cidx_scip.server.routes import get_references
 
         mock_scip_service.find_references.side_effect = Exception("Query failed")
         mock_request = MagicMock(spec=Request)
 
         with patch(
-            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            "cidx_scip.server.routes._get_scip_query_service",
             return_value=mock_scip_service,
         ):
             # Sync call - no await needed
@@ -368,13 +368,13 @@ class TestErrorHandling:
     def test_impact_catches_service_exception(self, mock_user, mock_scip_service):
         """Verify impact route catches and returns errors."""
         from fastapi import Request
-        from code_indexer.server.routers.scip_queries import get_impact
+        from cidx_scip.server.routes import get_impact
 
         mock_scip_service.analyze_impact.side_effect = Exception("Analysis failed")
         mock_request = MagicMock(spec=Request)
 
         with patch(
-            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            "cidx_scip.server.routes._get_scip_query_service",
             return_value=mock_scip_service,
         ):
             response = get_impact(
@@ -391,13 +391,13 @@ class TestErrorHandling:
     def test_callchain_catches_service_exception(self, mock_user, mock_scip_service):
         """Verify callchain route catches and returns errors."""
         from fastapi import Request
-        from code_indexer.server.routers.scip_queries import get_callchain
+        from cidx_scip.server.routes import get_callchain
 
         mock_scip_service.trace_callchain.side_effect = Exception("Tracing failed")
         mock_request = MagicMock(spec=Request)
 
         with patch(
-            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            "cidx_scip.server.routes._get_scip_query_service",
             return_value=mock_scip_service,
         ):
             response = get_callchain(
@@ -415,13 +415,13 @@ class TestErrorHandling:
     def test_context_catches_service_exception(self, mock_user, mock_scip_service):
         """Verify context route catches and returns errors."""
         from fastapi import Request
-        from code_indexer.server.routers.scip_queries import get_context
+        from cidx_scip.server.routes import get_context
 
         mock_scip_service.get_context.side_effect = Exception("Context failed")
         mock_request = MagicMock(spec=Request)
 
         with patch(
-            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            "cidx_scip.server.routes._get_scip_query_service",
             return_value=mock_scip_service,
         ):
             response = get_context(

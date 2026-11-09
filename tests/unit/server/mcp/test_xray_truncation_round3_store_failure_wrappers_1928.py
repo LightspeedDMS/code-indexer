@@ -51,7 +51,7 @@ class TestXraySearchWrapperSurfacesStoreFailure:
     (via _lazy_singleton_app_or_none()), so it is patched via app_module."""
 
     def test_truncate_xray_result_returns_explicit_error(self) -> None:
-        from code_indexer.server.mcp.handlers.xray import _truncate_xray_result
+        from cidx_xray.server.mcp.xray import _truncate_xray_result
 
         cache = _FailingStoreBatchCache(_SMALL_BUDGET_CHARS)
         mock_app = MagicMock()
@@ -74,7 +74,7 @@ class TestAnalyzeGraphWrapperSurfacesStoreFailure:
     (same pattern as _truncate_xray_result above)."""
 
     def test_truncate_graph_result_returns_explicit_error(self) -> None:
-        from code_indexer.server.mcp.handlers.xray_graph import (
+        from cidx_xray.server.mcp.xray_graph import (
             _truncate_graph_result,
         )
 
@@ -103,7 +103,7 @@ class TestXraySearchBatchWrapperSurfacesStoreFailure:
     patching is needed here -- the cache is just passed directly."""
 
     def test_truncate_xray_batch_result_returns_explicit_error(self) -> None:
-        from code_indexer.server.mcp.handlers.xray_batch import (
+        from cidx_xray.server.mcp.xray_batch import (
             _truncate_xray_batch_result,
         )
 

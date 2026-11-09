@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from code_indexer.xray.sandbox import validate_rust_evaluator
+from cidx_xray.sandbox import validate_rust_evaluator
 
 REPO_ROOT = Path(__file__).parent.parent.parent.parent
 XRAY_CLI = REPO_ROOT / "rust" / "target" / "release" / "xray-cli"
@@ -120,7 +120,7 @@ def test_shipped_seed_patterns_compile_via_real_pipeline(
     "Line 8: `matches!` macro is not allowed". Resolves the REAL shipped
     pattern (with its real parameter consts prepended) through BOTH the
     Python pre-flight and the real Rust compile pipeline."""
-    from code_indexer.server.services.xray_pattern_service import XrayPatternService
+    from cidx_xray.server.pattern_service import XrayPatternService
 
     cidx_meta = tmp_path / "cidx-meta"
     svc = XrayPatternService(cidx_meta)

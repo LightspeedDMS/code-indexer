@@ -7,14 +7,14 @@ try:
 except ImportError:
     import sqlite3
 
-from code_indexer.scip.database.verify import SCIPDatabaseVerifier
-from code_indexer.scip.database.builder import (
+from cidx_scip.database.verify import SCIPDatabaseVerifier
+from cidx_scip.database.builder import (
     SCIPDatabaseBuilder,
     ROLE_DEFINITION,
     ROLE_READ_ACCESS,
 )
-from code_indexer.scip.database.schema import DatabaseManager
-from code_indexer.scip.protobuf import scip_pb2
+from cidx_scip.database.schema import DatabaseManager
+from cidx_scip.protobuf import scip_pb2
 
 
 class TestSymbolVerification:

@@ -30,6 +30,7 @@ from tests.unit.server.query.extension_filter_env_2047 import (
     expected_semantic,
     ranked_store_search,
 )
+from tests.unit.server.app_state_patch import patch_app_state
 
 ADMIN = User(
     username="admin",
@@ -68,14 +69,9 @@ def omni_env(
     (root / "golden-repos").mkdir()
     with corpus_app(root / "app") as app, pytest.MonkeyPatch.context() as mp:
         # What the lifespan would install (TestClient here runs no lifespan).
-        mp.setattr(
-            app.state, "golden_repos_dir", str(root / "golden-repos"), raising=False
-        )
-        mp.setattr(
-            app.state,
-            "access_filtering_service",
-            AccessFilteringService(groups),
-            raising=False,
+        patch_app_state(mp, app.state, "golden_repos_dir", str(root / "golden-repos"))
+        patch_app_state(
+            mp, app.state, "access_filtering_service", AccessFilteringService(groups)
         )
         yield app, repos
 

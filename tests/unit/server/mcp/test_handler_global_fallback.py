@@ -177,7 +177,7 @@ class TestScipDefinitionFallback:
 
     def test_bare_alias_rewritten_to_global(self):
         """scip_definition bare alias -> repository_alias rewritten before service call."""
-        from code_indexer.server.mcp.handlers.scip import scip_definition
+        from cidx_scip.server.mcp.scip import scip_definition
 
         user = _make_user()
         params = {"symbol": "MyClass", "repository_alias": "example-repo"}
@@ -200,11 +200,11 @@ class TestScipDefinitionFallback:
             patch(_ARM_PATH, _make_arm(has_repo=False)),
             patch(_GRM_PATH, _make_grm(globally_active=True)),
             patch(
-                "code_indexer.server.mcp.handlers.scip._get_scip_query_service",
+                "cidx_scip.server.mcp.scip._get_scip_query_service",
                 return_value=mock_service,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.scip._apply_scip_payload_truncation",
+                "cidx_scip.server.mcp.scip._apply_scip_payload_truncation",
                 side_effect=lambda x, **kw: x,
             ),
         ):
@@ -222,7 +222,7 @@ class TestScipReferencesFallback:
 
     def test_bare_alias_rewritten_to_global(self):
         """scip_references bare alias -> repository_alias rewritten before service call."""
-        from code_indexer.server.mcp.handlers.scip import scip_references
+        from cidx_scip.server.mcp.scip import scip_references
 
         user = _make_user()
         params = {"symbol": "MyClass", "repository_alias": "example-repo"}
@@ -240,11 +240,11 @@ class TestScipReferencesFallback:
             patch(_ARM_PATH, _make_arm(has_repo=False)),
             patch(_GRM_PATH, _make_grm(globally_active=True)),
             patch(
-                "code_indexer.server.mcp.handlers.scip._get_scip_query_service",
+                "cidx_scip.server.mcp.scip._get_scip_query_service",
                 return_value=mock_service,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.scip._apply_scip_payload_truncation",
+                "cidx_scip.server.mcp.scip._apply_scip_payload_truncation",
                 side_effect=lambda x, **kw: x,
             ),
         ):
@@ -262,7 +262,7 @@ class TestScipDependenciesFallback:
 
     def test_bare_alias_rewritten_to_global(self):
         """scip_dependencies bare alias -> repository_alias rewritten before service call."""
-        from code_indexer.server.mcp.handlers.scip import scip_dependencies
+        from cidx_scip.server.mcp.scip import scip_dependencies
 
         user = _make_user()
         params = {"symbol": "MyClass", "repository_alias": "example-repo"}
@@ -280,11 +280,11 @@ class TestScipDependenciesFallback:
             patch(_ARM_PATH, _make_arm(has_repo=False)),
             patch(_GRM_PATH, _make_grm(globally_active=True)),
             patch(
-                "code_indexer.server.mcp.handlers.scip._get_scip_query_service",
+                "cidx_scip.server.mcp.scip._get_scip_query_service",
                 return_value=mock_service,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.scip._apply_scip_payload_truncation",
+                "cidx_scip.server.mcp.scip._apply_scip_payload_truncation",
                 side_effect=lambda x, **kw: x,
             ),
         ):
@@ -302,7 +302,7 @@ class TestScipDependentsFallback:
 
     def test_bare_alias_rewritten_to_global(self):
         """scip_dependents bare alias -> repository_alias rewritten before service call."""
-        from code_indexer.server.mcp.handlers.scip import scip_dependents
+        from cidx_scip.server.mcp.scip import scip_dependents
 
         user = _make_user()
         params = {"symbol": "MyClass", "repository_alias": "example-repo"}
@@ -320,11 +320,11 @@ class TestScipDependentsFallback:
             patch(_ARM_PATH, _make_arm(has_repo=False)),
             patch(_GRM_PATH, _make_grm(globally_active=True)),
             patch(
-                "code_indexer.server.mcp.handlers.scip._get_scip_query_service",
+                "cidx_scip.server.mcp.scip._get_scip_query_service",
                 return_value=mock_service,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.scip._apply_scip_payload_truncation",
+                "cidx_scip.server.mcp.scip._apply_scip_payload_truncation",
                 side_effect=lambda x, **kw: x,
             ),
         ):
@@ -342,7 +342,7 @@ class TestScipImpactFallback:
 
     def test_bare_alias_rewritten_to_global(self):
         """scip_impact bare alias -> repository_alias rewritten before service call."""
-        from code_indexer.server.mcp.handlers.scip import scip_impact
+        from cidx_scip.server.mcp.scip import scip_impact
 
         user = _make_user()
         params = {"symbol": "MyClass", "repository_alias": "example-repo"}
@@ -360,7 +360,7 @@ class TestScipImpactFallback:
             patch(_ARM_PATH, _make_arm(has_repo=False)),
             patch(_GRM_PATH, _make_grm(globally_active=True)),
             patch(
-                "code_indexer.server.mcp.handlers.scip._get_scip_query_service",
+                "cidx_scip.server.mcp.scip._get_scip_query_service",
                 return_value=mock_service,
             ),
         ):
@@ -376,7 +376,7 @@ class TestScipCallchainFallback:
 
     def test_bare_alias_rewritten_to_global(self):
         """scip_callchain bare alias -> repository_alias rewritten before service call."""
-        from code_indexer.server.mcp.handlers.scip import scip_callchain
+        from cidx_scip.server.mcp.scip import scip_callchain
 
         user = _make_user()
         params = {
@@ -398,7 +398,7 @@ class TestScipCallchainFallback:
             patch(_ARM_PATH, _make_arm(has_repo=False)),
             patch(_GRM_PATH, _make_grm(globally_active=True)),
             patch(
-                "code_indexer.server.mcp.handlers.scip._get_scip_query_service",
+                "cidx_scip.server.mcp.scip._get_scip_query_service",
                 return_value=mock_service,
             ),
         ):
@@ -414,7 +414,7 @@ class TestScipContextFallback:
 
     def test_bare_alias_rewritten_to_global(self):
         """scip_context bare alias -> repository_alias rewritten before service call."""
-        from code_indexer.server.mcp.handlers.scip import scip_context
+        from cidx_scip.server.mcp.scip import scip_context
 
         user = _make_user()
         params = {"symbol": "MyClass", "repository_alias": "example-repo"}
@@ -432,7 +432,7 @@ class TestScipContextFallback:
             patch(_ARM_PATH, _make_arm(has_repo=False)),
             patch(_GRM_PATH, _make_grm(globally_active=True)),
             patch(
-                "code_indexer.server.mcp.handlers.scip._get_scip_query_service",
+                "cidx_scip.server.mcp.scip._get_scip_query_service",
                 return_value=mock_service,
             ),
         ):

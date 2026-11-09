@@ -18,7 +18,7 @@ from code_indexer.server.services.cidx_meta_access import (
     load_depmap_model,
     project_lines,
 )
-from code_indexer.server.services.dep_map_index_regenerator import IndexRegenerator
+from cidx_depmap.server.dep_map_index_regenerator import IndexRegenerator
 
 VISIBLE_A = "alpha-svc"
 VISIBLE_B = "delta-svc"
@@ -331,7 +331,7 @@ def test_intra_domain_table_keeps_visible_rows_and_drops_hidden_ones(
 
 
 def test_dependency_types_table_is_kept_with_prose_redaction(tmp_path: Path) -> None:
-    from code_indexer.global_repos.dependency_map_analyzer import (
+    from cidx_depmap.server.dependency_map_analyzer import (
         DependencyMapAnalyzer,
     )
 

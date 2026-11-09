@@ -27,11 +27,20 @@ from datetime import datetime, timezone
 from code_indexer.server.mcp.tools import TOOL_REGISTRY
 from code_indexer.server.mcp.handlers import HANDLER_REGISTRY
 from code_indexer.server.auth.user_manager import User, UserRole
+from tests.unit.server._scip_feature import scip_tools_installed
 
 
 # =============================================================================
 # Test Fixtures
 # =============================================================================
+
+
+@pytest.fixture(autouse=True)
+def _scip_feature_tools():
+    """The SCIP admin tools are the cidx-scip feature's (modular phase 4d):
+    installed as a server with "scip" enabled installs them."""
+    with scip_tools_installed():
+        yield
 
 
 @pytest.fixture

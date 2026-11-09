@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import pytest
 
-from code_indexer.xray.languages import EXTENSION_MAP
+from cidx_xray.languages import EXTENSION_MAP
 from tests.unit.xray.new_language_fixtures_2212 import (
     MARKER,
     NEW_LANGUAGE_FILES,
@@ -32,7 +32,7 @@ def _no_lazy_trigram_build(monkeypatch: pytest.MonkeyPatch) -> None:
 
 class TestEngineDetectionMap:
     def test_engine_extension_map_equals_search_detection_map(self) -> None:
-        from code_indexer.xray.ast_engine import AstSearchEngine
+        from cidx_xray.ast_engine import AstSearchEngine
 
         assert AstSearchEngine().extension_map == EXTENSION_MAP
 
@@ -67,7 +67,7 @@ def _python_named_kinds(root: Any) -> List[str]:
 
 class TestPythonParsePaths:
     def test_parse_refuses_new_languages_without_matching_grammar(self) -> None:
-        from code_indexer.xray.ast_engine import AstSearchEngine
+        from cidx_xray.ast_engine import AstSearchEngine
 
         engine = AstSearchEngine()
         for ext in sorted(PYTHON_REFUSED):
@@ -81,7 +81,7 @@ class TestPythonParsePaths:
             assert repr(label) in message
 
     def test_search_detection_needs_no_python_grammar(self) -> None:
-        from code_indexer.xray.ast_engine import AstSearchEngine
+        from cidx_xray.ast_engine import AstSearchEngine
 
         with patch(
             "tree_sitter_languages.get_language",
@@ -95,8 +95,8 @@ class TestPythonParsePaths:
         from tests.unit.xray.conftest import require_xray_cli_binary
 
         require_xray_cli_binary()
-        from code_indexer.xray.ast_engine import AstSearchEngine
-        from code_indexer.xray.rust_backend import RustNativeBackend
+        from cidx_xray.ast_engine import AstSearchEngine
+        from cidx_xray.rust_backend import RustNativeBackend
 
         engine = AstSearchEngine()
         repo = write_new_language_repo(tmp_path)
@@ -135,7 +135,7 @@ _ALWAYS_MATCH = (
 
 
 def _run_search(repo: Path) -> Dict[str, Any]:
-    from code_indexer.xray.search_engine import XRaySearchEngine
+    from cidx_xray.search_engine import XRaySearchEngine
 
     return XRaySearchEngine().run(
         repo_path=repo,
@@ -199,7 +199,7 @@ def _run_unparsed(repo: Path) -> Dict[str, Any]:
     from tests.unit.xray.conftest import require_xray_cli_binary
 
     require_xray_cli_binary()
-    from code_indexer.xray.search_engine import XRaySearchEngine
+    from cidx_xray.search_engine import XRaySearchEngine
 
     doomed = repo / _DOOMED_NAME
 
@@ -263,7 +263,7 @@ class TestEvaluateFileAstDebug:
         from tests.unit.xray.conftest import require_xray_cli_binary
 
         require_xray_cli_binary()
-        from code_indexer.xray.search_engine import XRaySearchEngine
+        from cidx_xray.search_engine import XRaySearchEngine
 
         engine = XRaySearchEngine()
         repo = write_new_language_repo(tmp_path)

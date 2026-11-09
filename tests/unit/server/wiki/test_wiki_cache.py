@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from code_indexer.server.wiki.wiki_cache import WikiCache
+from cidx_wiki.server.wiki_cache import WikiCache
 
 
 @pytest.fixture

@@ -24,8 +24,15 @@ convention -- confirmed that max_turns=0 omits the --max-turns flag entirely
 rather than meaning "zero turns", see ClaudeInvoker.invoke_full_agentic).
 """
 
-from code_indexer.global_repos.dependency_map_analyzer import DependencyMapAnalyzer
-from code_indexer.server.utils.config_manager import ClaudeIntegrationConfig
+import pytest
+
+from tests.unit.server._depmap_feature import (
+    depmap_claude_config,
+    depmap_section_of,
+    set_depmap_settings,
+)
+from cidx_depmap.server.dependency_map_analyzer import DependencyMapAnalyzer
+from code_indexer.server.features.config import FeatureConfigError
 from code_indexer.server.services.config_service import ConfigService
 
 
@@ -117,46 +124,48 @@ class TestMaxTurnsDefaultsUnlimited:
     """Instance #3: pass2/delta max-turns default to 0 (unlimited), matching pass1."""
 
     def test_pass2_max_turns_default_is_zero(self):
-        config = ClaudeIntegrationConfig()
+        config = depmap_claude_config()
         assert config.dependency_map_pass2_max_turns == 0
 
     def test_delta_max_turns_default_is_zero(self):
-        config = ClaudeIntegrationConfig()
+        config = depmap_claude_config()
         assert config.dependency_map_delta_max_turns == 0
 
     def test_pass1_max_turns_still_zero(self):
         """Pass 1 was already correct -- confirm it remains unchanged."""
-        config = ClaudeIntegrationConfig()
+        config = depmap_claude_config()
         assert config.dependency_map_pass1_max_turns == 0
 
 
 class TestConfigServiceAllowsUnlimitedMaxTurns:
-    """Instance #3: ConfigService must not clamp pass2/delta up to a minimum of 5.
+    """Instance #3: the settings must not have a minimum of 5 for pass2/delta.
 
-    A minimum-5 clamp would make it impossible for an operator to restore the
-    unlimited (0) default via the Web UI, defeating the fix.
+    A minimum-5 bound would make it impossible for an operator to restore the
+    unlimited (0) default via the Web UI, defeating the fix. The settings are
+    the cidx-depmap feature's section (modular phase 4g), changed through the
+    feature config door.
     """
 
     def test_pass2_max_turns_accepts_zero(self, tmp_path):
         service = ConfigService(server_dir_path=str(tmp_path))
-        service.update_setting("claude_cli", "dependency_map_pass2_max_turns", 0)
-        claude_config = service.get_claude_integration_config()
+        set_depmap_settings(service, dependency_map_pass2_max_turns=0)
+        claude_config = depmap_section_of(service)
         assert claude_config.dependency_map_pass2_max_turns == 0
 
     def test_delta_max_turns_accepts_zero(self, tmp_path):
         service = ConfigService(server_dir_path=str(tmp_path))
-        service.update_setting("claude_cli", "dependency_map_delta_max_turns", 0)
-        claude_config = service.get_claude_integration_config()
+        set_depmap_settings(service, dependency_map_delta_max_turns=0)
+        claude_config = depmap_section_of(service)
         assert claude_config.dependency_map_delta_max_turns == 0
 
-    def test_pass2_max_turns_still_clamps_negative_to_zero(self, tmp_path):
+    def test_pass2_max_turns_still_refuses_negative(self, tmp_path):
         service = ConfigService(server_dir_path=str(tmp_path))
-        service.update_setting("claude_cli", "dependency_map_pass2_max_turns", -1)
-        claude_config = service.get_claude_integration_config()
-        assert claude_config.dependency_map_pass2_max_turns == 0
+        with pytest.raises(FeatureConfigError):
+            set_depmap_settings(service, dependency_map_pass2_max_turns=-1)
+        assert depmap_section_of(service).dependency_map_pass2_max_turns == 0
 
-    def test_delta_max_turns_still_clamps_negative_to_zero(self, tmp_path):
+    def test_delta_max_turns_still_refuses_negative(self, tmp_path):
         service = ConfigService(server_dir_path=str(tmp_path))
-        service.update_setting("claude_cli", "dependency_map_delta_max_turns", -1)
-        claude_config = service.get_claude_integration_config()
-        assert claude_config.dependency_map_delta_max_turns == 0
+        with pytest.raises(FeatureConfigError):
+            set_depmap_settings(service, dependency_map_delta_max_turns=-1)
+        assert depmap_section_of(service).dependency_map_delta_max_turns == 0

@@ -25,7 +25,7 @@ import logging
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from code_indexer.global_repos.dependency_map_analyzer import (
+from cidx_depmap.server.dependency_map_analyzer import (
     DependencyMapAnalyzer,
     _strip_leading_yaml_frontmatter,
 )
@@ -174,7 +174,7 @@ class TestPass2DispatcherConstruction:
 
         with (
             patch(
-                "code_indexer.global_repos.dependency_map_analyzer.get_config_service"
+                "cidx_depmap.server.dependency_map_analyzer.get_config_service"
             ) as mock_get_cfg,
             patch.dict("os.environ", {"CODEX_HOME": codex_home}),
         ):
@@ -199,7 +199,7 @@ class TestPass2DispatcherConstruction:
         config = _make_mock_config(tmp_path, codex_enabled=False)
 
         with patch(
-            "code_indexer.global_repos.dependency_map_analyzer.get_config_service"
+            "cidx_depmap.server.dependency_map_analyzer.get_config_service"
         ) as mock_get_cfg:
             mock_svc = MagicMock()
             mock_svc.get_config.return_value = config
@@ -269,7 +269,7 @@ class TestPass2DispatcherInvocation:
 
         with caplog.at_level(
             logging.INFO,
-            logger="code_indexer.global_repos.dependency_map_analyzer",
+            logger="cidx_depmap.server.dependency_map_analyzer",
         ):
             _run_pass2(analyzer, tmp_path)
 
@@ -312,7 +312,7 @@ class TestPass2DispatcherCaching:
         config = _make_mock_config(tmp_path, codex_enabled=False)
 
         with patch(
-            "code_indexer.global_repos.dependency_map_analyzer.get_config_service"
+            "cidx_depmap.server.dependency_map_analyzer.get_config_service"
         ) as mock_get_cfg:
             mock_svc = MagicMock()
             mock_svc.get_config.return_value = config
@@ -404,7 +404,7 @@ class TestPass2FailoverOnRetryableOther:
 
         with caplog.at_level(
             logging.INFO,
-            logger="code_indexer.global_repos.dependency_map_analyzer",
+            logger="cidx_depmap.server.dependency_map_analyzer",
         ):
             output = analyzer._invoke_pass2_dispatcher(
                 "Test prompt", _DEFAULT_PASS_TIMEOUT
@@ -471,7 +471,7 @@ class TestPass2DispatcherOutputAndSource:
         This guards against accidentally removing the warning.
         """
         import inspect
-        import code_indexer.global_repos.dependency_map_analyzer as mod
+        import cidx_depmap.server.dependency_map_analyzer as mod
 
         source = inspect.getsource(mod)
         assert "https://github.com/openai/codex/issues/16732" in source, (

@@ -12,7 +12,7 @@ from typing import Dict, Any
 from pathlib import Path
 import tempfile
 
-from code_indexer.api_clients.scip_client import (
+from cidx_scip.api_client import (
     SCIPAPIClient,
     SCIPQueryError,
     SCIPNotFoundError,

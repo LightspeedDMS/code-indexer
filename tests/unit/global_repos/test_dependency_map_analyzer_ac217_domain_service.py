@@ -22,7 +22,7 @@ from unittest.mock import Mock
 
 def _make_domain_service(golden_repos_dir: str):
     """Build DependencyMapDomainService with minimal mocks."""
-    from code_indexer.server.services.dependency_map_domain_service import (
+    from cidx_depmap.server.dependency_map_domain_service import (
         DependencyMapDomainService,
     )
 

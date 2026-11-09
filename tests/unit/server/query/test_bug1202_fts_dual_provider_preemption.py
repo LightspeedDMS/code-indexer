@@ -682,22 +682,10 @@ class TestAC7_EffectiveModeEcho:
                     return_value=(qur_return["results"], _fake_rerank_meta),
                 ),
                 patch(
-                    "code_indexer.server.mcp.handlers.search.repo_search._run_memory_retrieval",
-                    return_value=None,
-                ),
-                patch(
                     "code_indexer.server.mcp.handlers.search.repo_search._load_category_map",
                     return_value={},
                 ),
-                patch(
-                    "code_indexer.server.mcp.handlers.search.repo_search.get_config_service"
-                ) as mock_cfg_svc,
             ):
-                mock_mem_cfg = MagicMock()
-                mock_mem_cfg.memory_retrieval_enabled = False
-                mock_mem_cfg_obj = MagicMock()
-                mock_mem_cfg_obj.memory_retrieval_config = mock_mem_cfg
-                mock_cfg_svc.return_value.get_config.return_value = mock_mem_cfg_obj
                 response = search_code(
                     {"query_text": "authenticate", "search_mode": "fts", "limit": 5},
                     user,
@@ -867,9 +855,7 @@ def _ac4_patch_context(qur_return, truncation_meta):
       - app_module           : server app state / semantic_query_manager
       - _apply_search_truncation : leaf that produces (results, fts_meta) tuple
       - _mcp_reranking._apply_reranking_sync : reranker leaf (no reranking)
-      - _run_memory_retrieval: memory-retrieval leaf (disabled)
       - _load_category_map   : category enrichment leaf (empty)
-      - get_config_service   : config leaf (memory retrieval disabled)
 
     The real _apply_rerank_and_filter runs so its AC4 merge logic is exercised.
     """
@@ -879,10 +865,6 @@ def _ac4_patch_context(qur_return, truncation_meta):
         "rerank_time_ms": 0,
         "reranker_status": {"status": "disabled"},
     }
-    mock_mem_cfg = MagicMock()
-    mock_mem_cfg.memory_retrieval_enabled = False
-    mock_cfg_obj = MagicMock()
-    mock_cfg_obj.memory_retrieval_config = mock_mem_cfg
 
     with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
         mock_app.semantic_query_manager.query_user_repositories.return_value = (
@@ -901,18 +883,10 @@ def _ac4_patch_context(qur_return, truncation_meta):
                 return_value=(qur_return["results"], _base_rerank_meta),
             ),
             patch(
-                "code_indexer.server.mcp.handlers.search.repo_search._run_memory_retrieval",
-                return_value=None,
-            ),
-            patch(
                 "code_indexer.server.mcp.handlers.search.repo_search._load_category_map",
                 return_value={},
             ),
-            patch(
-                "code_indexer.server.mcp.handlers.search.repo_search.get_config_service"
-            ) as mock_cfg_svc,
         ):
-            mock_cfg_svc.return_value.get_config.return_value = mock_cfg_obj
             yield
 
 

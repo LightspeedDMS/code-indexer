@@ -44,6 +44,7 @@ from code_indexer.server.middleware.audit_request_context import (
     reset_audit_request_context,
 )
 from tests.unit.server.self_service_elevation_harness import build_stack, enforcement
+from tests.unit.server.app_state_patch import patch_app_state
 
 _ADMIN = "example-admin"
 _SUBJECT = "example-subject"
@@ -166,12 +167,12 @@ def env(tmp_path: Path, monkeypatch, home_in_tmp: Path) -> Iterator[_Env]:
     admin = stack.user_manager.create_user(_ADMIN, _PASSWORD, UserRole.ADMIN)
     subject = stack.user_manager.create_user(_SUBJECT, _PASSWORD, UserRole.NORMAL_USER)
     groups = GroupAccessManager(tmp_path / "groups.db")
-    monkeypatch.setattr(app_module.app.state, "group_manager", groups, raising=False)
+    patch_app_state(monkeypatch, app_module.app.state, "group_manager", groups)
 
     for store in bound_audit_store(tmp_path / "audit.db"):
         monkeypatch.setattr(password_audit_logger, "_audit_service", store.service)
-        monkeypatch.setattr(
-            app_module.app.state, "audit_service", store.service, raising=False
+        patch_app_state(
+            monkeypatch, app_module.app.state, "audit_service", store.service
         )
         app = FastAPI()
         app.add_middleware(AuditRequestContextMiddleware)

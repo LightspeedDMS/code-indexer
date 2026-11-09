@@ -26,7 +26,7 @@ class TestGetSmartContextTimeoutParameter:
 
     def test_get_smart_context_accepts_timeout_seconds(self, tmp_path: Path) -> None:
         """get_smart_context() must accept timeout_seconds keyword argument."""
-        from code_indexer.scip.query.composites import get_smart_context
+        from cidx_scip.query.composites import get_smart_context
 
         # Calling with timeout_seconds must not raise TypeError
         # (empty dir = empty result, no DB work done)
@@ -38,7 +38,7 @@ class TestGetSmartContextTimeoutParameter:
     ) -> None:
         """get_smart_context() must have a default timeout_seconds of 30."""
         import inspect
-        from code_indexer.scip.query.composites import get_smart_context
+        from cidx_scip.query.composites import get_smart_context
 
         sig = inspect.signature(get_smart_context)
         assert "timeout_seconds" in sig.parameters, (
@@ -53,7 +53,7 @@ class TestGetSmartContextTimeoutParameter:
         Simulates a slow query by making analyze_impact hang, then verifies
         get_smart_context returns within timeout_seconds (not hang forever).
         """
-        from code_indexer.scip.query.composites import get_smart_context
+        from cidx_scip.query.composites import get_smart_context
 
         # Create a fake .scip.db file so the function tries to do real work
         scip_dir = tmp_path / "repo" / ".code-indexer" / "scip"
@@ -66,7 +66,7 @@ class TestGetSmartContextTimeoutParameter:
             time.sleep(10)  # Much longer than timeout_seconds=1
 
         with patch(
-            "code_indexer.scip.query.composites.analyze_impact",
+            "cidx_scip.query.composites.analyze_impact",
             side_effect=slow_analyze_impact,
         ):
             start = time.monotonic()
@@ -82,8 +82,8 @@ class TestGetSmartContextTimeoutParameter:
 
     def test_get_smart_context_timeout_exception_type(self, tmp_path: Path) -> None:
         """get_smart_context() must raise a QueryTimeoutError on timeout."""
-        from code_indexer.scip.query.composites import get_smart_context
-        from code_indexer.scip.database.queries import QueryTimeoutError
+        from cidx_scip.query.composites import get_smart_context
+        from cidx_scip.database.queries import QueryTimeoutError
 
         scip_dir = tmp_path / "repo" / ".code-indexer" / "scip"
         scip_dir.mkdir(parents=True)
@@ -94,7 +94,7 @@ class TestGetSmartContextTimeoutParameter:
             time.sleep(10)
 
         with patch(
-            "code_indexer.scip.query.composites.analyze_impact",
+            "cidx_scip.query.composites.analyze_impact",
             side_effect=slow_analyze_impact,
         ):
             with pytest.raises(QueryTimeoutError):
@@ -104,7 +104,7 @@ class TestGetSmartContextTimeoutParameter:
         self, tmp_path: Path
     ) -> None:
         """get_smart_context() returns normally when query finishes within timeout."""
-        from code_indexer.scip.query.composites import (
+        from cidx_scip.query.composites import (
             get_smart_context,
             SmartContextResult,
         )
@@ -124,8 +124,8 @@ class TestSCIPQueryServiceContextTimeout:
         self, tmp_path: Path
     ) -> None:
         """SCIPQueryService.get_context() must forward timeout_seconds."""
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
-        from code_indexer.scip.query.composites import SmartContextResult
+        from cidx_scip.server.query_service import SCIPQueryService
+        from cidx_scip.query.composites import SmartContextResult
 
         golden_repos = tmp_path / "golden-repos"
         golden_repos.mkdir()
@@ -146,7 +146,7 @@ class TestSCIPQueryServiceContextTimeout:
                 service, "find_scip_files", return_value=["/fake/index.scip.db"]
             ),
             patch(
-                "code_indexer.scip.query.composites.get_smart_context",
+                "cidx_scip.query.composites.get_smart_context",
                 return_value=mock_result,
             ) as mock_ctx,
         ):
@@ -161,7 +161,7 @@ class TestSCIPQueryServiceContextTimeout:
     def test_get_context_default_timeout_is_30_seconds(self, tmp_path: Path) -> None:
         """SCIPQueryService.get_context() must default timeout_seconds=30."""
         import inspect
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from cidx_scip.server.query_service import SCIPQueryService
 
         sig = inspect.signature(SCIPQueryService.get_context)
         assert "timeout_seconds" in sig.parameters, (
@@ -174,8 +174,8 @@ class TestSCIPQueryServiceContextTimeout:
 
     def test_get_context_propagates_timeout_error(self, tmp_path: Path) -> None:
         """SCIPQueryService.get_context() must propagate timeout as exception."""
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
-        from code_indexer.scip.database.queries import QueryTimeoutError
+        from cidx_scip.server.query_service import SCIPQueryService
+        from cidx_scip.database.queries import QueryTimeoutError
 
         golden_repos = tmp_path / "golden-repos"
         golden_repos.mkdir()
@@ -187,7 +187,7 @@ class TestSCIPQueryServiceContextTimeout:
                 service, "find_scip_files", return_value=["/fake/index.scip.db"]
             ),
             patch(
-                "code_indexer.scip.query.composites.get_smart_context",
+                "cidx_scip.query.composites.get_smart_context",
                 side_effect=QueryTimeoutError("Query exceeded timeout limit"),
             ),
         ):
@@ -200,8 +200,8 @@ class TestScipContextHandlerTimeout:
 
     def test_scip_context_handler_returns_error_on_timeout(self) -> None:
         """scip_context MCP handler must return error dict (not hang) on timeout."""
-        from code_indexer.server.mcp.handlers import scip_context
-        from code_indexer.scip.database.queries import QueryTimeoutError
+        from cidx_scip.server.mcp.scip import scip_context
+        from cidx_scip.database.queries import QueryTimeoutError
         import json
 
         mock_user = MagicMock()
@@ -213,7 +213,7 @@ class TestScipContextHandlerTimeout:
         )
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            "cidx_scip.server.mcp.scip._get_scip_query_service",
             return_value=mock_service,
         ):
             response = scip_context({"symbol": "GoldenRepoManager"}, mock_user)
@@ -229,7 +229,7 @@ class TestScipContextHandlerTimeout:
 
     def test_scip_context_handler_passes_timeout_to_service(self) -> None:
         """scip_context handler must pass a timeout to service.get_context()."""
-        from code_indexer.server.mcp.handlers import scip_context
+        from cidx_scip.server.mcp.scip import scip_context
 
         mock_user = MagicMock()
         mock_user.username = "testuser"
@@ -245,7 +245,7 @@ class TestScipContextHandlerTimeout:
         }
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            "cidx_scip.server.mcp.scip._get_scip_query_service",
             return_value=mock_service,
         ):
             scip_context({"symbol": "Symbol"}, mock_user)

@@ -23,18 +23,18 @@ def _make_search_result(matches, read_capped: bool = False):
 @pytest.fixture
 def search_engine(tmp_path, monkeypatch):
     pytest.importorskip("tree_sitter_languages", reason="xray extras not installed")
-    from code_indexer.xray.search_engine import XRaySearchEngine
+    from cidx_xray.search_engine import XRaySearchEngine
 
     real_which = shutil.which
     monkeypatch.setattr(
-        "code_indexer.xray.search_engine.shutil.which",
+        "cidx_xray.search_engine.shutil.which",
         lambda cmd, *a, **kw: None if cmd == "rg" else real_which(cmd, *a, **kw),
     )
     return XRaySearchEngine()
 
 
 def _probe(search_engine, tmp_path, result):
-    with patch("code_indexer.xray.search_engine.RegexSearchService") as MockService:
+    with patch("cidx_xray.search_engine.RegexSearchService") as MockService:
         MockService.return_value.search = AsyncMock(return_value=result)
         return search_engine._probe_zero_match_patterns_content(tmp_path, ["**/*.py"])
 

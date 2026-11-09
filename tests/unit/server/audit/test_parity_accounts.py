@@ -44,6 +44,7 @@ from tests.unit.server.self_service_elevation_harness import (
     build_stack,
     enforcement,
 )
+from tests.unit.server.app_state_patch import patch_app_state
 
 _ADMIN = "example-admin"
 _OTHER = "example-other"
@@ -183,7 +184,7 @@ def env(tmp_path: Path, monkeypatch) -> Iterator[_Env]:
     groups = GroupAccessManager(tmp_path / "groups.db")
     monkeypatch.setattr(groups_router, "_group_manager", groups)
     monkeypatch.setattr(web_routes, "_get_group_manager", lambda: groups)
-    monkeypatch.setattr(app_module.app.state, "group_manager", groups, raising=False)
+    patch_app_state(monkeypatch, app_module.app.state, "group_manager", groups)
     monkeypatch.setattr(web_routes, "validate_login_csrf_token", lambda _r, _t: True)
 
     app = FastAPI()

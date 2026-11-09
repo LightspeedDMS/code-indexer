@@ -38,7 +38,7 @@ below is always against a guaranteed-untouched original, regardless of
 cross-file test execution order in a full suite run.
 """
 
-import code_indexer.server.mcp.handlers.xray as xray
+import cidx_xray.server.mcp.xray as xray
 
 from .test_cidx_meta_directory_tree_access import (
     TestDirectoryTreeCidxMetaAccessFiltering as _CulpritTestClass,

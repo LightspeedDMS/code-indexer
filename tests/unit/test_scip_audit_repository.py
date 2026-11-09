@@ -11,7 +11,7 @@ import tempfile
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
-from code_indexer.server.repositories.scip_audit import SCIPAuditRepository
+from cidx_scip.server.audit import SCIPAuditRepository
 
 
 class TestSCIPAuditRepository:
@@ -55,11 +55,13 @@ class TestSCIPAuditRepository:
             )
             indexes = [row[0] for row in cursor.fetchall()]
 
-            # Check for required indexes
-            assert "idx_timestamp" in indexes
-            assert "idx_repo_alias" in indexes
-            assert "idx_job_id" in indexes
-            assert "idx_project_language" in indexes
+            # Check for required indexes. Prefixed with the table since the
+            # cidx-scip feature (modular phase 4d) keeps the table in the
+            # server database, where index names are database-wide.
+            assert "idx_scip_audit_timestamp" in indexes
+            assert "idx_scip_audit_repo_alias" in indexes
+            assert "idx_scip_audit_job_id" in indexes
+            assert "idx_scip_audit_project_language" in indexes
 
     def test_create_audit_record_success(self, repository):
         """Test successful creation of audit record."""

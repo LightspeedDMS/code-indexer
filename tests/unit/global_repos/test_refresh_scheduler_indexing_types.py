@@ -29,6 +29,7 @@ from code_indexer.global_repos.cleanup_manager import CleanupManager
 from code_indexer.global_repos.global_registry import GlobalRegistry
 from code_indexer.config import ConfigManager
 from code_indexer.services.progress_subprocess_runner import IndexingSubprocessError
+from tests.unit.server._scip_feature import scip_pipeline_installed
 
 
 # ---------------------------------------------------------------------------
@@ -374,16 +375,244 @@ class TestTemporalIndexingInIndexSource:
             f"Got calls: {temporal_calls}"
         )
 
+    @pytest.mark.parametrize("backend", ["delegated", "unreadable"])
+    def test_temporal_indexing_skipped_where_the_repository_is_not_on_this_pod(
+        self, scheduler, registry, source_repo, monkeypatch, caplog, backend
+    ):
+        """
+        With LOCAL git, temporal indexing runs git log on this pod; on a pod
+        that does not hold the repository that fails, and the failure used to
+        fail the WHOLE refresh. It is skipped -- at ERROR, a lost feature -- and
+        the semantic index still runs. Not knowing the backend counts as not
+        holding it; not knowing the git backend counts as local.
+        """
+        import logging
+
+        from code_indexer.global_repos import refresh_scheduler as rs
+        from code_indexer.server.startup import content_backend_wiring as wiring
+
+        def unreadable() -> str:
+            raise RuntimeError("config service not initialised")
+
+        monkeypatch.setattr(
+            wiring,
+            "configured_content_backend_name",
+            (lambda: "delegated") if backend == "delegated" else unreadable,
+        )
+        monkeypatch.setattr(
+            rs,
+            "configured_git_backend_name",
+            (lambda: "local") if backend == "delegated" else unreadable,
+        )
+        registry.register_global_repo(
+            "mountless-temporal-test",
+            "mountless-temporal-test-global",
+            "https://git.example/mountless.git",
+            str(source_repo),
+            enable_temporal=True,
+        )
+        calls = []
+
+        def mock_popen_progress(**kwargs):
+            command = kwargs.get("command", [])
+            calls.append(list(command))
+            if "--fts" in command:
+                (Path(kwargs.get("cwd", "")) / ".code-indexer" / "index").mkdir(
+                    parents=True, exist_ok=True
+                )
+            return 50
+
+        with caplog.at_level(logging.ERROR):
+            with patch(
+                "code_indexer.services.progress_subprocess_runner.gather_repo_metrics",
+                return_value=(0, 0),
+            ):
+                with patch(
+                    "code_indexer.services.progress_subprocess_runner.run_with_popen_progress",
+                    side_effect=mock_popen_progress,
+                ):
+                    with patch(
+                        "subprocess.run",
+                        return_value=MagicMock(returncode=0, stdout="", stderr=""),
+                    ):
+                        scheduler._index_source(
+                            alias_name="mountless-temporal-test-global",
+                            source_path=str(source_repo),
+                        )
+
+        assert not [c for c in calls if "--index-commits" in c], calls
+        assert [c for c in calls if "--fts" in c], "the semantic index did not run"
+        assert any(
+            "Skipping temporal indexing" in r.getMessage() for r in caplog.records
+        )
+
+    def test_temporal_indexing_runs_through_the_git_seam_when_git_is_delegated(
+        self, scheduler, registry, source_repo, monkeypatch
+    ):
+        """With git delegated the temporal child reads the history through
+        the git service: it runs, carrying both seam flags, instead of being skipped."""
+        from code_indexer.global_repos import refresh_scheduler as rs
+        from code_indexer.server.startup import content_backend_wiring as wiring
+        from code_indexer.server.utils import index_command_layout as icl
+
+        for module in (wiring, icl):
+            monkeypatch.setattr(
+                module, "configured_content_backend_name", lambda: "delegated"
+            )
+        for module in (rs, icl):
+            monkeypatch.setattr(
+                module, "configured_git_backend_name", lambda: "delegated"
+            )
+        registry.register_global_repo(
+            "seam-temporal-test",
+            "seam-temporal-test-global",
+            "https://git.example/seam.git",
+            str(source_repo),
+            enable_temporal=True,
+        )
+        calls = []
+
+        def mock_popen_progress(**kwargs):
+            command = kwargs.get("command", [])
+            calls.append(list(command))
+            if "--fts" in command:
+                (Path(kwargs.get("cwd", "")) / ".code-indexer" / "index").mkdir(
+                    parents=True, exist_ok=True
+                )
+            return 50
+
+        with patch(
+            "code_indexer.services.progress_subprocess_runner.gather_repo_metrics",
+            return_value=(0, 0),
+        ):
+            with patch(
+                "code_indexer.services.progress_subprocess_runner.run_with_popen_progress",
+                side_effect=mock_popen_progress,
+            ):
+                with patch(
+                    "subprocess.run",
+                    return_value=MagicMock(returncode=0, stdout="", stderr=""),
+                ):
+                    scheduler._index_source(
+                        alias_name="seam-temporal-test-global",
+                        source_path=str(source_repo),
+                    )
+
+        temporal = [c for c in calls if "--index-commits" in c]
+        assert len(temporal) == 1, calls
+        assert "--git-backend=delegated" in temporal[0]
+        assert "--content-backend=delegated" in temporal[0]
+
+    @pytest.mark.parametrize(
+        "repo_url, delegated_flags",
+        [("local:///some/path", False), ("https://git.example/r.git", True)],
+    )
+    def test_a_local_repo_reads_the_pods_disk_on_a_delegated_server(
+        self, scheduler, registry, source_repo, monkeypatch, repo_url, delegated_flags
+    ):
+        """cidx-meta and other local:// repositories are written on this pod;
+        under --content-backend=delegated their refresh failed (seen on EKS)."""
+        from code_indexer.server.utils import index_command_layout as icl
+
+        monkeypatch.setattr(icl, "configured_content_backend_name", lambda: "delegated")
+        monkeypatch.setattr(icl, "configured_git_backend_name", lambda: "delegated")
+        registry.register_global_repo(
+            "podlocal-test", "podlocal-test-global", repo_url, str(source_repo)
+        )
+        commands = []
+
+        def mock_popen_progress(**kwargs):
+            command = kwargs.get("command", [])
+            commands.append(list(command))
+            if "--fts" in command:
+                (Path(kwargs.get("cwd", "")) / ".code-indexer" / "index").mkdir(
+                    parents=True, exist_ok=True
+                )
+            return 50
+
+        with patch(
+            "code_indexer.services.progress_subprocess_runner.gather_repo_metrics",
+            return_value=(0, 0),
+        ):
+            with patch(
+                "code_indexer.services.progress_subprocess_runner.run_with_popen_progress",
+                side_effect=mock_popen_progress,
+            ):
+                with patch(
+                    "subprocess.run",
+                    return_value=MagicMock(returncode=0, stdout="", stderr=""),
+                ):
+                    scheduler._index_source(
+                        alias_name="podlocal-test-global",
+                        source_path=str(source_repo),
+                    )
+
+        semantic = next(c for c in commands if "--fts" in c)
+        assert ("--content-backend=delegated" in semantic) is delegated_flags
+        assert ("--git-backend=delegated" in semantic) is delegated_flags
+
 
 # ---------------------------------------------------------------------------
 # Tests: SCIP indexing in _index_source() (C7)
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+def scip_index_type():
+    """The scip index type, as the enabled cidx-scip feature contributes it
+    (modular phase 4d: the pipeline builds SCIP only through its builder)."""
+    with scip_pipeline_installed():
+        yield
+
+
 class TestScipIndexingInIndexSource:
     """C7: SCIP indexing runs on source in _index_source(), not in _create_snapshot()."""
 
-    def test_scip_runs_on_source_when_enabled(self, scheduler, registry, source_repo):
+    def test_scip_skipped_without_the_scip_feature(
+        self, scheduler, registry, source_repo
+    ):
+        """No enabled feature builds SCIP indexes: enable_scip runs nothing."""
+        registry.register_global_repo(
+            "scip-absent",
+            "scip-absent-global",
+            "git@github.com:org/repo.git",
+            str(source_repo),
+            enable_scip=True,
+        )
+        scip_calls = []
+
+        def mock_run(cmd, **kwargs):
+            if cmd[:2] == ["cidx", "scip"]:
+                scip_calls.append(list(cmd))
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = ""
+            result.stderr = ""
+            return result
+
+        def mock_popen_progress(**kwargs):
+            cwd = kwargs.get("cwd", "")
+            (Path(cwd) / ".code-indexer" / "index").mkdir(parents=True, exist_ok=True)
+            return 50
+
+        with patch(
+            "code_indexer.services.progress_subprocess_runner.gather_repo_metrics",
+            return_value=(0, 0),
+        ):
+            with patch(
+                "code_indexer.services.progress_subprocess_runner.run_with_popen_progress",
+                side_effect=mock_popen_progress,
+            ):
+                with patch("subprocess.run", side_effect=mock_run):
+                    scheduler._index_source(
+                        alias_name="scip-absent-global",
+                        source_path=str(source_repo),
+                    )
+        assert scip_calls == []
+
+    def test_scip_runs_on_source_when_enabled(
+        self, scheduler, registry, source_repo, scip_index_type
+    ):
         """
         AC: cidx scip generate runs on source path when enable_scip=True.
 
@@ -487,7 +716,7 @@ class TestScipIndexingInIndexSource:
         )
 
     def test_scip_failure_surfaces_command_exit_code_and_stdout(
-        self, scheduler, registry, source_repo, tmp_path, monkeypatch
+        self, scheduler, registry, source_repo, tmp_path, monkeypatch, scip_index_type
     ):
         """A real failing SCIP child must retain all of its diagnostics."""
         registry.register_global_repo(

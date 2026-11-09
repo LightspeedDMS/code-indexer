@@ -17,9 +17,9 @@ import json
 from pathlib import Path
 from typing import List
 
-from code_indexer.server.services.dep_map_health_detector import DepMapHealthDetector
-from code_indexer.server.services.dep_map_index_regenerator import IndexRegenerator
-from code_indexer.server.services.dep_map_repair_executor import DepMapRepairExecutor
+from cidx_depmap.server.dep_map_health_detector import DepMapHealthDetector
+from cidx_depmap.server.dep_map_index_regenerator import IndexRegenerator
+from cidx_depmap.server.dep_map_repair_executor import DepMapRepairExecutor
 
 # ---------------------------------------------------------------------------
 # Fixture data

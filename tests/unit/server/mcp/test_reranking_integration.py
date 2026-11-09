@@ -51,10 +51,6 @@ def _patched_global_repo_env(rerank_meta: dict, fake_result):
             "code_indexer.server.mcp.handlers.search.repo_search._utils"
         ) as mock_utils,
         patch(
-            "code_indexer.server.mcp.handlers.search.repo_search.get_config_service",
-            return_value=_make_config_service_with_rerank(),
-        ),
-        patch(
             "code_indexer.server.mcp.handlers.search._shared._get_access_filtering_service",
             return_value=None,
         ),
@@ -200,22 +196,6 @@ class TestRerankingGuardNoOverhead:
 # ---------------------------------------------------------------------------
 
 
-def _make_config_service_with_rerank():
-    """Build a mock config_service with rerank config populated."""
-    from code_indexer.server.utils.config_manager import RerankConfig
-
-    rerank_cfg = RerankConfig(
-        voyage_reranker_model="rerank-2.5",
-        cohere_reranker_model="rerank-v3.5",
-        overfetch_multiplier=5,
-    )
-    config = MagicMock()
-    config.rerank_config = rerank_cfg
-    svc = MagicMock()
-    svc.get_config.return_value = config
-    return svc
-
-
 class TestSearchCodeHandlerRerankingWiring:
     """search_code handler passes code content extractor to _apply_reranking_sync."""
 
@@ -260,10 +240,6 @@ class TestSearchCodeHandlerRerankingWiring:
             patch(
                 "code_indexer.server.mcp.handlers.search.repo_search._utils"
             ) as mock_utils,
-            patch(
-                "code_indexer.server.mcp.handlers.search.repo_search.get_config_service",
-                return_value=_make_config_service_with_rerank(),
-            ),
             patch(
                 "code_indexer.server.mcp.handlers.search._shared._get_access_filtering_service",
                 return_value=None,
@@ -648,10 +624,6 @@ def _run_search_code_with_rerank_meta(rerank_meta: dict) -> dict:
         patch(
             "code_indexer.server.mcp.handlers.search.repo_search._utils"
         ) as mock_utils,
-        patch(
-            "code_indexer.server.mcp.handlers.search.repo_search.get_config_service",
-            return_value=_make_config_service_with_rerank(),
-        ),
         patch(
             "code_indexer.server.mcp.handlers.search._shared._get_access_filtering_service",
             return_value=None,

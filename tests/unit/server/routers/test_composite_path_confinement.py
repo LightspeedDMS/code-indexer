@@ -1,4 +1,3 @@
-# ruff: noqa: F811
 """Composite file doors confine the requested path to each component.
 
 A composite listing walks the caller's ``path`` inside every component; a
@@ -22,13 +21,18 @@ import pytest
 from tests.shared.cidx_meta_visibility_fixture import ADMIN_USER, ALPHA, CANARY
 from tests.shared.cidx_meta_visibility_fixture import RESTRICTED_USER
 from tests.unit.server.mcp.catalog_file_door_env import CatalogFileDoorEnv
-from tests.unit.server.routers.test_repo_files_meta_visibility import (  # noqa: F401
+from tests.unit.server.routers.test_repo_files_meta_visibility import (
     COMPOSITE,
     _get,
-    client,
-    composite,
-    env,
 )
+from tests.unit.server.routers import (
+    test_repo_files_meta_visibility as _test_repo_files_meta_visibility,
+)
+
+# Shared fixtures (pytest finds them as module attributes).
+client = _test_repo_files_meta_visibility.client
+composite = _test_repo_files_meta_visibility.composite
+env = _test_repo_files_meta_visibility.env
 
 PLAIN = "plain"
 BRAVO = "bravo"

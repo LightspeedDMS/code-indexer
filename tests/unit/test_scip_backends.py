@@ -49,9 +49,9 @@ def _build_two_method_call_chain_db(tmp_path: Path) -> Path:
     ID and be removed by DatabaseBackend.trace_call_chain's self-loop
     guard before the query is ever reached).
     """
-    from code_indexer.scip.database.builder import ROLE_DEFINITION
-    from code_indexer.scip.database.builder import SCIPDatabaseBuilder
-    from code_indexer.scip.protobuf import scip_pb2
+    from cidx_scip.database.builder import ROLE_DEFINITION
+    from cidx_scip.database.builder import SCIPDatabaseBuilder
+    from cidx_scip.protobuf import scip_pb2
 
     index = scip_pb2.Index()
     caller = "python test `caller`/Caller#run()."
@@ -88,7 +88,7 @@ class TestDatabaseBackend:
 
     def test_database_backend_initialization(self, db_fixture_path):
         """Should initialize DatabaseBackend with database connection."""
-        from code_indexer.scip.query.backends import DatabaseBackend
+        from cidx_scip.query.backends import DatabaseBackend
 
         backend = DatabaseBackend(db_fixture_path)
 
@@ -98,8 +98,8 @@ class TestDatabaseBackend:
 
     def test_database_backend_find_definition(self, db_fixture_path):
         """Should find symbol definitions using database queries."""
-        from code_indexer.scip.query.backends import DatabaseBackend
-        from code_indexer.scip.query.primitives import QueryResult
+        from cidx_scip.query.backends import DatabaseBackend
+        from cidx_scip.query.primitives import QueryResult
 
         backend = DatabaseBackend(db_fixture_path)
 
@@ -115,8 +115,8 @@ class TestDatabaseBackend:
 
     def test_database_backend_find_references(self, db_fixture_path):
         """Should find symbol references using database queries."""
-        from code_indexer.scip.query.backends import DatabaseBackend
-        from code_indexer.scip.query.primitives import QueryResult
+        from cidx_scip.query.backends import DatabaseBackend
+        from cidx_scip.query.primitives import QueryResult
 
         backend = DatabaseBackend(db_fixture_path)
 
@@ -138,8 +138,8 @@ class TestDatabaseBackend:
         This test verifies the fix that enables LIKE pattern matching in the
         database query when exact=False.
         """
-        from code_indexer.scip.query.backends import DatabaseBackend
-        from code_indexer.scip.query.primitives import QueryResult
+        from cidx_scip.query.backends import DatabaseBackend
+        from cidx_scip.query.primitives import QueryResult
 
         backend = DatabaseBackend(db_fixture_path)
 
@@ -158,8 +158,8 @@ class TestDatabaseBackend:
 
     def test_database_backend_get_dependencies(self, db_fixture_path):
         """Should find symbol dependencies using database queries."""
-        from code_indexer.scip.query.backends import DatabaseBackend
-        from code_indexer.scip.query.primitives import QueryResult
+        from cidx_scip.query.backends import DatabaseBackend
+        from cidx_scip.query.primitives import QueryResult
 
         backend = DatabaseBackend(db_fixture_path)
 
@@ -173,8 +173,8 @@ class TestDatabaseBackend:
 
     def test_database_backend_get_dependents(self, db_fixture_path):
         """Should find symbol dependents using database queries."""
-        from code_indexer.scip.query.backends import DatabaseBackend
-        from code_indexer.scip.query.primitives import QueryResult
+        from cidx_scip.query.backends import DatabaseBackend
+        from cidx_scip.query.primitives import QueryResult
 
         backend = DatabaseBackend(db_fixture_path)
 
@@ -196,7 +196,7 @@ class TestDatabaseBackend:
 
         This tests Issue #3 from Story #603 code review (backends.py line 264).
         """
-        from code_indexer.scip.query.backends import DatabaseBackend
+        from cidx_scip.query.backends import DatabaseBackend
 
         backend = DatabaseBackend(db_fixture_path)
 
@@ -220,13 +220,13 @@ class TestDatabaseBackend:
         failure instead of an indistinguishable "no chains found".
         """
         from unittest.mock import patch
-        from code_indexer.scip.query.backends import DatabaseBackend
+        from cidx_scip.query.backends import DatabaseBackend
 
         db_path = _build_two_method_call_chain_db(tmp_path)
         backend = DatabaseBackend(db_path)
 
         with patch(
-            "code_indexer.scip.database.queries.trace_call_chain_v2_batched",
+            "cidx_scip.database.queries.trace_call_chain_v2_batched",
             return_value=([], "Query exceeded 30-second timeout."),
         ) as mock_query:
             timeout_errors: list = []
@@ -256,7 +256,7 @@ class TestDatabaseBackend:
         When trace_call_chain() is called
         Then results contain CallChain objects with path, length, has_cycle
         """
-        from code_indexer.scip.query.backends import DatabaseBackend, CallChain
+        from cidx_scip.query.backends import DatabaseBackend, CallChain
 
         backend = DatabaseBackend(db_fixture_path)
 
@@ -287,7 +287,7 @@ class TestDatabaseBackend:
         Then it should complete in <1 second (not 4+ seconds from redundant expansion)
         """
         import time
-        from code_indexer.scip.query.backends import DatabaseBackend
+        from cidx_scip.query.backends import DatabaseBackend
 
         # Get project root dynamically
         project_root = Path(__file__).resolve().parent.parent.parent
@@ -328,7 +328,7 @@ class TestDatabaseBackend:
         Then it should complete in <1 second
         """
         import time
-        from code_indexer.scip.query.backends import DatabaseBackend
+        from cidx_scip.query.backends import DatabaseBackend
 
         # Get project root dynamically
         project_root = Path(__file__).resolve().parent.parent.parent
@@ -397,8 +397,8 @@ def _build_minimal_scip_db(tmp_path: Path, source_lines: list) -> tuple:
       - _DEF_LINE: definition of MyClass (role=DEFINITION)
       - _REF_LINE: reference  of MyClass (role=REFERENCE)
     """
-    from code_indexer.scip.database.builder import SCIPDatabaseBuilder
-    from code_indexer.scip.protobuf import scip_pb2
+    from cidx_scip.database.builder import SCIPDatabaseBuilder
+    from cidx_scip.protobuf import scip_pb2
 
     # Write the actual source file
     project_root = tmp_path / "project"
@@ -444,7 +444,7 @@ class TestContextFieldBug662:
     @_requires_proc_fd
     def test_find_definition_context_is_populated(self, tmp_path: Path):
         """find_definition() must return context populated from source file."""
-        from code_indexer.scip.query.backends import DatabaseBackend
+        from cidx_scip.query.backends import DatabaseBackend
 
         db_path, project_root = _build_minimal_scip_db(tmp_path, _FIXTURE_SOURCE_LINES)
 
@@ -462,7 +462,7 @@ class TestContextFieldBug662:
     @_requires_proc_fd
     def test_find_references_context_is_populated(self, tmp_path: Path):
         """find_references() must return context populated from source file."""
-        from code_indexer.scip.query.backends import DatabaseBackend
+        from cidx_scip.query.backends import DatabaseBackend
 
         db_path, project_root = _build_minimal_scip_db(tmp_path, _FIXTURE_SOURCE_LINES)
 
@@ -480,7 +480,7 @@ class TestContextFieldBug662:
     @pytest.mark.timeout(60)
     def test_find_definition_context_matches_correct_line(self, tmp_path: Path):
         """context field value must be the exact source line at the reported line."""
-        from code_indexer.scip.query.backends import DatabaseBackend
+        from cidx_scip.query.backends import DatabaseBackend
 
         custom_lines = ["class MyClass:  # annotated version", "MyClass()"]
         db_path, project_root = _build_minimal_scip_db(tmp_path, custom_lines)
@@ -496,7 +496,7 @@ class TestContextFieldBug662:
 
     def test_find_definition_context_graceful_on_missing_source(self, tmp_path: Path):
         """When source file is missing, context stays None (no crash)."""
-        from code_indexer.scip.query.backends import DatabaseBackend
+        from cidx_scip.query.backends import DatabaseBackend
 
         db_path, project_root = _build_minimal_scip_db(tmp_path, _FIXTURE_SOURCE_LINES)
 
@@ -515,7 +515,7 @@ class TestContextFieldBug662:
 
     def test_find_definition_no_project_root_context_is_none(self, tmp_path: Path):
         """When project_root is empty string, context stays None (no crash)."""
-        from code_indexer.scip.query.backends import DatabaseBackend
+        from cidx_scip.query.backends import DatabaseBackend
 
         db_path, _ = _build_minimal_scip_db(tmp_path, _FIXTURE_SOURCE_LINES)
 
@@ -549,8 +549,8 @@ class TestImmutableVersionedSnapshotReadOnly1616:
         chmod that directory (and the db file) read-only on disk -- mirroring
         the real filesystem permissions of a versioned snapshot.
         """
-        from code_indexer.scip.database.builder import SCIPDatabaseBuilder
-        from code_indexer.scip.protobuf import scip_pb2
+        from cidx_scip.database.builder import SCIPDatabaseBuilder
+        from cidx_scip.protobuf import scip_pb2
 
         snapshot_root = (
             tmp_path / "golden" / ".versioned" / "scipprobe" / "v_1234567890"
@@ -598,7 +598,7 @@ class TestImmutableVersionedSnapshotReadOnly1616:
         (no pending migration write) and successfully answer a real query,
         instead of raising 'attempt to write a readonly database'.
         """
-        from code_indexer.scip.query.backends import DatabaseBackend
+        from cidx_scip.query.backends import DatabaseBackend
 
         db_path = self._build_snapshot_scip_db(tmp_path)
         snapshot_root = db_path.parents[2]  # .../.versioned/scipprobe/v_1234567890
@@ -624,7 +624,7 @@ class TestImmutableVersionedSnapshotReadOnly1616:
         lucky -- a direct write attempt must still raise, proving this
         isn't a fluke of on-disk file permissions alone.
         """
-        from code_indexer.scip.query.backends import DatabaseBackend
+        from cidx_scip.query.backends import DatabaseBackend
 
         db_path = self._build_snapshot_scip_db(tmp_path)
         snapshot_root = db_path.parents[2]
@@ -643,9 +643,9 @@ class TestImmutableVersionedSnapshotReadOnly1616:
         the Story #609 index-creation migration on first open -- the fix
         must not disable this for the writable/CLI path.
         """
-        from code_indexer.scip.query.backends import DatabaseBackend
-        from code_indexer.scip.database.builder import SCIPDatabaseBuilder
-        from code_indexer.scip.protobuf import scip_pb2
+        from cidx_scip.query.backends import DatabaseBackend
+        from cidx_scip.database.builder import SCIPDatabaseBuilder
+        from cidx_scip.protobuf import scip_pb2
 
         index = scip_pb2.Index()
         sym_info = index.external_symbols.add()
@@ -693,8 +693,8 @@ class TestDatabaseBackendNonVersionedPathSkipsServerImport1616Followup:
     @staticmethod
     def _build_plain_scip_db(tmp_path: Path) -> Path:
         """Build a real, non-versioned (plain) .scip.db via SCIPDatabaseBuilder."""
-        from code_indexer.scip.database.builder import SCIPDatabaseBuilder
-        from code_indexer.scip.protobuf import scip_pb2
+        from cidx_scip.database.builder import SCIPDatabaseBuilder
+        from cidx_scip.protobuf import scip_pb2
 
         index = scip_pb2.Index()
         sym_info = index.external_symbols.add()
@@ -723,7 +723,7 @@ class TestDatabaseBackendNonVersionedPathSkipsServerImport1616Followup:
 import sys, json
 sys.path.insert(0, {_SRC_ROOT!r})
 from pathlib import Path
-from code_indexer.scip.query.backends import DatabaseBackend
+from cidx_scip.query.backends import DatabaseBackend
 backend = DatabaseBackend(Path({str(db_path)!r}))
 print(json.dumps({{
     "starlette": "starlette" in sys.modules,
@@ -765,7 +765,7 @@ print(json.dumps({{
             tmp_path
         )
 
-        from code_indexer.scip.query.backends import DatabaseBackend
+        from cidx_scip.query.backends import DatabaseBackend
 
         snapshot_root = db_path.parents[2]
         backend = DatabaseBackend(db_path, project_root=str(snapshot_root))

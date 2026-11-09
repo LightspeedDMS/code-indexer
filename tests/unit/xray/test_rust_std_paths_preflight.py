@@ -6,7 +6,7 @@ from typing import Optional
 
 import pytest
 
-from code_indexer.xray.sandbox import validate_rust_evaluator
+from cidx_xray.sandbox import validate_rust_evaluator
 
 _ENTRY = "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { Vec::new() }\n"
 

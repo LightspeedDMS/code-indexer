@@ -30,7 +30,7 @@ import pytest
 
 
 def _import_resolve_evaluator_code():
-    from code_indexer.server.mcp.handlers.xray import _resolve_evaluator_code
+    from cidx_xray.server.mcp.xray import _resolve_evaluator_code
 
     return _resolve_evaluator_code
 
@@ -75,7 +75,7 @@ class TestDefaultEvaluatorIsOptIn:
         """The two MCP handlers that genuinely document this fallback
         (xray_search, xray_explore) must still get it when they pass
         allow_default_evaluator=True."""
-        from code_indexer.server.mcp.handlers.xray import _DEFAULT_EVALUATOR_CODE
+        from cidx_xray.server.mcp.xray import _DEFAULT_EVALUATOR_CODE
 
         resolve = _import_resolve_evaluator_code()
 

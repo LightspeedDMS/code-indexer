@@ -197,7 +197,7 @@ def test_xray_never_reads_git_resolving_symlinks(
 def test_graph_candidates_never_include_git_resolving_symlinks(app: Any) -> None:
     """analyze_graph's candidate walk (the files handed to the graph
     extractor) skips files resolving into .git, keeps legitimate links."""
-    from code_indexer.server.mcp.handlers.xray_graph import (
+    from cidx_xray.server.mcp.xray_graph import (
         _collect_graph_candidate_files,
     )
 
@@ -219,7 +219,7 @@ def test_graph_candidates_never_include_git_resolving_symlinks(app: Any) -> None
 def wiki(app: Any, activation: str) -> Dict[str, str]:
     """Wiki enabled on the golden repository and on the user's activation;
     returns the two URL prefixes."""
-    from code_indexer.server.wiki import routes as wiki_routes
+    from cidx_wiki.server import routes as wiki_routes
 
     app.state.golden_repo_manager.set_wiki_enabled(REPO, True)
     app.state.activated_repo_manager.set_wiki_enabled(USER, activation, True)
@@ -275,7 +275,7 @@ def test_wiki_never_serves_a_page_cached_before_the_rule(
 ) -> None:
     """A page cached for a .git-resolving path (e.g. before this rule
     existed) is never served."""
-    from code_indexer.server.wiki.wiki_cache import WikiCache
+    from cidx_wiki.server.wiki_cache import WikiCache
 
     cache = WikiCache(app.state.golden_repo_manager.db_path)
     cache.ensure_tables()

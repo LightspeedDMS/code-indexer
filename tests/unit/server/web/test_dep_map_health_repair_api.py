@@ -9,7 +9,7 @@ Test strategy:
   Uses real FastAPI test client with real app (same pattern as test_dependency_map_routes.py).
   Admin session obtained via form-based login (CSRF token flow).
   Mocking used only at the service layer boundary (_get_dep_map_output_dir,
-  _get_dep_map_service_from_state) to isolate endpoint logic from filesystem/state.
+  the running service in the feature slot) to isolate endpoint logic from filesystem/state.
 
 All 5 tests map to Story #342 AC requirements.
 """
@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
+from tests.unit.server._depmap_feature import depmap_service_installed
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -61,7 +62,10 @@ def app():
     cross-test contamination.
     """
     from code_indexer.server.app import app as _app
-    from code_indexer.server.web.dependency_map_routes import dependency_map_router
+    from tests.unit.server._depmap_feature import ensure_depmap_routes
+
+    ensure_depmap_routes(_app)
+    from cidx_depmap.server.web.routes import dependency_map_router
 
     original_overrides = dict(_app.dependency_overrides)
     _bypass_elevation(_app, dependency_map_router)
@@ -127,7 +131,7 @@ class TestHealthEndpoint:
         make_healthy_output_dir(tmp_path)
 
         with patch(
-            "code_indexer.server.web.dependency_map_routes._get_dep_map_output_dir",
+            "cidx_depmap.server.web.routes._get_dep_map_output_dir",
             return_value=tmp_path,
         ):
             response = client.get(
@@ -169,7 +173,7 @@ class TestRepairEndpoint:
     @pytest.fixture(autouse=True)
     def elevation_bypass(self, app):
         """Bypass elevation check for all repair endpoint tests."""
-        from code_indexer.server.web.dependency_map_routes import dependency_map_router
+        from cidx_depmap.server.web.routes import dependency_map_router
 
         _bypass_elevation(app, dependency_map_router)
         yield
@@ -191,12 +195,9 @@ class TestRepairEndpoint:
         mock_service.is_available.return_value = True
 
         with (
+            depmap_service_installed(mock_service),
             patch(
-                "code_indexer.server.web.dependency_map_routes._get_dep_map_service_from_state",
-                return_value=mock_service,
-            ),
-            patch(
-                "code_indexer.server.web.dependency_map_routes._get_dep_map_output_dir",
+                "cidx_depmap.server.web.routes._get_dep_map_output_dir",
                 return_value=tmp_path,
             ),
         ):
@@ -238,12 +239,9 @@ class TestRepairEndpoint:
         mock_service.is_available.return_value = False
 
         with (
+            depmap_service_installed(mock_service),
             patch(
-                "code_indexer.server.web.dependency_map_routes._get_dep_map_service_from_state",
-                return_value=mock_service,
-            ),
-            patch(
-                "code_indexer.server.web.dependency_map_routes._get_dep_map_output_dir",
+                "cidx_depmap.server.web.routes._get_dep_map_output_dir",
                 return_value=tmp_path,
             ),
         ):
@@ -304,15 +302,15 @@ class TestJobStatusPartialAnomalyDetails:
 
         with (
             patch(
-                "code_indexer.server.web.dependency_map_routes._get_dep_map_output_dir",
+                "cidx_depmap.server.web.routes._get_dep_map_output_dir",
                 return_value=tmp_path,
             ),
             patch(
-                "code_indexer.server.web.dependency_map_routes._get_known_repo_names",
+                "cidx_depmap.server.web.routes._get_known_repo_names",
                 return_value=None,
             ),
             patch(
-                "code_indexer.server.web.dependency_map_routes._get_dashboard_cache_backend",
+                "cidx_depmap.server.web.routes._get_dashboard_cache_backend",
                 return_value=mock_cache,
             ),
         ):
@@ -340,11 +338,11 @@ class TestJobStatusPartialAnomalyDetails:
 
         with (
             patch(
-                "code_indexer.server.web.dependency_map_routes._get_dep_map_output_dir",
+                "cidx_depmap.server.web.routes._get_dep_map_output_dir",
                 return_value=tmp_path,
             ),
             patch(
-                "code_indexer.server.web.dependency_map_routes._get_known_repo_names",
+                "cidx_depmap.server.web.routes._get_known_repo_names",
                 return_value=None,
             ),
         ):
@@ -375,16 +373,16 @@ class TestJobStatusPartialAnomalyDetails:
 
         with (
             patch(
-                "code_indexer.server.web.dependency_map_routes._get_dep_map_output_dir",
+                "cidx_depmap.server.web.routes._get_dep_map_output_dir",
                 return_value=tmp_path,
             ),
             patch(
                 # Inject a known repo that is not covered by any domain
-                "code_indexer.server.web.dependency_map_routes._get_known_repo_names",
+                "cidx_depmap.server.web.routes._get_known_repo_names",
                 return_value={"repo-alpha", "repo-beta", "uncovered-service"},
             ),
             patch(
-                "code_indexer.server.web.dependency_map_routes._get_dashboard_cache_backend",
+                "cidx_depmap.server.web.routes._get_dashboard_cache_backend",
                 return_value=mock_cache,
             ),
         ):

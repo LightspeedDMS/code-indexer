@@ -108,42 +108,46 @@ def _patched_xray_env(
     with (
         patch("code_indexer.server.mcp.handlers._utils.app_module", mock_app),
         patch(
-            "code_indexer.server.mcp.handlers.xray._search._resolve_repo_path",
+            "cidx_xray.server.mcp.xray._search._resolve_repo_path",
             return_value="/fake/repo/path",
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
+            "cidx_xray.server.mcp.xray._explore._resolve_repo_path",
             return_value="/fake/repo/path",
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._search._get_background_job_manager",
+            "cidx_xray.server.mcp.xray._search._get_background_job_manager",
             return_value=mock_bjm,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._explore._get_background_job_manager",
+            "cidx_xray.server.mcp.xray._explore._get_background_job_manager",
             return_value=mock_bjm,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._search._get_job_tracker",
+            "cidx_xray.server.mcp.xray._search._get_job_tracker",
             return_value=mock_job_tracker,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._explore._get_job_tracker",
+            "cidx_xray.server.mcp.xray._explore._get_job_tracker",
             return_value=mock_job_tracker,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._search._get_xray_executor",
+            "cidx_xray.server.mcp.xray._search._get_xray_executor",
             return_value=mock_xray_executor,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._explore._get_xray_executor",
+            "cidx_xray.server.mcp.xray._infra._get_xray_executor",
             return_value=mock_xray_executor,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._search.validate_rust_evaluator"
+            "cidx_xray.server.mcp.xray._explore._get_xray_executor",
+            return_value=mock_xray_executor,
+        ),
+        patch(
+            "cidx_xray.server.mcp.xray._search.validate_rust_evaluator"
         ) as mock_validate,
         patch(
-            "code_indexer.server.mcp.handlers.xray._explore.validate_rust_evaluator"
+            "cidx_xray.server.mcp.xray._explore.validate_rust_evaluator"
         ) as mock_validate_explore,
         patch("asyncio.get_running_loop") as mock_loop,
     ):
@@ -165,7 +169,7 @@ class TestAwaitSecondsMaxCapped:
 
     def test_await_seconds_max_is_at_most_45(self):
         """_AWAIT_SECONDS_MAX must be <= 45.0 (Bug #1070 AC: cap from 120.0)."""
-        from code_indexer.server.mcp.handlers.xray import _AWAIT_SECONDS_MAX
+        from cidx_xray.server.mcp.xray import _AWAIT_SECONDS_MAX
 
         assert _AWAIT_SECONDS_MAX <= 45.0, (
             f"_AWAIT_SECONDS_MAX must be <= 45.0 to avoid ALB 60s timeout 504s, "
@@ -174,7 +178,7 @@ class TestAwaitSecondsMaxCapped:
 
     def test_await_seconds_max_is_exactly_45(self):
         """_AWAIT_SECONDS_MAX must be exactly 45.0 per Bug #1070 spec."""
-        from code_indexer.server.mcp.handlers.xray import _AWAIT_SECONDS_MAX
+        from cidx_xray.server.mcp.xray import _AWAIT_SECONDS_MAX
 
         assert _AWAIT_SECONDS_MAX == 45.0, (
             f"Expected _AWAIT_SECONDS_MAX == 45.0, got {_AWAIT_SECONDS_MAX}"
@@ -195,7 +199,7 @@ class TestHandlersAreAsync:
         Protocol dispatches async handlers directly on the event loop,
         avoiding run_in_executor and the _mcp_executor thread pool.
         """
-        from code_indexer.server.mcp.handlers.xray import handle_xray_search
+        from cidx_xray.server.mcp.xray import handle_xray_search
 
         assert asyncio.iscoroutinefunction(handle_xray_search), (
             "handle_xray_search must be an async def coroutine function.\n"
@@ -205,7 +209,7 @@ class TestHandlersAreAsync:
 
     def test_handle_xray_explore_is_coroutine_function(self):
         """asyncio.iscoroutinefunction(handle_xray_explore) must be True."""
-        from code_indexer.server.mcp.handlers.xray import handle_xray_explore
+        from cidx_xray.server.mcp.xray import handle_xray_explore
 
         assert asyncio.iscoroutinefunction(handle_xray_explore), (
             "handle_xray_explore must be an async def coroutine function.\n"
@@ -232,7 +236,7 @@ class TestXrayDoesNotUseBjmWorkerPool:
         user = _make_user(UserRole.NORMAL_USER)
 
         with _patched_xray_env(success_future_count=1) as (mock_bjm, _jt, _xe, _loop):
-            from code_indexer.server.mcp.handlers.xray import handle_xray_search
+            from cidx_xray.server.mcp.xray import handle_xray_search
 
             await handle_xray_search(VALID_SEARCH_PARAMS.copy(), user)
 
@@ -244,7 +248,7 @@ class TestXrayDoesNotUseBjmWorkerPool:
         user = _make_user(UserRole.NORMAL_USER)
 
         with _patched_xray_env(success_future_count=1) as (mock_bjm, _jt, _xe, _loop):
-            from code_indexer.server.mcp.handlers.xray import handle_xray_explore
+            from cidx_xray.server.mcp.xray import handle_xray_explore
 
             await handle_xray_explore(VALID_EXPLORE_PARAMS.copy(), user)
 
@@ -276,7 +280,7 @@ class TestXrayConcurrentSameRepoNoConflict:
         with _patched_xray_env(
             mock_job_tracker=mock_job_tracker, success_future_count=3
         ) as (_bjm, _jt, _xe, _loop):
-            from code_indexer.server.mcp.handlers.xray import handle_xray_search
+            from cidx_xray.server.mcp.xray import handle_xray_search
 
             results = await asyncio.gather(
                 handle_xray_search(VALID_SEARCH_PARAMS.copy(), user),
@@ -316,7 +320,7 @@ class TestXrayConcurrentSameRepoNoConflict:
         with _patched_xray_env(
             mock_job_tracker=mock_job_tracker, success_future_count=3
         ) as (_bjm, _jt, _xe, _loop):
-            from code_indexer.server.mcp.handlers.xray import handle_xray_explore
+            from cidx_xray.server.mcp.xray import handle_xray_explore
 
             results = await asyncio.gather(
                 handle_xray_explore(VALID_EXPLORE_PARAMS.copy(), user),
@@ -354,7 +358,7 @@ class TestXrayModuleLevelAccessors:
 
     def test_get_job_tracker_function_exists(self):
         """xray.py must expose _get_job_tracker() for JobTracker access."""
-        import code_indexer.server.mcp.handlers.xray as xray_mod
+        import cidx_xray.server.mcp.xray as xray_mod
 
         assert hasattr(xray_mod, "_get_job_tracker"), (
             "xray.py must have _get_job_tracker() for JobTracker access"
@@ -363,7 +367,7 @@ class TestXrayModuleLevelAccessors:
 
     def test_get_xray_executor_function_exists(self):
         """xray.py must expose _get_xray_executor() for executor access."""
-        import code_indexer.server.mcp.handlers.xray as xray_mod
+        import cidx_xray.server.mcp.xray as xray_mod
 
         assert hasattr(xray_mod, "_get_xray_executor"), (
             "xray.py must have _get_xray_executor() for ThreadPoolExecutor access"
@@ -372,7 +376,7 @@ class TestXrayModuleLevelAccessors:
 
     def test_set_xray_executor_function_exists(self):
         """xray.py must expose set_xray_executor() called from lifespan."""
-        import code_indexer.server.mcp.handlers.xray as xray_mod
+        import cidx_xray.server.mcp.xray as xray_mod
 
         assert hasattr(xray_mod, "set_xray_executor"), (
             "xray.py must have set_xray_executor() to allow lifespan injection"
@@ -430,7 +434,7 @@ class TestXrayRegisterJobNullRepoAlias:
         self, handler_name: str, params: Dict[str, Any]
     ) -> None:
         """Both xray handlers must call register_job with repo_alias explicitly None."""
-        import code_indexer.server.mcp.handlers.xray as xray_mod
+        import cidx_xray.server.mcp.xray as xray_mod
 
         user = _make_user(UserRole.NORMAL_USER)
         mock_jt = MagicMock()

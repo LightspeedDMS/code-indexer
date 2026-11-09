@@ -37,8 +37,8 @@ _STUB_MODULES = [
     "rich.traceback",
     "rich.logging",
     "pathspec",
-    "code_indexer.scip.protobuf.scip_pb2",
-    "code_indexer.scip.protobuf",
+    "cidx_scip.protobuf.scip_pb2",
+    "cidx_scip.protobuf",
     "numpy",
     "msgpack",
 ]

@@ -14,10 +14,10 @@ from __future__ import annotations
 
 import pytest
 
-from code_indexer.server.services.xray_graph_governor.cache_governor_bridge import (
+from code_indexer.server.services.governed_cache_composite import (
     CompositeLRUCache,
 )
-from code_indexer.server.services.xray_graph_governor.cache_proxy import (
+from cidx_xray.server.graph_governor.cache_proxy import (
     GraphWireFileHandle,
     XrayGraphCacheProxy,
 )

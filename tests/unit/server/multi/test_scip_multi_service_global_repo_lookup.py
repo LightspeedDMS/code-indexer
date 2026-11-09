@@ -30,7 +30,7 @@ class TestGetRepositoryPathBugFix:
 
         This test reads the source code to verify correct classes are used.
         """
-        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+        from cidx_scip.server.multi_service import SCIPMultiService
 
         service = SCIPMultiService()
 
@@ -62,7 +62,7 @@ class TestGetRepositoryPathBugFix:
 
         Users pass global repo names like "example-repo-global", so we need 'alias_name' lookup.
         """
-        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+        from cidx_scip.server.multi_service import SCIPMultiService
 
         service = SCIPMultiService()
 
@@ -81,7 +81,7 @@ class TestGetRepositoryPathBugFix:
         The old error message says "not found in registry" which is confusing
         since users work with global repos (alias_name ending in -global).
         """
-        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+        from cidx_scip.server.multi_service import SCIPMultiService
 
         service = SCIPMultiService()
 
@@ -103,7 +103,7 @@ class TestGetRepositoryPathFunctional:
 
         This tests the CORRECT behavior after the fix.
         """
-        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+        from cidx_scip.server.multi_service import SCIPMultiService
 
         service = SCIPMultiService()
 
@@ -126,7 +126,7 @@ class TestGetRepositoryPathFunctional:
                 return_value=mock_alias_manager_instance,
             ),
             patch(
-                "code_indexer.server.multi.scip_multi_service._get_golden_repos_dir",
+                "cidx_scip.server.multi_service._get_golden_repos_dir",
                 return_value=str(tmp_path / "golden-repos"),
             ),
         ):
@@ -147,7 +147,7 @@ class TestGetRepositoryPathFunctional:
         """
         _get_repository_path should raise FileNotFoundError with 'global repositories' message.
         """
-        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+        from cidx_scip.server.multi_service import SCIPMultiService
 
         service = SCIPMultiService()
 
@@ -158,7 +158,7 @@ class TestGetRepositoryPathFunctional:
         with (
             patch("code_indexer.server.app.app") as mock_fastapi_app,
             patch(
-                "code_indexer.server.multi.scip_multi_service._get_golden_repos_dir",
+                "cidx_scip.server.multi_service._get_golden_repos_dir",
                 return_value=str(tmp_path / "golden-repos"),
             ),
         ):
@@ -177,7 +177,7 @@ class TestGetRepositoryPathFunctional:
         """
         _get_repository_path should raise FileNotFoundError when alias exists but has no target.
         """
-        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+        from cidx_scip.server.multi_service import SCIPMultiService
 
         service = SCIPMultiService()
 
@@ -196,7 +196,7 @@ class TestGetRepositoryPathFunctional:
                 return_value=mock_alias_manager_instance,
             ),
             patch(
-                "code_indexer.server.multi.scip_multi_service._get_golden_repos_dir",
+                "cidx_scip.server.multi_service._get_golden_repos_dir",
                 return_value=str(tmp_path / "golden-repos"),
             ),
         ):
@@ -216,7 +216,7 @@ class TestGetRepositoryPathFunctional:
         """
         _get_repository_path should raise FileNotFoundError when target path doesn't exist.
         """
-        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+        from cidx_scip.server.multi_service import SCIPMultiService
 
         service = SCIPMultiService()
 
@@ -238,7 +238,7 @@ class TestGetRepositoryPathFunctional:
                 return_value=mock_alias_manager_instance,
             ),
             patch(
-                "code_indexer.server.multi.scip_multi_service._get_golden_repos_dir",
+                "cidx_scip.server.multi_service._get_golden_repos_dir",
                 return_value=str(tmp_path / "golden-repos"),
             ),
         ):
@@ -275,7 +275,7 @@ class TestGetScipFileForRepoExceptionHandling:
         must propagate through _get_scip_file_for_repo so the proper error
         message ("not found in global repositories") reaches the user.
         """
-        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+        from cidx_scip.server.multi_service import SCIPMultiService
 
         service = SCIPMultiService()
 
@@ -286,7 +286,7 @@ class TestGetScipFileForRepoExceptionHandling:
         with (
             patch("code_indexer.server.app.app") as mock_fastapi_app,
             patch(
-                "code_indexer.server.multi.scip_multi_service._get_golden_repos_dir",
+                "cidx_scip.server.multi_service._get_golden_repos_dir",
                 return_value=str(tmp_path / "golden-repos"),
             ),
         ):
@@ -307,7 +307,7 @@ class TestGetScipFileForRepoExceptionHandling:
         _get_scip_file_for_repo should still catch non-FileNotFoundError exceptions
         and return None (e.g., permission errors, I/O errors).
         """
-        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+        from cidx_scip.server.multi_service import SCIPMultiService
 
         service = SCIPMultiService()
 

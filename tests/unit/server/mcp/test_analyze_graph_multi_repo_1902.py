@@ -32,13 +32,13 @@ import pytest
 
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.services.config_service import get_config_service
-from code_indexer.xray.rust_backend import _XRAY_CLI_DEFAULT
+from cidx_xray.rust_backend import resolve_xray_cli_path
 
 
 def _require_xray_cli_binary() -> None:
-    if not _XRAY_CLI_DEFAULT.exists():
+    if not resolve_xray_cli_path().exists():
         pytest.skip(
-            f"xray-cli binary not built at {_XRAY_CLI_DEFAULT}; "
+            f"xray-cli binary not built at {resolve_xray_cli_path()}; "
             "run 'cargo build --release' inside rust/ to enable this test."
         )
 
@@ -57,7 +57,7 @@ def _parse_response(result: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _import_handler():
-    from code_indexer.server.mcp.handlers.xray_graph import handle_analyze_graph
+    from cidx_xray.server.mcp.xray_graph import handle_analyze_graph
 
     return handle_analyze_graph
 
@@ -97,7 +97,7 @@ VALID_PARAMS: Dict[str, Any] = {
 
 
 _GUARD_ACCESS_SERVICE = (
-    "code_indexer.server.mcp.handlers.xray._catalog_guard.xray_access_service"
+    "cidx_xray.server.mcp.xray._catalog_guard.xray_access_service"
 )
 
 
@@ -124,9 +124,7 @@ async def test_empty_list_alias_returns_repository_alias_required() -> None:
     return empty success"."""
     handler = _import_handler()
     params = {**VALID_PARAMS, "repository_alias": []}
-    with patch(
-        "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path"
-    ) as mock_resolve:
+    with patch("cidx_xray.server.mcp.xray_graph._resolve_repo_path") as mock_resolve:
         result = await handler(params, _make_user())
     mock_resolve.assert_not_called()
     assert _parse_response(result)["error"] == "repository_alias_required"
@@ -138,9 +136,7 @@ async def test_list_with_non_string_element_returns_invalid_params() -> None:
     as invalid_params, never coerced or silently dropped."""
     handler = _import_handler()
     params = {**VALID_PARAMS, "repository_alias": ["real-repo", 123]}
-    with patch(
-        "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path"
-    ) as mock_resolve:
+    with patch("cidx_xray.server.mcp.xray_graph._resolve_repo_path") as mock_resolve:
         result = await handler(params, _make_user())
     mock_resolve.assert_not_called()
     assert _parse_response(result)["error"] == "invalid_params"
@@ -161,9 +157,7 @@ async def test_repo_count_cap_exceeded_rejected_before_resolution() -> None:
     handler = _import_handler()
     aliases = [f"repo-{i}" for i in range(cap + 1)]
     params = {**VALID_PARAMS, "repository_alias": aliases}
-    with patch(
-        "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path"
-    ) as mock_resolve:
+    with patch("cidx_xray.server.mcp.xray_graph._resolve_repo_path") as mock_resolve:
         result = await handler(params, _make_user())
     mock_resolve.assert_not_called()
     assert _parse_response(result)["error"] == "repo_count_cap_exceeded"
@@ -184,7 +178,7 @@ async def test_malformed_json_like_string_treated_as_literal_alias_not_a_list() 
     params = {**VALID_PARAMS, "repository_alias": malformed}
     with patch(_GUARD_ACCESS_SERVICE, lambda: _AccessService(admin=True)):
         with patch(
-            "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path",
+            "cidx_xray.server.mcp.xray_graph._resolve_repo_path",
             return_value=None,
         ) as mock_resolve:
             result = await handler(params, _make_user())
@@ -204,7 +198,7 @@ async def test_malformed_json_like_string_refused_for_restricted_caller() -> Non
     params = {**VALID_PARAMS, "repository_alias": malformed}
     with patch(_GUARD_ACCESS_SERVICE, lambda: _AccessService(admin=False)):
         with patch(
-            "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path",
+            "cidx_xray.server.mcp.xray_graph._resolve_repo_path",
             return_value=None,
         ) as mock_resolve:
             result = await handler(params, _make_user())
@@ -230,7 +224,7 @@ async def test_bare_string_alias_takes_single_repo_path_unchanged() -> None:
         "fact_graph_complete": True,
     }
     with patch(
-        "code_indexer.server.mcp.handlers.xray_graph._run_analyze_graph_pipeline",
+        "cidx_xray.server.mcp.xray_graph._run_analyze_graph_pipeline",
         new=AsyncMock(return_value=canned),
     ) as mock_pipeline:
         result = await handler(dict(VALID_PARAMS), _make_user())
@@ -261,7 +255,7 @@ async def test_single_element_list_collapses_to_single_repo_path() -> None:
     }
     params = {**VALID_PARAMS, "repository_alias": ["myrepo-global"]}
     with patch(
-        "code_indexer.server.mcp.handlers.xray_graph._run_analyze_graph_pipeline",
+        "cidx_xray.server.mcp.xray_graph._run_analyze_graph_pipeline",
         new=AsyncMock(return_value=canned),
     ) as mock_pipeline:
         result = await handler(params, _make_user())
@@ -300,7 +294,7 @@ async def test_two_repo_list_runs_pipeline_per_repo_with_unambiguous_attribution
         "evaluator_code": _evaluator_for("cross_repo_probe"),
     }
     with patch(
-        "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path",
+        "cidx_xray.server.mcp.xray_graph._resolve_repo_path",
         side_effect=lambda alias: alias_to_path.get(alias),
     ):
         result = await handler(params, _make_user())
@@ -341,7 +335,7 @@ async def test_json_encoded_two_repo_list_matches_native_list_shape(
         "evaluator_code": _evaluator_for("json_form_probe"),
     }
     with patch(
-        "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path",
+        "cidx_xray.server.mcp.xray_graph._resolve_repo_path",
         side_effect=lambda alias: alias_to_path.get(alias),
     ):
         result = await handler(params, _make_user())
@@ -372,7 +366,7 @@ async def test_mixed_valid_and_unknown_alias_list_reports_per_repo_error(
         "evaluator_code": _evaluator_for("mixed_probe"),
     }
     with patch(
-        "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path",
+        "cidx_xray.server.mcp.xray_graph._resolve_repo_path",
         side_effect=lambda alias: alias_to_path.get(alias),
     ):
         result = await handler(params, _make_user())
@@ -414,7 +408,7 @@ async def test_timeout_seconds_passed_full_not_divided_per_alias() -> None:
     handler = _import_handler()
     canned = {"ok": True, "status": "ran_ok", "findings": [], "refine": []}
     with patch(
-        "code_indexer.server.mcp.handlers.xray_graph._run_analyze_graph_pipeline",
+        "cidx_xray.server.mcp.xray_graph._run_analyze_graph_pipeline",
         new=AsyncMock(return_value=canned),
     ) as mock_pipeline:
         params = {
@@ -454,7 +448,7 @@ async def test_duplicate_aliases_deduped_before_analysis() -> None:
     handler = _import_handler()
     canned = {"ok": True, "status": "ran_ok", "findings": [], "refine": []}
     with patch(
-        "code_indexer.server.mcp.handlers.xray_graph._run_analyze_graph_pipeline",
+        "cidx_xray.server.mcp.xray_graph._run_analyze_graph_pipeline",
         new=AsyncMock(return_value=canned),
     ) as mock_pipeline:
         params = {
@@ -480,16 +474,14 @@ async def test_empty_string_element_in_list_returns_repository_alias_required() 
     a different error code/shape for the identical mistake."""
     handler = _import_handler()
     params = {**VALID_PARAMS, "repository_alias": [""]}
-    with patch(
-        "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path"
-    ) as mock_resolve:
+    with patch("cidx_xray.server.mcp.xray_graph._resolve_repo_path") as mock_resolve:
         result = await handler(params, _make_user())
     mock_resolve.assert_not_called()
     assert _parse_response(result)["error"] == "repository_alias_required"
 
     params_mixed = {**VALID_PARAMS, "repository_alias": ["real-repo", ""]}
     with patch(
-        "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path"
+        "cidx_xray.server.mcp.xray_graph._resolve_repo_path"
     ) as mock_resolve_mixed:
         result_mixed = await handler(params_mixed, _make_user())
     mock_resolve_mixed.assert_not_called()
@@ -521,11 +513,9 @@ async def test_evaluator_validation_hoisted_to_single_top_level_error() -> None:
         "evaluator_code": unsafe_evaluator,
     }
     with (
+        patch("cidx_xray.server.mcp.xray_graph._resolve_repo_path") as mock_resolve,
         patch(
-            "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path"
-        ) as mock_resolve,
-        patch(
-            "code_indexer.server.mcp.handlers.xray_graph._run_analyze_graph_pipeline"
+            "cidx_xray.server.mcp.xray_graph._run_analyze_graph_pipeline"
         ) as mock_pipeline,
     ):
         result = await handler(params, _make_user())
@@ -564,7 +554,7 @@ async def test_bounded_error_payload_truncates_and_preserves_repository_alias() 
     }
     handler = _import_handler()
     with patch(
-        "code_indexer.server.mcp.handlers.xray_graph._run_analyze_graph_pipeline",
+        "cidx_xray.server.mcp.xray_graph._run_analyze_graph_pipeline",
         new=AsyncMock(return_value=canned_error),
     ):
         params = {

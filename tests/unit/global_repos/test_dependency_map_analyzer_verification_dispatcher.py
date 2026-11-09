@@ -21,7 +21,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from code_indexer.global_repos.dependency_map_analyzer import DependencyMapAnalyzer
+from cidx_depmap.server.dependency_map_analyzer import DependencyMapAnalyzer
 from code_indexer.server.services.intelligence_cli_invoker import InvocationResult
 
 _DEFAULT_PASS_TIMEOUT = 600
@@ -122,7 +122,7 @@ def test_verification_builds_dispatcher_with_codex_when_enabled(tmp_path: Path):
 
     with (
         patch(
-            "code_indexer.global_repos.dependency_map_analyzer.get_config_service"
+            "cidx_depmap.server.dependency_map_analyzer.get_config_service"
         ) as mock_get_cfg,
         patch.dict("os.environ", {"CODEX_HOME": codex_home}),
     ):
@@ -148,7 +148,7 @@ def test_verification_builds_claude_only_when_codex_disabled(tmp_path: Path):
     config = _make_mock_config(codex_enabled=False)
 
     with patch(
-        "code_indexer.global_repos.dependency_map_analyzer.get_config_service"
+        "cidx_depmap.server.dependency_map_analyzer.get_config_service"
     ) as mock_get_cfg:
         mock_svc = MagicMock()
         mock_svc.get_config.return_value = config

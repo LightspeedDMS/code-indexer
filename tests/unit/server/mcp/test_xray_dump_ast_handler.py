@@ -40,7 +40,7 @@ def _parse_response(result: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _import_handler():
-    from code_indexer.server.mcp.handlers.xray import handle_xray_dump_ast
+    from cidx_xray.server.mcp.xray import handle_xray_dump_ast
 
     return handle_xray_dump_ast
 
@@ -68,7 +68,7 @@ class TestXrayDumpAstHandlerValidFile:
         }
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._dump_ast._resolve_repo_path",
+            "cidx_xray.server.mcp.xray._dump_ast._resolve_repo_path",
             return_value=str(tmp_path),
         ):
             handler = _import_handler()
@@ -94,7 +94,7 @@ class TestXrayDumpAstHandlerValidFile:
         }
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._dump_ast._resolve_repo_path",
+            "cidx_xray.server.mcp.xray._dump_ast._resolve_repo_path",
             return_value=str(tmp_path),
         ):
             handler = _import_handler()
@@ -123,7 +123,7 @@ class TestXrayDumpAstHandlerValidFile:
         }
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._dump_ast._resolve_repo_path",
+            "cidx_xray.server.mcp.xray._dump_ast._resolve_repo_path",
             return_value=str(tmp_path),
         ):
             handler = _import_handler()
@@ -152,7 +152,7 @@ class TestXrayDumpAstHandlerErrors:
         }
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._dump_ast._resolve_repo_path",
+            "cidx_xray.server.mcp.xray._dump_ast._resolve_repo_path",
             return_value=str(tmp_path),
         ):
             handler = _import_handler()
@@ -174,7 +174,7 @@ class TestXrayDumpAstHandlerErrors:
         }
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._dump_ast._resolve_repo_path",
+            "cidx_xray.server.mcp.xray._dump_ast._resolve_repo_path",
             return_value=str(tmp_path),
         ):
             handler = _import_handler()
@@ -198,7 +198,7 @@ class TestXrayDumpAstHandlerErrors:
         }
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._dump_ast._resolve_repo_path",
+            "cidx_xray.server.mcp.xray._dump_ast._resolve_repo_path",
             return_value=str(tmp_path),
         ):
             handler = _import_handler()
@@ -216,7 +216,7 @@ class TestXrayDumpAstHandlerErrors:
         }
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._dump_ast._resolve_repo_path",
+            "cidx_xray.server.mcp.xray._dump_ast._resolve_repo_path",
             return_value=None,
         ):
             handler = _import_handler()
@@ -267,7 +267,7 @@ class TestXrayDumpAstHandlerAuth:
         }
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._dump_ast._resolve_repo_path",
+            "cidx_xray.server.mcp.xray._dump_ast._resolve_repo_path",
             return_value=str(tmp_path),
         ):
             handler = _import_handler()

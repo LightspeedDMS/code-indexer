@@ -33,13 +33,20 @@ _SRC = _REPO_ROOT / "src" / "code_indexer"
 _DECISION_PATH_FILES = [
     "server/mcp/handlers/repos.py",
     "server/mcp/handlers/_provider_job_paths.py",
-    "server/services/scip_query_service.py",
-    "server/services/dependency_map_service.py",
+    # DependencyMapService's read-path resolution moved here (modular 4g).
+    "server/services/cidx_meta_read_mirror.py",
     "server/services/query_path_cache.py",
     "server/mcp/handlers/_legacy.py",
     "global_repos/refresh_scheduler.py",
     "server/repositories/golden_repo_manager.py",
     "global_repos/cleanup_manager.py",
+]
+
+# The same rule for the feature distributions' decision paths (SCIP's query
+# service moved into cidx-scip in modular phase 4d), relative to the repo root.
+_FEATURE_DECISION_PATH_FILES = [
+    "packages/features/cidx-depmap/src/cidx_depmap/server/dependency_map_service.py",
+    "packages/features/cidx-scip/src/cidx_scip/server/query_service.py",
 ]
 
 # Matches a membership/decision test on the literal ``.versioned`` string:
@@ -83,8 +90,10 @@ def _offending_lines(path: Path) -> list[tuple[int, str]]:
 def test_no_versioned_substring_decision_in_consumer_paths():
     """No ``".versioned" in`` membership decision survives in any consumer path."""
     violations: dict[str, list[tuple[int, str]]] = {}
-    for rel in _DECISION_PATH_FILES:
-        path = _SRC / rel
+    paths = [(rel, _SRC / rel) for rel in _DECISION_PATH_FILES] + [
+        (rel, _REPO_ROOT / rel) for rel in _FEATURE_DECISION_PATH_FILES
+    ]
+    for rel, path in paths:
         assert path.exists(), f"decision-path file missing: {path}"
         hits = _offending_lines(path)
         if hits:

@@ -86,6 +86,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from tests.utils.perf_artifact_paths import perf_artifact_path
+from tests.unit.server.app_state_patch import patch_app_state
 
 if TYPE_CHECKING:
     from code_indexer.server.services.diagnostics_service import (
@@ -1640,8 +1641,8 @@ def _regex_dispatch_app(
 
     golden_repos_dir = tmp_path / "golden-repos"
     _build_regex_corpus(golden_repos_dir / _REGEX_REPO_ALIAS)
-    monkeypatch.setattr(
-        app_module.app.state, "golden_repos_dir", str(golden_repos_dir), raising=False
+    patch_app_state(
+        monkeypatch, app_module.app.state, "golden_repos_dir", str(golden_repos_dir)
     )
 
     observer = _PrefilterObserver()
@@ -2005,10 +2006,10 @@ def _omni_regex_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     resolver's ``_is_git_repo`` check looks for -- regex search reads the working
     tree, so no commits are involved), a real ``AliasManager`` pointer file per
     repo (the resolver's first-priority lookup), real ripgrep, and the real
-    response formatting.  The only stand-ins are the two registry lookups a live
+    response formatting.  The only stand-ins are the registry lookups a live
     server would answer from its database: the global-repo listing that wildcard
-    expansion enumerates, and the access-filtering service (absent, i.e. no
-    restriction).
+    expansion enumerates, each repo's registry row, and the access-filtering
+    service (absent, i.e. no restriction).
     """
     import code_indexer.server.app as app_module
     from code_indexer.global_repos.alias_manager import AliasManager
@@ -2029,8 +2030,8 @@ def _omni_regex_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
             )
         alias_manager.create_alias(f"{alias}-global", str(repo_root), repo_name=alias)
 
-    monkeypatch.setattr(
-        app_module.app.state, "golden_repos_dir", str(golden_repos_dir), raising=False
+    patch_app_state(
+        monkeypatch, app_module.app.state, "golden_repos_dir", str(golden_repos_dir)
     )
     monkeypatch.setattr(
         _utils,
@@ -2038,6 +2039,21 @@ def _omni_regex_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         lambda: [{"alias_name": f"{alias}-global"} for alias in _OMNI_REPO_ALIASES],
     )
     monkeypatch.setattr(_utils, "_get_access_filtering_service", lambda: None)
+    # The per-repo registry row (Bug #1315's index_path fallback) is the third
+    # registry lookup a live server answers from its database; without it the
+    # resolver reached for app.state.backend_registry, which only existed when
+    # an earlier test in the run had built the full app.
+    rows = {
+        f"{alias}-global": {
+            "alias_name": f"{alias}-global",
+            "index_path": str(golden_repos_dir / alias),
+        }
+        for alias in _OMNI_REPO_ALIASES
+    }
+    from code_indexer.server.mcp.handlers import _legacy
+
+    monkeypatch.setattr(_utils, "_get_global_repo", rows.get)
+    monkeypatch.setattr(_legacy, "_get_global_repo", rows.get)
 
 
 @pytest.mark.asyncio

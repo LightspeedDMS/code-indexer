@@ -139,12 +139,22 @@ class TestRefreshSchedulerBackgroundJobManagerIntegration:
 
         scheduler._submit_refresh_job("test-repo-global")
 
+        # metadata= is what makes the row pod-pull work-stealable; `func` stays
+        # as the local-pool fallback for solo/sqlite. Asserted with the exact
+        # kwargs (not ANY for metadata) because submit_job's pod-pull branch
+        # falls through SILENTLY when metadata is None -- the migration would
+        # then be a no-op with nothing to notice it by.
         mock_background_job_manager.submit_job.assert_called_once_with(
             operation_type="global_repo_refresh",
             func=ANY,
             submitter_username="system",
             is_admin=True,
             repo_alias="test-repo-global",
+            metadata={
+                "alias_name": "test-repo-global",
+                "force_reset": False,
+                "submitter_username": "system",
+            },
         )
 
     def test_submit_refresh_job_lambda_executes_correctly(
@@ -173,8 +183,12 @@ class TestRefreshSchedulerBackgroundJobManagerIntegration:
             call_args = mock_background_job_manager.submit_job.call_args
             submitted_func = call_args.kwargs["func"]
 
-            # Execute the lambda
-            submitted_func()
+            # Execute the lambda. issue-66113: the worker declares a `job_id`
+            # parameter that BackgroundJobManager._execute_job injects from the
+            # dequeued job tuple (race-free, replacing the removed mutable holder);
+            # simulate that injection and assert job_id is forwarded to
+            # _execute_refresh.
+            submitted_func(job_id="job-abc")
 
             # Verify _execute_refresh was called with correct alias.
             # The worker runs under the job submit_job already claimed,
@@ -185,7 +199,7 @@ class TestRefreshSchedulerBackgroundJobManagerIntegration:
                 progress_callback=None,
                 tracked_by_caller=True,
                 cancel_check=None,
-                job_id=None,
+                job_id="job-abc",
             )
 
     def test_execute_refresh_raises_exception_on_timeout(

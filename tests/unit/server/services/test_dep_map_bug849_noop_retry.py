@@ -18,8 +18,8 @@ from unittest.mock import Mock, patch as _patch
 
 import pytest
 
-from code_indexer.global_repos.dependency_map_analyzer import _DELTA_NOOP
-from code_indexer.server.services.dependency_map_service import (
+from cidx_depmap.server.dependency_map_analyzer import _DELTA_NOOP
+from cidx_depmap.server.dependency_map_service import (
     MAX_DOMAIN_RETRIES,
     DependencyMapService,
     _DomainUpdateResult,
@@ -243,7 +243,7 @@ def real_svc_env(tmp_path, config):
 
     Returns (real_svc, dep_map_dir).
     """
-    from code_indexer.global_repos.dependency_map_analyzer import DependencyMapAnalyzer
+    from cidx_depmap.server.dependency_map_analyzer import DependencyMapAnalyzer
     from code_indexer.server.services.cli_dispatcher import CliDispatcher
     from code_indexer.server.services.claude_invoker import ClaudeInvoker
 

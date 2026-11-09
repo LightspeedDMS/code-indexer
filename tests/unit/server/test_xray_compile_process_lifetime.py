@@ -26,8 +26,8 @@ from unittest.mock import patch
 
 import pytest
 
-from code_indexer.xray import rust_backend
-from code_indexer.xray.rust_backend import RustNativeBackend, _XRAY_CLI_DEFAULT
+from cidx_xray import rust_backend
+from cidx_xray.rust_backend import RustNativeBackend, _XRAY_CLI_DEFAULT
 
 _MARKER_ENV = "CIDX_TEST_XRAY_JOB_MARKER"
 _WAIT_FOR_RUSTC_SECONDS = 30.0
@@ -127,7 +127,7 @@ class _Job:
 
 
 def _free_compile_slots() -> int:
-    return rust_backend._compile_semaphore._value  # type: ignore[attr-defined]
+    return int(getattr(rust_backend._compile_semaphore, "_value"))
 
 
 def test_server_timeout_leaves_no_process_of_the_job(

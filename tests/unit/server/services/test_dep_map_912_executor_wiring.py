@@ -22,8 +22,8 @@ from pathlib import Path
 from typing import List
 from unittest.mock import MagicMock, patch
 
-from code_indexer.server.services.dep_map_repair_executor import DepMapRepairExecutor
-from code_indexer.server.services.dep_map_health_detector import HealthReport
+from cidx_depmap.server.dep_map_repair_executor import DepMapRepairExecutor
+from cidx_depmap.server.dep_map_health_detector import HealthReport
 from code_indexer.server.services.dep_map_parser_hygiene import (
     AnomalyEntry,
     AnomalyType,
@@ -137,7 +137,7 @@ def test_bidirectional_mismatch_anomalies_trigger_audit(tmp_path):
     anomaly = _make_bidi_anomaly("src", "tgt")
 
     with patch(
-        "code_indexer.server.services.dep_map_repair_executor.DepMapMCPParser"
+        "cidx_depmap.server.dep_map_repair_executor.DepMapMCPParser"
     ) as MockParser:
         mock_instance = MockParser.return_value
         mock_instance.get_cross_domain_graph_with_channels.return_value = (
@@ -165,7 +165,7 @@ def test_build_repair_executor_wires_invoke_llm_fn(tmp_path):
     """
     from code_indexer.server.services.cli_dispatcher import CliDispatcher
     from code_indexer.server.services.intelligence_cli_invoker import InvocationResult
-    from code_indexer.server.web.dependency_map_routes import _build_repair_executor
+    from cidx_depmap.server.web.routes import _build_repair_executor
 
     fake_manager = MagicMock()
     fake_manager.get_actual_repo_path = lambda alias: str(tmp_path / alias)
@@ -255,7 +255,7 @@ def test_bidirectional_pass_skipped_when_flag_false(tmp_path):
     anomaly = _make_bidi_anomaly("src", "tgt")
 
     with patch(
-        "code_indexer.server.services.dep_map_repair_executor.DepMapMCPParser"
+        "cidx_depmap.server.dep_map_repair_executor.DepMapMCPParser"
     ) as MockParser:
         mock_instance = MockParser.return_value
         mock_instance.get_cross_domain_graph_with_channels.return_value = (
@@ -282,10 +282,7 @@ def test_no_bare_except_exception_in_bidi_modules():
 
     services_dir = (
         pathlib.Path(__file__).parent.parent.parent.parent.parent
-        / "src"
-        / "code_indexer"
-        / "server"
-        / "services"
+        / "packages/features/cidx-depmap/src/cidx_depmap/server"
     )
     modules = [
         "dep_map_repair_bidirectional.py",
@@ -363,7 +360,7 @@ def test_run_phase37_routes_through_shim(tmp_path):
     anomaly = _make_bidi_anomaly("src", "tgt")
 
     with patch(
-        "code_indexer.server.services.dep_map_repair_executor.DepMapMCPParser"
+        "cidx_depmap.server.dep_map_repair_executor.DepMapMCPParser"
     ) as MockParser:
         mock_instance = MockParser.return_value
         mock_instance.get_cross_domain_graph_with_channels.return_value = (

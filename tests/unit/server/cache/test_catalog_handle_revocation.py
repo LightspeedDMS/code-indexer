@@ -196,7 +196,7 @@ def _mcp_get_cached(handle: str) -> Dict[str, Any]:
 
 
 def _mcp_fetch_payload(handle: str) -> Dict[str, Any]:
-    from code_indexer.server.mcp.handlers.xray._cached_payload import (
+    from code_indexer.server.mcp.handlers.cached_payload import (
         handle_cidx_fetch_cached_payload,
     )
 

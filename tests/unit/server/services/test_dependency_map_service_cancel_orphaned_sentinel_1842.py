@@ -25,7 +25,7 @@ Uses a REAL SharedJobSentinel (Messi Rule #1 anti-mock).
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from code_indexer.server.services.dependency_map_service import (
+from cidx_depmap.server.dependency_map_service import (
     ANALYSIS_STALE_TIMEOUT_SECONDS,
     DependencyMapService,
 )

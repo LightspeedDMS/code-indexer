@@ -8,7 +8,7 @@ instead of run_pass_3_index (Claude-based Pass 3).
 
 from unittest.mock import Mock, patch
 
-from code_indexer.server.services.dependency_map_service import DependencyMapService
+from cidx_depmap.server.dependency_map_service import DependencyMapService
 
 
 def _make_service_for_finalize(tmp_path):

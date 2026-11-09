@@ -44,7 +44,7 @@ def _mock_status_tracker():
 
 
 def _get_command(command_name):
-    from code_indexer.cli_scip import scip_dependencies, scip_dependents
+    from cidx_scip.cli import scip_dependencies, scip_dependents
 
     return {"dependencies": scip_dependencies, "dependents": scip_dependents}[
         command_name
@@ -58,9 +58,9 @@ def _invoke(command_name, engine_method, symbol, depth):
     setattr(mock_engine, engine_method, Mock(return_value=[]))
 
     with (
-        patch("code_indexer.scip.query.SCIPQueryEngine", return_value=mock_engine),
+        patch("cidx_scip.query.SCIPQueryEngine", return_value=mock_engine),
         patch(
-            "code_indexer.scip.status.StatusTracker",
+            "cidx_scip.status.StatusTracker",
             return_value=_mock_status_tracker(),
         ),
     ):

@@ -16,22 +16,18 @@ from datetime import datetime
 import pytest
 
 from code_indexer.server.repositories.background_jobs import JobStatus
-from code_indexer.server.utils.config_manager import ServerConfig
 
 
-from code_indexer.server.services.workspace_cleanup_service import (
+from cidx_scip.server.workspace_cleanup import (
     WorkspaceCleanupService,
 )
 
 
 @pytest.fixture
-def server_config(tmp_path):
-    """Create test server configuration."""
-    server_dir = tmp_path / "server"
-    server_dir.mkdir()
-    config = ServerConfig(server_dir=str(server_dir))
-    config.scip_workspace_retention_days = 7
-    return config
+def retention_days():
+    """The workspace retention the service is built with (the feature's
+    ``scip_workspace_retention_days`` setting)."""
+    return 7
 
 
 @pytest.fixture
@@ -52,19 +48,32 @@ def workspace_root(tmp_path):
 class TestWorkspaceCleanupServiceAC2:
     """AC2: Periodic Cleanup Job tests."""
 
-    def test_cleanup_service_initializes_with_config(self, server_config, job_manager):
+    def test_cleanup_service_initializes_with_config(self, retention_days, job_manager):
         """
-        Given a ServerConfig and BackgroundJobManager
+        Given a retention and BackgroundJobManager
         When WorkspaceCleanupService is initialized
-        Then it should store retention_days from config
+        Then it should keep retention_days
         """
-        service = WorkspaceCleanupService(config=server_config, job_manager=job_manager)
+        service = WorkspaceCleanupService(
+            retention_days=retention_days, job_manager=job_manager
+        )
 
         assert service.retention_days == 7
         assert service.job_manager is job_manager
 
+    def test_cleanup_service_without_retention_reads_the_setting(
+        self, job_manager, monkeypatch
+    ):
+        """No retention given: the scip feature's setting, here its default
+        (feature not started), or the environment override."""
+        monkeypatch.delenv("CIDX_SCIP_WORKSPACE_RETENTION_DAYS", raising=False)
+        service = WorkspaceCleanupService(job_manager=job_manager)
+        assert service.retention_days == 7
+        monkeypatch.setenv("CIDX_SCIP_WORKSPACE_RETENTION_DAYS", "3")
+        assert service.retention_days == 3
+
     def test_scan_workspaces_finds_all_workspace_directories(
-        self, server_config, job_manager, workspace_root
+        self, retention_days, job_manager, workspace_root
     ):
         """
         Given multiple workspace directories exist
@@ -81,7 +90,7 @@ class TestWorkspaceCleanupServiceAC2:
             ws.mkdir()
 
         service = WorkspaceCleanupService(
-            config=server_config,
+            retention_days=retention_days,
             job_manager=job_manager,
             workspace_root=str(workspace_root),
         )
@@ -97,7 +106,7 @@ class TestWorkspaceCleanupServiceAC2:
         assert "other-directory" not in workspace_names
 
     def test_is_workspace_expired_checks_creation_time(
-        self, server_config, job_manager, workspace_root
+        self, retention_days, job_manager, workspace_root
     ):
         """
         Given workspace directories with different ages
@@ -117,7 +126,7 @@ class TestWorkspaceCleanupServiceAC2:
         os.utime(recent_ws, (recent_time, recent_time))
 
         service = WorkspaceCleanupService(
-            config=server_config,
+            retention_days=retention_days,
             job_manager=job_manager,
             workspace_root=str(workspace_root),
         )
@@ -129,7 +138,7 @@ class TestWorkspaceCleanupServiceAC2:
         assert service.is_workspace_expired(recent_ws) is False
 
     def test_cleanup_workspaces_deletes_expired_workspaces(
-        self, server_config, job_manager, workspace_root
+        self, retention_days, job_manager, workspace_root
     ):
         """
         Given expired and non-expired workspaces exist
@@ -155,7 +164,7 @@ class TestWorkspaceCleanupServiceAC2:
         os.utime(kept_file, (recent_time, recent_time))  # Set file time too
 
         service = WorkspaceCleanupService(
-            config=server_config,
+            retention_days=retention_days,
             job_manager=job_manager,
             workspace_root=str(workspace_root),
         )
@@ -174,7 +183,7 @@ class TestWorkspaceCleanupServiceAC2:
         assert result.workspaces_preserved == 1
 
     def test_cleanup_workspaces_calculates_space_reclaimed(
-        self, server_config, job_manager, workspace_root
+        self, retention_days, job_manager, workspace_root
     ):
         """
         Given workspace with known size
@@ -196,7 +205,7 @@ class TestWorkspaceCleanupServiceAC2:
         os.utime(file2, (old_time, old_time))
 
         service = WorkspaceCleanupService(
-            config=server_config,
+            retention_days=retention_days,
             job_manager=job_manager,
             workspace_root=str(workspace_root),
         )
@@ -207,7 +216,7 @@ class TestWorkspaceCleanupServiceAC2:
         assert result.space_reclaimed_bytes >= 3000
 
     def test_cleanup_workspaces_logs_operations(
-        self, server_config, job_manager, workspace_root, caplog
+        self, retention_days, job_manager, workspace_root, caplog
     ):
         """
         Given workspaces to clean up
@@ -221,7 +230,7 @@ class TestWorkspaceCleanupServiceAC2:
         os.utime(ws, (old_time, old_time))
 
         service = WorkspaceCleanupService(
-            config=server_config,
+            retention_days=retention_days,
             job_manager=job_manager,
             workspace_root=str(workspace_root),
         )
@@ -239,7 +248,7 @@ class TestWorkspaceCleanupServiceAC6:
     """AC6: Safe Cleanup Behavior tests."""
 
     def test_cleanup_skips_workspaces_for_active_jobs(
-        self, server_config, job_manager, workspace_root
+        self, retention_days, job_manager, workspace_root
     ):
         """
         Given workspace for job in RESOLVING_PREREQUISITES state
@@ -269,7 +278,7 @@ class TestWorkspaceCleanupServiceAC6:
             job_manager.jobs[job_id].job_id = "job123"  # Match workspace name
 
         service = WorkspaceCleanupService(
-            config=server_config,
+            retention_days=retention_days,
             job_manager=job_manager,
             workspace_root=str(workspace_root),
         )
@@ -283,7 +292,7 @@ class TestWorkspaceCleanupServiceAC6:
         assert result.skipped[0]["reason"] == "active_job"
 
     def test_cleanup_skips_recently_modified_workspaces(
-        self, server_config, job_manager, workspace_root
+        self, retention_days, job_manager, workspace_root
     ):
         """
         Given workspace modified in last 24 hours
@@ -302,7 +311,7 @@ class TestWorkspaceCleanupServiceAC6:
         (ws / "recent.txt").write_text("modified")
 
         service = WorkspaceCleanupService(
-            config=server_config,
+            retention_days=retention_days,
             job_manager=job_manager,
             workspace_root=str(workspace_root),
         )
@@ -315,7 +324,7 @@ class TestWorkspaceCleanupServiceAC6:
         assert "recent_modification" in result.skipped[0]["reason"]
 
     def test_cleanup_handles_deletion_errors_gracefully(
-        self, server_config, job_manager, workspace_root, monkeypatch
+        self, retention_days, job_manager, workspace_root, monkeypatch
     ):
         """
         Given workspace that fails to delete
@@ -339,7 +348,7 @@ class TestWorkspaceCleanupServiceAC6:
         os.utime(file2, (old_time, old_time))
 
         service = WorkspaceCleanupService(
-            config=server_config,
+            retention_days=retention_days,
             job_manager=job_manager,
             workspace_root=str(workspace_root),
         )
@@ -366,7 +375,7 @@ class TestWorkspaceCleanupServiceAC6:
         assert not ws2.exists()
 
     def test_cleanup_result_contains_all_required_fields(
-        self, server_config, job_manager, workspace_root
+        self, retention_days, job_manager, workspace_root
     ):
         """
         Given cleanup operation completes
@@ -374,7 +383,7 @@ class TestWorkspaceCleanupServiceAC6:
         Then it should contain all required fields per AC2
         """
         service = WorkspaceCleanupService(
-            config=server_config,
+            retention_days=retention_days,
             job_manager=job_manager,
             workspace_root=str(workspace_root),
         )
@@ -404,7 +413,7 @@ class TestWorkspaceCleanupServiceAC5:
     """AC5: Cleanup Status Visibility tests."""
 
     def test_get_cleanup_status_returns_all_required_fields(
-        self, server_config, job_manager, workspace_root
+        self, retention_days, job_manager, workspace_root
     ):
         """
         Given WorkspaceCleanupService initialized
@@ -412,7 +421,7 @@ class TestWorkspaceCleanupServiceAC5:
         Then it should return status dict with all required fields
         """
         service = WorkspaceCleanupService(
-            config=server_config,
+            retention_days=retention_days,
             job_manager=job_manager,
             workspace_root=str(workspace_root),
         )
@@ -426,7 +435,7 @@ class TestWorkspaceCleanupServiceAC5:
         assert "total_size_mb" in status
 
     def test_get_cleanup_status_shows_null_before_first_cleanup(
-        self, server_config, job_manager, workspace_root
+        self, retention_days, job_manager, workspace_root
     ):
         """
         Given cleanup has never run
@@ -434,7 +443,7 @@ class TestWorkspaceCleanupServiceAC5:
         Then last_cleanup_time should be None
         """
         service = WorkspaceCleanupService(
-            config=server_config,
+            retention_days=retention_days,
             job_manager=job_manager,
             workspace_root=str(workspace_root),
         )
@@ -444,7 +453,7 @@ class TestWorkspaceCleanupServiceAC5:
         assert status["last_cleanup_time"] is None
 
     def test_get_cleanup_status_shows_time_after_cleanup(
-        self, server_config, job_manager, workspace_root
+        self, retention_days, job_manager, workspace_root
     ):
         """
         Given cleanup has been run
@@ -452,7 +461,7 @@ class TestWorkspaceCleanupServiceAC5:
         Then last_cleanup_time should be set with ISO format timestamp
         """
         service = WorkspaceCleanupService(
-            config=server_config,
+            retention_days=retention_days,
             job_manager=job_manager,
             workspace_root=str(workspace_root),
         )
@@ -469,7 +478,7 @@ class TestWorkspaceCleanupServiceAC5:
         datetime.fromisoformat(status["last_cleanup_time"].replace("Z", "+00:00"))
 
     def test_get_cleanup_status_counts_workspaces(
-        self, server_config, job_manager, workspace_root
+        self, retention_days, job_manager, workspace_root
     ):
         """
         Given multiple workspace directories exist
@@ -485,7 +494,7 @@ class TestWorkspaceCleanupServiceAC5:
             ws.mkdir()
 
         service = WorkspaceCleanupService(
-            config=server_config,
+            retention_days=retention_days,
             job_manager=job_manager,
             workspace_root=str(workspace_root),
         )
@@ -495,7 +504,7 @@ class TestWorkspaceCleanupServiceAC5:
         assert status["workspace_count"] == 3
 
     def test_get_cleanup_status_calculates_oldest_workspace_age(
-        self, server_config, job_manager, workspace_root
+        self, retention_days, job_manager, workspace_root
     ):
         """
         Given workspaces with different ages
@@ -515,7 +524,7 @@ class TestWorkspaceCleanupServiceAC5:
         os.utime(recent_ws, (recent_time, recent_time))
 
         service = WorkspaceCleanupService(
-            config=server_config,
+            retention_days=retention_days,
             job_manager=job_manager,
             workspace_root=str(workspace_root),
         )
@@ -527,7 +536,7 @@ class TestWorkspaceCleanupServiceAC5:
         assert status["oldest_workspace_age"] <= 11.0
 
     def test_get_cleanup_status_calculates_total_size(
-        self, server_config, job_manager, workspace_root
+        self, retention_days, job_manager, workspace_root
     ):
         """
         Given workspaces with known total size
@@ -546,7 +555,7 @@ class TestWorkspaceCleanupServiceAC5:
         file2.write_text("y" * (2 * 1024 * 1024))  # 2 MB
 
         service = WorkspaceCleanupService(
-            config=server_config,
+            retention_days=retention_days,
             job_manager=job_manager,
             workspace_root=str(workspace_root),
         )
@@ -558,7 +567,7 @@ class TestWorkspaceCleanupServiceAC5:
         assert status["total_size_mb"] <= 3.5
 
     def test_get_cleanup_status_handles_no_workspaces(
-        self, server_config, job_manager, workspace_root
+        self, retention_days, job_manager, workspace_root
     ):
         """
         Given no workspace directories exist
@@ -566,7 +575,7 @@ class TestWorkspaceCleanupServiceAC5:
         Then status should show zero values gracefully
         """
         service = WorkspaceCleanupService(
-            config=server_config,
+            retention_days=retention_days,
             job_manager=job_manager,
             workspace_root=str(workspace_root),
         )

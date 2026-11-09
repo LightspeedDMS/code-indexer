@@ -13,7 +13,7 @@ import typing
 import pytest
 
 from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
-from code_indexer.server.services.memory_store_service import (
+from cidx_memory.server.memory_store_service import (
     RefreshSchedulerProtocol,
 )
 

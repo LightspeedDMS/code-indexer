@@ -92,6 +92,12 @@ def _make_manager():
     resource_config = MagicMock()
     resource_config.git_pull_timeout = 300
     manager.resource_config = resource_config
+    # issue-64678: __init__ is bypassed here, so wire the git seam explicitly.
+    # LocalGitBackend still shells out to real git via git_runner, which is what
+    # these tests exercise against the temp bare repos they build.
+    from code_indexer.server.storage.shared.git_backend import local_git_backend
+
+    manager._git_backend = local_git_backend()
     return manager
 
 

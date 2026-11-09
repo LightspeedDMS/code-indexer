@@ -253,7 +253,7 @@ class TestXrayLazySingletonAppOrNoneDelegatesAndRecovers:
             "with patch.object(m, 'app', Mock()):\n"
             "    pass\n"
             "real_app = m._lazy_values.get('app')\n"
-            "from code_indexer.server.mcp.handlers import xray; "
+            "from cidx_xray.server.mcp import xray; "
             "result = xray._lazy_singleton_app_or_none(); "
             "print('app_in_dict_after_teardown:', 'app' in vars(m)); "
             "print('real_app_is_none:', real_app is None); "

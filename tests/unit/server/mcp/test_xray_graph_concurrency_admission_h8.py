@@ -34,7 +34,7 @@ import pytest
 
 
 def _import_pipeline():
-    from code_indexer.server.mcp.handlers.xray_graph import (
+    from cidx_xray.server.mcp.xray_graph import (
         _run_analyze_graph_pipeline,
     )
 
@@ -73,16 +73,16 @@ async def test_denied_slot_returns_structured_error_and_never_calls_backend(
 
     with (
         patch(
-            "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path",
+            "cidx_xray.server.mcp.xray_graph._resolve_repo_path",
             return_value=str(repo_root),
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray_graph._get_xray_cell_limiter",
+            "cidx_xray.server.mcp.xray_graph._get_xray_cell_limiter",
             return_value=denying_limiter,
             create=True,
         ),
         patch(
-            "code_indexer.xray.rust_backend.RustNativeBackend.run_graph_analysis"
+            "cidx_xray.rust_backend.RustNativeBackend.run_graph_analysis"
         ) as mock_run,
     ):
         result: Dict[str, Any] = await pipeline(
@@ -120,16 +120,16 @@ async def test_granted_slot_is_acquired_once_and_released_once(
 
     with (
         patch(
-            "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path",
+            "cidx_xray.server.mcp.xray_graph._resolve_repo_path",
             return_value=str(repo_root),
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray_graph._get_xray_cell_limiter",
+            "cidx_xray.server.mcp.xray_graph._get_xray_cell_limiter",
             return_value=granting_limiter,
             create=True,
         ),
         patch(
-            "code_indexer.xray.rust_backend.RustNativeBackend.run_graph_analysis",
+            "cidx_xray.rust_backend.RustNativeBackend.run_graph_analysis",
             return_value=fake_backend_result,
         ) as mock_run,
     ):

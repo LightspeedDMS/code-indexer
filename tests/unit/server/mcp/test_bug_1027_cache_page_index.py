@@ -51,7 +51,9 @@ def _make_user() -> MagicMock:
 
 
 def _import_handler():
-    from code_indexer.server.mcp.handlers.xray import handle_cidx_fetch_cached_payload
+    from code_indexer.server.mcp.handlers.cached_payload import (
+        handle_cidx_fetch_cached_payload,
+    )
 
     return handle_cidx_fetch_cached_payload
 

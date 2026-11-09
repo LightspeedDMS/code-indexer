@@ -268,30 +268,6 @@ def tiny_fsv_store(tmp_path):
     an unused import "redefined" by that parameter (F811), even though
     pytest's fixture-injection mechanism genuinely uses it.
     """
-    from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
+    from _deep_fidelity_audit_test_support_1822 import build_tiny_fsv_store
 
-    from _deep_fidelity_audit_test_support_1822 import COLLECTION_NAME, DIM, norm
-
-    store = FilesystemVectorStore(tmp_path, project_root=tmp_path)
-    store.create_collection(COLLECTION_NAME, vector_size=DIM)
-
-    vecs = [
-        norm([1, 0, 0, 0, 0, 0, 0, 0]),
-        norm([0, 1, 0, 0, 0, 0, 0, 0]),
-        norm([0, 0, 1, 0, 0, 0, 0, 0]),
-        norm([0, 0, 0, 1, 0, 0, 0, 0]),
-        norm([0, 0, 0, 0, 1, 0, 0, 0]),
-    ]
-    points = [
-        {
-            "id": f"doc_{i}",
-            "vector": vecs[i],
-            "payload": {"path": f"file_{i}.py", "content": f"content {i}"},
-        }
-        for i in range(len(vecs))
-    ]
-    store.begin_indexing(COLLECTION_NAME)
-    store.upsert_points(COLLECTION_NAME, points)
-    store.end_indexing(COLLECTION_NAME)
-
-    return store, vecs
+    return build_tiny_fsv_store(tmp_path)

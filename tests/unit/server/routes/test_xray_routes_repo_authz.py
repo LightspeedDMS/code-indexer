@@ -41,7 +41,7 @@ from code_indexer.server.services.access_filtering_service import (
     AccessFilteringService,
 )
 from code_indexer.server.services.group_access_manager import GroupAccessManager
-from code_indexer.server.routes.xray_routes import router as xray_router
+from tests.unit.server._xray_feature import mount_xray_routes
 
 
 def _make_user(username: str, role: UserRole = UserRole.NORMAL_USER) -> User:
@@ -83,8 +83,7 @@ def _build_access_service(
 
 
 def _build_app(user: User, access_service) -> FastAPI:
-    app = FastAPI()
-    app.include_router(xray_router)
+    app = mount_xray_routes(FastAPI())
 
     def _unauthenticated():
         raise HTTPException(
@@ -121,11 +120,11 @@ VALID_BATCH_BODY = {
 def _patch_single_search_backend():
     return (
         patch(
-            "code_indexer.server.routes.xray_routes._resolve_repo_path",
+            "cidx_xray.server.routes._resolve_repo_path",
             return_value="/some/repo/path",
         ),
         patch(
-            "code_indexer.server.routes.xray_routes._get_background_job_manager",
+            "cidx_xray.server.routes._get_background_job_manager",
             return_value=MagicMock(submit_job=MagicMock(return_value="job-1")),
         ),
     )
@@ -208,19 +207,19 @@ class TestXrayBatchSearchRepoAuthz:
         mock_bjm.submit_job.return_value = "batch-job"
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._get_access_filtering_service",
+                "cidx_xray.server.mcp.xray_batch._get_access_filtering_service",
                 return_value=access_service,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._resolve_repo_path",
+                "cidx_xray.server.mcp.xray_batch._resolve_repo_path",
                 return_value="/some/repo/path",
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._get_arm_and_grm",
+                "cidx_xray.server.mcp.xray_batch._get_arm_and_grm",
                 return_value=(None, None),
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._get_background_job_manager",
+                "cidx_xray.server.mcp.xray_batch._get_background_job_manager",
                 return_value=mock_bjm,
             ),
         ):
@@ -243,23 +242,23 @@ class TestXrayBatchSearchRepoAuthz:
         mock_bjm.submit_job.return_value = "batch-job"
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._get_access_filtering_service",
+                "cidx_xray.server.mcp.xray_batch._get_access_filtering_service",
                 return_value=access_service,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._resolve_repo_path",
+                "cidx_xray.server.mcp.xray_batch._resolve_repo_path",
                 return_value="/some/repo/path",
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._get_arm_and_grm",
+                "cidx_xray.server.mcp.xray_batch._get_arm_and_grm",
                 return_value=(None, None),
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._get_background_job_manager",
+                "cidx_xray.server.mcp.xray_batch._get_background_job_manager",
                 return_value=mock_bjm,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._get_cidx_meta_path",
+                "cidx_xray.server.mcp.xray_batch._get_cidx_meta_path",
                 return_value=Path("/cidx-meta"),
             ),
         ):
@@ -282,23 +281,23 @@ class TestXrayBatchSearchRepoAuthz:
         mock_bjm.submit_job.return_value = "batch-job"
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._get_access_filtering_service",
+                "cidx_xray.server.mcp.xray_batch._get_access_filtering_service",
                 return_value=access_service,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._resolve_repo_path",
+                "cidx_xray.server.mcp.xray_batch._resolve_repo_path",
                 return_value="/some/repo/path",
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._get_arm_and_grm",
+                "cidx_xray.server.mcp.xray_batch._get_arm_and_grm",
                 return_value=(None, None),
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._get_background_job_manager",
+                "cidx_xray.server.mcp.xray_batch._get_background_job_manager",
                 return_value=mock_bjm,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._get_cidx_meta_path",
+                "cidx_xray.server.mcp.xray_batch._get_cidx_meta_path",
                 return_value=Path("/cidx-meta"),
             ),
         ):
@@ -318,19 +317,19 @@ class TestXrayBatchSearchRepoAuthz:
         mock_bjm.submit_job.return_value = "batch-job"
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._get_access_filtering_service",
+                "cidx_xray.server.mcp.xray_batch._get_access_filtering_service",
                 return_value=None,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._resolve_repo_path",
+                "cidx_xray.server.mcp.xray_batch._resolve_repo_path",
                 return_value="/some/repo/path",
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._get_arm_and_grm",
+                "cidx_xray.server.mcp.xray_batch._get_arm_and_grm",
                 return_value=(None, None),
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray_batch._get_background_job_manager",
+                "cidx_xray.server.mcp.xray_batch._get_background_job_manager",
                 return_value=mock_bjm,
             ),
         ):

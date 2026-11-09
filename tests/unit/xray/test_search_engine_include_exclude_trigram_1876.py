@@ -39,7 +39,7 @@ def _no_lazy_build(monkeypatch):
 @pytest.fixture
 def search_engine():
     pytest.importorskip("tree_sitter_languages", reason="xray extras not installed")
-    from code_indexer.xray.search_engine import XRaySearchEngine
+    from cidx_xray.search_engine import XRaySearchEngine
 
     return XRaySearchEngine()
 

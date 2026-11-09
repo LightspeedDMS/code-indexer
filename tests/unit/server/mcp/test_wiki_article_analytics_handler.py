@@ -103,12 +103,12 @@ def mock_grm_no_wiki():
 
 def _call_handler(params, mock_grm, mock_cache, mock_user):
     """Helper: call handle_wiki_article_analytics with mocked dependencies."""
-    from code_indexer.server.mcp.handlers import handle_wiki_article_analytics
+    from cidx_wiki.server.mcp.analytics import handle_wiki_article_analytics
 
     with (
         patch("code_indexer.server.app.golden_repo_manager", mock_grm),
         patch(
-            "code_indexer.server.mcp.handlers._get_wiki_cache_for_handler",
+            "cidx_wiki.server.mcp.analytics._get_wiki_cache_for_handler",
             return_value=mock_cache,
         ),
     ):
@@ -344,7 +344,7 @@ class TestSorting:
 
     def test_tie_breaking_most_viewed_alphabetical(self, mock_user):
         """AC3: Ties in most_viewed sort must break alphabetically by path."""
-        from code_indexer.server.mcp.handlers import handle_wiki_article_analytics
+        from cidx_wiki.server.mcp.analytics import handle_wiki_article_analytics
 
         tie_views = [
             {
@@ -378,7 +378,7 @@ class TestSorting:
         with (
             patch("code_indexer.server.app.golden_repo_manager", grm),
             patch(
-                "code_indexer.server.mcp.handlers._get_wiki_cache_for_handler",
+                "cidx_wiki.server.mcp.analytics._get_wiki_cache_for_handler",
                 return_value=mock_cache,
             ),
         ):
@@ -393,7 +393,7 @@ class TestSorting:
 
     def test_tie_breaking_least_viewed_alphabetical(self, mock_user):
         """AC3: Ties in least_viewed sort must break alphabetically by path."""
-        from code_indexer.server.mcp.handlers import handle_wiki_article_analytics
+        from cidx_wiki.server.mcp.analytics import handle_wiki_article_analytics
 
         tie_views = [
             {
@@ -427,7 +427,7 @@ class TestSorting:
         with (
             patch("code_indexer.server.app.golden_repo_manager", grm),
             patch(
-                "code_indexer.server.mcp.handlers._get_wiki_cache_for_handler",
+                "cidx_wiki.server.mcp.analytics._get_wiki_cache_for_handler",
                 return_value=mock_cache,
             ),
         ):
@@ -466,7 +466,7 @@ class TestLimitParameter:
 
     def test_limit_default_is_20(self, mock_grm_wiki_enabled, mock_user):
         """AC1: Default limit is 20 - verified with 25 article records."""
-        from code_indexer.server.mcp.handlers import handle_wiki_article_analytics
+        from cidx_wiki.server.mcp.analytics import handle_wiki_article_analytics
 
         many_views = [
             {
@@ -483,7 +483,7 @@ class TestLimitParameter:
         with (
             patch("code_indexer.server.app.golden_repo_manager", mock_grm_wiki_enabled),
             patch(
-                "code_indexer.server.mcp.handlers._get_wiki_cache_for_handler",
+                "cidx_wiki.server.mcp.analytics._get_wiki_cache_for_handler",
                 return_value=mock_cache,
             ),
         ):
@@ -545,7 +545,7 @@ class TestNonWikiEnabledRepo:
 
     def test_global_suffix_stripped_for_wiki_check(self, mock_user):
         """AC5: -global suffix must be stripped when checking wiki_enabled."""
-        from code_indexer.server.mcp.handlers import handle_wiki_article_analytics
+        from cidx_wiki.server.mcp.analytics import handle_wiki_article_analytics
 
         grm = Mock()
         grm._sqlite_backend = Mock()
@@ -558,7 +558,7 @@ class TestNonWikiEnabledRepo:
         with (
             patch("code_indexer.server.app.golden_repo_manager", grm),
             patch(
-                "code_indexer.server.mcp.handlers._get_wiki_cache_for_handler",
+                "cidx_wiki.server.mcp.analytics._get_wiki_cache_for_handler",
                 return_value=mock_cache,
             ),
         ):
@@ -573,7 +573,7 @@ class TestNonWikiEnabledRepo:
 
     def test_alias_without_global_suffix_also_works(self, mock_user):
         """AC5: Alias without -global suffix also works for wiki check."""
-        from code_indexer.server.mcp.handlers import handle_wiki_article_analytics
+        from cidx_wiki.server.mcp.analytics import handle_wiki_article_analytics
 
         grm = Mock()
         grm._sqlite_backend = Mock()
@@ -586,7 +586,7 @@ class TestNonWikiEnabledRepo:
         with (
             patch("code_indexer.server.app.golden_repo_manager", grm),
             patch(
-                "code_indexer.server.mcp.handlers._get_wiki_cache_for_handler",
+                "cidx_wiki.server.mcp.analytics._get_wiki_cache_for_handler",
                 return_value=mock_cache,
             ),
         ):
@@ -635,7 +635,7 @@ class TestTitleGeneration:
         self, mock_grm_wiki_enabled, mock_user
     ):
         """AC2: 'getting-started.md' title becomes 'Getting Started'."""
-        from code_indexer.server.mcp.handlers import handle_wiki_article_analytics
+        from cidx_wiki.server.mcp.analytics import handle_wiki_article_analytics
 
         views = [
             {
@@ -651,7 +651,7 @@ class TestTitleGeneration:
         with (
             patch("code_indexer.server.app.golden_repo_manager", mock_grm_wiki_enabled),
             patch(
-                "code_indexer.server.mcp.handlers._get_wiki_cache_for_handler",
+                "cidx_wiki.server.mcp.analytics._get_wiki_cache_for_handler",
                 return_value=mock_cache,
             ),
         ):
@@ -666,7 +666,7 @@ class TestTitleGeneration:
         self, mock_grm_wiki_enabled, mock_user
     ):
         """AC2: 'system_configuration.md' title becomes 'System Configuration'."""
-        from code_indexer.server.mcp.handlers import handle_wiki_article_analytics
+        from cidx_wiki.server.mcp.analytics import handle_wiki_article_analytics
 
         views = [
             {
@@ -682,7 +682,7 @@ class TestTitleGeneration:
         with (
             patch("code_indexer.server.app.golden_repo_manager", mock_grm_wiki_enabled),
             patch(
-                "code_indexer.server.mcp.handlers._get_wiki_cache_for_handler",
+                "cidx_wiki.server.mcp.analytics._get_wiki_cache_for_handler",
                 return_value=mock_cache,
             ),
         ):

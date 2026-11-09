@@ -29,7 +29,7 @@ def _get_repair_source() -> str:
     Scanning both functions together preserves the logical ordering invariant:
     register_job (wrapper) precedes update_status (body) in the combined text.
     """
-    from code_indexer.server.web import dependency_map_routes
+    from cidx_depmap.server.web import routes as dependency_map_routes
 
     wrapper_source = inspect.getsource(dependency_map_routes._run_repair_with_feedback)
     body_source = inspect.getsource(dependency_map_routes._execute_repair_body)

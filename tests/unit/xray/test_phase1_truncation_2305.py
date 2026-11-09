@@ -8,14 +8,14 @@ import pytest
 
 _FILE_COUNT = 40
 _LINES_PER_FILE = 20
-_CAP_SEAM = "code_indexer.xray.phase1_limits.PHASE1_MAX_MATCHES"
+_CAP_SEAM = "cidx_xray.phase1_limits.PHASE1_MAX_MATCHES"
 _CEILING_SEAM = "code_indexer.global_repos.regex_search._MAX_READ_BYTES"
 
 
 @pytest.fixture
 def engine():
     pytest.importorskip("tree_sitter_languages", reason="xray extras not installed")
-    from code_indexer.xray.search_engine import XRaySearchEngine
+    from cidx_xray.search_engine import XRaySearchEngine
 
     return XRaySearchEngine()
 

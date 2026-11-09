@@ -176,7 +176,6 @@ def _client(store: RealStore, tmp_path, bgm: Any, monkeypatch):
         user_manager=stub,
         golden_repo_manager=stub,
         background_job_manager=bgm,
-        workspace_cleanup_service=stub,
         config_service=stub,
         server_config=stub,
         data_dir=str(tmp_path),

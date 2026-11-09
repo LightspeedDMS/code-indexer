@@ -1,7 +1,30 @@
-"""Unit tests for SCIP query execution in query_results_partial_post() endpoint."""
+"""Unit tests for SCIP query execution in query_results_partial_post() endpoint.
+
+The ``scip`` search mode is the cidx-scip feature's (``web_query_modes()``,
+modular phase 4d): installed for every test here, as an app built with the
+feature enabled has it.
+"""
+
+from typing import Iterator
 
 import pytest
 from unittest.mock import patch, MagicMock
+
+from tests.unit.server._scip_feature import scip_pipeline_installed
+
+
+@pytest.fixture(autouse=True)
+def scip_mode() -> Iterator[None]:
+    """The query page's scip mode, as the enabled feature contributes it.
+
+    The page's handler reaches the process app (its query manager), whose
+    first build installs the features of ITS config (none); built first, so
+    the mode installed here is what the handler sees."""
+    from code_indexer.server import app as app_module
+
+    assert app_module.app is not None
+    with scip_pipeline_installed():
+        yield
 
 
 @pytest.fixture
@@ -21,7 +44,7 @@ class TestSCIPQueryExecutionInPartialEndpoint:
         """query_results_partial_post() should execute SCIP definition search when search_mode='scip'."""
         from code_indexer.server.web.routes import query_results_partial_post
         from fastapi import Request
-        from code_indexer.scip.query.primitives import QueryResult
+        from cidx_scip.query.primitives import QueryResult
 
         # Create mock request
         request = MagicMock(spec=Request)
@@ -59,9 +82,7 @@ class TestSCIPQueryExecutionInPartialEndpoint:
                     }
                 ],
             ),
-            patch(
-                "code_indexer.scip.query.primitives.SCIPQueryEngine"
-            ) as mock_engine_class,
+            patch("cidx_scip.query.primitives.SCIPQueryEngine") as mock_engine_class,
             patch("code_indexer.server.web.routes.templates") as mock_templates,
             patch("code_indexer.server.web.routes._add_to_query_history"),
         ):
@@ -196,9 +217,7 @@ class TestSCIPQueryExecutionInPartialEndpoint:
                     }
                 ],
             ),
-            patch(
-                "code_indexer.scip.query.primitives.SCIPQueryEngine"
-            ) as mock_engine_class,
+            patch("cidx_scip.query.primitives.SCIPQueryEngine") as mock_engine_class,
             patch("code_indexer.server.web.routes.templates") as mock_templates,
             patch("code_indexer.server.web.routes._add_to_query_history"),
         ):

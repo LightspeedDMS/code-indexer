@@ -7,7 +7,7 @@ Tests for:
 
 import json
 
-from code_indexer.global_repos.dependency_map_analyzer import DependencyMapAnalyzer
+from cidx_depmap.server.dependency_map_analyzer import DependencyMapAnalyzer
 
 
 def _make_analyzer(tmp_path):

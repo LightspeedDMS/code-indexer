@@ -14,8 +14,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from code_indexer.server.auth import dependencies
-from code_indexer.server.routers import scip_queries
+from cidx_scip.server import routes as scip_queries
+from cidx_scip.server.route_auth import current_caller
 from tests.unit.server.routers.repo_authz_test_env import (
     ADMIN_USERNAME,
     GRANTED_REPO,
@@ -102,7 +102,9 @@ def _scip_client(user, access_service, golden_repos_dir: str) -> TestClient:
     app.include_router(scip_queries.router)
     app.state.access_filtering_service = access_service
     app.state.golden_repos_dir = golden_repos_dir
-    app.dependency_overrides[dependencies.get_current_user] = lambda: user
+    # The SCIP routes are the cidx-scip feature's router (modular phase 4d):
+    # the core authenticates the caller before them, stood in for here.
+    app.dependency_overrides[current_caller] = lambda: user
     return TestClient(app, raise_server_exceptions=False)
 
 

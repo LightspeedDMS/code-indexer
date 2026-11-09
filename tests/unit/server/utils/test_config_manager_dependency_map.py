@@ -10,11 +10,17 @@ Tests the 6 configuration fields:
 - dependency_map_delta_max_turns
 """
 
+import pytest as _pytest
+
+from tests.unit.server._depmap_feature import (
+    depmap_claude_config,
+    depmap_registry_active,
+    depmap_section_of,
+)
 import json
 
 from code_indexer.server.utils.config_manager import (
     ServerConfigManager,
-    ClaudeIntegrationConfig,
 )
 
 
@@ -27,7 +33,7 @@ class TestDependencyMapConfigDefaults:
         config = config_manager.create_default_config()
 
         assert config.claude_integration_config is not None
-        claude_config = config.claude_integration_config
+        claude_config = depmap_section_of(config)
 
         # Verify defaults
         assert claude_config.dependency_map_enabled is False
@@ -52,13 +58,18 @@ class TestDependencyMapConfigPersistence:
         config_manager = ServerConfigManager(str(tmp_path))
         config = config_manager.create_default_config()
 
-        # Modify dependency map settings
-        config.claude_integration_config.dependency_map_enabled = True
-        config.claude_integration_config.dependency_map_interval_hours = 72
-        config.claude_integration_config.dependency_map_pass_timeout_seconds = 900
-        config.claude_integration_config.dependency_map_pass1_max_turns = 40
-        config.claude_integration_config.dependency_map_pass2_max_turns = 70
-        config.claude_integration_config.dependency_map_delta_max_turns = 25
+        # Modify dependency map settings (the cidx-depmap feature's section
+        # since modular phase 4g)
+        config.feature_settings = {
+            "depmap": {
+                "dependency_map_enabled": True,
+                "dependency_map_interval_hours": 72,
+                "dependency_map_pass_timeout_seconds": 900,
+                "dependency_map_pass1_max_turns": 40,
+                "dependency_map_pass2_max_turns": 70,
+                "dependency_map_delta_max_turns": 25,
+            }
+        }
 
         # Save config
         config_manager.save_config(config)
@@ -68,7 +79,7 @@ class TestDependencyMapConfigPersistence:
 
         assert loaded_config is not None
         assert loaded_config.claude_integration_config is not None
-        claude_config = loaded_config.claude_integration_config
+        claude_config = depmap_section_of(loaded_config)
 
         # Verify loaded values
         assert claude_config.dependency_map_enabled is True
@@ -99,7 +110,7 @@ class TestDependencyMapConfigPersistence:
 
         assert loaded_config is not None
         assert loaded_config.claude_integration_config is not None
-        claude_config = loaded_config.claude_integration_config
+        claude_config = depmap_section_of(loaded_config)
 
         # Verify defaults are applied (with new defaults from Fixes 5, 6, 7)
         assert claude_config.dependency_map_enabled is False
@@ -117,7 +128,7 @@ class TestClaudeIntegrationConfigDataclass:
 
     def test_create_claude_integration_config_with_dependency_map(self):
         """Test creating ClaudeIntegrationConfig with dependency map fields."""
-        config = ClaudeIntegrationConfig(
+        config = depmap_claude_config(
             dependency_map_enabled=True,
             dependency_map_interval_hours=96,
             dependency_map_pass_timeout_seconds=1200,
@@ -132,3 +143,12 @@ class TestClaudeIntegrationConfigDataclass:
         assert config.dependency_map_pass1_max_turns == 45
         assert config.dependency_map_pass2_max_turns == 65
         assert config.dependency_map_delta_max_turns == 28
+
+
+@_pytest.fixture(autouse=True)
+def _depmap_loaded():
+    """The dependency-map settings are the cidx-depmap feature's section
+    (modular phase 4g): the config service lists and updates them while the
+    feature is loaded."""
+    with depmap_registry_active():
+        yield

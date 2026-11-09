@@ -24,7 +24,7 @@ import pytest
 
 def _make_dep_map_service(refresh_scheduler=None):
     """Create a DependencyMapService with mocked dependencies."""
-    from code_indexer.server.services.dependency_map_service import DependencyMapService
+    from cidx_depmap.server.dependency_map_service import DependencyMapService
 
     golden_repos_manager = MagicMock()
     golden_repos_manager.golden_repos_dir = "/tmp/golden-repos"

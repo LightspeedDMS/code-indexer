@@ -37,7 +37,7 @@ class TestSCIPDefinitionTool:
 
     def test_scip_definition_returns_mcp_response(self, mock_user, mock_scip_files):
         """Should return MCP-compliant response with definition results."""
-        from code_indexer.server.mcp.handlers import scip_definition
+        from cidx_scip.server.mcp.scip import scip_definition
 
         params = {"symbol": "UserService", "exact": False}
 
@@ -57,7 +57,7 @@ class TestSCIPDefinitionTool:
         ]
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            "cidx_scip.server.mcp.scip._get_scip_query_service",
             return_value=mock_service,
         ):
             response = scip_definition(params, mock_user)
@@ -81,7 +81,7 @@ class TestSCIPReferencesTool:
 
     def test_scip_references_returns_mcp_response(self, mock_user, mock_scip_files):
         """Should return MCP-compliant response with reference results."""
-        from code_indexer.server.mcp.handlers import scip_references
+        from cidx_scip.server.mcp.scip import scip_references
 
         params = {"symbol": "UserService", "limit": 100, "exact": False}
 
@@ -101,7 +101,7 @@ class TestSCIPReferencesTool:
         ]
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            "cidx_scip.server.mcp.scip._get_scip_query_service",
             return_value=mock_service,
         ):
             response = scip_references(params, mock_user)
@@ -117,7 +117,7 @@ class TestSCIPDependenciesTool:
 
     def test_scip_dependencies_returns_mcp_response(self, mock_user, mock_scip_files):
         """Should return MCP-compliant response with dependency results."""
-        from code_indexer.server.mcp.handlers import scip_dependencies
+        from cidx_scip.server.mcp.scip import scip_dependencies
 
         params = {"symbol": "UserService", "exact": False}
 
@@ -137,7 +137,7 @@ class TestSCIPDependenciesTool:
         ]
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            "cidx_scip.server.mcp.scip._get_scip_query_service",
             return_value=mock_service,
         ):
             response = scip_dependencies(params, mock_user)
@@ -161,7 +161,7 @@ class TestSCIPDependentsTool:
 
     def test_scip_dependents_returns_mcp_response(self, mock_user, mock_scip_files):
         """Should return MCP-compliant response with dependent results."""
-        from code_indexer.server.mcp.handlers import scip_dependents
+        from cidx_scip.server.mcp.scip import scip_dependents
 
         params = {"symbol": "UserService", "exact": False}
 
@@ -181,7 +181,7 @@ class TestSCIPDependentsTool:
         ]
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            "cidx_scip.server.mcp.scip._get_scip_query_service",
             return_value=mock_service,
         ):
             response = scip_dependents(params, mock_user)
@@ -205,7 +205,7 @@ class TestSCIPImpactTool:
 
     def test_scip_impact_returns_mcp_response(self, mock_user, tmp_path):
         """Should return MCP-compliant response with impact analysis results."""
-        from code_indexer.server.mcp.handlers import scip_impact
+        from cidx_scip.server.mcp.scip import scip_impact
 
         params = {"symbol": "UserService", "depth": 3}
 
@@ -239,7 +239,7 @@ class TestSCIPImpactTool:
         }
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            "cidx_scip.server.mcp.scip._get_scip_query_service",
             return_value=mock_service,
         ):
             response = scip_impact(params, mock_user)
@@ -264,7 +264,7 @@ class TestSCIPCallChainTool:
 
     def test_scip_callchain_returns_mcp_response(self, mock_user):
         """Should return MCP-compliant response with call chain results."""
-        from code_indexer.server.mcp.handlers import scip_callchain
+        from cidx_scip.server.mcp.scip import scip_callchain
 
         params = {"from_symbol": "Controller", "to_symbol": "Database"}
 
@@ -286,7 +286,7 @@ class TestSCIPCallChainTool:
         mock_service.find_scip_files.return_value = [Path("repo/index.scip.db")]
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            "cidx_scip.server.mcp.scip._get_scip_query_service",
             return_value=mock_service,
         ):
             response = scip_callchain(params, mock_user)
@@ -304,7 +304,7 @@ class TestSCIPCallChainTool:
         with an explicit error, NOT an indistinguishable empty-success
         response (total_chains_found: 0 looks identical to "no chains
         exist" while actually meaning "the query was cut off")."""
-        from code_indexer.server.mcp.handlers import scip_callchain
+        from cidx_scip.server.mcp.scip import scip_callchain
 
         params = {"from_symbol": "Controller", "to_symbol": "Database"}
 
@@ -315,7 +315,7 @@ class TestSCIPCallChainTool:
         )
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            "cidx_scip.server.mcp.scip._get_scip_query_service",
             return_value=mock_service,
         ):
             response = scip_callchain(params, mock_user)
@@ -335,7 +335,7 @@ class TestSCIPContextTool:
 
     def test_scip_context_returns_mcp_response(self, mock_user):
         """Should return MCP-compliant response with smart context results."""
-        from code_indexer.server.mcp.handlers import scip_context
+        from cidx_scip.server.mcp.scip import scip_context
 
         params = {"symbol": "UserService"}
 
@@ -368,7 +368,7 @@ class TestSCIPContextTool:
         }
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            "cidx_scip.server.mcp.scip._get_scip_query_service",
             return_value=mock_service,
         ):
             response = scip_context(params, mock_user)
@@ -398,13 +398,13 @@ class TestSCIPImpactDepthClamp:
     def test_scip_impact_depth_out_of_range_is_rejected(self, mock_user, raw_depth):
         """depth outside [1, 10] (above max or below min) must be rejected
         loudly rather than silently clamped to the nearest bound."""
-        from code_indexer.server.mcp.handlers import scip_impact
+        from cidx_scip.server.mcp.scip import scip_impact
 
         mock_service = Mock()
         mock_service.analyze_impact.return_value = {}
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            "cidx_scip.server.mcp.scip._get_scip_query_service",
             return_value=mock_service,
         ):
             response = scip_impact(
@@ -423,7 +423,7 @@ class TestSCIPImpactDepthClamp:
     def test_scip_impact_default_depth_unchanged(self, mock_user):
         """No depth param supplied must still default to 3, unaffected by
         the new clamp (3 is already within [1, 10])."""
-        from code_indexer.server.mcp.handlers import scip_impact
+        from cidx_scip.server.mcp.scip import scip_impact
 
         params = {"symbol": "UserService"}
 
@@ -438,7 +438,7 @@ class TestSCIPImpactDepthClamp:
         }
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            "cidx_scip.server.mcp.scip._get_scip_query_service",
             return_value=mock_service,
         ):
             scip_impact(params, mock_user)
@@ -452,7 +452,7 @@ class TestSCIPImpactDepthClamp:
     ):
         """Every depth within the documented [1, 10] range must still
         succeed unaffected by the new rejection guard."""
-        from code_indexer.server.mcp.handlers import scip_impact
+        from cidx_scip.server.mcp.scip import scip_impact
 
         mock_service = Mock()
         mock_service.analyze_impact.return_value = {
@@ -465,7 +465,7 @@ class TestSCIPImpactDepthClamp:
         }
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            "cidx_scip.server.mcp.scip._get_scip_query_service",
             return_value=mock_service,
         ):
             response = scip_impact(
@@ -487,13 +487,13 @@ class TestSCIPImpactDepthClamp:
         NOT silently clamp it to 3 with only a server-side WARNING log (the
         pre-remediation behavior this test replaces). trace_callchain must
         never even be called for a rejected value."""
-        from code_indexer.server.mcp.handlers import scip_callchain
+        from cidx_scip.server.mcp.scip import scip_callchain
 
         mock_service = Mock()
         mock_service.trace_callchain.return_value = ([], [])
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            "cidx_scip.server.mcp.scip._get_scip_query_service",
             return_value=mock_service,
         ):
             response = scip_callchain(
@@ -512,12 +512,12 @@ class TestSCIPImpactDepthClamp:
     def test_scip_callchain_max_depth_accepts_string_value(self, mock_user):
         """Bug #1603 code review round 2 (Priority 3, item D): max_depth
         used to be read via a direct params.get("max_depth", 3) instead
-        of the _coerce_int helper every sibling handler in this file uses
+        of the coerce_int helper every sibling handler in this file uses
         (scip_dependencies, scip_dependents, scip_impact, scip_context)
         -- a JSON client sending max_depth as a string ("3") would hit a
         TypeError in the subsequent int comparison against
         _MAX_CALLCHAIN_DEPTH instead of being coerced cleanly."""
-        from code_indexer.server.mcp.handlers import scip_callchain
+        from cidx_scip.server.mcp.scip import scip_callchain
 
         mock_service = Mock()
         mock_service.trace_callchain.return_value = ([], [])
@@ -527,7 +527,7 @@ class TestSCIPImpactDepthClamp:
         mock_service.find_scip_files.return_value = []
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            "cidx_scip.server.mcp.scip._get_scip_query_service",
             return_value=mock_service,
         ):
             response = scip_callchain(
@@ -553,10 +553,10 @@ def _call_scip_dependents_with_mock_service(params, mock_user, mock_service):
     Used by TestSCIPDependentsDepthReject to avoid repeating the same
     patch-context boilerplate in every test method.
     """
-    from code_indexer.server.mcp.handlers import scip_dependents
+    from cidx_scip.server.mcp.scip import scip_dependents
 
     with patch(
-        "code_indexer.server.mcp.handlers._get_scip_query_service",
+        "cidx_scip.server.mcp.scip._get_scip_query_service",
         return_value=mock_service,
     ):
         return scip_dependents(params, mock_user)
@@ -654,10 +654,10 @@ def _call_scip_dependencies_with_mock_service(params, mock_user, mock_service):
     Used by TestSCIPDependenciesDepthReject to avoid repeating the same
     patch-context boilerplate in every test method.
     """
-    from code_indexer.server.mcp.handlers import scip_dependencies
+    from cidx_scip.server.mcp.scip import scip_dependencies
 
     with patch(
-        "code_indexer.server.mcp.handlers._get_scip_query_service",
+        "cidx_scip.server.mcp.scip._get_scip_query_service",
         return_value=mock_service,
     ):
         return scip_dependencies(params, mock_user)
@@ -753,10 +753,10 @@ def _call_scip_references_with_mock_service(params, mock_user, mock_service):
 
     Mirrors _call_scip_dependents_with_mock_service for the limit-clamp tests.
     """
-    from code_indexer.server.mcp.handlers import scip_references
+    from cidx_scip.server.mcp.scip import scip_references
 
     with patch(
-        "code_indexer.server.mcp.handlers._get_scip_query_service",
+        "cidx_scip.server.mcp.scip._get_scip_query_service",
         return_value=mock_service,
     ):
         return scip_references(params, mock_user)

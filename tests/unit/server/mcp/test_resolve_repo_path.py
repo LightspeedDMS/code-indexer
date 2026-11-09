@@ -46,7 +46,14 @@ class TestResolveRepoPathAliasJson:
         alias_file.write_text(json.dumps(alias_data))
 
         golden_repos_dir = str(tmp_path / "golden-repos")
-        result = _resolve_repo_path("my-repo-global", golden_repos_dir)
+        # Bug #1315: _resolve_repo_path also reads the registry row (index_path
+        # fallback) from app.state.backend_registry; this test is about the
+        # alias pointer alone -- no registry row, independent of app state.
+        with patch(
+            "code_indexer.server.mcp.handlers._legacy._get_global_repo",
+            return_value=None,
+        ):
+            result = _resolve_repo_path("my-repo-global", golden_repos_dir)
 
         assert result == str(target_dir)
 
@@ -71,7 +78,14 @@ class TestResolveRepoPathAliasJson:
 
         golden_repos_dir = str(tmp_path / "golden-repos")
         # Pass non-global identifier 'cidx-meta' — should find 'cidx-meta-global' alias
-        result = _resolve_repo_path("cidx-meta", golden_repos_dir)
+        # Bug #1315: _resolve_repo_path also reads the registry row (index_path
+        # fallback) from app.state.backend_registry; this test is about the
+        # alias pointer alone -- no registry row, independent of app state.
+        with patch(
+            "code_indexer.server.mcp.handlers._legacy._get_global_repo",
+            return_value=None,
+        ):
+            result = _resolve_repo_path("cidx-meta", golden_repos_dir)
 
         assert result == str(target_dir)
 
@@ -263,6 +277,10 @@ class TestHandleDirectoryTreeAliasResolution:
 
         mock_alias_manager = MagicMock()
         mock_alias_manager.read_alias.return_value = str(repo_content_dir)
+        # _resolve_repo_path builds its manager with AliasManager.existing()
+        # (content seam 5a: no directory probe when the registry is installed).
+        mock_alias_manager_cls = MagicMock(return_value=mock_alias_manager)
+        mock_alias_manager_cls.existing.return_value = mock_alias_manager
 
         with (
             patch(
@@ -275,7 +293,7 @@ class TestHandleDirectoryTreeAliasResolution:
             ),
             patch(
                 "code_indexer.server.mcp.handlers.AliasManager",
-                return_value=mock_alias_manager,
+                mock_alias_manager_cls,
             ),
         ):
             response = handle_directory_tree(args, fake_user)

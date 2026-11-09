@@ -292,3 +292,75 @@ class TestExpectedOrphanKeys:
         assert pos_auto < pos_mfa, (
             f"Expected 'auto_watch_config' before 'mfa_config' in sorted INFO message, got: {summary_msg}"
         )
+
+
+class TestRemovedScipDelegationKeys:
+    """issue-64616: keys only the removed SCIP delegation read.
+
+    ``scip_build_stateless`` (the removed ``scip_backend='delegated'``),
+    ``scip_query_backend`` and ``scip_sandbox`` (the removed SCIP query
+    delegation) may still sit in an older config.json. Each is an expected
+    orphan: stripped quietly, never a ServerConfig field, never a bootstrap key.
+    """
+
+    _REMOVED = {
+        "scip_build_stateless": True,
+        "scip_query_backend": "local",
+        "scip_sandbox": {
+            "endpoint": "http://the sandbox service.claude-code-indexer:8200",
+            "api_key": "scip-token",
+        },
+    }
+
+    @pytest.mark.parametrize("key", sorted(_REMOVED))
+    def test_removed_key_still_loads_quietly(self, key, tmp_path, caplog):
+        from code_indexer.server.utils.config_manager import EXPECTED_ORPHAN_KEYS
+
+        assert key in EXPECTED_ORPHAN_KEYS
+        config_manager = ServerConfigManager(str(tmp_path))
+        config_manager.save_config(config_manager.create_default_config())
+        config_path = tmp_path / "config.json"
+        raw = json.loads(config_path.read_text())
+        raw[key] = self._REMOVED[key]
+        config_path.write_text(json.dumps(raw))
+
+        with caplog.at_level(logging.WARNING):
+            loaded = config_manager.load_config()
+
+        assert isinstance(loaded, ServerConfig)
+        assert not hasattr(loaded, key)
+        assert key not in caplog.text
+
+    @pytest.mark.parametrize("key", sorted(_REMOVED))
+    def test_removed_key_is_not_a_bootstrap_key(self, key):
+        from code_indexer.server.services.config_service import BOOTSTRAP_KEYS
+
+        assert key not in BOOTSTRAP_KEYS
+
+
+class TestReadConfigFile:
+    """``read_config_file`` returns config.json as written (issue-64616): the
+    startup check for a removed key needs the keys load_config strips."""
+
+    def test_returns_the_file_with_keys_load_config_strips(self, tmp_path):
+        config_manager = ServerConfigManager(str(tmp_path))
+        config_manager.save_config(config_manager.create_default_config())
+        config_path = tmp_path / "config.json"
+        raw = json.loads(config_path.read_text())
+        raw["scip_query_backend"] = "delegated"
+        config_path.write_text(json.dumps(raw))
+
+        assert config_manager.read_config_file() == raw
+
+    def test_returns_none_without_a_file(self, tmp_path):
+        assert ServerConfigManager(str(tmp_path)).read_config_file() is None
+
+    def test_invalid_json_raises(self, tmp_path):
+        (tmp_path / "config.json").write_text("{not json")
+        with pytest.raises(json.JSONDecodeError):
+            ServerConfigManager(str(tmp_path)).read_config_file()
+
+    def test_load_config_still_reports_invalid_json_as_value_error(self, tmp_path):
+        (tmp_path / "config.json").write_text("{not json")
+        with pytest.raises(ValueError, match="Failed to parse configuration file"):
+            ServerConfigManager(str(tmp_path)).load_config()

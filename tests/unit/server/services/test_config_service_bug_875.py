@@ -3,8 +3,10 @@ Unit tests for Bug #875: Web UI config save failed with ValueError for five
 missing keys in _update_claude_cli_setting().
 
 Fields affected:
-  - dep_map_fact_check_enabled  (bool)
-  - fact_check_timeout_seconds  (int, min 60)
+  - dep_map_fact_check_enabled  (bool)  -- the cidx-depmap feature's since
+  - fact_check_timeout_seconds  (int)      modular phase 4g; changed through
+                                           the feature config door (see
+                                           test_config_service_dependency_map)
   - scheduled_catchup_enabled   (bool)
   - scheduled_catchup_interval_minutes (int, min 1)
   - cohere_api_key              (Optional[str])
@@ -13,15 +15,11 @@ Tests use realistic HTTP form value types (strings) because the Web UI POSTs
 form data as strings, not Python natives.
 """
 
+from tests.unit.server._depmap_feature import depmap_section_of
 import pytest
 from code_indexer.server.services.config_service import ConfigService
 
 # Named constants — no magic numbers in tests
-FACT_CHECK_TIMEOUT_VALID = "300"
-FACT_CHECK_TIMEOUT_VALID_INT = 300
-FACT_CHECK_TIMEOUT_BELOW_MIN = "10"
-FACT_CHECK_TIMEOUT_MIN = 60
-
 CATCHUP_INTERVAL_VALID = "120"
 CATCHUP_INTERVAL_VALID_INT = 120
 CATCHUP_INTERVAL_BELOW_MIN = "0"
@@ -39,14 +37,12 @@ def service(tmp_path):
 
 def _get_claude_config(svc: ConfigService):
     """Retrieve ClaudeIntegrationConfig and assert it is not None."""
-    config = svc.get_claude_integration_config()
+    config = depmap_section_of(svc)
     assert config is not None
     return config
 
 
-@pytest.mark.parametrize(
-    "field", ["dep_map_fact_check_enabled", "scheduled_catchup_enabled"]
-)
+@pytest.mark.parametrize("field", ["scheduled_catchup_enabled"])
 def test_bool_fields_accept_true_string(service, field):
     """Both new bool fields accept string 'true' and set the field to True."""
     service.update_setting("claude_cli", field, "true")
@@ -54,9 +50,7 @@ def test_bool_fields_accept_true_string(service, field):
     assert getattr(config, field) is True
 
 
-@pytest.mark.parametrize(
-    "field", ["dep_map_fact_check_enabled", "scheduled_catchup_enabled"]
-)
+@pytest.mark.parametrize("field", ["scheduled_catchup_enabled"])
 def test_bool_fields_accept_false_string(service, field):
     """Both new bool fields accept string 'false' and set the field to False."""
     service.update_setting("claude_cli", field, "true")
@@ -68,11 +62,6 @@ def test_bool_fields_accept_false_string(service, field):
 @pytest.mark.parametrize(
     "field, input_value, expected",
     [
-        (
-            "fact_check_timeout_seconds",
-            FACT_CHECK_TIMEOUT_VALID,
-            FACT_CHECK_TIMEOUT_VALID_INT,
-        ),
         (
             "scheduled_catchup_interval_minutes",
             CATCHUP_INTERVAL_VALID,
@@ -90,11 +79,6 @@ def test_int_fields_accept_valid_string(service, field, input_value, expected):
 @pytest.mark.parametrize(
     "field, below_min_value, expected_min",
     [
-        (
-            "fact_check_timeout_seconds",
-            FACT_CHECK_TIMEOUT_BELOW_MIN,
-            FACT_CHECK_TIMEOUT_MIN,
-        ),
         (
             "scheduled_catchup_interval_minutes",
             CATCHUP_INTERVAL_BELOW_MIN,

@@ -42,6 +42,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from code_indexer.config import Config
+from code_indexer.services.chunk_coverage import (
+    CHUNK_COVERAGE_KEY,
+    CHUNK_COVERAGE_VERSION,
+)
 from code_indexer.services.smart_indexer import SmartIndexer
 from code_indexer.storage.sqlite_chunk_store import ChunkStoreUnavailableError
 
@@ -241,6 +245,8 @@ class TestIncrementalIndexAbortsOnFatalError:
         meta["embedding_model"] = "voyage-code-3"
         meta["files_to_index"] = []
         meta["current_file_index"] = 0
+        # issue-64616: an index already checked for files missing chunks.
+        meta[CHUNK_COVERAGE_KEY] = CHUNK_COVERAGE_VERSION
         indexer.progressive_metadata._save_metadata()
 
     def test_fatal_chunk_store_error_calls_abort_not_end(

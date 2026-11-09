@@ -20,7 +20,7 @@ import logging
 from unittest.mock import MagicMock
 
 from code_indexer.global_repos.write_lock_manager import WriteLockManager
-from code_indexer.server.services.dependency_map_service import DependencyMapService
+from cidx_depmap.server.dependency_map_service import DependencyMapService
 
 
 def _make_scheduler_with_real_lock_held(lock_dir, owner_name="dependency_map_service"):

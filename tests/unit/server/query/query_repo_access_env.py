@@ -152,11 +152,8 @@ class QueryAccessEnv:
         # Real config service rooted at this temp server dir (its
         # data/cidx_server.db is the DB above), never the operator's home.
         config_service = ConfigService(server_dir_path=str(tmp_path))
-        # Memory retrieval is a separate feature that embeds through a real
-        # provider; switch it off with its real kill switch.
-        config_service.update_setting(
-            "memory_retrieval", "memory_retrieval_enabled", False
-        )
+        # Memory retrieval (the cidx-memory feature's search section) is not
+        # loaded here, so search_code embeds nothing for it.
         set_config_service(config_service)
         self.payload_cache = PayloadCache(
             db_path=tmp_path / "payload_cache.db", config=PayloadCacheConfig()

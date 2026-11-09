@@ -216,13 +216,7 @@ class TestMcpSearchThatNeverRan:
 
     def test_providers_unavailable_records_a_failure_row(self, env, monkeypatch):
         from code_indexer.server.mcp.handlers.search import search_code
-        from code_indexer.server.services.config_service import get_config_service
 
-        monkeypatch.setattr(
-            get_config_service().get_config().memory_retrieval_config,
-            "memory_retrieval_enabled",
-            False,
-        )
         app_module = _mcp_app_module(
             env, semantic_query_manager=_ProvidersUnavailable()
         )

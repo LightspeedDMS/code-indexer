@@ -34,6 +34,8 @@ from tests.unit.server.services.search_event_recording_harness import (
     make_user,
     recorder,
 )
+from tests.unit.server._scip_feature import scip_pipeline_installed
+from tests.unit.server.app_state_patch import patch_app_state
 
 _KINDS = [
     "sqlite",
@@ -114,9 +116,7 @@ def _web_query(
 
     app = app_package.app
     listed = _REPOS if repos is None else repos
-    monkeypatch.setattr(
-        app.state, "search_event_log_writer", env.rec.writer, raising=False
-    )
+    patch_app_state(monkeypatch, app.state, "search_event_log_writer", env.rec.writer)
     monkeypatch.setattr(web_routes, "_get_semantic_query_manager", lambda: manager)
     monkeypatch.setattr(
         web_routes, "_get_all_activated_repos_for_query", lambda registry=None: listed
@@ -134,9 +134,14 @@ def _web_query(
         "csrf_token": "example-csrf-token",
         **form,
     }
-    with patch(
-        "code_indexer.server.web.routes.get_session_manager",
-        return_value=session_manager,
+    # The "scip" search mode is the cidx-scip feature's (modular phase 4d):
+    # installed as a server with "scip" enabled installs it.
+    with (
+        scip_pipeline_installed(),
+        patch(
+            "code_indexer.server.web.routes.get_session_manager",
+            return_value=session_manager,
+        ),
     ):
         csrf = Response()
         web_routes.set_csrf_cookie(csrf, "example-csrf-token")
@@ -169,7 +174,7 @@ class _ScipEngine:
 def _use_scip_engine(monkeypatch: Any) -> List[_ScipEngine]:
     """Install _ScipEngine where both Web SCIP paths import it; returns the
     engines the request constructs."""
-    from code_indexer.scip.query import primitives
+    from cidx_scip.query import primitives
 
     engines: List[_ScipEngine] = []
 
@@ -255,17 +260,18 @@ class TestWebQueryPage:
         )
 
     def test_scip_mode_web_query_records_one_scip_row(self, env, monkeypatch):
-        from code_indexer.server.web import routes as web_routes
+        from cidx_scip.server.web import query_page
 
         rows = [{"file_path": "src/a.py", "scip_symbol": "Calculator"}] * 3
         monkeypatch.setattr(
-            web_routes, "_execute_scip_query", lambda *a, **k: (rows, None, None)
+            query_page, "_execute_scip_query", lambda *a, **k: (rows, None, None)
         )
         _web_query(
             env,
             PARTIAL,
             _QueryManager(),
             monkeypatch,
+            repos=[_scip_repo_with_index(env.tmp)],
             query_text="Calculator",
             search_mode="scip",
             scip_query_type="definition",
@@ -335,7 +341,7 @@ class TestWebQueryPage:
     ):
         """Story #2117: a SCIP query that ran on a resolved repository and
         raised is a failure row (its exception's class)."""
-        from code_indexer.scip.query import primitives
+        from cidx_scip.query import primitives
 
         class _BrokenEngine:
             def __init__(self, *_: Any, **__: Any) -> None:
@@ -389,10 +395,10 @@ class TestWebQueryPage:
         assert env.rec.rows() == []
 
     def test_failed_scip_mode_web_query_records_no_row(self, env, monkeypatch):
-        from code_indexer.server.web import routes as web_routes
+        from cidx_scip.server.web import query_page
 
         monkeypatch.setattr(
-            web_routes,
+            query_page,
             "_execute_scip_query",
             lambda *a, **k: ([], "No SCIP index found for repository", None),
         )
@@ -401,6 +407,7 @@ class TestWebQueryPage:
             PARTIAL,
             _QueryManager(),
             monkeypatch,
+            repos=[_scip_repo_with_index(env.tmp)],
             query_text="Calculator",
             search_mode="scip",
         )
@@ -431,7 +438,7 @@ def _wiki_get(env: Env, path: str, manager: _QueryManager) -> Any:
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
-    from code_indexer.server.wiki import routes as wiki_routes
+    from cidx_wiki.server import routes as wiki_routes
 
     app = FastAPI()
     app.include_router(wiki_routes.wiki_router, prefix="/wiki")

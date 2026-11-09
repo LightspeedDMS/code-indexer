@@ -41,7 +41,7 @@ class _FailingStoreBatchCache:
 
 class TestAnalyzeGraphWrapperPreservesMetadataOnStoreFailure:
     def test_fact_graph_complete_and_ok_survive_the_store_failure(self) -> None:
-        from code_indexer.server.mcp.handlers.xray_graph import (
+        from cidx_xray.server.mcp.xray_graph import (
             _truncate_graph_result,
         )
 
@@ -78,7 +78,7 @@ class TestAnalyzeGraphWrapperPreservesMetadataOnStoreFailure:
 
 class TestXraySearchWrapperPreservesMetadataOnStoreFailure:
     def test_arbitrary_base_metadata_survives_the_store_failure(self) -> None:
-        from code_indexer.server.mcp.handlers.xray import _truncate_xray_result
+        from cidx_xray.server.mcp.xray import _truncate_xray_result
 
         cache = _FailingStoreBatchCache(_SMALL_BUDGET_CHARS)
         mock_app = MagicMock()

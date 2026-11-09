@@ -14,6 +14,7 @@ invocations.
 """
 
 import uuid
+from tests.unit.server.app_state_patch import patch_app_state
 
 # cache_100_chars fixture: preview_size_chars=100, max_fetch_size_chars=200
 PREVIEW_SIZE_CHARS = 100
@@ -36,7 +37,7 @@ FIRST_PAGE = 0
 def _install_cache(monkeypatch, cache):
     from code_indexer.server import app as app_module
 
-    monkeypatch.setattr(app_module.app.state, "payload_cache", cache, raising=False)
+    patch_app_state(monkeypatch, app_module.app.state, "payload_cache", cache)
     return cache
 
 

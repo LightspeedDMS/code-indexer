@@ -305,12 +305,12 @@ class TestCallerLayersThreadKwarg:
     def test_mcp_handler_search_threads_kwarg(self):
         # Issue #1935: handlers/search.py was split into the handlers/search/
         # package; the coalesced_query_embedding() calls that thread this
-        # kwarg now live in handlers/search/memory_retrieval.py.
-        source = _read_source("server/mcp/handlers/search/memory_retrieval.py")
+        # kwarg now live in handlers/search/query_vector.py.
+        source = _read_source("server/mcp/handlers/search/query_vector.py")
         assert _has_kwarg_in_call(
             source, "coalesced_query_embedding", "no_embedding_cache_shortcut"
         ), (
-            "handlers/search/memory_retrieval.py must pass no_embedding_cache_shortcut= "
+            "handlers/search/query_vector.py must pass no_embedding_cache_shortcut= "
             "to coalesced_query_embedding"
         )
 
@@ -594,7 +594,8 @@ class TestValueFlowComputeSharedQueryVector:
     - app_module.semantic_query_manager: full backend search infrastructure
     - app_module.activated_repo_manager: database access
 
-    _compute_shared_query_vector and _compute_memory_query_vector run unmodified.
+    _compute_shared_query_vector runs unmodified; the memory feature's search
+    section (which wants the shared vector) is installed and enabled.
     """
 
     def test_flag_reaches_coalesced_query_embedding_via_shared_vector(
@@ -639,25 +640,11 @@ class TestValueFlowComputeSharedQueryVector:
             ss_mod, "_get_http_client_factory", lambda: None, raising=False
         )
 
-        # External dep: get_config_service reads DB/runtime config — stub with
-        # memory_retrieval_enabled=True to trigger the shared-vector path.
-        # Additional fields read by _run_memory_retrieval's MemoryRetrievalPipelineConfig.
-        class _FakeMemCfg:
-            memory_retrieval_enabled = True
-            memory_voyage_min_score = 0.7
-            memory_cohere_min_score = 0.7
-            memory_retrieval_k_multiplier = 2
-            memory_retrieval_max_body_chars = 5000
-
-        class _FakeCfg:
-            memory_retrieval_config = _FakeMemCfg()
-
-        class _FakeConfigService:
-            def get_config(self):
-                return _FakeCfg()
-
-        monkeypatch.setattr(
-            search_handler, "get_config_service", lambda: _FakeConfigService()
+        # The memory feature's search section, enabled, wants the shared
+        # vector: that triggers the shared-vector path.
+        from tests.unit.server._memory_feature import (
+            memory_context_installed,
+            memory_search_section_installed,
         )
 
         # External dep: app_module.semantic_query_manager is full backend infra;
@@ -693,14 +680,14 @@ class TestValueFlowComputeSharedQueryVector:
         class _FakeUser:
             username = "alice"
 
-        # _search_activated_repo may raise RuntimeError from golden_repos_dir
-        # access in the memory-retrieval pipeline — that fires AFTER coalesced_query_embedding
-        # is called and the spy captures the flag. Catch only RuntimeError here; any
-        # other exception type re-raises so unexpected failures are not hidden.
-        try:
+        # The memory section fails on the unset golden_repos_dir AFTER
+        # coalesced_query_embedding was called; the core logs it and answers
+        # without the section.
+        with (
+            memory_search_section_installed(),
+            memory_context_installed(settings={"memory_retrieval_enabled": True}),
+        ):
             search_handler._search_activated_repo(params, _FakeUser())
-        except RuntimeError:
-            pass  # golden_repos_dir not set in unit-test env — expected infra gap
 
         assert coalesce_calls, (
             "coalesced_query_embedding was never called. "
@@ -710,108 +697,6 @@ class TestValueFlowComputeSharedQueryVector:
         assert coalesce_calls[0] is True, (
             f"no_embedding_cache_shortcut=True must be forwarded to coalesced_query_embedding "
             f"via _compute_shared_query_vector, but captured: {coalesce_calls}"
-        )
-
-
-class TestValueFlowRunMemoryRetrieval:
-    """Value-flow test: _run_memory_retrieval fallback (query_vector=None) must forward
-    no_embedding_cache_shortcut from params into coalesced_query_embedding.
-
-    This tests the code path at search.py ~line 593-599:
-        if query_vector is None:
-            query_vector = _compute_memory_query_vector(
-                query_text,
-                no_embedding_cache_shortcut=params.get("no_embedding_cache_shortcut", False),
-            )
-    """
-
-    def test_run_memory_retrieval_fallback_forwards_flag(self, monkeypatch):
-        """When _run_memory_retrieval is called with query_vector=None,
-        the no_embedding_cache_shortcut flag from params reaches coalesced_query_embedding.
-        """
-        import code_indexer.server.mcp.handlers.search as search_handler
-        import code_indexer.server.services.governed_call as governed_mod
-
-        coalesce_calls: list = []
-
-        def _spy_coalesce(provider, text, *, no_embedding_cache_shortcut=False, **kw):
-            coalesce_calls.append(no_embedding_cache_shortcut)
-            # Return a real-looking vector so the pipeline doesn't short-circuit.
-            return [0.1] * 8
-
-        monkeypatch.setattr(governed_mod, "coalesced_query_embedding", _spy_coalesce)
-
-        # Stub VoyageAIClient so no network call is made.
-        import code_indexer.services.voyage_ai as voyage_mod
-
-        class _FakeVoyageClient:
-            def __init__(self, *a, **kw):
-                pass
-
-            def get_provider_name(self):
-                return "voyage-ai"
-
-            def get_current_model(self):
-                return "voyage-code-3"
-
-            def get_model_info(self):
-                return {"dimensions": 1024}
-
-        monkeypatch.setattr(voyage_mod, "VoyageAIClient", _FakeVoyageClient)
-
-        # Stub _get_http_client_factory — reads app.state, not available in unit tests.
-        import code_indexer.server.services.search_service as ss_mod
-
-        monkeypatch.setattr(
-            ss_mod, "_get_http_client_factory", lambda: None, raising=False
-        )
-
-        # Build the config stub that _run_memory_retrieval reads.
-        class _FakeMemCfg:
-            memory_retrieval_enabled = True
-            memory_voyage_min_score = 0.7
-            memory_cohere_min_score = 0.7
-            memory_retrieval_k_multiplier = 2
-            memory_retrieval_max_body_chars = 5000
-
-        class _FakeCfg:
-            memory_retrieval_config = _FakeMemCfg()
-
-        class _FakeConfigService:
-            def get_config(self):
-                return _FakeCfg()
-
-        params = {
-            "query_text": "find auth",
-            "search_mode": "semantic",
-            "no_embedding_cache_shortcut": True,
-            "limit": 5,
-        }
-
-        class _FakeUser:
-            username = "alice"
-
-        # Call the fallback path directly: query_vector=None forces _compute_memory_query_vector.
-        # _get_golden_repos_dir() fires after the vector is computed — RuntimeError expected.
-        try:
-            search_handler._run_memory_retrieval(
-                params=params,
-                user=_FakeUser(),
-                config_service=_FakeConfigService(),
-                reranker_status="disabled",
-                query_vector=None,
-            )
-        except RuntimeError:
-            pass  # golden_repos_dir not set in unit-test env — expected infra gap
-
-        assert coalesce_calls, (
-            "coalesced_query_embedding was never called via the _run_memory_retrieval "
-            "fallback path. Ensure query_vector=None triggers _compute_memory_query_vector."
-        )
-        assert coalesce_calls[0] is True, (
-            f"no_embedding_cache_shortcut=True must be forwarded through "
-            f"_run_memory_retrieval -> _compute_memory_query_vector -> coalesced_query_embedding, "
-            f"but captured: {coalesce_calls}"
         )
 
 

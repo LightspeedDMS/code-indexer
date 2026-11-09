@@ -6,6 +6,7 @@ and never stores "local"/"unknown" sentinels. Also tests that detect_changes cor
 flags repos as CHANGED when SHA differs from stored tracking value.
 """
 
+from tests.unit.server._depmap_feature import depmap_claude_config
 import json
 from pathlib import Path
 from typing import Dict, Optional
@@ -13,8 +14,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from code_indexer.server.services.dependency_map_service import DependencyMapService
-from code_indexer.server.utils.config_manager import ClaudeIntegrationConfig
+from cidx_depmap.server.dependency_map_service import DependencyMapService
 
 
 @pytest.fixture
@@ -45,7 +45,7 @@ def _make_service(
     stored_hashes: Optional[Dict[str, Optional[str]]] = None,
 ) -> DependencyMapService:
     """Build a DependencyMapService with mocked dependencies."""
-    config = ClaudeIntegrationConfig(
+    config = depmap_claude_config(
         dependency_map_enabled=True,
         dependency_map_interval_hours=24,
     )

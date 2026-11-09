@@ -77,6 +77,7 @@ def _make_file_history_result(commits=None, path="src/auth.py", truncated=False)
     result.total_count = len(result.commits)
     result.truncated = truncated
     result.renamed_from = None
+    result.follow_mode = "plain"
     return result
 
 

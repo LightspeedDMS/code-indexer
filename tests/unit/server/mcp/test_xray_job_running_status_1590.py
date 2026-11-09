@@ -79,42 +79,46 @@ def _xray_single_repo_env(
     with (
         patch("code_indexer.server.mcp.handlers._utils.app_module", mock_app),
         patch(
-            "code_indexer.server.mcp.handlers.xray._search._resolve_repo_path",
+            "cidx_xray.server.mcp.xray._search._resolve_repo_path",
             return_value="/fake/repo/path",
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
+            "cidx_xray.server.mcp.xray._explore._resolve_repo_path",
             return_value="/fake/repo/path",
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._search._get_background_job_manager",
+            "cidx_xray.server.mcp.xray._search._get_background_job_manager",
             return_value=mock_bjm,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._explore._get_background_job_manager",
+            "cidx_xray.server.mcp.xray._explore._get_background_job_manager",
             return_value=mock_bjm,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._search._get_job_tracker",
+            "cidx_xray.server.mcp.xray._search._get_job_tracker",
             return_value=mock_jt,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._explore._get_job_tracker",
+            "cidx_xray.server.mcp.xray._explore._get_job_tracker",
             return_value=mock_jt,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._search._get_xray_executor",
+            "cidx_xray.server.mcp.xray._search._get_xray_executor",
             return_value=mock_exec,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._explore._get_xray_executor",
+            "cidx_xray.server.mcp.xray._infra._get_xray_executor",
             return_value=mock_exec,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._search.validate_rust_evaluator"
+            "cidx_xray.server.mcp.xray._explore._get_xray_executor",
+            return_value=mock_exec,
+        ),
+        patch(
+            "cidx_xray.server.mcp.xray._search.validate_rust_evaluator"
         ) as mock_validate,
         patch(
-            "code_indexer.server.mcp.handlers.xray._explore.validate_rust_evaluator"
+            "cidx_xray.server.mcp.xray._explore.validate_rust_evaluator"
         ) as mock_validate_explore,
         patch("asyncio.get_running_loop", return_value=loop_instance),
     ):
@@ -151,7 +155,7 @@ class TestSingleRepoSearchRunningStatus:
     async def test_single_repo_search_job_transitions_to_running(self):
         """job_fn must call update_status(job_id, status='running') AFTER
         acquiring the cell-limiter slot and BEFORE engine.run() executes."""
-        from code_indexer.server.mcp.handlers.xray import handle_xray_search
+        from cidx_xray.server.mcp.xray import handle_xray_search
 
         user = _make_user(UserRole.NORMAL_USER)
         call_order: list = []
@@ -159,7 +163,7 @@ class TestSingleRepoSearchRunningStatus:
         with (
             _xray_single_repo_env() as (mock_bjm, mock_jt, mock_exec, mock_loop),
             patch(
-                "code_indexer.xray.search_engine.XRaySearchEngine.run",
+                "cidx_xray.search_engine.XRaySearchEngine.run",
                 side_effect=_make_call_order_run(call_order),
             ),
         ):
@@ -183,7 +187,7 @@ class TestMultiRepoSearchRunningStatus:
     async def test_multi_repo_search_job_transitions_to_running(self):
         """The omni multi-repo _make_search_job_fn job body must also
         transition each per-alias job to 'running' before engine.run()."""
-        from code_indexer.server.mcp.handlers.xray import handle_xray_search
+        from cidx_xray.server.mcp.xray import handle_xray_search
 
         user = _make_user(UserRole.NORMAL_USER)
         call_order: list = []
@@ -198,7 +202,7 @@ class TestMultiRepoSearchRunningStatus:
                 loop_instance,
             ),
             patch(
-                "code_indexer.xray.search_engine.XRaySearchEngine.run",
+                "cidx_xray.search_engine.XRaySearchEngine.run",
                 side_effect=_make_call_order_run(call_order),
             ),
         ):
@@ -219,7 +223,7 @@ class TestSingleRepoExploreRunningStatus:
     async def test_single_repo_explore_job_transitions_to_running(self):
         """handle_xray_explore's single-repo job body must also transition
         to 'running' before engine.run() executes."""
-        from code_indexer.server.mcp.handlers.xray import handle_xray_explore
+        from cidx_xray.server.mcp.xray import handle_xray_explore
 
         user = _make_user(UserRole.NORMAL_USER)
         call_order: list = []
@@ -227,7 +231,7 @@ class TestSingleRepoExploreRunningStatus:
         with (
             _xray_single_repo_env() as (mock_bjm, mock_jt, mock_exec, mock_loop),
             patch(
-                "code_indexer.xray.search_engine.XRaySearchEngine.run",
+                "cidx_xray.search_engine.XRaySearchEngine.run",
                 side_effect=_make_call_order_run(call_order),
             ),
         ):
@@ -253,7 +257,7 @@ class TestRunningStatusUpdateDoesNotLeakSlot:
     restart, exactly the failure class Bug #1590 exists to eliminate."""
 
     async def test_slot_released_even_if_update_status_raises(self):
-        from code_indexer.server.mcp.handlers.xray import handle_xray_search
+        from cidx_xray.server.mcp.xray import handle_xray_search
         from code_indexer.server.services.resizable_limiter import (
             ResizableLimiter,
         )
@@ -269,7 +273,7 @@ class TestRunningStatusUpdateDoesNotLeakSlot:
                 mock_loop,
             ),
             patch(
-                "code_indexer.xray.search_engine.XRaySearchEngine.run",
+                "cidx_xray.search_engine.XRaySearchEngine.run",
                 side_effect=_make_call_order_run([]),
             ),
         ):

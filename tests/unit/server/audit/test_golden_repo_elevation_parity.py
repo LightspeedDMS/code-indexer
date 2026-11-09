@@ -232,3 +232,68 @@ def test_mcp_admin_without_totp_is_told_to_set_it_up(env) -> None:
     result = _mcp(env, "remove_golden_repo", {"alias": EXAMPLE_ALIAS}, _jti(env))
     assert result["error"] == "totp_setup_required", result
     assert env.jobs.submissions == []
+
+
+class TestRename:
+    """issue-64616: the rename doors are elevation-gated like removal; past
+    the gate the request reaches the rename's own checks (never a 403)."""
+
+    def _rest(self, env: DoorsEnv):
+        return env.rest(
+            "POST",
+            f"/api/admin/golden-repos/{EXAMPLE_ALIAS}/rename",
+            json={"new_alias": "example-renamed"},
+        )
+
+    def _mcp(self, env: DoorsEnv) -> Dict[str, Any]:
+        return _mcp(
+            env,
+            "rename_golden_repo",
+            {"alias": EXAMPLE_ALIAS, "new_alias": "example-renamed"},
+            elevation_key=_jti(env),
+        )
+
+    def test_rest_refused_without_an_elevation_window(self, env) -> None:
+        resp = self._rest(env)
+        assert resp.status_code == 403, resp.text
+        assert resp.json()["detail"]["error"] == "elevation_required"
+        assert env.jobs.submissions == []
+
+    def test_rest_passes_the_gate_with_the_callers_window(self, env) -> None:
+        env.stack.elevate(_jti(env), ACTING_ADMIN)
+        assert self._rest(env).status_code != 403
+
+    def test_mcp_refused_without_an_elevation_window(self, env) -> None:
+        result = self._mcp(env)
+        assert result["error"] == "elevation_required", result
+        assert env.jobs.submissions == []
+
+    def test_mcp_passes_the_gate_with_the_callers_window(self, env) -> None:
+        env.stack.elevate(_jti(env), ACTING_ADMIN)
+        assert self._mcp(env).get("error") != "elevation_required"
+
+
+class TestCatalogSync:
+    """issue-64616: the catalog sync doors are elevation-gated."""
+
+    def test_rest_refused_without_an_elevation_window(self, env) -> None:
+        resp = env.rest("POST", "/api/admin/golden-catalog/sync", json={})
+        assert resp.status_code == 403, resp.text
+        assert env.jobs.submissions == []
+
+    def test_rest_allowed_with_the_callers_window(self, env) -> None:
+        env.stack.elevate(_jti(env), ACTING_ADMIN)
+        resp = env.rest("POST", "/api/admin/golden-catalog/sync", json={})
+        assert resp.status_code == 202, resp.text
+        assert len(env.jobs.submissions) == 1
+
+    def test_mcp_refused_without_an_elevation_window(self, env) -> None:
+        result = _mcp(env, "sync_golden_catalog", {}, elevation_key=_jti(env))
+        assert result["error"] == "elevation_required", result
+        assert env.jobs.submissions == []
+
+    def test_mcp_allowed_with_the_callers_window(self, env) -> None:
+        env.stack.elevate(_jti(env), ACTING_ADMIN)
+        result = _mcp(env, "sync_golden_catalog", {}, elevation_key=_jti(env))
+        assert result.get("success") is True, result
+        assert len(env.jobs.submissions) == 1

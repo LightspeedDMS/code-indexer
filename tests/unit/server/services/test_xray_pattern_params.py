@@ -6,8 +6,9 @@ from typing import Any, Dict, List
 
 import pytest
 
-from code_indexer.server.services import xray_pattern_params, xray_pattern_service
-from code_indexer.server.services.xray_pattern_params import (
+from cidx_xray.server import pattern_params as xray_pattern_params
+from cidx_xray.server import pattern_service as xray_pattern_service
+from cidx_xray.server.pattern_params import (
     build_const_lines,
     resolve_params,
     validate_parameter_declarations,

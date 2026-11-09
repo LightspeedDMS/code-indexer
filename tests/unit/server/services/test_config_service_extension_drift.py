@@ -214,3 +214,36 @@ class TestSyncEdgeCases:
 
         assert isinstance(result, ExtensionDrift)
         assert "py" in result.added
+
+
+class TestRestoreRepoExtensions:
+    """restore_repo_extensions() undoes a sync, so the drift is seen again."""
+
+    def test_restore_brings_the_same_drift_back(self, cs, repo_dir):
+        _set_server_extensions(cs, [".py", ".jsonl"])
+        _write_repo_config(repo_dir, ["py", "log"])
+        drift = cs.sync_repo_extensions_if_drifted(str(repo_dir))
+        assert drift is not None
+
+        cs.restore_repo_extensions(str(repo_dir), drift)
+
+        again = cs.sync_repo_extensions_if_drifted(str(repo_dir))
+        assert again is not None
+        assert (again.added, again.removed) == ({"jsonl"}, {"log"})
+
+    def test_restore_keeps_the_other_config_keys(self, cs, repo_dir):
+        import json
+
+        _set_server_extensions(cs, [".py"])
+        _write_repo_config(repo_dir, ["log"])
+        config_path = repo_dir / ".code-indexer" / "config.json"
+        config = json.loads(config_path.read_text())
+        config["embedding_provider"] = "voyage-ai"
+        config_path.write_text(json.dumps(config))
+        drift = cs.sync_repo_extensions_if_drifted(str(repo_dir))
+
+        cs.restore_repo_extensions(str(repo_dir), drift)
+
+        restored = json.loads(config_path.read_text())
+        assert restored["file_extensions"] == ["log"]
+        assert restored["embedding_provider"] == "voyage-ai"
