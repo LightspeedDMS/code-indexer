@@ -751,7 +751,7 @@ class XrayPatternService:
         if _shared_cidx_meta(self._cidx_meta) is not None:
             # Delegated content backend: the commit history exists to feed the
             # cidx-meta git backup, which is refused there (the pod's
-            # directory is not the content, and git-mcp does not hold
+            # directory is not the content, and the git service does not hold
             # cidx-meta). Nothing reads it, so nothing is committed.
             logger.debug("xray_pattern_service: shared cidx-meta, no git commit")
             return

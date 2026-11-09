@@ -2,7 +2,7 @@
 
 ``scip_backend='delegated-plugin'``: the SCIP build for a cidx pod with no
 repository mount. The plugin (``code_indexer.scip_backend``; evo-sandbox's
-runs sandbox-mcp's ``scip`` run profile) RETURNS the index bytes, and this
+runs the sandbox service's ``scip`` run profile) RETURNS the index bytes, and this
 indexer writes them to ``output_dir`` -- the project's directory under the
 repository's index root (``scip.paths.scip_index_dir``), the IndexStore path
 every SCIP reader and the index-artifact publish already use. Nothing is read

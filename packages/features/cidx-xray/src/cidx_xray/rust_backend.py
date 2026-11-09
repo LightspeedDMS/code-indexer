@@ -462,7 +462,7 @@ def _apply_compile_resource_limits() -> None:
 # Linux lets a same-uid process read that file (verified: a child spawned with
 # a scrubbed env reads a variable from its parent's environ). Closing that
 # needs a separate uid, PID namespace or hidepid /proc for xray-cli -- the
-# long-term fix is moving X-Ray into sandbox-mcp.
+# long-term fix is moving X-Ray into the sandbox service.
 #
 # What xray-cli and the toolchain it drives actually read
 # (rust/xray-cli/src/main.rs, rust/xray-core/src/{cache.rs,compiler/}):

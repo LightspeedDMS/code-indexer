@@ -2,7 +2,7 @@
 
 X-Ray compiles caller-supplied Rust and runs it over a repository through
 ``xray-cli``. That EXECUTION is the part that may move out of the cidx pod (to
-a plugin backend, e.g. evo-sandbox's, which runs it in sandbox-mcp); everything
+a plugin backend, e.g. evo-sandbox's, which runs it in the sandbox service); everything
 above it -- auth, validation for
 UX, candidate selection, job tracking, truncation -- stays in cidx and never
 learns where the evaluator ran. This module is the seam between the two:

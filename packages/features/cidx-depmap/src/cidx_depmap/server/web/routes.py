@@ -1242,7 +1242,7 @@ def depmap_graph_data(request: Request):
 
 def _delegated_dep_map_dir() -> Optional[Path]:
     """The shared dependency-map path (inside cidx-meta) under a delegated
-    content backend, else None. It is workspace-mcp's, not this pod's disk."""
+    content backend, else None. It is the content service's, not this pod's disk."""
     from cidx_depmap._platform import is_content_seam_delegated
 
     if not is_content_seam_delegated():

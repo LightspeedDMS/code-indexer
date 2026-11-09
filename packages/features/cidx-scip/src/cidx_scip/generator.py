@@ -255,7 +255,7 @@ class SCIPGenerator:
                 byte-for-byte the previous behaviour. Prefer
                 ``build_scip_generator`` (startup wiring) to select the backend
                 from config rather than constructing a map here.
-            workspace_id: workspace-mcp id of the golden repo,
+            workspace_id: the content service id of the golden repo,
                 threaded into every ``indexer.generate`` call. Only the
                 delegated backend uses it; ``None`` (default) is correct for the
                 local backend.

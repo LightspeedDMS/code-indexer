@@ -77,7 +77,7 @@ def _content_seam_root(
     """The repository path the content seam is asked about.
 
     The db's own UNRESOLVED root (the directory above ``.code-indexer/scip``)
-    is the path the golden-repo registry and workspace-mcp know the repository
+    is the path the golden-repo registry and the content service know the repository
     by: the index root is ``<repo>/.code-indexer`` under every IndexStore. It
     is used whenever it IS the trusted root; a caller-selected trusted root
     that differs is used as given.

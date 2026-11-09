@@ -3,7 +3,7 @@
 Under ``scip_backend='delegated-plugin'`` an out-of-tree plugin (entry point
 group ``code_indexer.scip_backend``, or ``CIDX_SCIP_BACKEND``; see
 ``server/services/scip_backend_plugin.py``) runs a project's SCIP indexer
-somewhere else -- evo-sandbox's runs it in sandbox-mcp's ``scip`` run profile --
+somewhere else -- evo-sandbox's runs it in the sandbox service's ``scip`` run profile --
 and hands back the index BYTES. cidx keeps everything else: project discovery,
 the request, writing the index under the repository's index root (the
 IndexStore path every SCIP reader uses), sha256 verification, the database
@@ -20,7 +20,7 @@ What is here:
 * :class:`ScipExecutionBackend` -- the protocol a plugin's factory returns;
 * the status vocabulary (:data:`STATUS_OK`, :data:`STATUS_FAILED`,
   :data:`STATUS_UNSUPPORTED`) and :func:`sha256_hex`;
-* the sandbox-mcp transport (:class:`SandboxMcpClient`, :class:`SandboxMcpError`)
+* the the sandbox service transport (:class:`SandboxMcpClient`, :class:`SandboxMcpError`)
   re-exported, so a plugin need not import ``code_indexer.utils``.
 
 A backend should not raise for a known failure: it answers with an outcome

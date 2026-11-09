@@ -10,9 +10,9 @@ directory holding only cidx's own index state, and answered "no projects",
 
 Here each question goes where the repository is:
 
-* files: the content backend (workspace-mcp) -- ``manifest`` for the listing,
+* files: the content backend (the content service) -- ``manifest`` for the listing,
   ``fetch`` for a ``pom.xml``'s text and for the root build-file probe;
-* HEAD: the git backend (git-mcp) -- ``rev_parse(repo, "HEAD")``.
+* HEAD: the git backend (the git service) -- ``rev_parse(repo, "HEAD")``.
 
 Selected by the content seam alone: when the server reads repository files
 through a NON-local content backend, the repository is not on this pod, so SCIP
@@ -141,7 +141,7 @@ def _delegated_head_commit(repo_root: Union[str, Path]) -> str:
         raise ScipRepoReadError(
             "content_backend is delegated (the repository is not on this pod) but "
             "git_backend is local: SCIP cannot read HEAD of "
-            f"{repo_root}. Configure git_backend=delegated (git-mcp)."
+            f"{repo_root}. Configure git_backend=delegated (the git service)."
         )
     target = _content_root(repo_root)
     memo = _head_memo.get()
@@ -178,7 +178,7 @@ def head_memo() -> Iterator[None]:
 
     For a sweep: presence and freshness of one repo both ask HEAD, a few
     statements apart. Scoped to the block (one cycle), so a HEAD that moves is
-    seen by the next cycle; outside a block every call asks git-mcp.
+    seen by the next cycle; outside a block every call asks the git service.
     """
     token = _head_memo.set({})
     try:

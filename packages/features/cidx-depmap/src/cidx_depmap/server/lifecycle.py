@@ -67,7 +67,7 @@ def _ensure_dep_map_output_dir(golden_repos_dir: Union[str, Path]) -> Path:
 def _dep_map_dir_is_on_this_disk() -> bool:
     """Whether cidx-meta's dependency map is on this pod's disk (local content
     backend). Under a delegated backend it is shared content behind
-    workspace-mcp and analysis is refused here (dep_map_delegated), so the
+    the content service and analysis is refused here (dep_map_delegated), so the
     startup staging cleanup, eager output directory and stale-sentinel sweep
     -- all on this pod's directory -- are skipped."""
     from cidx_depmap._platform import is_content_seam_delegated

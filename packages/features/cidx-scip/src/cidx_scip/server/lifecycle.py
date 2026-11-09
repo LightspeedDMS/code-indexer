@@ -115,7 +115,7 @@ def _scip_db_exists(scip_dir: Path) -> bool:
 
 
 def _head_commit(repo_root: Path) -> Optional[str]:
-    """HEAD for freshness / dedupe: local read, or git-mcp on a pod without the
+    """HEAD for freshness / dedupe: local read, or the git service on a pod without the
     repository (raises there rather than answering None -- see scip_repo_reads)."""
     return head_commit(repo_root, local_reader=lambda path: get_current_commit(path))
 

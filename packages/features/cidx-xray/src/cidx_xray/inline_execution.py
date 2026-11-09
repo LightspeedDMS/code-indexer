@@ -6,7 +6,7 @@ cannot mount it. The evaluator is caller-supplied code and must still never
 run here. So under ``xray_backend=delegated`` :class:`PodLocalInlineXrayBackend`
 reads the candidate files -- this pod's own data -- and hands their bytes to
 the delegated plugin (``execute_scan_inline`` / ``execute_graph_analysis_inline``,
-cidx-content-backend >= 0.10.0), which runs the evaluator in sandbox-mcp's
+cidx-content-backend >= 0.10.0), which runs the evaluator in the sandbox service's
 mountless ``xray-inline`` profile.
 
 Limits are the plugin's (``inline_limits``: files per request, bytes per file,

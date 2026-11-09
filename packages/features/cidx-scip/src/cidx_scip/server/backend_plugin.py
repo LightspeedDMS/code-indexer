@@ -7,7 +7,7 @@ own. Under
 ``scip_backend='delegated-plugin'`` the compile step must not run in the cidx
 pod (no toolchain, no repository mount), so the ``ScipExecutionBackend``
 (``cidx_scip/delegation_api.py``) comes from a plugin -- evo-sandbox's
-``cidx-content-backend`` registers one that runs sandbox-mcp's ``scip`` run
+``cidx-content-backend`` registers one that runs the sandbox service's ``scip`` run
 profile and returns the index bytes. It is only resolved for that backend, so
 ``local`` deployments never import a plugin.
 

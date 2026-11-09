@@ -12,7 +12,7 @@ Fail-loud policy:
   ``ScipExecutionBackend``, or one reporting itself unavailable fails loud --
   never a local build.
 - ``local``: no external validation needed (default, unchanged behaviour).
-- ``delegated`` (removed: sandbox-mcp's ``sandbox_scip`` writing ``index.scip``
+- ``delegated`` (removed: the sandbox service's ``sandbox_scip`` writing ``index.scip``
   onto the shared golden volume) and any other value raise
   :class:`UnsupportedScipBackendError`, which stops server startup.
 
@@ -184,7 +184,7 @@ def build_scip_generator(
     repo_root:
         Golden-repo root (== the sandbox ``/workspace`` mount).
     workspace_id:
-        workspace-mcp id of the repo, threaded into the generator. Mutually
+        the content service id of the repo, threaded into the generator. Mutually
         exclusive with ``golden_alias`` at delegated generate time.
     golden_alias:
         Golden-repo alias ( Option C), threaded into the generator so
@@ -237,7 +237,7 @@ def build_scip_generator(
         if not next(iter(indexer_map.values())).is_available():
             raise RuntimeError(
                 f"SCIP backend plugin {type(backend).__name__} reports itself "
-                f"unavailable (sandbox-mcp unreachable?). {_NO_LOCAL_FALLBACK}"
+                f"unavailable (the sandbox service unreachable?). {_NO_LOCAL_FALLBACK}"
             )
         logger.info(
             "SCIPGenerator: using PluginScipIndexer (%s)", type(backend).__name__
@@ -276,9 +276,9 @@ def build_scip_generator_for_golden_repo(
 
      **seam #3**, updated by  (Option C). Under a delegated
     backend (``delegated-plugin``) the build is addressed by the golden repo's
-    own ``alias``, not a workspace-mcp ``workspace_id``: cidx's golden repos are
+    own ``alias``, not a the content service ``workspace_id``: cidx's golden repos are
     cidx-owned dirs at ``/data/data/golden-repos/<alias>`` and carry no
-    workspace_id. cidx sends the bare alias verbatim; sandbox-mcp resolves
+    workspace_id. cidx sends the bare alias verbatim; the sandbox service resolves
     ``<GOLDEN_REPOS_ROOT>/<alias>`` and owns the confinement (cidx never builds a
     path). Addressing by alias is the only mode that works for golden repos, so
     it is not gated behind a config knob.

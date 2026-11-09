@@ -31,7 +31,7 @@ What is here:
 * the seam types (requests, outcomes, ``BatchResult``) re-exported from
   ``execution_backend``.
 
-The sandbox-mcp transport is ``code_indexer.utils.sandbox_mcp_client``
+The the sandbox service transport is ``code_indexer.utils.sandbox_mcp_client``
 (``SandboxMcpClient.call_tool`` / ``call_tool_payload``).
 """
 

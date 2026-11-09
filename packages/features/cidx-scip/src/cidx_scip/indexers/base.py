@@ -75,7 +75,7 @@ class SCIPIndexer(ABC):
             project_dir: Directory containing the project source code
             output_dir: Directory where the .scip file should be generated
             build_system: Build system used by the project (e.g., "maven", "gradle", "npm")
-            workspace_id: workspace-mcp id of the golden repo. Only the
+            workspace_id: the content service id of the golden repo. Only the
                 delegated backend needs it to address the sandbox; local indexers
                 ignore it. Keyword-only so existing 3-arg callers are unaffected.
             golden_alias: Golden-repo alias ( Option C). The delegated

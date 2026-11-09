@@ -7,7 +7,7 @@ ripgrep, index artifacts and the content writer. Under ``xray_backend='delegated
 compile or run in the cidx pod, so the ``XrayExecutionBackend``
 (``cidx_xray/execution_backend.py``) comes from a plugin --
 evo-sandbox's ``cidx-content-backend`` registers one that runs xray-cli in
-sandbox-mcp. It is only ever resolved when ``xray_backend`` is delegated, so a
+the sandbox service. It is only ever resolved when ``xray_backend`` is delegated, so a
 local deployment never imports a plugin.
 
 The contract

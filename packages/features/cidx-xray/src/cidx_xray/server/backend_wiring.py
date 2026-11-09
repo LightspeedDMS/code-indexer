@@ -21,7 +21,7 @@ Fail-fast policy (mirrors the git, content and ripgrep wiring):
 - ``delegated`` : the evaluator runs wherever the X-Ray backend PLUGIN runs
                   it (``code_indexer.xray_backend`` entry point, or
                   ``CIDX_XRAY_BACKEND``; see ``backend_plugin``)
-                  -- evo-sandbox's runs it in sandbox-mcp. There is
+                  -- evo-sandbox's runs it in the sandbox service. There is
                   deliberately **no fallback to local**: delegation exists so
                   caller-supplied code never runs in the cidx pod, and a pod
                   built for it may hold neither the repositories nor rustc. No

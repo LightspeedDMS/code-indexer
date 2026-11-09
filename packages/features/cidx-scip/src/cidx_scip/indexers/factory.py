@@ -11,7 +11,7 @@ injected into ``SCIPGenerator``.
   every language, over a plugin's ``ScipExecutionBackend`` (which returns the
   index bytes; see ``scip/delegation_api.py``).
 
-``"delegated"`` (sandbox-mcp's ``sandbox_scip`` writing ``index.scip`` onto the
+``"delegated"`` (the sandbox service's ``sandbox_scip`` writing ``index.scip`` onto the
 shared golden volume) was removed; :data:`REMOVED_SCIP_BACKENDS` carries the
 migration message startup fails with.
 
@@ -46,12 +46,12 @@ DELEGATED_SCIP_BACKENDS: Tuple[str, ...] = (SCIP_BACKEND_DELEGATED_PLUGIN,)
 #: an un-migrated deployment names its own fix.
 REMOVED_SCIP_BACKENDS: Mapping[str, str] = {
     "delegated": (
-        "scip_backend='delegated' (sandbox-mcp's sandbox_scip writing index.scip "
+        "scip_backend='delegated' (the sandbox service's sandbox_scip writing index.scip "
         "onto the shared golden volume) was removed. Set "
         "scip_backend='delegated-plugin', which needs the cidx-content-backend "
         "SCIP plugin (code_indexer.scip_backend entry point) in the image, "
         "CIDX_SCIP_SANDBOX_MCP_URL on the cidx pod, and SCIP_RUN_SANDBOX_IMAGE on "
-        "sandbox-mcp; or set scip_backend='local'. Drop scip_build_stateless: "
+        "the sandbox service; or set scip_backend='local'. Drop scip_build_stateless: "
         "it has no effect any more."
     ),
 }

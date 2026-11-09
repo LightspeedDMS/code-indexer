@@ -27,7 +27,7 @@ path confinement helpers       containment of SCIP database paths            SDK
 ``is_immutable_versioned_      the snapshot path rule                        the ``snapshot_predicate``
 snapshot``                                                                   capability
 ``write_json_atomic``          the SCIP database migration marker            an SDK utility
-``SandboxMcpClient``           the delegated build's sandbox-mcp client      the ``cidx-delegate-
+``SandboxMcpClient``           the delegated build's the sandbox service client      the ``cidx-delegate-
 (lazy)                                                                       sandbox`` distribution
 CLI helpers (lazy)             ``cidx scip``: mode detection, the remote     a CLI capability
                                API client base, the disabled-command guard

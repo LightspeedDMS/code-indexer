@@ -371,11 +371,11 @@ class SCIPResolutionQueue:
 # =============================================================================
 #
 # The delegated SCIP backend (stream-01) hands each golden-repo compile step to
-# sandbox-mcp. Because a single build can take up to 1800s, it must NOT run
+# the sandbox service. Because a single build can take up to 1800s, it must NOT run
 # inline in the golden-repo index job (a 30s query vs a 1800s build). This
 # section adds a *serialized* build drain that reuses the same one-at-a-time
 # FIFO shape as ``SCIPResolutionQueue`` above (serialization is itself the
-# backpressure on sandbox-mcp), plus explicit 429/backpressure re-enqueue.
+# backpressure on the sandbox service), plus explicit 429/backpressure re-enqueue.
 #
 # It is thread-backed rather than asyncio-backed on purpose: the two funnel
 # entrypoints (``refresh_scheduler`` and ``activated_repo_index_manager``) are
@@ -383,7 +383,7 @@ class SCIPResolutionQueue:
 # daemon worker is the honest fit and keeps enqueue callable straight from those
 # sync paths without bridging an event loop.
 
-# sandbox-mcp returns HTTP 429 for backpressure. The plugin-backed indexer
+# the sandbox service returns HTTP 429 for backpressure. The plugin-backed indexer
 # (``scip_backend='delegated-plugin'``) reports a full sandbox (no capacity,
 # HTTP 429) with ``DELEGATED_BACKPRESSURE_MARKER``; the ``HTTP 429`` tokens catch
 # a FAILED result whose stderr carries the raw status. Matched to distinguish
@@ -453,7 +453,7 @@ def _result_is_success(result: Optional["GenerationResult"]) -> bool:
 
 
 def _detect_backpressure(result: Optional["GenerationResult"]) -> bool:
-    """True iff a FAILED build looks like sandbox-mcp backpressure (HTTP 429).
+    """True iff a FAILED build looks like the sandbox service backpressure (HTTP 429).
 
     Scans every per-project ``stderr`` for a backpressure marker. A genuine
     build failure (unsupported-language exit 69, missing deps, etc.) carries no
@@ -524,7 +524,7 @@ class DelegatedScipBuild:
 class DelegatedScipBuildQueue:
     """Serialized FIFO drain for delegated SCIP builds.
 
-    One build runs at a time (natural backpressure on sandbox-mcp). Terminal
+    One build runs at a time (natural backpressure on the sandbox service). Terminal
     outcomes:
 
     * success (≥1 project index produced) → ``on_success`` fires (records the
@@ -730,7 +730,7 @@ class DelegatedScipBuildQueue:
                 build.backpressure_attempts += 1
                 record_scip_metric("delegated_build_backpressure_retry")
                 logger.warning(
-                    "sandbox-mcp backpressure (HTTP 429) for '%s'; "
+                    "the sandbox service backpressure (HTTP 429) for '%s'; "
                     "re-enqueuing (attempt %d/%d)",
                     build.alias,
                     build.backpressure_attempts,

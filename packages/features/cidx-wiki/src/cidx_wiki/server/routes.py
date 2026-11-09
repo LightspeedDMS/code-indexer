@@ -251,7 +251,7 @@ def _user_copy_present(
 ) -> bool:
     """Whether the user's activated copy is there: its directory, when the
     content seam's implementation reads this pod's disk -- else (the copy
-    lives on workspace-mcp and this pod holds its index state at most) the
+    lives on the content service and this pod holds its index state at most) the
     registry's record of the activation for THIS user."""
     directory = pod_directory_of(repo_path)
     if directory is not None:
