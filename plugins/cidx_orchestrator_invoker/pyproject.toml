@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cidx-orchestrator-invoker"
+version = "0.1.0"
+description = "Run cidx's LLM prompts as orchestration layer jobs instead of a local claude CLI subprocess"
+requires-python = ">=3.10"
+# A delegate depends on the SDK only (its seam types and the core's repository
+# source), never on the core. By path, like every in-repo distribution.
+dependencies = ["cidx-sdk @ {root:parent:parent:uri}/packages/cidx-sdk"]
+
+# Registers on cidx's code_indexer.cli_invoker seam, so the plugin is active as
+# soon as it is installed. CIDX_CLI_INVOKER=cidx_orchestrator_invoker:make_invoker
+# is an equivalent override and takes precedence.
+[project.entry-points."code_indexer.cli_invoker"]
+orchestrator = "cidx_orchestrator_invoker:make_invoker"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["cidx_orchestrator_invoker"]
