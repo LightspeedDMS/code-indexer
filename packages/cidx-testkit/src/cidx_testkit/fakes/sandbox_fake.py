@@ -1,7 +1,7 @@
-"""An in-process fake of sandbox-mcp, and delegate-shaped clients for it.
+"""An in-process fake of the sandbox service, and delegate-shaped clients for it.
 
-sandbox-mcp is the remote service the SCIP and X-Ray seams delegate to. cidx
-calls two of its fixed tools (``code_indexer.utils.sandbox_mcp_client``):
+the sandbox service is the remote service the SCIP and X-Ray seams delegate to. cidx
+calls two of its fixed tools (``code_indexer.utils.sandbox_fake_client``):
 
 * ``sandbox_run_profile`` runs a named profile and answers a run-result
   envelope (``exit_code``, ``output``, ``duration_ms``, ``errors``). An output
@@ -11,7 +11,7 @@ calls two of its fixed tools (``code_indexer.utils.sandbox_mcp_client``):
   "chunk"}`` -> ``{"result_handle", "chunk", "data", "next_chunk"}``
   (``next_chunk`` None on the last page).
 
-sandbox-mcp runs as several replicas behind one endpoint, so the fetch for a
+the sandbox service runs as several replicas behind one endpoint, so the fetch for a
 page may land on a replica that did not run the profile. Parked results live
 in a :class:`SandboxResultStore` the replicas SHARE (the service's cluster
 store); the clients here round-robin their calls over the replicas they are
@@ -181,7 +181,7 @@ class SandboxState:
 
 
 class FakeSandboxMcp:
-    """One sandbox-mcp replica over a :class:`SandboxState`.
+    """One the sandbox service replica over a :class:`SandboxState`.
 
     ``results`` defaults to the state's shared store; pass a private one to
     model a replica that keeps parked results in its own memory.
@@ -379,7 +379,7 @@ class _ReplicaClient:
 
     def __init__(self, replicas: Sequence[FakeSandboxMcp]) -> None:
         if not replicas:
-            raise ValueError("at least one sandbox-mcp replica is needed")
+            raise ValueError("at least one the sandbox service replica is needed")
         self.replicas = list(replicas)
         self._next = itertools.cycle(self.replicas)
 
@@ -413,7 +413,7 @@ class _ReplicaClient:
 
 
 class FakeSandboxScipBackend(_ReplicaClient):
-    """A ``ScipBackend`` that builds through sandbox-mcp's ``scip`` profile."""
+    """A ``ScipBackend`` that builds through the sandbox service's ``scip`` profile."""
 
     def is_available(self) -> bool:
         return all(replica.health() for replica in self.replicas)
@@ -433,7 +433,7 @@ class FakeSandboxScipBackend(_ReplicaClient):
         except FakeSandboxError as exc:
             return ScipBuildOutcome(
                 status=STATUS_FAILED,
-                error=f"sandbox-mcp: {exc}",
+                error=f"the sandbox service: {exc}",
                 backpressure=exc.status_code == 429,
             )
         if exit_code != 0 or not isinstance(output, dict):
@@ -491,7 +491,7 @@ def _graph_error(error_type: str, message: str) -> Dict[str, Any]:
 
 
 class FakeSandboxXrayBackend(_ReplicaClient):
-    """An ``XrayBackend`` (with the inline extension) over sandbox-mcp."""
+    """An ``XrayBackend`` (with the inline extension) over the sandbox service."""
 
     @property
     def inline_limits(self) -> FakeInlineLimits:

@@ -17,7 +17,7 @@ def coerce_int(value: Any, default: int) -> int:
         return default
     try:
         return int(value)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         return default
 
 

@@ -132,7 +132,7 @@ class LocalContentBackend:
         * a symlink anywhere in the path. The final component is checked with
           ``lstat``; intermediate components are caught by requiring the parent to
           resolve to exactly where the path says it is, which is the same equality
-          rule the workspace-mcp side applies, so both backends refuse the same
+          rule the the content service side applies, so both backends refuse the same
           repositories.
         """
         unsafe = unsafe_relative_reason(rel)

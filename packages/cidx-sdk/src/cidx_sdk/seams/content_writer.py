@@ -4,7 +4,7 @@ The write side of the content seam, selected by the SAME ``content_backend``
 setting (reads and writes cannot disagree about where the files are);
 entry-point group ``code_indexer.content_writer``. Under ``local`` the core
 writes this pod's disk directly and resolves no writer; under ``delegated`` the
-writer is the remote service's (workspace-mcp ``POST /content/write``).
+writer is the remote service's (the content service ``POST /content/write``).
 
 Paths are ABSOLUTE as the content backend knows them (the seam root plus the
 repo-relative path). ``expected_blob_sha`` is a compare-and-swap on git's blob

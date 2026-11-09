@@ -19,7 +19,7 @@ from cidx_testkit.conformance.content_writer import (
     WriterSubject,
 )
 from cidx_testkit.conformance.ripgrep import RipgrepBackendContract, RipgrepSubject
-from cidx_testkit.fakes.workspace_mcp import (
+from cidx_testkit.fakes.workspace_fake import (
     FakeIndexArtifacts,
     FakeServiceError,
     FakeWorkspaceMcpRipgrepBackend,

@@ -13,7 +13,7 @@ from cidx_testkit.conformance.clone import (
     CloneSubject,
     local_subject,
 )
-from cidx_testkit.fakes.workspace_mcp import (
+from cidx_testkit.fakes.workspace_fake import (
     FakeWorkspaceMcp,
     FakeWorkspaceMcpCloneBackend,
     FakeWorkspaceMcpHttp,

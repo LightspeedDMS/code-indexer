@@ -1,9 +1,9 @@
 """The ripgrep seam: run one ripgrep invocation somewhere.
 
 Entry-point group ``code_indexer.ripgrep_backend``. ``local`` runs ``rg`` in
-this pod; ``delegated`` runs it in workspace-mcp (``POST /content/rg``), which
+this pod; ``delegated`` runs it in the content service (``POST /content/rg``), which
 validates the argv against an allowlist. What cidx sends there is pinned by a
-Pact (``tests/contracts/workspace-mcp/``) owned by the delegate distribution.
+Pact (``tests/contracts/the content service/``) owned by the delegate distribution.
 
 Moved from ``code_indexer.kernel.seam_types`` (originally
 ``server/storage/shared/ripgrep_backend.py``); the old modules re-export.

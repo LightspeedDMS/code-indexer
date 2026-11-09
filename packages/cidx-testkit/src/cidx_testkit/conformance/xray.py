@@ -6,7 +6,7 @@ the testkit's sandbox-mcp fake -- must pass the same checks. Subclass
 :class:`XraySubject` holding the backend, the repository root it scans, a way
 to lay files out there, and how to spell an evaluator FOR THAT BACKEND that
 reports every line containing a needle (real Rust for the in-pod engine,
-:func:`cidx_testkit.fakes.sandbox_mcp.fake_evaluator` for the fake).
+:func:`cidx_testkit.fakes.sandbox_fake.fake_evaluator` for the fake).
 
 A backend that also offers inline execution
 (:class:`~cidx_sdk.seams.xray.XrayInlineExecutionBackend`) is checked by

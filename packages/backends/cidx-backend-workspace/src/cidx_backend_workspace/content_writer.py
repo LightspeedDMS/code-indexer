@@ -1,7 +1,7 @@
 """The local content writer: writes a repository's files on this pod's disk.
 
 Registered on ``code_indexer.content_writer`` as ``local``. Same contract as
-the delegate (workspace-mcp ``POST /content/write``):
+the delegate (the content service ``POST /content/write``):
 
 * paths are ABSOLUTE (the content backend's root plus the repo-relative
   path); a relative one is ``EINVAL``;

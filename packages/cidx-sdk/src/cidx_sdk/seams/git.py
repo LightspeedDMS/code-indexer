@@ -1,7 +1,7 @@
 """The git seam: cidx's internal git operations, and its git tools.
 
 Entry-point group ``code_indexer.git_backend``. ``local`` runs git in this
-process (``LocalGitBackend``); ``delegated`` runs it in git-mcp (the
+process (``LocalGitBackend``); ``delegated`` runs it in the git service (the
 ``cidx_git_backend`` plugin). :class:`GitCommandRunner` is the extension a
 backend implements to also carry the user-facing git TOOLS.
 
@@ -33,7 +33,7 @@ VALID_GIT_BACKENDS = ("local", "delegated")
 #: What git prints when HEAD is not a branch: ``fatal: ref HEAD is not a
 #: symbolic ref``. Part of the contract: ``symbolic_ref`` on a detached HEAD
 #: raises ``CalledProcessError`` whose ``stderr`` carries this text, through
-#: every backend (git-mcp surfaces git's stderr verbatim), so callers tell a
+#: every backend (the git service surfaces git's stderr verbatim), so callers tell a
 #: detached HEAD from a failure.
 DETACHED_HEAD_MARKER = "is not a symbolic ref"
 
@@ -51,7 +51,7 @@ class GitBackend(Protocol):
 
         ``LocalGitBackend`` returns False — it runs git in-process and relies on
         the credential carried in the URL / ambient git config. The delegated
-        git-mcp backend returns True — git-mcp holds the token, so the
+        the git service backend returns True — the git service holds the token, so the
         PAT lives only there and never in cidx's stored golden-repo state.
         """
         ...  # pragma: no cover
@@ -98,7 +98,7 @@ class GitBackend(Protocol):
         """``git [-c core.fsync=none] fetch <remote>`` (``retry`` opt-in).
 
         ``ref`` (a branch name) fetches ONLY that branch, into
-        ``refs/remotes/<remote>/<ref>`` (git-mcp ``git_fetch`` ``ref``), never
+        ``refs/remotes/<remote>/<ref>`` (the git service ``git_fetch`` ``ref``), never
         the clone's configured refspec -- which, on a single-branch clone,
         names a branch upstream may have deleted."""
         ...  # pragma: no cover

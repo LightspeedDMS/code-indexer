@@ -2,7 +2,7 @@
 
 Selected by ``clone_backend``: ``local`` (``cp --reflink``), ``ontap`` (ONTAP
 FlexClone), ``cow-daemon`` (the CoW daemon over NFS) or ``delegated``
-(workspace-mcp). Entry-point group ``code_indexer.clone_backend``, with the
+(the content service). Entry-point group ``code_indexer.clone_backend``, with the
 mode chosen by entry name. Every provider is a factory taking ONE argument,
 :class:`CloneBackendSettings`: what the configured mode needs from the core
 (its config section, the versioned base) and the core runtime services it
@@ -190,7 +190,7 @@ class CloneServices:
         run_cancellable: how a local copy process is run (Bug #1342).
         redact: masks credentials in text a backend puts in an exception.
         visibility_waiter: ``waiter(path)`` returns once *path*, created by
-            another host (the CoW daemon, ONTAP, workspace-mcp), is visible
+            another host (the CoW daemon, ONTAP, the content service), is visible
             on this node (Bug #1084 read-after-create barrier); raises when
             it never becomes visible.
     """

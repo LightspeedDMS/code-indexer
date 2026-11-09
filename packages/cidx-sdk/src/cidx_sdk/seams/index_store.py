@@ -3,7 +3,7 @@
 Selected by ``index_store_backend``. ``local`` keeps the index inside the
 repository (``<repo>/.code-indexer``); ``delegated`` publishes built indexes as
 immutable versions to an artifact service, through the
-``code_indexer.index_artifacts`` entry point (workspace-mcp's index store), and
+``code_indexer.index_artifacts`` entry point (the content service's index store), and
 checks versions out for readers.
 
 Entry-point group ``code_indexer.index_artifacts``. The entry named ``local``

@@ -1,6 +1,6 @@
-"""An in-process fake of git-mcp, for the git invoker and git backend seams.
+"""An in-process fake of the git service, for the git invoker and git backend seams.
 
-git-mcp runs git where the repositories are, with its own credentials. The
+the git service runs git where the repositories are, with its own credentials. The
 fake runs real ``git`` in the directory a request names (mapped through
 ``roots`` when cidx and the service address a repository differently: a
 request path equal to, or under, a root is rewritten onto the service's
@@ -9,7 +9,7 @@ whose non-zero exit is reported, never raised -- the invoker contract.
 
 Two delegate-shaped clients: :class:`FakeGitMcpInvoker` (the git invoker) and
 :class:`FakeGitMcpGitBackend` (the git backend, as the ``cidx_git_backend``
-plugin presents git-mcp: it owns its credentials and raises
+plugin presents the git service: it owns its credentials and raises
 ``CalledProcessError`` with git's stderr). The backend builds its argvs
 independently of the local backend, so passing the git suite against it says
 something about the suite.
@@ -69,7 +69,7 @@ class FakeGitMcp:
         env: Optional[Dict[str, str]] = None,
     ) -> "subprocess.CompletedProcess[str]":
         """Run *cmd* in *cwd* (mapped). *env* overrides the service's own
-        commit identity, as git-mcp's ``git_exec`` takes one per request."""
+        commit identity, as the git service's ``git_exec`` takes one per request."""
         argv = tuple(cmd)
         self.requests.append((argv, os.fspath(cwd)))
         if not argv or argv[0] != "git":
@@ -112,7 +112,7 @@ class FakeGitMcpGitBackend:
     Paths (repositories, clone destinations) are mapped onto the service's
     directories; a failure raises ``CalledProcessError`` carrying git's stderr
     (credentials in it redacted), as the delegate plugin does. It owns its
-    credentials: ``credentials_url`` is ignored, as git-mcp ignores it.
+    credentials: ``credentials_url`` is ignored, as the git service ignores it.
     """
 
     def __init__(self, service: FakeGitMcp) -> None:

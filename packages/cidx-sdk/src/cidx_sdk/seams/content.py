@@ -2,7 +2,7 @@
 
 Selected by the core's ``content_backend`` setting; entry-point group
 ``code_indexer.content_backend``. ``local`` reads this pod's disk, ``delegated``
-asks the service that owns filesystem access (workspace-mcp).
+asks the service that owns filesystem access (the content service).
 
 What every implementation must keep (the conformance suite in
 ``cidx_testkit.conformance.content`` checks it):
@@ -40,14 +40,14 @@ from typing import (
 
 #: Per-file fetch errors that mean "the file is there but could not be read":
 #: a directory, or a file the backend will not serve. Every OTHER per-file
-#: error reads as "not found" (workspace-mcp answers EACCES, not ENOENT, for a
+#: error reads as "not found" (the content service answers EACCES, not ENOENT, for a
 #: file under a missing directory).
 UNREADABLE_FETCH_ERRORS = frozenset(
     {"EISDIR", os.strerror(errno.EISDIR), "EFBIG", "ESIZECHANGED"}
 )
 
 #: Per-file fetch errors that mean "there is no such file": ENOENT, ENOTDIR (a
-#: path through a file), and EACCES, which workspace-mcp answers for a file
+#: path through a file), and EACCES, which the content service answers for a file
 #: under a missing directory. For callers that must tell ABSENCE from FAILURE
 #: (an absent build file is an answer; EIO or a timeout record is not): an
 #: error in neither this set nor ``UNREADABLE_FETCH_ERRORS`` is a failure.
@@ -160,7 +160,7 @@ def entry_in_scope(path: str, prefix: str, max_depth: Optional[int]) -> bool:
     return True
 
 
-#: How workspace-mcp answers a manifest whose ROOT does not exist: HTTP 400
+#: How the content service answers a manifest whose ROOT does not exist: HTTP 400
 #: with this marker in the detail. A local backend lists such a root as empty.
 ABSENT_ROOT_STATUS = 400
 ABSENT_ROOT_MARKER = "source_path does not exist"

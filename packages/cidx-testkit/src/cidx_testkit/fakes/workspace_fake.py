@@ -1,6 +1,6 @@
-"""An in-process fake of workspace-mcp, and delegate-shaped clients for it.
+"""An in-process fake of the content service, and delegate-shaped clients for it.
 
-workspace-mcp is the remote service several seams delegate to: content
+the content service is the remote service several seams delegate to: content
 (manifest + fetch), content writes, ripgrep, clone and index artifacts. The
 real delegates live outside this repository; this fake reproduces the
 service's ANSWERS -- including the ones a local backend never gives -- so a
@@ -221,7 +221,7 @@ class FakeWorkspaceMcp:
             if parent.is_symlink():
                 return FetchedFile(rel, None, b"", REFUSED_SYMLINKED_DIRECTORY)
             if not parent.is_dir():
-                # workspace-mcp answers EACCES for a file under a missing dir.
+                # the content service answers EACCES for a file under a missing dir.
                 return FetchedFile(rel, None, b"", "EACCES")
         if target.is_symlink():
             return FetchedFile(rel, None, b"", REFUSED_SYMLINK)
@@ -531,7 +531,7 @@ def unregister_delegate(registered: Dict[str, List[str]]) -> None:
         remove_entry_points(group, names)
 
 
-# ── the clone seam: workspace-mcp's clone-path routes ─────────────────────────
+# ── the clone seam: the content service's clone-path routes ─────────────────────────
 
 
 class FakeWorkspaceMcpCloneBackend:
@@ -626,7 +626,7 @@ class FakeRequestException(Exception):
 
 
 class FakeWorkspaceMcpHttp:
-    """A stand-in for the ``requests`` module that routes workspace-mcp's
+    """A stand-in for the ``requests`` module that routes the content service's
     clone-path routes to :class:`FakeWorkspaceMcp`, so a REAL delegated
     client (one that speaks HTTP) runs against the fake service::
 

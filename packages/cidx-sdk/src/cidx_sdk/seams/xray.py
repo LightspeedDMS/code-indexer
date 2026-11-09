@@ -2,7 +2,7 @@
 
 Entry-point group ``code_indexer.xray_backend``. ``local`` runs ``xray-cli``
 in this pod (the X-Ray feature's own engine); ``delegated`` runs it wherever the
-plugin does (sandbox-mcp). Everything above execution -- auth, validation,
+plugin does (the sandbox service). Everything above execution -- auth, validation,
 candidate selection, job tracking, truncation -- stays with the feature and
 never learns where the evaluator ran.
 

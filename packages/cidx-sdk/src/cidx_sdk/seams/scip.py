@@ -2,7 +2,7 @@
 
 Entry-point group ``code_indexer.scip_backend``. ``local`` runs the indexers
 in this pod (the SCIP feature's own engine); ``delegated-plugin`` (the config
-spelling of the delegated mode) runs them in a plugin's backend -- sandbox-mcp
+spelling of the delegated mode) runs them in a plugin's backend -- the sandbox service
 -- which hands back the index BYTES. cidx keeps project discovery, writing the
 index, sha256 verification and the database build.
 

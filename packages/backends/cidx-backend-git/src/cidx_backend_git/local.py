@@ -2,7 +2,7 @@
 
 The ``local`` mode of the git seam (``cidx_sdk.seams.git.GitBackend`` and
 ``GitCommandRunner``), registered on ``code_indexer.git_backend`` under the
-entry name ``local``; the delegated mode runs the same operations in git-mcp.
+entry name ``local``; the delegated mode runs the same operations in the git service.
 
 This module builds argvs and nothing else. How git is spawned -- the
 non-interactive SSH environment, ``safe.directory``, a network operation's
@@ -179,7 +179,7 @@ class LocalGitBackend:
             cmd += ["-c", "core.fsync=none"]
         cmd += ["fetch", remote]
         if ref:
-            # The same refspec git-mcp's git_fetch builds for its ``ref``.
+            # The same refspec the git service's git_fetch builds for its ``ref``.
             cmd.append(f"+{ref}:refs/remotes/{remote}/{ref}")
         self._run(
             cmd,
@@ -386,7 +386,7 @@ class LocalGitBackend:
         count: Optional[int] = None,
         timeout: Timeout = None,
     ) -> bytes:
-        # The argv git-mcp's git_for_each_ref runs: options, then ``--`` patterns.
+        # The argv the git service's git_for_each_ref runs: options, then ``--`` patterns.
         cmd = ["git", "for-each-ref", f"--format={fmt}"]
         if sort:
             cmd.append(f"--sort={sort}")

@@ -16,7 +16,7 @@ from cidx_testkit.conformance.scip import (
     directory_writer,
 )
 from cidx_testkit.conformance.xray import XrayInlineContract, XraySubject
-from cidx_testkit.fakes.sandbox_mcp import (
+from cidx_testkit.fakes.sandbox_fake import (
     RESULT_FETCH_TOOL,
     RUN_PROFILE_TOOL,
     FakeSandboxError,

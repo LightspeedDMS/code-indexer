@@ -4,7 +4,7 @@ Entry-point group ``code_indexer.git_invoker``. Placed at the one chokepoint
 every git call in the core bottoms out at (``utils.git_runner``), so internal
 git and the user-facing git tools delegate through one point. ``local`` (no
 invoker) runs ``subprocess`` here; ``delegated`` hands MUTATING commands to the
-invoker (git-mcp), while reads stay in place. Which commands mutate is the
+invoker (the git service), while reads stay in place. Which commands mutate is the
 core's policy (``utils.git_invoker.is_mutating_git``), not the invoker's.
 
 Moved from ``code_indexer.utils.git_invoker``, which re-exports it.
