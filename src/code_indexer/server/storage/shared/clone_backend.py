@@ -523,7 +523,7 @@ class CowDaemonBackend:
         underscores. Real cluster usernames are email addresses (e.g.
         ``Jane.Doe@example.com``), so any character outside that
         allowed set -- not just dots -- must be replaced, or the daemon
-        rejects the request with HTTP 400 VALIDATION_ERROR (Issue #1465).
+        rejects the request with HTTP 400 VALIDATION_ERROR (Issue: sanitization validation).
         Every disallowed character maps to a single underscore.
         """
         return re.sub(r"[^A-Za-z0-9_-]", "_", alias)
@@ -541,23 +541,23 @@ class CowDaemonBackend:
           translation is a genuine no-op (nothing to translate) -- returns cidx_path unchanged.
         - If cidx_path DOES resolve under mount_point, translation IS required (the daemon
           only accepts paths under its own local storage root) but impossible without a
-          configured daemon_storage_path. Bug #1320: silently returning the untranslatable
+          configured daemon_storage_path. Bug: untranslatable path: silently returning the untranslatable
           mount-point path here caused the CoW daemon to reject it with HTTP 400
           PATH_NOT_ALLOWED at publish time. Raise a clear, actionable configuration error
           instead of silently passing through a path the daemon is guaranteed to reject.
 
         Raises ValueError if cidx_path is not under mount_point (caller must use a path within the mount).
         """
-        # Bug #1046: resolve symlinks before path-prefix check, and accept
+        # Bug: symlink resolution: resolve symlinks before path-prefix check, and accept
         # paths under EITHER mount_point or daemon_storage_path.
         #
-        # On NFS-client nodes (e.g. cluster node 20/22), the golden-repos
-        # symlink resolves under mount_point (/mnt/cow-storage/...), needs
+        # On NFS-client nodes (e.g. <nfs_client_node>), the golden-repos
+        # symlink resolves under mount_point (<mount_point>/...), needs
         # translation to daemon_storage_path form.
         #
-        # On the CoW daemon host (e.g. cluster node 23), the same logical
+        # On the CoW daemon host (e.g. <cow_daemon_node>), the same logical
         # filesystem is reached via daemon_storage_path directly
-        # (/home/opuser/cow-storage/...) — the symlink resolves there
+        # (<daemon_storage_path>/...) — the symlink resolves there
         # because the local layout points to the source rather than the
         # bind mount. Such paths are ALREADY in daemon-local form, return
         # as-is without re-prefixing.
@@ -596,8 +596,8 @@ class CowDaemonBackend:
         """Translate daemon-local clone_path returned by a job back to a CIDX mount-point path.
 
         The daemon job response contains clone_path as the daemon-local absolute path
-        (e.g. ``home/opuser/cow-storage/ns/name`` without leading slash, or
-        ``/home/opuser/cow-storage/ns/name`` with leading slash).
+        (e.g. ``home/<daemon_user>/cow-storage/ns/name`` without leading slash, or
+        ``<daemon_storage_path>/ns/name`` with leading slash).
 
         When daemon_storage_path is configured we strip it and replace with mount_point.
         When daemon_storage_path is empty the clone_path is already relative (``ns/name``)
