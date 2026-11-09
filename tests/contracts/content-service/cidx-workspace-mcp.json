@@ -3,7 +3,7 @@
     "name": "cidx"
   },
   "provider": {
-    "name": "workspace-mcp"
+    "name": "content-service"
   },
   "interactions": [
     {

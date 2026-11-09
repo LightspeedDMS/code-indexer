@@ -440,7 +440,7 @@ def test_check_hnsw_health_fails_closed_when_access_service_unwired(
     assert seen["submitted"] is None
 
 
-# --- get_index_status under a delegated IndexStore (EVO-64616) ------------------
+# --- get_index_status under a delegated IndexStore (issue-64616) ------------------
 
 
 class _GoldenManager:

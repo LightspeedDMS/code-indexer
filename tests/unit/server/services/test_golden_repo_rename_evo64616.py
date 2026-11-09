@@ -1,4 +1,4 @@
-"""EVO-64616: renaming a golden repository's alias moves everything that
+"""issue-64616: renaming a golden repository's alias moves everything that
 names it, without re-cloning or re-embedding, survives a crash at any step
 (a re-run finishes it) and racing pods (one wins, the rest fail loud).
 
@@ -35,9 +35,9 @@ from code_indexer.utils.index_store import (
     temporal_index_store_alias,
 )
 
-OLD, NEW = "evolution-2", "conversion-evolution"
-URL = "https://gitlab.example.com/ideas/innovation-week/evolution.git"
-OTHER_URL = "https://gitlab.example.com/conversion/evolution.git"
+OLD, NEW = "example-repo-2", "conversion-example-repo"
+URL = "https://gitlab.example.com/ideas/innovation-week/example-repo.git"
+OTHER_URL = "https://gitlab.example.com/conversion/example-repo.git"
 
 
 class Boom(RuntimeError):
@@ -792,7 +792,7 @@ def test_a_clone_that_cannot_be_read_refuses_with_a_conflict(tmp_path: Path) -> 
 
 
 def test_an_empty_clone_can_be_renamed_in_place(tmp_path: Path) -> None:
-    """EVO-64616: an empty clone (nothing pushed upstream) has no commit and no
+    """issue-64616: an empty clone (nothing pushed upstream) has no commit and no
     origin tracking ref; counting commits ahead failed, refusing the rename."""
     world = World(tmp_path, delegated=False)
 
@@ -843,7 +843,7 @@ def test_an_unreadable_clone_reports_and_logs_gits_own_error(
 def test_an_unwired_clone_backend_points_at_the_startup_failure(
     tmp_path: Path,
 ) -> None:
-    """EVO-64616: a pod whose VersionedSnapshotManager failed to build at startup
+    """issue-64616: a pod whose VersionedSnapshotManager failed to build at startup
     (workspace-mcp unreachable then) refused renames with only "NoneType"."""
     from code_indexer.server.repositories.golden_repo_manager import (
         GitOperationError,

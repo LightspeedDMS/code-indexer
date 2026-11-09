@@ -1,4 +1,4 @@
-"""EVO-65484: X-Cidx-Caller -> job submitter label (attribution, not authz)."""
+"""issue-65484: X-Cidx-Caller -> job submitter label (attribution, not authz)."""
 
 from code_indexer.server.routers.inline_admin_ops import _resolve_job_submitter
 

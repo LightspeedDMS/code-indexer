@@ -1,4 +1,4 @@
-"""Unit tests for the golden-repo SCIP lifecycle funnel (EVO-65021, stream-05).
+"""Unit tests for the golden-repo SCIP lifecycle funnel (issue-65021, stream-05).
 
 Covers: the enable-scip/backend gate, both-entrypoints routing through the
 config-selected backend, fail-soft (no alias / no workspace_id / builder error),
@@ -146,7 +146,7 @@ class TestFailSoft:
     def test_builder_returned_none_skips(self, tmp_path, monkeypatch):
         monkeypatch.setattr(scip_lifecycle, "get_current_commit", lambda _p: "sha1")
         # builder returns None → stream-01 seam #3 DEFENSIVE guard. Under Option C
-        # (EVO-65365) the production builder always returns a generator for a
+        # (issue-65365) the production builder always returns a generator for a
         # golden repo, so a None indicates a builder-seam/config anomaly (or, as
         # here, a test injecting the seam) — the funnel fails soft, not crashes.
         out = funnel_scip_generation(
@@ -216,7 +216,7 @@ class TestFreshness:
     def test_root_build_repo_stale_nested_only_is_NOT_fresh(
         self, tmp_path, monkeypatch
     ):
-        """EVO-66190 2nd gate: a root-buildable repo (root settings.gradle) with only a
+        """issue-66190 2nd gate: a root-buildable repo (root settings.gradle) with only a
         stale per-subproject DB + a matching marker must NOT read fresh — else the funnel
         skips the rebuild the reconcile enqueued."""
         monkeypatch.setattr(scip_lifecycle, "get_current_commit", lambda _p: "sha1")
@@ -270,7 +270,7 @@ class TestFreshness:
         assert scip_db_is_fresh(tmp_path, scip_dir) is False
 
     def test_not_fresh_when_marker_missing(self, tmp_path, monkeypatch):
-        # Finding-6 (6): every repo that had a SCIP index built BEFORE EVO-65021
+        # Finding-6 (6): every repo that had a SCIP index built BEFORE issue-65021
         # has a built .scip.db but NO .build_commit marker. On first upgrade it
         # MUST be treated as not-fresh (rebuild), never fresh — otherwise the
         # entire existing fleet is skipped forever.
@@ -399,7 +399,7 @@ class TestClearRebuild:
 
 
 class TestFunnelGoldenScip:
-    """EVO-65365: the ONE home for the golden ``-global``→bare normalization.
+    """issue-65365: the ONE home for the golden ``-global``→bare normalization.
 
     Every golden-repo SCIP entrypoint funnels through ``funnel_golden_scip``, so
     the CRITICAL-1 invariant (normalize the ``-global`` REGISTRY alias to the

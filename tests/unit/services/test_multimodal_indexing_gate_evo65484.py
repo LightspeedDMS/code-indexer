@@ -1,4 +1,4 @@
-"""EVO-65484: multimodal (image) indexing is env-gated so deployments that never
+"""issue-65484: multimodal (image) indexing is env-gated so deployments that never
 issue image queries can stop the pure-waste voyage-multimodal-3 vendor spend."""
 
 import os

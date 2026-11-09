@@ -1,4 +1,4 @@
-"""EVO-66105: ActivatedRepoIndexManager threads repo_alias as
+"""issue-66105: ActivatedRepoIndexManager threads repo_alias as
 golden_repo_alias through to build_embedding_stats_child_env for
 per-repo VoyageAI cost correlation.
 
@@ -77,7 +77,7 @@ def capturing_subprocess_run():
 
 
 class TestActivatedRepoIndexManagerEmbedStatsAlias:
-    """EVO-66105: repo_alias threads through as CIDX_EMBEDDING_STATS_GOLDEN_REPO_ALIAS."""
+    """issue-66105: repo_alias threads through as CIDX_EMBEDDING_STATS_GOLDEN_REPO_ALIAS."""
 
     def test_semantic_indexing_threads_golden_repo_alias(
         self, index_manager, tmp_path, capturing_subprocess_run

@@ -6,7 +6,7 @@ valid routing key for workspace-mcp / git-mcp, but the directory does not
 exist locally.  All resolve-* functions must return the path without probing
 the local filesystem.
 
-Covers EVO-64616 code-fix sites:
+Covers issue-64616 code-fix sites:
 - ``resolve_alias_or_index_path(..., skip_fs_check=True)``
 - ``_resolve_repo_path()`` alias-step bypass
 - ``_registry_index_path_dir()`` delegation bypass

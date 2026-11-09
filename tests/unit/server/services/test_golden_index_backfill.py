@@ -1,4 +1,4 @@
-"""EVO-66445: unit tests for the DRY golden-repo index backfill engine."""
+"""issue-66445: unit tests for the DRY golden-repo index backfill engine."""
 
 from __future__ import annotations
 
@@ -119,7 +119,7 @@ def test_missing_golden_dir_is_a_noop(tmp_path: Path) -> None:
 
 
 def test_control_dirs_are_never_scanned_as_repos(tmp_path: Path) -> None:
-    """EVO-64616: ``aliases`` (alias pointer files) and ``cidx-exports`` are cidx's
+    """issue-64616: ``aliases`` (alias pointer files) and ``cidx-exports`` are cidx's
     control state, not repositories. The scan must neither enqueue them nor create
     a ``.code-indexer`` attempt marker inside them."""
     from code_indexer.server.services.golden_index_backfill import (
@@ -164,7 +164,7 @@ def test_control_dir_names_are_scanned_when_the_caller_lists_them(
 
 
 def test_the_analytics_export_dir_is_one_the_scan_skips(tmp_path: Path) -> None:
-    """EVO-64616: the export service and the scan name the exports directory from
+    """issue-64616: the export service and the scan name the exports directory from
     one constant. Whatever directory the export service writes under must be a
     control directory, or the backfill would enqueue it as a repository."""
     import uuid

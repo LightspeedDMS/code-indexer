@@ -741,7 +741,7 @@ def test_generator_drops_git_documents_wherever_the_repository_is(
     assert _kept(repo / ".code-indexer" / "scip" / "index.scip") == ["a.py"]
 
 
-# ── EVO-64616: indexes built by the delegated plugin (sandbox root) ──────────
+# ── issue-64616: indexes built by the delegated plugin (sandbox root) ──────────
 
 SANDBOX_ROOT = "file:///workspace"
 

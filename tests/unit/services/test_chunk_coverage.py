@@ -1,4 +1,4 @@
-"""EVO-64616: chunk coverage of the text index.
+"""issue-64616: chunk coverage of the text index.
 
 Files indexed while image chunks bypassed the text index are missing some of
 their chunks. ``incomplete_chunk_paths`` finds them from the stored payloads

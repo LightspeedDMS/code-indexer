@@ -1,4 +1,4 @@
-"""EVO-64616: index_cleanup is idempotent -- already gone is deleted.
+"""issue-64616: index_cleanup is idempotent -- already gone is deleted.
 
 On tools-test two pods ran the same cleanup: one deleted
 ``.versioned/knowledge-base/v_1792503817``, the other's job then FAILED with

@@ -324,7 +324,7 @@ def test_delegated_remove_of_an_absent_clone_never_claims_a_deletion(
 
 
 def test_delegated_remove_deletes_an_in_place_registration(tmp_path: Path) -> None:
-    # EVO-64616: retained, it was an indexed clone with no registry row, and
+    # issue-64616: retained, it was an indexed clone with no registry row, and
     # the registry reconcile re-registered it -- undoing the removal.
     mgr, clones = _delegated(tmp_path)
     in_place = os.path.join(mgr.golden_repos_dir, ALIAS)
@@ -340,7 +340,7 @@ def test_delegated_remove_deletes_an_in_place_registration(tmp_path: Path) -> No
 
 
 def test_a_failed_add_still_retains_an_in_place_registration(tmp_path: Path) -> None:
-    # EVO-64228 is unchanged outside a removal: the provisioner's source stays.
+    # issue-64228 is unchanged outside a removal: the provisioner's source stays.
     mgr, _ = _delegated(tmp_path)
     in_place = os.path.join(mgr.golden_repos_dir, ALIAS)
 

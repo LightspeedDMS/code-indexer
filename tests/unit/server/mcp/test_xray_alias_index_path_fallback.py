@@ -7,8 +7,8 @@ xray_dump_ast / xray_search_batch) returned ``repository_not_found`` for a ``-gl
 repo whenever the filesystem alias pointer was missing (e.g. after a golden-repo
 seeder/bulk-provisioning refresh emptied ``golden-repos/aliases/``) — even though
 ``search_code`` / ``regex_search`` resolved the SAME alias fine (they already use the
-shared ``resolve_alias_or_index_path`` helper). Observed live on ``evolution-global``
-and ``evolution-2-global``.
+shared ``resolve_alias_or_index_path`` helper). Observed live on ``example-repo-global``
+and ``example-repo-2-global``.
 
 The fix routes both xray resolvers through the shared
 ``_utils._resolve_global_repo_path_or_index`` (registry ``index_path`` fallback),
@@ -66,16 +66,16 @@ def test_falls_back_to_index_path_when_alias_pointer_missing(
     backend = _build_registry(tmp_path)
     index_dir = tmp_path / "index-evo"
     index_dir.mkdir()
-    backend.register_repo("evolution-global", "evolution", None, str(index_dir))
+    backend.register_repo("example-repo-global", "example-repo", None, str(index_dir))
 
     golden_repos_dir = tmp_path / "golden-repos"
     (golden_repos_dir / "aliases").mkdir(parents=True)
-    # Deliberately NO alias pointer for evolution-global (the seeder gap).
+    # Deliberately NO alias pointer for example-repo-global (the seeder gap).
 
     _patch_app_state(monkeypatch, golden_repos_dir, backend)
 
     # Before the fix this returned None → repository_not_found.
-    assert resolver("evolution-global") == str(index_dir)
+    assert resolver("example-repo-global") == str(index_dir)
 
 
 @pytest.mark.parametrize("module_path", _XRAY_RESOLVERS)

@@ -1,4 +1,4 @@
-"""Integration test for EVO-66113 (MR !47 review MAJOR finding): prove the
+"""Integration test for issue-66113 (MR !47 review MAJOR finding): prove the
 fix works through VectorCalculationManager's REAL ThreadPoolExecutor, not
 just via direct contextvars manipulation.
 
@@ -134,7 +134,7 @@ class TestVectorCalculationManagerEmbedStatsPropagation:
         ), "instrument_call must have recorded exactly one call"
         rec = writer.records[0]
         assert rec.golden_repo_alias == "my-golden-repo", (
-            "EVO-66113 regression: golden_repo_alias fallback did not "
+            "issue-66113 regression: golden_repo_alias fallback did not "
             "survive into the VectorCalculationManager ThreadPoolExecutor "
             "worker"
         )

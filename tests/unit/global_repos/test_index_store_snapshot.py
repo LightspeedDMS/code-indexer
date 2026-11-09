@@ -265,7 +265,7 @@ def test_names_that_differ_only_in_case_get_distinct_aliases() -> None:
 def test_a_refresh_records_its_base_index_as_used_by_the_served_cache(
     world: Dict[str, Any],
 ) -> None:
-    """EVO-64616: the base clone is the refresh's incremental base, never a
+    """issue-64616: the base clone is the refresh's incremental base, never a
     query's target; the refresh keeps its LRU age current so the served-index
     cache does not evict it first (which would cost a full rebuild)."""
     from code_indexer.server.services import served_index_cache as sic

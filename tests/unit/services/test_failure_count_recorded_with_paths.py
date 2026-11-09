@@ -1,4 +1,4 @@
-"""EVO-64616: a run's ``failed_files`` count always comes with its paths.
+"""issue-64616: a run's ``failed_files`` count always comes with its paths.
 
 A count with no recorded path (``failed_files`` > ``failed_file_paths``)
 cannot be retried file by file. The full-index path used to leave exactly

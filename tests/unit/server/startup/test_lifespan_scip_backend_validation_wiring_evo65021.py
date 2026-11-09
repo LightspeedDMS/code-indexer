@@ -1,4 +1,4 @@
-"""EVO-65021 regression guard: ``scip_backend`` is validated at startup.
+"""issue-65021 regression guard: ``scip_backend`` is validated at startup.
 
 The only production caller of the scip wiring
 (``lifecycle.funnel_scip_generation``) swallows a config ``RuntimeError`` per

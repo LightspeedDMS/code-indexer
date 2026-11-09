@@ -1,4 +1,4 @@
-"""EVO-66445: unit tests for the SCIP backfill policy (granular sub-counts + enqueue)."""
+"""issue-66445: unit tests for the SCIP backfill policy (granular sub-counts + enqueue)."""
 
 from __future__ import annotations
 

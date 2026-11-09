@@ -232,7 +232,7 @@ def test_any_batching_merges_to_exactly_the_one_run_result(
 def test_unreadable_candidates_never_abort_the_other_batches(
     repo: Path, max_files: int
 ) -> None:
-    """EVO-64616 (review of !233): a sandbox run of ONLY unreadable candidates
+    """issue-64616 (review of !233): a sandbox run of ONLY unreadable candidates
     was a whole-batch error that threw away every other batch. They are
     answered here, on their own results, as one local run answers them."""
     rels = ["missing.py", "gone/x.py", "a.py", "e.py", "missing.py"]

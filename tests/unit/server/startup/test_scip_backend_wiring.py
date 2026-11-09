@@ -1,4 +1,4 @@
-"""Unit tests for build_scip_generator (EVO-65021 scip backend wiring).
+"""Unit tests for build_scip_generator (issue-65021 scip backend wiring).
 
 The wiring is the cidx-scip feature's (``cidx_scip.server.backend_wiring``)
 since modular phase 4d; the removed ``scip_query_backend`` guard stays in the
@@ -56,7 +56,7 @@ class TestLocalDefault:
 
 
 class TestFailLoudOnBadValue:
-    """EVO-65021: an unrecognised scip_backend must RAISE, never silently
+    """issue-65021: an unrecognised scip_backend must RAISE, never silently
     downgrade to a local build (which would come up 'healthy' then fail every
     project with tool-not-found on the toolchain-less indexing pods)."""
 
@@ -183,7 +183,7 @@ class TestStartupPolicy:
 
 
 class TestValidateScipBackendConfig:
-    """EVO-65021: the eager startup config validation (fail-loud call site)."""
+    """issue-65021: the eager startup config validation (fail-loud call site)."""
 
     def test_local_config_passes(self):
         validate_scip_backend_config(_local_config())
@@ -206,7 +206,7 @@ class TestValidateScipBackendConfig:
 
 
 class TestGoldenRepoAllowDegenerate:
-    """EVO-65365: golden-repo builds opt into the sandbox allow_degenerate path."""
+    """issue-65365: golden-repo builds opt into the sandbox allow_degenerate path."""
 
     def test_golden_repo_generator_has_allow_degenerate_true(self, tmp_path):
         gen = build_scip_generator_for_golden_repo(
@@ -238,7 +238,7 @@ class TestGoldenRepoBridge:
 
 
 class TestRemovedScipQueryBackend:
-    """EVO-64616: scip_query_backend was removed. config.json is read as written
+    """issue-64616: scip_query_backend was removed. config.json is read as written
     (ServerConfig no longer has the key); only an absent, empty or 'local'
     value passes."""
 

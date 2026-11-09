@@ -1,4 +1,4 @@
-"""EVO-66445: unit tests for the FTS backfill policy + its POD_PULL build executor."""
+"""issue-66445: unit tests for the FTS backfill policy + its POD_PULL build executor."""
 
 from __future__ import annotations
 

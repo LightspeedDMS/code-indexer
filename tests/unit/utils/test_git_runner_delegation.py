@@ -1,5 +1,5 @@
 """
-run_git_command delegation seam — EVO-64616 Phase 2.
+run_git_command delegation seam — issue-64616 Phase 2.
 
 Pins that the ONE chokepoint routes through the installed ``GitInvoker`` for
 mutations while reads stay local, with native ``subprocess`` behavior unchanged

@@ -1,4 +1,4 @@
-"""Unit tests for EVO-66113 process-level embed-stats tag fallback +
+"""Unit tests for issue-66113 process-level embed-stats tag fallback +
 ThreadPoolExecutor propagation (MR !47 review findings).
 
 set_process_embed_stats_tags() sets process-level ContextVar fallbacks
@@ -190,7 +190,7 @@ class TestSetProcessEmbedStatsTagsFallback:
 
 
 class TestProcessTagsThreadPoolExecutorPropagation:
-    """EVO-66113 CRITICAL fix: process-level ContextVar fallbacks must
+    """issue-66113 CRITICAL fix: process-level ContextVar fallbacks must
     survive into ThreadPoolExecutor worker threads via
     contextvars.copy_context().run() at the submit() call site -- plain
     executor.submit() does NOT propagate ContextVars across threads."""

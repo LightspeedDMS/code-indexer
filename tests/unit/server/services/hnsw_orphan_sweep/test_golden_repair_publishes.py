@@ -421,7 +421,7 @@ def test_a_refresh_snapshot_carries_the_marker(world: Dict[str, Any]) -> None:
 def test_an_add_publishes_without_marking_its_base_clone(
     world: Dict[str, Any],
 ) -> None:
-    """EVO-64616: an add publishes in place, from the base clone. A base
+    """issue-64616: an add publishes in place, from the base clone. A base
     clone is not a checkout: marked, the served-index cache evicted it."""
     from code_indexer.server.repositories.golden_repo_manager import (
         GoldenRepoManager,

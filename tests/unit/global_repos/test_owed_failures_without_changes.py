@@ -1,4 +1,4 @@
-"""EVO-64616: a refresh heals recorded failures even with no upstream change.
+"""issue-64616: a refresh heals recorded failures even with no upstream change.
 
 !232 made a failure COUNT with no recorded path (``failed_files`` above
 ``failed_file_paths``) owe a full reconcile -- but only a run that published

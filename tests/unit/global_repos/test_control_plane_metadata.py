@@ -182,7 +182,7 @@ class TestRegistryIsTheSourceOfTruth:
     def test_a_delete_is_remembered_through_a_recreate(
         self, metadata, golden_repos_dir
     ):
-        # EVO-64616: the registry reconcile reads this to tell a clone a
+        # issue-64616: the registry reconcile reads this to tell a clone a
         # removal left behind from one a crashed add left.
         manager = AliasManager(golden_repos_dir / "aliases")
         assert manager.deleted_at(ALIAS) is None

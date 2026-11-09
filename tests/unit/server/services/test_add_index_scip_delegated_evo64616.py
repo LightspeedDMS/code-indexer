@@ -1,11 +1,11 @@
-"""EVO-64616: add_golden_repo_index {index_type: scip} under all-delegated
+"""issue-64616: add_golden_repo_index {index_type: scip} under all-delegated
 backends (tools-test, cidx 0f9ca76).
 
-* evolution / evolution-3: the job "completed" with no build behind it, and
+* example-repo / example-repo-3: the job "completed" with no build behind it, and
   scip stayed not_indexed. An explicit request now always enqueues a build
   (clear=True); a build that cannot be enqueued fails the job; an existing
   configuration is "already initialised", never a "❌".
-* evolution-4: the build was enqueued, then the job failed creating a local
+* example-repo-4: the build was enqueued, then the job failed creating a local
   snapshot ("index directory not created"). A delegated SCIP build builds
   nothing on this pod, so there is nothing to snapshot or publish.
 * The build's progress and outcome are tracked (job tracker, shared across
@@ -193,7 +193,7 @@ def _result(ok: bool, stderr: str = "") -> Any:
 def _build(
     tracker: FakeTracker, outcome: Any
 ) -> Tuple[DelegatedScipBuild, BuildTracker]:
-    build_tracker = BuildTracker(tracker, "evolution", "evolution@abc")
+    build_tracker = BuildTracker(tracker, "example-repo", "example-repo@abc")
 
     def run() -> Any:
         if isinstance(outcome, Exception):
@@ -201,8 +201,8 @@ def _build(
         return outcome
 
     build = DelegatedScipBuild(
-        alias="evolution",
-        dedupe_key="evolution@abc",
+        alias="example-repo",
+        dedupe_key="example-repo@abc",
         run_build=run,
         on_state=build_tracker.on_state,
     )
@@ -223,21 +223,21 @@ def test_a_successful_build_is_completed_with_its_summary() -> None:
     job = tracker.jobs[build_tracker.job_id or ""]
     assert job["status"] == "completed"
     assert job["result"]["successful_projects"] == 1
-    assert job["operation_type"] == OPERATION and job["repo_alias"] == "evolution"
+    assert job["operation_type"] == OPERATION and job["repo_alias"] == "example-repo"
 
 
 def test_a_build_in_progress_is_running() -> None:
     tracker = FakeTracker()
     seen: List[str] = []
-    build_tracker = BuildTracker(tracker, "evolution", "evolution@abc")
+    build_tracker = BuildTracker(tracker, "example-repo", "example-repo@abc")
 
     def run() -> Any:
         seen.append(tracker.jobs[build_tracker.job_id or ""]["status"])
         return _result(True)
 
     build = DelegatedScipBuild(
-        alias="evolution",
-        dedupe_key="evolution@abc",
+        alias="example-repo",
+        dedupe_key="example-repo@abc",
         run_build=run,
         on_state=build_tracker.on_state,
     )
@@ -293,7 +293,7 @@ def test_the_funnel_tracks_an_enqueued_build_but_not_a_deduped_one(
     generator = SimpleNamespace(generate=lambda: _result(True))
     for expected in (ScipDelegationOutcome.ENQUEUED, ScipDelegationOutcome.DEDUPED):
         out = funnel_scip_generation(
-            alias="evolution",
+            alias="example-repo",
             repo_root=tmp_path,
             config=DELEGATED,
             clear=True,
@@ -310,7 +310,7 @@ def test_the_funnel_tracks_an_enqueued_build_but_not_a_deduped_one(
 
 def _tracked(state: str, error: Optional[str] = None) -> FakeTracker:
     tracker = FakeTracker()
-    tracker.register_job("j1", OPERATION, "system-scip", repo_alias="evolution")
+    tracker.register_job("j1", OPERATION, "system-scip", repo_alias="example-repo")
     tracker.jobs["j1"]["status"] = state
     if error:
         tracker.jobs["j1"]["error"] = error
@@ -328,7 +328,7 @@ def test_get_index_status_shows_the_build(
         status_module, "server_job_tracker", lambda: _tracked(state, "gradle failed")
     )
     status = with_build_state(
-        {"status": "not_indexed", "project_count": 0}, "evolution-global"
+        {"status": "not_indexed", "project_count": 0}, "example-repo-global"
     )
     assert status["status"] == shown
     assert status["delegated_build"]["job_id"] == "j1"
@@ -340,7 +340,7 @@ def test_a_readable_index_keeps_its_status(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(
         status_module, "server_job_tracker", lambda: _tracked("running")
     )
-    status = with_build_state({"status": "SUCCESS", "project_count": 2}, "evolution")
+    status = with_build_state({"status": "SUCCESS", "project_count": 2}, "example-repo")
     assert status["status"] == "SUCCESS" and "delegated_build" in status
 
 
@@ -362,16 +362,16 @@ def test_an_empty_scip_query_says_why(
     monkeypatch.setattr(
         status_module, "server_job_tracker", lambda: _tracked(state, "why")
     )
-    assert text in (explain_empty_results("evolution-global") or "")
+    assert text in (explain_empty_results("example-repo-global") or "")
 
     from cidx_scip.server.mcp import scip as scip_handlers
 
     monkeypatch.setattr(scip_handlers, "_index_gap", lambda alias, username: None)
     payload: Dict[str, Any] = {"success": True, "results": []}
-    scip_handlers._explain_no_results(payload, "evolution-global", "admin")
+    scip_handlers._explain_no_results(payload, "example-repo-global", "admin")
     assert text in payload["scip_index"]
     found: Dict[str, Any] = {"success": True, "results": [{"symbol": "x"}]}
-    scip_handlers._explain_no_results(found, "evolution-global", "admin")
+    scip_handlers._explain_no_results(found, "example-repo-global", "admin")
     assert "scip_index" not in found
 
 
@@ -379,7 +379,7 @@ def test_a_completed_build_explains_nothing(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(
         status_module, "server_job_tracker", lambda: _tracked("completed")
     )
-    assert explain_empty_results("evolution") is None
+    assert explain_empty_results("example-repo") is None
 
 
 # -- the add-index job ------------------------------------------------------------------
@@ -387,19 +387,19 @@ def test_a_completed_build_explains_nothing(monkeypatch: pytest.MonkeyPatch) -> 
 
 def _manager(tmp_path: Path) -> Tuple[GoldenRepoManager, str, MagicMock]:
     mgr = GoldenRepoManager(data_dir=str(tmp_path))
-    repo_path = tmp_path / "golden-repos" / "evolution"
+    repo_path = tmp_path / "golden-repos" / "example-repo"
     repo_path.mkdir(parents=True)
     created = datetime.now(timezone.utc).isoformat()
-    url = "https://example.com/g/evolution.git"
-    mgr.golden_repos["evolution"] = GoldenRepo(
-        alias="evolution",
+    url = "https://example.com/g/example-repo.git"
+    mgr.golden_repos["example-repo"] = GoldenRepo(
+        alias="example-repo",
         repo_url=url,
         default_branch="main",
         clone_path=str(repo_path),
         created_at=created,
     )
     mgr._sqlite_backend.add_repo(
-        alias="evolution",
+        alias="example-repo",
         repo_url=url,
         default_branch="main",
         clone_path=str(repo_path),
@@ -443,7 +443,7 @@ def _run_add_index(
 
     with patch.object(mgr.background_job_manager, "submit_job", side_effect=submit):
         mgr.add_indexes_to_golden_repo(
-            "evolution", index_types, submitter_username="admin"
+            "example-repo", index_types, submitter_username="admin"
         )
     return dict(outcome["result"])
 
@@ -478,7 +478,7 @@ def test_a_delegated_scip_add_that_cannot_enqueue_fails_the_job(tmp_path: Path) 
 
 def test_a_local_index_type_still_snapshots(tmp_path: Path) -> None:
     mgr, repo_path, scheduler = _manager(tmp_path)
-    scheduler._create_snapshot.return_value = str(tmp_path / ".versioned/evolution/v_1")
+    scheduler._create_snapshot.return_value = str(tmp_path / ".versioned/example-repo/v_1")
     scheduler.published_swap_extra.return_value = {}
     scheduler.alias_manager.read_alias.return_value = None
     with (

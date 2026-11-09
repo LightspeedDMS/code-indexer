@@ -1,4 +1,4 @@
-"""EVO-66121: TrustedGatewayConfig dataclass + ServerConfig(Manager) wiring.
+"""issue-66121: TrustedGatewayConfig dataclass + ServerConfig(Manager) wiring.
 
 Covers the new config-parsing logic flagged in MR !49 review: __post_init__ defaults +
 group_mappings dict->list conversion, the ServerConfig default, and the
@@ -49,8 +49,8 @@ class TestServerConfigWiring:
             "server_dir": str(tmp_path),
             "trusted_gateway_config": {
                 "enabled": True,
-                "issuer": "https://mcp.test.lightspeedtools.cloud",
-                "jwks_uri": "https://mcp.test.lightspeedtools.cloud/oauth/jwks.json",
+                "issuer": "https://gateway.example.com",
+                "jwks_uri": "https://gateway.example.com/oauth/jwks.json",
                 "audience": "cidx-tools-test",
                 "groups_claim": "roles",
                 "leeway_seconds": 30,
@@ -60,6 +60,6 @@ class TestServerConfigWiring:
         tg = cfg.trusted_gateway_config
         assert isinstance(tg, TrustedGatewayConfig)
         assert tg.enabled is True
-        assert tg.issuer == "https://mcp.test.lightspeedtools.cloud"
+        assert tg.issuer == "https://gateway.example.com"
         assert tg.groups_claim == "roles"
         assert tg.leeway_seconds == 30

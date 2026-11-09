@@ -359,7 +359,7 @@ def test_the_endpoint_forces_refreshes_through_the_scheduler(
 def test_the_endpoint_reports_an_empty_golden_repo_as_skipped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """EVO-64616: a repo with no commit is never force-refreshed (there is no
+    """issue-64616: a repo with no commit is never force-refreshed (there is no
     branch to check out); the scheduler's probe answers and it is skipped."""
     from code_indexer.global_repos.alias_manager import AliasManager
     from code_indexer.services.git_head import EMPTY_REPOSITORY_REASON
@@ -579,7 +579,7 @@ def test_a_rebuild_seeds_from_the_served_golden_index(
     assert (world.pod_copy() / INDEX_DIR / "config.json").read_text() == golden_config
 
 
-# ── EVO-64616: empty golden repos ───────────────────────────────────────────
+# ── issue-64616: empty golden repos ───────────────────────────────────────────
 
 
 @pytest.mark.parametrize("dry_run", [True, False])

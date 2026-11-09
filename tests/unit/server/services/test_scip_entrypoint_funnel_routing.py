@@ -1,4 +1,4 @@
-"""EVO-65021 stream-05: both golden-repo SCIP entrypoints route through the funnel.
+"""issue-65021 stream-05: both golden-repo SCIP entrypoints route through the funnel.
 
 Verifies that under ``scip_backend='delegated'`` neither entrypoint runs the
 local ``cidx scip generate`` subprocess, and that a fail-soft skip does not fail
@@ -217,7 +217,7 @@ class TestGoldenRepoManagerAddIndexEntrypoint:
             )
         funnel.assert_called_once()
         assert funnel.call_args.kwargs["alias"] == "my-repo"
-        # EVO-64616: an explicit add-index request always rebuilds
+        # issue-64616: an explicit add-index request always rebuilds
         assert funnel.call_args.kwargs["clear"] is True
         srun.assert_not_called()  # delegated build enqueued, not run inline
         # the job's output says the build is enqueued and asynchronous
@@ -240,7 +240,7 @@ class TestGoldenRepoManagerAddIndexEntrypoint:
         assert srun.call_args.args[0] == ["cidx", "scip", "generate"]
 
     def test_a_build_that_could_not_be_enqueued_fails_the_job(self):
-        """EVO-64616: an explicit add-index of SCIP whose delegated build was
+        """issue-64616: an explicit add-index of SCIP whose delegated build was
         skipped (fail-soft) used to complete with nothing indexed; it now
         fails the job, naming why."""
         mgr = _golden_repo_manager()

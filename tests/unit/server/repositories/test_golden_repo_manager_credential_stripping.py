@@ -1,4 +1,4 @@
-"""EVO-64616: golden-repo URLs are credential-stripped before persistence when the
+"""issue-64616: golden-repo URLs are credential-stripped before persistence when the
 git backend owns credentials (delegated → git-mcp), so the PAT lives ONLY in
 git-mcp — and left intact in local mode, where in-process git needs the token.
 

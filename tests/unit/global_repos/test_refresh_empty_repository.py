@@ -1,4 +1,4 @@
-"""EVO-64616: a refresh of an EMPTY golden repository is a clean skip.
+"""issue-64616: a refresh of an EMPTY golden repository is a clean skip.
 
 An empty repository -- no commit in the base clone (git's unborn HEAD) and no
 branch upstream -- has nothing to check out, pull or index. A forced refresh

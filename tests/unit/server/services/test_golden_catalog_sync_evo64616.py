@@ -1,4 +1,4 @@
-"""EVO-64616: the golden catalog sync -- naming, content identity, the
+"""issue-64616: the golden catalog sync -- naming, content identity, the
 migration plan and its order, dry run, single-flight, and never deleting."""
 
 from __future__ import annotations
@@ -77,14 +77,14 @@ def plan(
 def test_a_unique_leaf_stays_bare_and_a_shared_one_takes_its_shortest_suffix() -> None:
     names = catalog_aliases(
         [
-            "acme/private/ideas/innovation-week/evolution",
-            "acme/private/conversion/evolution",
+            "acme/private/ideas/innovation-week/example-repo",
+            "acme/private/conversion/example-repo",
             "acme/private/tools/acm",
         ]
     )
     assert names == {
-        "acme/private/ideas/innovation-week/evolution": "innovation-week-evolution",
-        "acme/private/conversion/evolution": "conversion-evolution",
+        "acme/private/ideas/innovation-week/example-repo": "innovation-week-example-repo",
+        "acme/private/conversion/example-repo": "conversion-example-repo",
         "acme/private/tools/acm": "acm",
     }
 
@@ -123,11 +123,11 @@ def test_a_name_ending_in_global_is_suffixed() -> None:
 @pytest.mark.parametrize(
     "alias, leaf, legacy",
     [
-        ("evolution-2", "evolution", True),
-        ("evolution-13", "evolution", True),
-        ("evolution-1", "evolution", False),
-        ("evolution", "evolution", False),
-        ("conversion-evolution", "evolution", False),
+        ("example-repo-2", "example-repo", True),
+        ("example-repo-13", "example-repo", True),
+        ("example-repo-1", "example-repo", False),
+        ("example-repo", "example-repo", False),
+        ("conversion-example-repo", "example-repo", False),
         ("api-v2", "api", False),
     ],
 )
@@ -198,10 +198,10 @@ class Git:
         raise AssertionError("never")
 
 
-A = f"https://{HOST}/{GROUP}/ideas/innovation-week/evolution.git"
-B = f"https://{HOST}/{GROUP}/conversion/evolution.git"
-A_ID = f"{HOST}/{GROUP}/ideas/innovation-week/evolution".casefold()
-B_ID = f"{HOST}/{GROUP}/conversion/evolution".casefold()
+A = f"https://{HOST}/{GROUP}/ideas/innovation-week/example-repo.git"
+B = f"https://{HOST}/{GROUP}/conversion/example-repo.git"
+A_ID = f"{HOST}/{GROUP}/ideas/innovation-week/example-repo".casefold()
+B_ID = f"{HOST}/{GROUP}/conversion/example-repo".casefold()
 
 
 def test_a_clone_never_repointed_is_its_origins_without_a_fetch() -> None:
@@ -283,25 +283,25 @@ def test_an_empty_registered_clone_matches_its_catalog_entry() -> None:
 
 # -- the plan ----------------------------------------------------------------------------
 
-EVO_IW = project("ideas/innovation-week/evolution", "development")
-EVO_CONV = project("conversion/evolution", "master")
+EVO_IW = project("ideas/innovation-week/example-repo", "development")
+EVO_CONV = project("conversion/example-repo", "master")
 ACM = project("tools/acm")
 
 
 def test_the_evolution_rows_are_fixed() -> None:
-    """evolution-2's row says innovation-week but its clone holds
-    conversion/evolution@master; evolution-3 holds innovation-week."""
+    """example-repo-2's row says innovation-week but its clone holds
+    conversion/example-repo@master; example-repo-3 holds innovation-week."""
     result = plan(
         catalog_of(EVO_IW, EVO_CONV, ACM),
         [
-            row("evolution-2", EVO_CONV, repo_url=EVO_IW.url, branch="master"),
-            row("evolution-3", EVO_IW, branch="development"),
+            row("example-repo-2", EVO_CONV, repo_url=EVO_IW.url, branch="master"),
+            row("example-repo-3", EVO_IW, branch="development"),
             row("acm", ACM),
         ],
     )
     assert [(r.old, r.new, r.repo_url, r.branch) for r in result.renames] == [
-        ("evolution-2", "conversion-evolution", EVO_CONV.url, "master"),
-        ("evolution-3", "innovation-week-evolution", None, None),
+        ("example-repo-2", "conversion-example-repo", EVO_CONV.url, "master"),
+        ("example-repo-3", "innovation-week-example-repo", None, None),
     ]
     assert result.renames[0].reason == "misassigned"
     assert result.adds == [] and result.conflicts == []
@@ -310,7 +310,7 @@ def test_the_evolution_rows_are_fixed() -> None:
 def test_an_alias_already_right_for_its_content_keeps_its_name() -> None:
     result = plan(
         catalog_of(ACM, EVO_CONV),
-        [row("acm", ACM), row("my-hand-named-evolution", EVO_CONV)],
+        [row("acm", ACM), row("my-hand-named-example-repo", EVO_CONV)],
     )
     assert result.renames == [] and result.adds == []
 
@@ -318,31 +318,31 @@ def test_an_alias_already_right_for_its_content_keeps_its_name() -> None:
 def test_seeder_in_place_rows_keep_their_file_url_form() -> None:
     result = plan(
         catalog_of(EVO_IW, EVO_CONV),
-        [row("evolution-3", EVO_IW, repo_url=f"file://{GOLDEN}/evolution-3")],
+        [row("example-repo-3", EVO_IW, repo_url=f"file://{GOLDEN}/example-repo-3")],
     )
-    assert result.renames[0].repo_url == f"file://{GOLDEN}/innovation-week-evolution"
+    assert result.renames[0].repo_url == f"file://{GOLDEN}/innovation-week-example-repo"
     assert result.renames[0].branch == "master", "the checked-out branch"
 
 
 def test_renames_free_a_name_before_it_is_taken() -> None:
-    """'evolution' holds conversion content; its name is innovation-week's
+    """'example-repo' holds conversion content; its name is innovation-week's
     target only after it moves -- order: free it first."""
-    only_conv = project("conversion/evolution")
-    only_iw = project("ideas/evolution")
+    only_conv = project("conversion/example-repo")
+    only_iw = project("ideas/example-repo")
     result = plan(
         catalog_of(only_conv, only_iw),
         [
-            row("evolution-2", only_iw),
-            row("evolution", only_conv, repo_url=only_iw.url),
+            row("example-repo-2", only_iw),
+            row("example-repo", only_conv, repo_url=only_iw.url),
         ],
     )
     names = catalog_aliases([only_conv.path, only_iw.path])
     order = [(r.old, r.new) for r in result.renames]
     assert order == [
-        ("evolution", names[only_conv.path]),
-        ("evolution-2", names[only_iw.path]),
-    ] or all(new != "evolution" for _, new in order)
-    taken = {"evolution", "evolution-2"}
+        ("example-repo", names[only_conv.path]),
+        ("example-repo-2", names[only_iw.path]),
+    ] or all(new != "example-repo" for _, new in order)
+    taken = {"example-repo", "example-repo-2"}
     for old, new in order:
         assert new not in taken, f"{new} taken when {old} is renamed"
         taken.discard(old)
@@ -397,8 +397,8 @@ def test_duplicates_and_unknowns_are_reported() -> None:
 
 
 def test_a_repointed_origin_is_healed_first() -> None:
-    result = plan(catalog_of(EVO_IW), [row("evolution-3", EVO_IW, heal_to=EVO_IW.url)])
-    assert result.heals == [("evolution-3", EVO_IW.url)]
+    result = plan(catalog_of(EVO_IW), [row("example-repo-3", EVO_IW, heal_to=EVO_IW.url)])
+    assert result.heals == [("example-repo-3", EVO_IW.url)]
 
 
 # -- the pass ----------------------------------------------------------------------------
@@ -443,7 +443,7 @@ def deps(
     catalog: Any = None,
 ) -> SyncDeps:
     rows = [
-        {"alias": "evolution-2", "repo_url": EVO_IW.url, "clone_path": "/c/e2"},
+        {"alias": "example-repo-2", "repo_url": EVO_IW.url, "clone_path": "/c/e2"},
         {"alias": "cidx-meta", "repo_url": "local://cidx-meta"},
         {"alias": "ws-0123abcd", "repo_url": "file:///w"},
     ]
@@ -483,8 +483,8 @@ def test_a_dry_run_changes_nothing_and_reports_the_plan() -> None:
     result = run_sync(deps(recorder, tracker), "dry-run")
     assert recorder.calls == []
     report = result.as_dict()["plan"]
-    assert report["renames"][0]["new"] == "conversion-evolution"
-    assert [a["alias"] for a in report["adds"]] == ["innovation-week-evolution"]
+    assert report["renames"][0]["new"] == "conversion-example-repo"
+    assert [a["alias"] for a in report["adds"]] == ["innovation-week-example-repo"]
     assert tracker.done[0][0] == "complete"
 
 
@@ -492,8 +492,8 @@ def test_apply_heals_then_renames_then_adds() -> None:
     recorder = Recorder()
     result = run_sync(deps(recorder, Tracker()), "apply")
     assert recorder.calls == [
-        ("rename", "evolution-2->conversion-evolution"),
-        ("add", "innovation-week-evolution"),
+        ("rename", "example-repo-2->conversion-example-repo"),
+        ("add", "innovation-week-example-repo"),
     ]
     assert result.applied["failed"] == {}
 
@@ -633,7 +633,7 @@ def test_the_scheduled_pass_does_nothing_while_off(
     assert scheduling._catalog_pass(SimpleNamespace()) == {"mode": "off"}
 
 
-# -- empty projects and failed adds (EVO-64616 apply-pass failures) ------------------
+# -- empty projects and failed adds (issue-64616 apply-pass failures) ------------------
 
 NOW = datetime(2026, 10, 22, 16, 0, tzinfo=timezone.utc)
 DAY = timedelta(days=1)
@@ -663,18 +663,18 @@ def test_the_group_listing_marks_empty_projects_and_keeps_upstream_facts(
 def test_an_empty_project_is_never_added_but_still_shapes_names() -> None:
     empty = replace(EVO_IW, empty=True, default_branch=None)
     result = plan(catalog_of(empty, EVO_CONV), [])
-    assert [a for a, _ in result.adds] == ["conversion-evolution"]
+    assert [a for a, _ in result.adds] == ["conversion-example-repo"]
     assert result.skipped_adds == {
-        "innovation-week-evolution": sync.EMPTY_PROJECT_REASON
+        "innovation-week-example-repo": sync.EMPTY_PROJECT_REASON
     }
     assert result.as_dict()["skipped_adds"] == result.skipped_adds
 
 
 def test_a_registered_empty_clone_is_still_renamed_to_its_catalog_name() -> None:
     empty = replace(EVO_CONV, empty=True, default_branch=None)
-    result = plan(catalog_of(empty, EVO_IW), [row("evolution-2", empty)])
+    result = plan(catalog_of(empty, EVO_IW), [row("example-repo-2", empty)])
     assert [(r.old, r.new) for r in result.renames] == [
-        ("evolution-2", "conversion-evolution")
+        ("example-repo-2", "conversion-example-repo")
     ]
 
 
@@ -704,7 +704,7 @@ def add_job(
     }
 
 
-IW = "innovation-week-evolution"
+IW = "innovation-week-example-repo"
 
 
 def holds(*jobs: Dict[str, Any], broken: bool = False) -> Any:
@@ -723,7 +723,7 @@ def test_an_add_that_just_failed_is_held_with_its_error() -> None:
         max_adds=5,
         hold_add=hold,
     )
-    assert [a for a, _ in result.adds] == ["conversion-evolution"]
+    assert [a for a, _ in result.adds] == ["conversion-example-repo"]
     assert result.skipped_adds == {IW: reason}
 
 

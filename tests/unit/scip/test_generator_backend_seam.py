@@ -1,4 +1,4 @@
-"""Unit tests for the SCIPGenerator backend seam / DI hook (EVO-65021)."""
+"""Unit tests for the SCIPGenerator backend seam / DI hook (issue-65021)."""
 
 from pathlib import Path
 from typing import Optional
@@ -84,7 +84,7 @@ class TestBackendSeam:
         assert call["build_system"] == "npm"
 
     def test_injected_map_and_golden_alias_threaded(self, tmp_path):
-        """EVO-65365: generate() threads golden_alias into the indexer."""
+        """issue-65365: generate() threads golden_alias into the indexer."""
         (tmp_path / "package.json").write_text("{}")
         recorder = _RecordingIndexer()
         gen = SCIPGenerator(
@@ -146,7 +146,7 @@ class TestBackendSeam:
         assert call["language"] == "typescript"
 
     def test_rebuild_threads_golden_alias(self, tmp_path):
-        """EVO-65365: rebuild_projects() also threads golden_alias (not just
+        """issue-65365: rebuild_projects() also threads golden_alias (not just
         generate()). Mirrors test_injected_map_and_golden_alias_threaded on the
         rebuild path so removing the golden_alias kwarg at generator.py:466 fails
         the suite."""
@@ -194,7 +194,7 @@ class TestBackendSeam:
 
 
 class TestAllowDegenerateThreading:
-    """EVO-65365: allow_degenerate is threaded into every indexer.generate() call
+    """issue-65365: allow_degenerate is threaded into every indexer.generate() call
     (both generate() and rebuild_projects()), the same way golden_alias is."""
 
     def _seed_failed_ts_status(self, gen):
@@ -298,7 +298,7 @@ class _FixedResultIndexer(SCIPIndexer):
 
 
 class TestFreshnessClassification:
-    """EVO-65021 freshness thrash fix: exit-69 (unsupported language) is a benign
+    """issue-65021 freshness thrash fix: exit-69 (unsupported language) is a benign
     outcome that must NOT block freshness, while a real failure must."""
 
     def test_unsupported_language_exit_69_is_fresh_eligible(self, tmp_path):
@@ -331,7 +331,7 @@ class TestFreshnessClassification:
         assert result.is_fresh_eligible() is False
 
     def test_zero_discovered_projects_is_fresh_eligible(self, tmp_path):
-        """EVO-65021: a repo with no discoverable projects is legitimately
+        """issue-65021: a repo with no discoverable projects is legitimately
         converged (nothing to index), so it is fresh-eligible and does not
         thrash by re-enqueueing an identical empty rebuild forever."""
         # Empty dir → ProjectDiscovery finds nothing.

@@ -1,4 +1,4 @@
-"""EVO-64616: the rename's satellites (activated repos, group grants, the
+"""issue-64616: the rename's satellites (activated repos, group grants, the
 cidx-meta description, dependency tracking), the job submission, the
 registry reconcile's guard and the snapshot reclaim's guard."""
 
@@ -102,38 +102,38 @@ def test_dependency_tracking_is_reset_for_both_names() -> None:
 # -- the cidx-meta description ------------------------------------------------------
 
 DESCRIPTION = """---
-name: evolution-2
-url: https://gitlab.example.com/ideas/innovation-week/evolution.git
+name: example-repo-2
+url: https://gitlab.example.com/ideas/innovation-week/example-repo.git
 technologies: [python]
 ---
 
-# evolution-2
+# example-repo-2
 
-The evolution service.
+The example-repo service.
 
-**Repository URL**: https://gitlab.example.com/ideas/innovation-week/evolution.git
+**Repository URL**: https://gitlab.example.com/ideas/innovation-week/example-repo.git
 """
 
 
 def test_the_description_names_the_new_alias_and_url() -> None:
     text = hook.renamed_description(
         DESCRIPTION,
-        "evolution-2",
-        "conversion-evolution",
-        "https://user:secret@gitlab.example.com/conversion/evolution.git",
+        "example-repo-2",
+        "conversion-example-repo",
+        "https://user:secret@gitlab.example.com/conversion/example-repo.git",
     )
-    assert "name: conversion-evolution" in text
-    assert "\n# conversion-evolution\n" in text
-    assert "url: https://***@gitlab.example.com/conversion/evolution.git" in text or (
-        "url: https://gitlab.example.com/conversion/evolution.git" in text
+    assert "name: conversion-example-repo" in text
+    assert "\n# conversion-example-repo\n" in text
+    assert "url: https://***@gitlab.example.com/conversion/example-repo.git" in text or (
+        "url: https://gitlab.example.com/conversion/example-repo.git" in text
     )
     assert "secret" not in text
-    assert "The evolution service." in text
+    assert "The example-repo service." in text
     assert "innovation-week" not in text
 
 
 def test_without_a_new_url_only_the_name_changes() -> None:
-    text = hook.renamed_description(DESCRIPTION, "evolution-2", "c-e", None)
+    text = hook.renamed_description(DESCRIPTION, "example-repo-2", "c-e", None)
     assert text.count("innovation-week") == 2
     assert "name: c-e" in text and "# c-e" in text
 
@@ -159,7 +159,7 @@ def test_on_repo_renamed_moves_the_file_and_its_tracking(
 ) -> None:
     meta = tmp_path / "cidx-meta"
     meta.mkdir()
-    (meta / "old.md").write_text(DESCRIPTION.replace("evolution-2", "old"))
+    (meta / "old.md").write_text(DESCRIPTION.replace("example-repo-2", "old"))
     tracking = FakeTracking()
     monkeypatch.setattr(hook, "_tracking_backend", tracking)
     monkeypatch.setattr(hook, "_refresh_scheduler", None)

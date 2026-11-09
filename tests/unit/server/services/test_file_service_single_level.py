@@ -95,7 +95,7 @@ class TestSingleLevelListing:
         assert all(".git" not in p and ".code-indexer" not in p for p in root)
 
     def test_excludes_the_served_index_markers(self, service, temp_repo):
-        """EVO-64616: browse_directory on a -global alias listed
+        """issue-64616: browse_directory on a -global alias listed
         .cidx-index-last-served -- pod state beside .code-indexer."""
         from code_indexer.global_repos.directory_explorer import (
             DirectoryExplorerService,

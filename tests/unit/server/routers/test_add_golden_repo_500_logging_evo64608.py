@@ -1,4 +1,4 @@
-"""EVO-64608: a golden-repo registration 500 must log the swallowed exception.
+"""issue-64608: a golden-repo registration 500 must log the swallowed exception.
 
 Hard evidence from the running multipod (3h): ~315 `POST /api/admin/golden-repos`
 500s with ZERO server-side log lines / tracebacks — the underlying exception is
@@ -76,7 +76,7 @@ class TestAddGoldenRepo500Logging:
             call.kwargs.get("exc_info") for call in mock_logger.error.call_args_list
         )
         assert logged_with_traceback, (
-            "EVO-64608: a registration 500 must log the underlying exception with a "
+            "issue-64608: a registration 500 must log the underlying exception with a "
             "traceback (logger.exception / exc_info) so the cause is diagnosable; "
             f"exception calls={mock_logger.exception.call_args_list} "
             f"error calls={mock_logger.error.call_args_list}"

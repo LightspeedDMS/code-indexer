@@ -1,5 +1,5 @@
 """Composite ``cidx query`` on a pod whose member directory holds index state
-only (EVO-64616).
+only (issue-64616).
 
 The server spawns ``cidx query`` per composite member. With the repositories
 delegated the member directory on the pod holds ``.code-indexer`` only, so the

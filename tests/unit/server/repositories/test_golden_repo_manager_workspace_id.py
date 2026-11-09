@@ -1,4 +1,4 @@
-"""EVO-65021: GoldenRepoManager workspace_id accessors.
+"""issue-65021: GoldenRepoManager workspace_id accessors.
 
 The delegated SCIP indexer (stream-01) must hand sandbox-mcp the workspace-mcp
 ``workspace_id`` (``sb-{workspace_id}``) of a golden repo's workspace. These
@@ -106,7 +106,7 @@ class TestSetWorkspaceId:
 
 
 class TestAuthoritativeResolve:
-    """EVO-65021 (Bug #1316 shape): resolve_workspace_id must read the
+    """issue-65021 (Bug #1316 shape): resolve_workspace_id must read the
     AUTHORITATIVE shared-backend state, not a stale per-worker cache HIT — its
     outcome decides whether a delegated SCIP build runs."""
 

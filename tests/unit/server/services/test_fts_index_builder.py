@@ -1,4 +1,4 @@
-"""EVO-66445: unit tests for the reliable, non-silent FTS index builder."""
+"""issue-66445: unit tests for the reliable, non-silent FTS index builder."""
 
 from __future__ import annotations
 
@@ -121,10 +121,10 @@ def test_rebuild_nonzero_is_failed_and_loud(tmp_path: Path, caplog) -> None:
     repo = _make_repo(tmp_path, config=True, fts=False)
     runner = _FakeRunner(repo, rebuild_rc=1)
     with caplog.at_level("ERROR"):
-        outcome = ensure_fts_index(repo, alias="evolution", runner=runner)
+        outcome = ensure_fts_index(repo, alias="example-repo", runner=runner)
     assert outcome.status is FtsBuildStatus.FAILED
     assert not outcome.ok
-    assert "evolution" in caplog.text  # surfaced loudly with the alias
+    assert "example-repo" in caplog.text  # surfaced loudly with the alias
 
 
 def test_exit_zero_but_no_index_is_failed_not_silent(tmp_path: Path, caplog) -> None:
@@ -157,10 +157,10 @@ def test_subprocess_launch_failure_is_failed_not_raised(tmp_path: Path, caplog) 
         raise FileNotFoundError("cidx not found on PATH")
 
     with caplog.at_level("ERROR"):
-        outcome = ensure_fts_index(repo, alias="evolution", runner=boom_runner)
+        outcome = ensure_fts_index(repo, alias="example-repo", runner=boom_runner)
     assert outcome.status is FtsBuildStatus.FAILED
     assert "subprocess error" in outcome.detail
-    assert "evolution" in caplog.text
+    assert "example-repo" in caplog.text
 
 
 def test_timeout_expired_is_failed_not_raised(tmp_path: Path) -> None:
@@ -175,7 +175,7 @@ def test_timeout_expired_is_failed_not_raised(tmp_path: Path) -> None:
     assert "subprocess error" in outcome.detail
 
 
-# ── EVO-66445 follow-up: no-files repos are SKIPPED (marked), and _detail is honest ──
+# ── issue-66445 follow-up: no-files repos are SKIPPED (marked), and _detail is honest ──
 
 
 def _skip_marker(repo: Path) -> Path:

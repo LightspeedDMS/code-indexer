@@ -297,7 +297,7 @@ def test_an_incomplete_paths_only_listing_is_not_retried_as_json(
 
 
 def test_listing_limits_fit_workspace_mcps_content_rg_limits() -> None:
-    """EVO-64616: /content/rg rejects timeout_ms above 300000 and
+    """issue-64616: /content/rg rejects timeout_ms above 300000 and
     max_output_bytes above 67108864 with a 400, which failed every delegated
     trigram build while the listing asked for 600 s / 256 MiB."""
     ripgrep = _Ripgrep(_listing(["a.py"]))

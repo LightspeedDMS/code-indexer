@@ -970,7 +970,7 @@ def test_drain_bound_is_armed_when_auto_resolves_to_local_files(
 
 
 # ===========================================================================
-# EVO-64616: a sink that is DOWN ends the sweep with one warning, then backs off
+# issue-64616: a sink that is DOWN ends the sweep with one warning, then backs off
 # ===========================================================================
 
 

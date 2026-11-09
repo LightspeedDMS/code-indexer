@@ -1,5 +1,5 @@
 """
-Pluggable delegated git backend loader (EVO-64678 Phase 3 / EVO-64616).
+Pluggable delegated git backend loader (issue-64678 Phase 3 / issue-64616).
 
 The git sibling of ``cli_invoker_plugin``: a deployment that must run git in the
 git-mcp spoke (not in the cidx image) supplies a ``GitBackend`` factory via the

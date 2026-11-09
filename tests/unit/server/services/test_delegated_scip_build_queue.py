@@ -1,4 +1,4 @@
-"""Unit tests for the delegated SCIP build queue (EVO-65021, stream-05).
+"""Unit tests for the delegated SCIP build queue (issue-65021, stream-05).
 
 Covers the fail-soft / backpressure / dedupe drain that decouples the (up to
 1800s) delegated sandbox build from the golden-repo index job.
@@ -33,7 +33,7 @@ def _gen_result(
 ):
     """Build a real ``GenerationResult`` so the queue exercises its real predicates.
 
-    EVO-65021: ``_result_is_success`` now calls
+    issue-65021: ``_result_is_success`` now calls
     ``GenerationResult.is_fresh_eligible()`` (``total>0`` and no REAL failure,
     where a real failure is ``failed - unsupported_language_projects``). The stub
     therefore carries ``total_projects``/``failed_projects`` and, for the
@@ -115,7 +115,7 @@ class TestSuccess:
 
 
 class TestDegenerateMetric:
-    """EVO-65365: a DEGENERATE (locals-only) index is a success that must be
+    """issue-65365: a DEGENERATE (locals-only) index is a success that must be
     OBSERVABLE — the worker meters ``delegated_degenerate`` from the per-project
     ``IndexerResult.degenerate`` flag surfaced by the delegated indexer."""
 
@@ -306,7 +306,7 @@ class TestPartialSuccessNotTerminalSuccess:
         assert recorded == [0]  # produced no index → on_success sees 0
 
     def test_zero_project_repo_is_marked_fresh_and_does_not_reenqueue(self):
-        """EVO-65021: a repo where discovery found NOTHING (total_projects == 0)
+        """issue-65021: a repo where discovery found NOTHING (total_projects == 0)
         is legitimately converged — nothing to index. It must fire on_success
         (write the .build_commit marker) and terminate, NOT re-enqueue an empty
         rebuild every cycle forever."""

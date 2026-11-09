@@ -1,4 +1,4 @@
-"""EVO-65484: reconcile_scip_from_filesystem — backfill SCIP for SCIP-eligible golden
+"""issue-65484: reconcile_scip_from_filesystem — backfill SCIP for SCIP-eligible golden
 repos that have none. Opt-in, language-gated, bounded, cooldown-backed.
 
 The scip feature's backfill job (``cidx_scip.server.reconcile``) since modular
@@ -178,7 +178,7 @@ class TestScipReconcile:
         assert counts["cooldown_skipped"] == 1
 
     def test_cooldown_skips_discovery_walk(self, tmp_path):
-        """EVO-66188: a repo in attempt-cooldown must NOT be re-discovered — the cooldown
+        """issue-66188: a repo in attempt-cooldown must NOT be re-discovered — the cooldown
         check now runs BEFORE ProjectDiscovery, so the NFS walk is skipped, not just the
         enqueue."""
         m, gr = _mgr(tmp_path)

@@ -62,7 +62,7 @@ _CONTENT_SEAM_SEAMS = (
     "LocalIndexStore",
 )
 
-# Delegation seams (EVO-64616): search delegation and the SCIP build plugin.
+# Delegation seams (issue-64616): search delegation and the SCIP build plugin.
 # A stateless pod configured for delegation has no local indexes, so a
 # regression there silently returns empty results for every query. SCIP
 # queries are not delegated: the removed setting must keep stopping startup.

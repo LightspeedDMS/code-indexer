@@ -146,7 +146,7 @@ def test_executor_defaults_force_reset_off_for_an_old_row():
 
 
 def test_executor_forwards_the_claim_loop_s_job_id():
-    """EVO-66105/EVO-66113: per-job VoyageAI cost correlation.
+    """issue-66105/issue-66113: per-job VoyageAI cost correlation.
 
     IndexJobClaimLoop injects ``metadata["job_id"]`` for exactly this -- the
     executor signature is (metadata, callback), so a key is how the id travels

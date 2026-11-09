@@ -1,4 +1,4 @@
-"""EVO-66445: unit tests for the FTS backfill sweep scheduler (tick + config gate)."""
+"""issue-66445: unit tests for the FTS backfill sweep scheduler (tick + config gate)."""
 
 from __future__ import annotations
 
@@ -118,7 +118,7 @@ def test_trigger_now_submits_tick_job() -> None:
     assert bjm.submitted[0][0] == "fts_backfill_sweep"
 
 
-# ── EVO-66445 follow-up: leader-gating (single sweep across the cluster) ──
+# ── issue-66445 follow-up: leader-gating (single sweep across the cluster) ──
 
 
 def test_is_leader_defaults_true_for_single_node() -> None:
@@ -200,7 +200,7 @@ def test_loop_submits_when_leader() -> None:
     assert bjm.submitted[0][0] == "fts_backfill_sweep"
 
 
-# ── EVO-66445: the ACTUAL production wiring (resolve_sweep_leader on app.state) ──
+# ── issue-66445: the ACTUAL production wiring (resolve_sweep_leader on app.state) ──
 
 
 def test_resolve_sweep_leader_holds_until_gate_ready() -> None:

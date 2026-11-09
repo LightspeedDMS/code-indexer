@@ -1,4 +1,4 @@
-"""Golden-repos mount removal (EVO-64616): cidx needs nothing on the volume.
+"""Golden-repos mount removal (issue-64616): cidx needs nothing on the volume.
 
 Each consumer a live check found still touching the golden-repos volume on
 a cidx pod is run twice -- LOCAL (today's

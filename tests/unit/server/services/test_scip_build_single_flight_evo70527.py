@@ -1,4 +1,4 @@
-"""EVO-70527: one delegated SCIP build per repo across the whole cluster.
+"""issue-70527: one delegated SCIP build per repo across the whole cluster.
 
 The in-process queue only dedupes inside one process. Two pods (or the
 refresh, add-index and backfill paths) used to start the same long build
@@ -121,7 +121,7 @@ def _metrics():
 def _funnel(tmp_path, tracker, queue, monkeypatch, commit="sha1"):
     monkeypatch.setattr(scip_lifecycle, "get_current_commit", lambda _p: commit)
     return funnel_scip_generation(
-        alias="evolution",
+        alias="example-repo",
         repo_root=tmp_path,
         config=_DELEGATED,
         golden_repo_manager=SimpleNamespace(job_tracker=tracker),
@@ -140,7 +140,7 @@ class TestFunnelClaimsBeforeQueueing:
         assert len(queue.builds) == 1
         [row] = tracker.jobs.values()
         assert row["operation_type"] == OPERATION
-        assert row["metadata"] == {"dedupe_key": "evolution@sha1"}
+        assert row["metadata"] == {"dedupe_key": "example-repo@sha1"}
 
     def test_second_pod_sees_a_running_build_and_queues_nothing(
         self, tmp_path, monkeypatch, caplog
@@ -171,7 +171,7 @@ class TestFunnelClaimsBeforeQueueing:
         assert out is ScipDelegationOutcome.DEDUPED
         assert newer.builds == []
         assert any(
-            "evolution@old" in r.getMessage() and "evolution@new" in r.getMessage()
+            "example-repo@old" in r.getMessage() and "example-repo@new" in r.getMessage()
             for r in caplog.records
         )
 
@@ -231,7 +231,7 @@ class TestBuildTrackerRegistersOnce:
     def test_a_failed_registration_is_not_retried_on_each_state_change(self, caplog):
         tracker = ClusterTracker()
         tracker.fail_registration_with = RuntimeError("db down")
-        build = BuildTracker(tracker, "evolution", "evolution@sha1")
+        build = BuildTracker(tracker, "example-repo", "example-repo@sha1")
 
         with caplog.at_level(logging.WARNING):
             build.queued()
@@ -244,9 +244,9 @@ class TestBuildTrackerRegistersOnce:
 
     def test_state_changes_after_a_lost_claim_never_touch_the_winners_row(self):
         tracker = ClusterTracker()
-        winner = BuildTracker(tracker, "evolution", "evolution@sha1")
+        winner = BuildTracker(tracker, "example-repo", "example-repo@sha1")
         assert winner.claim().claimed
-        loser = BuildTracker(tracker, "evolution", "evolution@sha1")
+        loser = BuildTracker(tracker, "example-repo", "example-repo@sha1")
         claim = loser.claim()
         assert not claim.claimed
         assert claim.blocking_job_id == winner.job_id
@@ -265,7 +265,7 @@ class TestBuildTrackerRegistersOnce:
         def claim() -> None:
             barrier.wait()
             results.append(
-                BuildTracker(tracker, "evolution", "evolution@sha1").claim().claimed
+                BuildTracker(tracker, "example-repo", "example-repo@sha1").claim().claimed
             )
 
         threads = [threading.Thread(target=claim) for _ in range(8)]

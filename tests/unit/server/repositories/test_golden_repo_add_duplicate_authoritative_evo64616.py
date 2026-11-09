@@ -1,4 +1,4 @@
-"""EVO-64616: the add-golden-repo duplicate guard reads the shared registry.
+"""issue-64616: the add-golden-repo duplicate guard reads the shared registry.
 
 Root cause: ``_submit_add_job`` decided "already exists" with the cache-first
 resolver. In a cluster each worker caches golden repos; a removal on ANOTHER

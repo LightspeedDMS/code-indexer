@@ -1,4 +1,4 @@
-"""EVO-66121: OAuth routes must use the app-wired (backend-aware) managers.
+"""issue-66121: OAuth routes must use the app-wired (backend-aware) managers.
 
 Regression guard for the OAuth backend-split bug: get_user_manager() and
 get_mcp_credential_manager() used to construct a bare UserManager(), which

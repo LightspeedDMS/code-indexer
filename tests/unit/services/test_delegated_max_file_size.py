@@ -173,7 +173,7 @@ def _run_incremental(indexer: SmartIndexer, old: str, new: str) -> Tuple[list, l
     deleted: List[Any] = []
     meta = indexer.progressive_metadata
     meta.metadata["status"] = "completed"
-    # EVO-64616: an index already checked for files missing chunks.
+    # issue-64616: an index already checked for files missing chunks.
     meta.metadata[CHUNK_COVERAGE_KEY] = CHUNK_COVERAGE_VERSION
     with ExitStack() as stack:
         for name, value in [

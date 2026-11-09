@@ -1,4 +1,4 @@
-"""EVO-66113 MR !53 review fix (MAJOR finding, discussion
+"""issue-66113 MR !53 review fix (MAJOR finding, discussion
 4defdd944af7679fdfaa797817d324f819ffe82f): prove job_id reaches
 RefreshScheduler's _submit_refresh_job/_refresh_worker closure AND the
 downstream _index_source() embed-stats env wiring WITHOUT relying on the
@@ -217,7 +217,7 @@ class TestIndexSourceThreadsJobIdIntoEmbedStatsEnvWithoutNameError:
         assert (
             semantic_env[EMBEDDING_STATS_JOB_ID_ENV] == "race-test-refresh-job-env-1"
         ), (
-            "EVO-66113 review fix regression: job_id passed to _index_source() "
+            "issue-66113 review fix regression: job_id passed to _index_source() "
             "must reach the semantic-phase child cidx index subprocess env "
             "for embed-stats correlation"
         )
@@ -229,7 +229,7 @@ class TestIndexSourceThreadsJobIdIntoEmbedStatsEnvWithoutNameError:
                 temporal_env[EMBEDDING_STATS_JOB_ID_ENV]
                 == "race-test-refresh-job-env-1"
             ), (
-                "EVO-66113 review fix regression: job_id must also reach the "
+                "issue-66113 review fix regression: job_id must also reach the "
                 "temporal-phase child cidx index subprocess env -- both "
                 "phases share the same _run_popen_c convergence point"
             )

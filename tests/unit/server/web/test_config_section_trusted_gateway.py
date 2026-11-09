@@ -1,4 +1,4 @@
-"""EVO-66121: structural tests for the trusted_gateway config UI section.
+"""issue-66121: structural tests for the trusted_gateway config UI section.
 
 MR !49/!51 review: the config screen must actually expose trusted_gateway (display +
 edit form posting to /admin/config/trusted_gateway), mirroring the OIDC section -- not

@@ -1,4 +1,4 @@
-"""Temporal status never says "absent" when this pod cannot tell (EVO-64616).
+"""Temporal status never says "absent" when this pod cannot tell (issue-64616).
 
 Under a delegated IndexStore a status read serves the recorded temporal
 version first (``served_temporal_index_root``). A pointer recording NO

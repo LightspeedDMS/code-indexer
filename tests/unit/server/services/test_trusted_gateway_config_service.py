@@ -1,4 +1,4 @@
-"""EVO-66121: ConfigService get_all_settings() + update_setting() for trusted_gateway.
+"""issue-66121: ConfigService get_all_settings() + update_setting() for trusted_gateway.
 
 The trusted mcp-gateway bearer section must be readable (Web UI / config API) and
 settable + persisted, so an admin can enable per-user gateway auth without hand-editing
@@ -37,12 +37,12 @@ class TestTrustedGatewayConfigService:
     def test_update_string_fields_persist(self, tmp_path):
         svc = _service(tmp_path)
         svc.update_setting(
-            "trusted_gateway", "issuer", "https://mcp.test.lightspeedtools.cloud"
+            "trusted_gateway", "issuer", "https://gateway.example.com"
         )
         svc.update_setting("trusted_gateway", "audience", "cidx-tools-test")
         svc.update_setting("trusted_gateway", "leeway_seconds", 30)
         tg = svc.get_config().trusted_gateway_config
-        assert tg.issuer == "https://mcp.test.lightspeedtools.cloud"
+        assert tg.issuer == "https://gateway.example.com"
         assert tg.audience == "cidx-tools-test"
         assert tg.leeway_seconds == 30
 

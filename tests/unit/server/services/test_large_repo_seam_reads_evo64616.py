@@ -1,4 +1,4 @@
-"""Large-repository reads through the content seam (EVO-64616).
+"""Large-repository reads through the content seam (issue-64616).
 
 On a 32k-file, 2 GB golden repository every whole-repository manifest walk
 cost workspace-mcp 40-60 s (it hashes every byte). These tests pin the rules

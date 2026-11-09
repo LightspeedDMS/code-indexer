@@ -1,5 +1,5 @@
 """
-EVO-66336: ``files.py::_resolve_global_repo_target`` was the 6th Bug #1315 site
+issue-66336: ``files.py::_resolve_global_repo_target`` was the 6th Bug #1315 site
 that still called ``AliasManager.read_alias()`` directly with NO fallback to the
 registry row's own ``index_path`` -- so ``list_files`` / ``browse_directory``
 returned ``"Alias for '<x>' not found"`` for ``-global`` repos whenever the

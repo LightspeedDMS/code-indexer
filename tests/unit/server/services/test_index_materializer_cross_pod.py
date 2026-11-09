@@ -463,7 +463,7 @@ def test_an_add_publishes_under_a_delegated_store(
     assert fields == published_index_fields(
         REPO, str(world["artifacts"].current_version(REPO))
     )
-    # EVO-64616: published in place, the base clone is not marked a checkout.
+    # issue-64616: published in place, the base clone is not marked a checkout.
     assert not (clone / im.CHECKED_OUT_MARKER).exists()
     im.ensure_published_index(
         world["target"], fields, store=world["store"], fix_config=world["fix"]

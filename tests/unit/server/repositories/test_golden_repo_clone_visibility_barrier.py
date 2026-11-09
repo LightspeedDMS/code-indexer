@@ -1,4 +1,4 @@
-"""EVO-64616: the post-clone workflow waits for a DELEGATED clone to become
+"""issue-64616: the post-clone workflow waits for a DELEGATED clone to become
 visible on THIS node before spawning `cidx init`/`cidx index` children.
 
 A delegated clone is written by git-mcp on a DIFFERENT NFS client, so this cidx

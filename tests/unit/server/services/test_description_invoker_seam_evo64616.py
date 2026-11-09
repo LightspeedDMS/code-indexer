@@ -1,4 +1,4 @@
-"""EVO-64616: description generation honours the CLI invoker plugin.
+"""issue-64616: description generation honours the CLI invoker plugin.
 
 Root cause: the golden-repo add hook (``meta_description_hook.on_repo_added``)
 always went to the local ``claude`` CLI through ClaudeCliManager. Every other

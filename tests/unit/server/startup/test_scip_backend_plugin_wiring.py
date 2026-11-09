@@ -306,7 +306,7 @@ def test_generator_builds_the_scip_db_from_plugin_bytes(
     written.ParseFromString((scip_dir / "index.scip").read_bytes())
     expected = _new_index()
     expected.ParseFromString(_index_bytes())
-    # EVO-64616: the sandbox's build directory is replaced by the project's
+    # issue-64616: the sandbox's build directory is replaced by the project's
     # directory in this repository; everything else is the plugin's index.
     assert written.metadata.project_root == (repo / "web").as_uri()
     expected.metadata.project_root = written.metadata.project_root

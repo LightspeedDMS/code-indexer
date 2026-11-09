@@ -1,4 +1,4 @@
-"""EVO-64616: a refresh stops before touching a clone that fetches from the
+"""issue-64616: a refresh stops before touching a clone that fetches from the
 wrong repository, and initializes a source left with no configuration.
 
 The refresh fetches ``origin``, never the registered URL. A writer sharing the

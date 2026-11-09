@@ -143,7 +143,7 @@ def test_activation_on_a_pod_without_the_golden_index_seeds_from_the_store(
 ) -> None:
     """The copy's index is the golden alias's PUBLISHED version, checked out
     straight into the copy: nothing is checked out (or read) under
-    golden-repos on this pod (EVO-64616, golden-repos mount removal)."""
+    golden-repos on this pod (issue-64616, golden-repos mount removal)."""
     store = DelegatedIndexStore(artifacts)
     version = store.publish(world.pod_golden, world.pod_golden / INDEX_DIR)
     AliasManager(str(world.pod_data / "golden-repos" / "aliases")).create_alias(

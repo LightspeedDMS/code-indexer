@@ -1,4 +1,4 @@
-"""EVO-64616: an unborn HEAD (a repository with no commit) is a state, not an error.
+"""issue-64616: an unborn HEAD (a repository with no commit) is a state, not an error.
 
 A golden repo registered from an empty remote has no commit, so every HEAD
 probe through git-mcp failed with git's ``ambiguous argument 'HEAD'``. The

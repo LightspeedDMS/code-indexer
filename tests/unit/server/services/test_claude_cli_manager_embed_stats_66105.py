@@ -1,4 +1,4 @@
-"""EVO-66105: ClaudeCliManager._commit_and_reindex threads job_id and
+"""issue-66105: ClaudeCliManager._commit_and_reindex threads job_id and
 sets golden_repo_alias='cidx-meta' when building the child subprocess
 env for the meta-repo reindex.
 
@@ -54,7 +54,7 @@ class TestCommitAndReindexEmbedStats:
             )
 
         # Upstream appends server-layout flags via append_server_layout_args(),
-        # so match the verb prefix rather than the exact argv (EVO-66105 asserts
+        # so match the verb prefix rather than the exact argv (issue-66105 asserts
         # the embed-stats env, not the command's flag set).
         index_calls = [c for c in run_calls if c["cmd"][:2] == ["cidx", "index"]]
         assert index_calls, f"expected a 'cidx index' call, got: {run_calls}"

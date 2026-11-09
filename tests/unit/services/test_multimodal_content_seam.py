@@ -582,7 +582,7 @@ def test_an_image_fetch_failure_fails_the_file_so_it_is_retried(
 def test_a_served_image_still_embeds_alongside_the_text(tmp_path: Path) -> None:
     result, written = _process_doc_with_image(tmp_path, _Recording({"img/a.png": b"a"}))
     assert result.success is True, result.error
-    # Both chunks' text, and the image chunk's multimodal point (EVO-64616:
+    # Both chunks' text, and the image chunk's multimodal point (issue-64616:
     # an image chunk's text is in the text index too).
     assert len(written) == 3
 

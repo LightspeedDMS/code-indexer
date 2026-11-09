@@ -1,10 +1,10 @@
-"""EVO-65484 regression guard: the periodic SCIP reconcile is scheduled.
+"""issue-65484 regression guard: the periodic SCIP reconcile is scheduled.
 
 ``reconcile_scip_from_filesystem`` enqueues delegated SCIP builds for
 SCIP-eligible golden repos that have none. Since modular phase 4d it is the
 scip feature's recurring background job (``ScipFeature.background_jobs()``),
 run by the core's feature job scheduler -- on a worker thread, one node per
-tick (the cluster-wide dedup that replaced the EVO-66188 leader gate), stopped
+tick (the cluster-wide dedup that replaced the issue-66188 leader gate), stopped
 on shutdown -- instead of a lifespan task. If the feature stops contributing
 it, eligible repos silently never get SCIP again.
 """

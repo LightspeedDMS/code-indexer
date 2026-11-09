@@ -1,9 +1,9 @@
-"""EVO-65484: registry reconcile — backfill golden repos that are indexed on disk
+"""issue-65484: registry reconcile — backfill golden repos that are indexed on disk
 but missing from the registry.
 
 Registration persists the index before the registry row, so an interrupted job
 (pod eviction / crash) leaves index-without-entry; the workspace-mcp seeder then
-sees the repo as unregistered and re-provisions it (EVO-65481). This reconcile
+sees the repo as unregistered and re-provisions it (issue-65481). This reconcile
 heals the drift by backfilling a registry row for every indexed-on-disk repo that
 has no entry — never re-indexing, idempotent, tolerant of concurrent sibling pods.
 """
@@ -24,7 +24,7 @@ _REPAIR = (
 @pytest.fixture(autouse=True)
 def _no_activation_repair():
     """The passes under test here are the backfill and the prune; the
-    activation repair (EVO-64616) has its own tests below and in
+    activation repair (issue-64616) has its own tests below and in
     test_global_activation_repair_evo64616.py."""
     with patch(
         _REPAIR, return_value=global_activation_repair.ActivationRepairResult()
@@ -117,7 +117,7 @@ def _manager_rows(tmp_path, rows):
 
 
 class TestRegistryReconcilePrunesOrphanRows:
-    """EVO-65484 Gap 3: prune registry rows whose in-tree clone dir has vanished."""
+    """issue-65484 Gap 3: prune registry rows whose in-tree clone dir has vanished."""
 
     def test_prunes_row_whose_clone_dir_is_gone(self, tmp_path):
         m, gr = _manager_rows(
@@ -184,7 +184,7 @@ class TestRegistryReconcilePrunesOrphanRows:
 
 
 class TestReconcileActivationEvo64616:
-    """EVO-64616: the backfill raced in-flight adds (the add then failed on the
+    """issue-64616: the backfill raced in-flight adds (the add then failed on the
     duplicate key before activating) and never activated what it backfilled,
     stranding golden rows with no -global entry."""
 
@@ -286,12 +286,12 @@ class _Aliases:
         return name in self._existing
 
     def list_records(self):
-        """No rename in progress (EVO-64616 rename guard)."""
+        """No rename in progress (issue-64616 rename guard)."""
         return {}
 
 
 class TestBackfillSkipsAClonesARemovalLeft:
-    """EVO-64616: a removal that left its clone was undone by the backfill."""
+    """issue-64616: a removal that left its clone was undone by the backfill."""
 
     def _reconcile(self, tmp_path, aliases):
         m, gr = _manager(tmp_path, registered_aliases=[])

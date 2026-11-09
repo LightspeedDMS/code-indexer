@@ -1,6 +1,6 @@
-"""EVO-64616: the global activation repair.
+"""issue-64616: the global activation repair.
 
-Golden rows with no ``<alias>-global`` registry row: the EVO-65484 backfill
+Golden rows with no ``<alias>-global`` registry row: the issue-65484 backfill
 inserted their rows (racing an in-flight add, or after a removal left the
 clone), and nothing ever activated them. The repair activates each from the
 index it already has -- never re-indexing -- under one cluster-wide

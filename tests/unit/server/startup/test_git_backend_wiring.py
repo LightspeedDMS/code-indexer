@@ -1,4 +1,4 @@
-"""Unit tests for build_git_backend (EVO-64678, EVO-64616 Phase 2).
+"""Unit tests for build_git_backend (issue-64678, issue-64616 Phase 2).
 
 Mirrors the clone-backend wiring tests: config selects the backend, the default
 is ``local`` (so existing deployments are untouched), and ``delegated`` fails

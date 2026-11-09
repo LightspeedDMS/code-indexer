@@ -1,4 +1,4 @@
-"""EVO-64616: change_golden_repo_branch moves a repo OFF a branch upstream deleted.
+"""issue-64616: change_golden_repo_branch moves a repo OFF a branch upstream deleted.
 
 On tools-test three golden repos were registered on branches GitLab no longer
 has (their default branch was renamed). ``change_branch`` fetched with the

@@ -1,4 +1,4 @@
-"""EVO-64616: a golden base clone is never a served-index checkout.
+"""issue-64616: a golden base clone is never a served-index checkout.
 
 The global-activation repair (and an add) publish a repository's index in
 place, from its base clone ``<golden_repos_dir>/<alias>``. Publishing marked

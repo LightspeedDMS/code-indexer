@@ -1,4 +1,4 @@
-"""Repository access control on the SCIP query path (EVO-64616).
+"""Repository access control on the SCIP query path (issue-64616).
 
 SCIP query delegation was removed, so every SCIP query handler reads this
 pod's ``index.scip.db`` files through SCIPQueryService. These tests pin, for

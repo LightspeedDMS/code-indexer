@@ -1,4 +1,4 @@
-"""EVO-70528: the PostgreSQL backend is never asked for an unscoped startup sweep.
+"""issue-70528: the PostgreSQL backend is never asked for an unscoped startup sweep.
 
 ``BackgroundJobManager`` ran its startup orphan cleanup against the PostgreSQL
 backend without a ``node_id``. The backend refuses (Bug #535) and logged

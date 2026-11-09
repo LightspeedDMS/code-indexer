@@ -1,4 +1,4 @@
-"""EVO-69818: POST /api/admin/golden-repos maps DuplicateJobError to 409, not 500.
+"""issue-69818: POST /api/admin/golden-repos maps DuplicateJobError to 409, not 500.
 
 The handler's blanket ``except Exception`` used to swallow DuplicateJobError and
 return 500. Sibling handlers (add_golden_repo_index) already return 409.

@@ -1,4 +1,4 @@
-"""EVO-64616: an idle repository gets its one chunk coverage check.
+"""issue-64616: an idle repository gets its one chunk coverage check.
 
 A file indexed while image chunks bypassed the text index is missing some of
 its chunks, and only an indexing run looks for such files (once per index,

@@ -1,4 +1,4 @@
-"""EVO-65484: golden-repo description-generation disable flag."""
+"""issue-65484: golden-repo description-generation disable flag."""
 
 from types import SimpleNamespace
 from unittest.mock import patch

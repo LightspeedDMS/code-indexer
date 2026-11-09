@@ -1,4 +1,4 @@
-"""EVO-64616: cidx registers agent workspaces from workspace-mcp's listing and
+"""issue-64616: cidx registers agent workspaces from workspace-mcp's listing and
 deregisters them only on an authoritative answer -- register, deregister,
 listing failure (nothing deregistered), dry run, idempotence."""
 

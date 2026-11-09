@@ -1,4 +1,4 @@
-"""Unit tests for the GitBackend seam (EVO-64678, EVO-64616 Phase 2).
+"""Unit tests for the GitBackend seam (issue-64678, issue-64616 Phase 2).
 
 Verifies that LocalGitBackend emits the exact ``git`` command lines the raw call
 sites use today — so refactoring them onto the seam is behavior-preserving — and

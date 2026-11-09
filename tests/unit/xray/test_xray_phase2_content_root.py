@@ -1,4 +1,4 @@
-"""EVO-64616: delegated X-Ray Phase 2 runs on the tree Phase 1 searched.
+"""issue-64616: delegated X-Ray Phase 2 runs on the tree Phase 1 searched.
 
 Phase 1 reads a golden repo through the content seam at
 ``golden_repo_content_root`` (a versioned snapshot -> its base clone). Phase 2

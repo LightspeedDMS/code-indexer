@@ -1,4 +1,4 @@
-"""An evicted refresh base never costs a re-embed (EVO-64616).
+"""An evicted refresh base never costs a re-embed (issue-64616).
 
 Under ``index_store_backend: delegated`` a refresh builds its index in place
 at ``golden-repos/<repo>`` -- the incremental base -- and publishes it. The
@@ -142,7 +142,7 @@ def _cache(pod: SimpleNamespace) -> sic.ServedIndexCache:
 def _evict(pod: SimpleNamespace) -> None:
     """The base's index state gone from this pod: a pod that never built it,
     or an eviction from before the served-index cache left base clones alone
-    (EVO-64616) -- removed exactly as that eviction removed it."""
+    (issue-64616) -- removed exactly as that eviction removed it."""
     sic.purge(sic.retire_pod_state(pod.source))
     assert not (pod.source / INDEX_DIRNAME).exists()
 
@@ -150,7 +150,7 @@ def _evict(pod: SimpleNamespace) -> None:
 def test_the_served_index_cache_never_evicts_the_base(
     pod: SimpleNamespace, provider: CountingProvider
 ) -> None:
-    """EVO-64616: even marked, idle and over every limit, the base clone is
+    """issue-64616: even marked, idle and over every limit, the base clone is
     the refresh's incremental base, not a cache entry."""
     _index(pod.source)
     _publish(pod)
@@ -284,7 +284,7 @@ def test_index_state_it_cannot_explain_is_left_alone(pod: SimpleNamespace) -> No
 def test_an_evicted_base_the_backfill_wrote_into_is_seeded(
     pod: SimpleNamespace, provider: CountingProvider
 ) -> None:
-    """EVO-64616: after an eviction the SCIP backfill re-creates the index
+    """issue-64616: after an eviction the SCIP backfill re-creates the index
     root for its cooldown marker and its output. That root holds no index:
     it is seeded like a missing one (leftovers kept), not left alone -- left
     alone, ``cidx index`` ran there with no configuration on every cycle."""

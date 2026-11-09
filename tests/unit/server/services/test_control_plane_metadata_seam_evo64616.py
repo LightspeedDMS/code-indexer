@@ -1,4 +1,4 @@
-"""EVO-64616: alias / write-mode FILES go through the content seam when delegated.
+"""issue-64616: alias / write-mode FILES go through the content seam when delegated.
 
 The pointers live in the registry, but their file representation is still read
 by the startup import, by the read-through on a registry miss before that

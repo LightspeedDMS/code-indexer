@@ -1,4 +1,4 @@
-"""git_file_history reads without ``--follow`` first (EVO-64616).
+"""git_file_history reads without ``--follow`` first (issue-64616).
 
 ``--follow`` diffs every commit for rename detection; on a repository with
 ~10^5 commits that alone took tens of seconds per call. So the plain

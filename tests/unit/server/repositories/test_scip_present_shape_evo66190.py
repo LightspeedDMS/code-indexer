@@ -1,11 +1,11 @@
-"""EVO-66190: SCIP presence (`cidx_scip.server.reconcile.scip_present`, the
+"""issue-66190: SCIP presence (`cidx_scip.server.reconcile.scip_present`, the
 golden repo manager's `_scip_present` before modular phase 4d) is
 discovery-shape-aware.
 
 A repo with a ROOT build file is indexed as a single root project whose build lands
 the TOP-LEVEL `scip/index.scip.db`, so presence requires that top-level DB — a stale
 per-subproject nested layout (from the old per-subproject discovery) must NOT count as
-"present" (that left JVM monoliths like evolution stuck with 1 indexed module forever).
+"present" (that left JVM monoliths like example-repo stuck with 1 indexed module forever).
 Repos with no root build file are nested-by-design, so any `.scip.db` still counts.
 """
 
@@ -65,7 +65,7 @@ class TestHasRootBuildFile:
 
 class TestScipPresentShape:
     def test_root_build_stale_nested_only_is_NOT_present(self, tmp_path):
-        """The evolution case: root settings.gradle, but only stale nested DBs."""
+        """The example-repo case: root settings.gradle, but only stale nested DBs."""
         m, gr = _mgr(tmp_path)
         repo = gr / "monolith"
         repo.mkdir()
@@ -115,7 +115,7 @@ class TestReconcileRebuildsStaleRootRepo:
         )
 
     def test_stale_nested_root_repo_is_reenqueued_not_skipped(self, tmp_path):
-        """Before EVO-66190 this repo counted scip_present and was skipped forever."""
+        """Before issue-66190 this repo counted scip_present and was skipped forever."""
         m, gr = _mgr(tmp_path)
         repo = gr / "monolith"
         repo.mkdir()

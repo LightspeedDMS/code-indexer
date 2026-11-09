@@ -1,4 +1,4 @@
-"""EVO-64616: an empty golden repo (unborn HEAD) is skipped, not raised as a failure.
+"""issue-64616: an empty golden repo (unborn HEAD) is skipped, not raised as a failure.
 
 Follows !220 (``git_head.is_unborn_head``). Two more HEAD readers met empty
 repositories on the delegated fleet:

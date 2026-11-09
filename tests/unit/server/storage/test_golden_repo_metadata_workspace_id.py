@@ -1,4 +1,4 @@
-"""EVO-65021: workspace-mcp ``workspace_id`` retention on golden_repos_metadata.
+"""issue-65021: workspace-mcp ``workspace_id`` retention on golden_repos_metadata.
 
 Exercises the REAL GoldenRepoMetadataSqliteBackend (no mocked DB layer,
 memory: feedback_faithful_db_mocks) for the new ``workspace_id`` column:
@@ -97,7 +97,7 @@ def _count_top_level_columns(select_body: str) -> int:
 
 
 class TestPostgresQueryColumnCount:
-    """CRITICAL (EVO-65021): every Postgres query feeding ``_row_to_dict_full``
+    """CRITICAL (issue-65021): every Postgres query feeding ``_row_to_dict_full``
     (which reads ``row[10]``) MUST SELECT 11 columns, else the mapper raises
     ``IndexError`` on the first row. ``list_repos_with_categories`` regressed
     this. Static guard so it fails without a live PostgreSQL."""
@@ -159,7 +159,7 @@ class TestUpdateWorkspaceId:
 class TestLegacyTableMigration:
     def test_ensure_table_exists_adds_workspace_id_to_legacy_table(self):
         """A golden_repos_metadata table created WITHOUT workspace_id (a DB from
-        before EVO-65021) gains the column when the backend initialises it."""
+        before issue-65021) gains the column when the backend initialises it."""
         temp_dir = tempfile.mkdtemp()
         try:
             db_path = os.path.join(temp_dir, "legacy.db")

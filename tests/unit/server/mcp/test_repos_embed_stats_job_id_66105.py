@@ -1,4 +1,4 @@
-"""EVO-66105: _provider_index_job and _provider_temporal_index_job thread
+"""issue-66105: _provider_index_job and _provider_temporal_index_job thread
 job_id from kwargs through to build_embedding_stats_child_env so the
 child subprocess env carries CIDX_EMBEDDING_STATS_JOB_ID.
 

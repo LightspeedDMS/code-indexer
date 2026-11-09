@@ -1,4 +1,4 @@
-"""EVO-66189: list_files/browse can be served from the index's path_index.bin
+"""issue-66189: list_files/browse can be served from the index's path_index.bin
 (indexed_only fast path) instead of stat-walking the working tree over NFS."""
 
 import msgpack

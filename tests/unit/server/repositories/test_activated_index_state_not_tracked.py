@@ -1,4 +1,4 @@
-"""EVO-64616: an activated repository never shows or stages ``.code-indexer/``.
+"""issue-64616: an activated repository never shows or stages ``.code-indexer/``.
 
 On tools-test ``git_status`` of a freshly activated copy listed
 ``.code-indexer/`` as untracked, so a stage-all could commit cidx's index

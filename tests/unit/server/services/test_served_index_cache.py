@@ -895,7 +895,7 @@ def test_a_known_size_is_remembered_after_eviction(pod: SimpleNamespace) -> None
 def test_a_golden_base_clone_checkout_is_never_evicted(
     pod: SimpleNamespace,
 ) -> None:
-    """EVO-64616: ``golden-repos/<repo>`` itself is the refresh's incremental
+    """issue-64616: ``golden-repos/<repo>`` itself is the refresh's incremental
     base (and, with the golden-repos mount on, shared by every pod): never a
     cache entry, even checked out, marked, idle and over the limit."""
     cache = _cache(pod)
@@ -1298,7 +1298,7 @@ def test_discovery_finds_every_kind_and_nothing_else(pod: SimpleNamespace) -> No
         for e in sic.discover_served_checkouts(pod.activated, pod.golden)
     }
     assert found == {
-        # EVO-64616: the marked base clone ``clone`` is never an entry.
+        # issue-64616: the marked base clone ``clone`` is never an entry.
         (sic.KIND_GOLDEN, "repo@v_7", str(snap)),
         (sic.KIND_ACTIVATED, "alice/repo", str(copy)),
         (sic.KIND_TEMPORAL, "repo (temporal)", str(root)),
@@ -1747,7 +1747,7 @@ def test_a_refresh_base_used_by_a_build_is_not_the_first_victim(
     assert cache.hits == 0
     assert (base / sic.LAST_SERVED_STAMP).is_file()
     _later(pod)
-    assert str(base) not in cache.run_pass().evicted  # EVO-64616: never
+    assert str(base) not in cache.run_pass().evicted  # issue-64616: never
     assert _served(base)
 
 

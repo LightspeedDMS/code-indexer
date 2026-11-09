@@ -1,11 +1,11 @@
 """
-EVO-66808: the golden-repo reconcile repoints a STALE `global_repos.index_path`.
+issue-66808: the golden-repo reconcile repoints a STALE `global_repos.index_path`.
 
 A `global_repos` row can carry an absolute `index_path` baked at registration
 under an older data-dir layout (e.g. `/opt/code-indexer/.cidx-server/data/
 golden-repos/<name>`) that no longer exists after the data dir moved (e.g.
 `/data/data/golden-repos/<name>`). A resolver that trusts that stale path lands
-on a non-existent root -> ENOENT ("os error 2"); observed live on evolution-global.
+on a non-existent root -> ENOENT ("os error 2"); observed live on example-repo-global.
 
 The reconcile's healthy-repo pass now heals it via a TARGETED
 `update_index_path` (no other registry field disturbed), CONSERVATIVELY: only
@@ -91,17 +91,17 @@ class TestGoldenRepoReconcilerEvo66808:
         )
 
     def test_reconcile_repoints_stale_index_path_to_the_live_clone(self, manager):
-        clone_path = self._register_repo(manager, "evolution")
-        stale = "/opt/code-indexer/.cidx-server/data/golden-repos/evolution"
+        clone_path = self._register_repo(manager, "example-repo")
+        stale = "/opt/code-indexer/.cidx-server/data/golden-repos/example-repo"
         assert not os.path.exists(stale)
-        self._make_globally_active(manager, "evolution", stale)
+        self._make_globally_active(manager, "example-repo", stale)
 
         result = reconcile_golden_repo_registry(manager)
 
         assert result.aborted is False
-        assert result.index_paths_repaired == ["evolution"]
+        assert result.index_paths_repaired == ["example-repo"]
         assert result.index_paths_repair_failed == []
-        row = GlobalReposSqliteBackend(manager.db_path).get_repo("evolution-global")
+        row = GlobalReposSqliteBackend(manager.db_path).get_repo("example-repo-global")
         assert row is not None
         assert row["index_path"] == clone_path
 

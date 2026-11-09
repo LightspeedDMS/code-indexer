@@ -1,10 +1,10 @@
-"""EVO-64678: the git seam owns every server-side git invocation.
+"""issue-64678: the git seam owns every server-side git invocation.
 
 ``utils/git_runner.run_git_command`` is the ONE chokepoint git calls bottom out
 at: it asks ``is_mutating_git()`` whether a command mutates and, when an invoker
 is installed, delegates the mutating ones to git-mcp. Reads stay local -- that is
 a deliberate, credential-driven policy (a read needs the working tree, already in
-the pod on shared NFS, and no PAT; a mutation needs the PAT, which EVO-64616
+the pod on shared NFS, and no PAT; a mutation needs the PAT, which issue-64616
 confines to git-mcp).
 
 That policy only holds if the chokepoint is the only door. A raw
@@ -244,7 +244,7 @@ def test_no_raw_mutating_git_outside_the_seam() -> None:
     assert not violations, (
         "git calls under server/ or global_repos/ must go through "
         "code_indexer.utils.git_runner.run_git_command() so the seam can decide "
-        "whether to delegate (EVO-64678).\n\n"
+        "whether to delegate (issue-64678).\n\n"
         + "\n".join(f"  - {v}" for v in violations)
         + "\n\nA MUTATING call is never allowed here: route it through "
         "run_git_command(). A genuinely read-only call may be added to "
@@ -262,7 +262,7 @@ def test_no_raw_git_with_unknowable_argv() -> None:
     assert not unknown, (
         "these raw git calls build argv at runtime, so no static check can tell "
         "whether they mutate -- route them through run_git_command() and let "
-        "is_mutating_git() classify each call (EVO-64678).\n\n"
+        "is_mutating_git() classify each call (issue-64678).\n\n"
         + "\n".join(f"  - {u}" for u in unknown)
     )
 

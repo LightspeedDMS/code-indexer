@@ -521,7 +521,7 @@ def test_a_non_positive_sweep_interval_is_refused(
     assert sweeper._thread is None
 
 
-# ── EVO-64616: no residue (emptied directories, lock files) ─────────────────
+# ── issue-64616: no residue (emptied directories, lock files) ─────────────────
 
 
 def _locks(directory: Path) -> List[str]:

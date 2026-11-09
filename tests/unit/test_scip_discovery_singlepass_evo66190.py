@@ -1,4 +1,4 @@
-"""EVO-66190: discovery does a SINGLE filesystem walk (not ~13 rglob passes).
+"""issue-66190: discovery does a SINGLE filesystem walk (not ~13 rglob passes).
 
 These lock in the behavior the single-walk refactor adds/keeps: VCS/index dirs are
 pruned (no bogus projects, and the walk doesn't descend a huge .git tree), the walk

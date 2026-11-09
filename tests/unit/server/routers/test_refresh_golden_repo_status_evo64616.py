@@ -1,4 +1,4 @@
-"""EVO-64616: POST /api/admin/golden-repos/{alias}/refresh answers the cause.
+"""issue-64616: POST /api/admin/golden-repos/{alias}/refresh answers the cause.
 
 Every failure to submit a refresh used to become a 500 whose cause went only
 into the response body; the server log showed a bare ``HTTP 500``. Now:

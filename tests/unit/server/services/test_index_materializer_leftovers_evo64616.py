@@ -1,4 +1,4 @@
-"""EVO-64616: a published index is checked out over rebuildable leftovers.
+"""issue-64616: a published index is checked out over rebuildable leftovers.
 
 The served-index cache evicts a checkout by renaming its whole index root
 away. The index backfill sweeps then re-create that root for their cooldown

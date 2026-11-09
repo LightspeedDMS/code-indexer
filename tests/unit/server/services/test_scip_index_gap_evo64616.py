@@ -1,7 +1,7 @@
-"""EVO-64616: a SCIP query on a repository whose index is absent or partial
+"""issue-64616: a SCIP query on a repository whose index is absent or partial
 says so, instead of answering ``success`` with 0 results.
 
-tools-test: ``evolution`` (a Gradle monorepo, root ``settings.gradle``) had
+tools-test: ``example-repo`` (a Gradle monorepo, root ``settings.gradle``) had
 only a 3-file C# solution under ``code/util/nativeapp`` indexed -- the root
 Gradle build failed in the sandbox -- so ``scip_definition DealTax`` answered
 success / 0 results with nothing to tell it from "no such class".
@@ -25,7 +25,7 @@ from cidx_scip.server.query_service import (
     SCIPQueryService,
 )
 
-ALIAS = "evolution-global"
+ALIAS = "example-repo-global"
 
 
 def _access(repos: Set[str]) -> MagicMock:
@@ -35,7 +35,7 @@ def _access(repos: Set[str]) -> MagicMock:
 
 
 def _repo(golden: Path, *, root_build: bool, dbs: List[str]) -> SCIPQueryService:
-    repo = golden / "evolution"
+    repo = golden / "example-repo"
     repo.mkdir(parents=True)
     if root_build:
         (repo / "settings.gradle").write_text("include 'code'\n")
@@ -43,14 +43,14 @@ def _repo(golden: Path, *, root_build: bool, dbs: List[str]) -> SCIPQueryService
         db = repo / ".code-indexer" / "scip" / rel / "index.scip.db"
         db.parent.mkdir(parents=True, exist_ok=True)
         db.write_bytes(b"")
-    return SCIPQueryService(golden, access_filtering_service=_access({"evolution"}))
+    return SCIPQueryService(golden, access_filtering_service=_access({"example-repo"}))
 
 
 def test_no_scip_database_is_a_missing_index(tmp_path: Path) -> None:
     service = _repo(tmp_path, root_build=True, dbs=[])
     gap = service.describe_index_gap(ALIAS, "alice")
     assert gap is not None and gap.missing
-    assert "No SCIP index exists for 'evolution-global'" in gap.message
+    assert "No SCIP index exists for 'example-repo-global'" in gap.message
 
 
 def test_root_build_without_top_level_index_is_partial(tmp_path: Path) -> None:
@@ -78,7 +78,7 @@ def test_per_project_repo_without_root_build_is_complete(tmp_path: Path) -> None
 
 def test_unknown_repo_is_no_gap(tmp_path: Path) -> None:
     service = _repo(tmp_path, root_build=True, dbs=[])
-    service.access_filtering_service = _access({"evolution", "unknown"})
+    service.access_filtering_service = _access({"example-repo", "unknown"})
     assert service.describe_index_gap("unknown-global", "alice") is None
 
 

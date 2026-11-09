@@ -1,4 +1,4 @@
-"""EVO-64616: files indexed before every chunk reached the text index heal once.
+"""issue-64616: files indexed before every chunk reached the text index heal once.
 
 Under the old routing an image chunk's text never reached the text index, so a
 page indexed then is stored without some of its chunks. Reconcile compares

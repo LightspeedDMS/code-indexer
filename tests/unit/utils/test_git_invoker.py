@@ -1,8 +1,8 @@
 """
-Pluggable git *invoker* — EVO-64616 Phase 2 (the seam the ticket names at
+Pluggable git *invoker* — issue-64616 Phase 2 (the seam the ticket names at
 ``run_git_command``).
 
-Unlike ``git_backend_plugin`` (EVO-64678), which seams only cidx's INTERNAL git
+Unlike ``git_backend_plugin`` (issue-64678), which seams only cidx's INTERNAL git
 (golden/activated lifecycle, refresh, sync), this seams the ONE universal
 chokepoint every git call bottoms out at: ``utils.git_runner.run_git_command``.
 Because ``GitOperationsService`` (which backs every user-facing git-mutation

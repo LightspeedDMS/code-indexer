@@ -1,4 +1,4 @@
-"""EVO-66113 MR !53 review fix (MAJOR finding, discussion
+"""issue-66113 MR !53 review fix (MAJOR finding, discussion
 6ac7a6ff9cf5f6247902b955b62375bfe3f02369): prove job_id reaches the
 background_worker closures for add_golden_repo and
 add_indexes_to_golden_repo WITHOUT relying on the removed
@@ -218,7 +218,7 @@ class TestAddIndexesToGoldenRepoJobIdReachesEmbedStatsEnvWithoutHolder:
         semantic_env = by_phase["semantic"]
         assert semantic_env is not None
         assert semantic_env[EMBEDDING_STATS_JOB_ID_ENV] == "race-test-job-99", (
-            "EVO-66113 review fix regression: job_id passed to the closure "
+            "issue-66113 review fix regression: job_id passed to the closure "
             "must reach the child cidx index subprocess env for embed-stats "
             "correlation -- this is exactly what the removed racy "
             "_job_id_holder pattern was trying (unsafely) to achieve"

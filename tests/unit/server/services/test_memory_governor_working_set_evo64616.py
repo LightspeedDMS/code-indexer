@@ -1,4 +1,4 @@
-"""EVO-64616: the memory governor measures the cgroup WORKING SET, not page
+"""issue-64616: the memory governor measures the cgroup WORKING SET, not page
 cache.
 
 claude-code-indexer-5 on tools-test: memory.max 4 GiB, memory.current 3.87

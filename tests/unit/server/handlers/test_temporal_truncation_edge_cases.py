@@ -5,9 +5,9 @@ Story #50: Updated to sync operations for FastAPI thread pool execution.
 
 Edge cases:
 - No temporal_context
-- temporal_context without evolution
-- Evolution entry without content
-- Evolution entry without diff
+- temporal_context without example-repo
+- example-repo entry without content
+- example-repo entry without diff
 - Unicode content handling
 - Preserving other temporal_context fields
 """
@@ -52,7 +52,7 @@ class TestTemporalTruncationEdgeCases:
         assert "content" not in result
 
     def test_temporal_context_without_evolution(self, cache):
-        """Test that temporal_context without evolution is handled."""
+        """Test that temporal_context without example-repo is handled."""
         from code_indexer.server.mcp.handlers import _apply_temporal_payload_truncation
 
         results = [
@@ -61,7 +61,7 @@ class TestTemporalTruncationEdgeCases:
                 "temporal_context": {
                     "commit_hash": "abc123",
                     "commit_date": "2024-01-01",
-                    # No evolution field
+                    # No example-repo field
                 },
             }
         ]
@@ -75,17 +75,17 @@ class TestTemporalTruncationEdgeCases:
 
         # Should work without error
         assert truncated[0]["temporal_context"]["commit_hash"] == "abc123"
-        assert "evolution" not in truncated[0]["temporal_context"]
+        assert "example-repo" not in truncated[0]["temporal_context"]
 
     def test_evolution_entry_without_content(self, cache):
-        """Test evolution entry with no content field (metadata only)."""
+        """Test example-repo entry with no content field (metadata only)."""
         from code_indexer.server.mcp.handlers import _apply_temporal_payload_truncation
 
         results = [
             {
                 "content": "main",
                 "temporal_context": {
-                    "evolution": [
+                    "example-repo": [
                         {
                             "commit_hash": "abc123",
                             # No content field
@@ -103,7 +103,7 @@ class TestTemporalTruncationEdgeCases:
 
             truncated = _apply_temporal_payload_truncation(results)  # Sync call
 
-        evo_entry = truncated[0]["temporal_context"]["evolution"][0]
+        evo_entry = truncated[0]["temporal_context"]["example-repo"][0]
 
         # Should handle missing content gracefully
         assert "content" not in evo_entry
@@ -115,14 +115,14 @@ class TestTemporalTruncationEdgeCases:
         )
 
     def test_evolution_entry_without_diff(self, cache):
-        """Test evolution entry with no diff field (new file)."""
+        """Test example-repo entry with no diff field (new file)."""
         from code_indexer.server.mcp.handlers import _apply_temporal_payload_truncation
 
         results = [
             {
                 "content": "main",
                 "temporal_context": {
-                    "evolution": [
+                    "example-repo": [
                         {
                             "commit_hash": "abc123",
                             "content": "some content",
@@ -140,7 +140,7 @@ class TestTemporalTruncationEdgeCases:
 
             truncated = _apply_temporal_payload_truncation(results)  # Sync call
 
-        evo_entry = truncated[0]["temporal_context"]["evolution"][0]
+        evo_entry = truncated[0]["temporal_context"]["example-repo"][0]
 
         # Should handle missing diff gracefully
         assert "diff" not in evo_entry
@@ -174,7 +174,7 @@ class TestTemporalTruncationEdgeCases:
         assert result["content_total_size"] == PREVIEW_SIZE + 1000
 
     def test_preserves_other_temporal_context_fields(self, cache):
-        """Test that non-evolution temporal_context fields are preserved."""
+        """Test that non-example-repo temporal_context fields are preserved."""
         from code_indexer.server.mcp.handlers import _apply_temporal_payload_truncation
 
         results = [
@@ -186,7 +186,7 @@ class TestTemporalTruncationEdgeCases:
                     "commit_count": 5,
                     "commits": [{"hash": "abc"}, {"hash": "def"}],
                     "is_removed": False,
-                    "evolution": [
+                    "example-repo": [
                         {
                             "commit_hash": "abc123",
                             "content": "C" * (PREVIEW_SIZE + 1000),
@@ -206,15 +206,15 @@ class TestTemporalTruncationEdgeCases:
 
         tc = truncated[0]["temporal_context"]
 
-        # Non-evolution fields should be preserved
+        # Non-example-repo fields should be preserved
         assert tc["first_seen"] == "2024-01-01T00:00:00Z"
         assert tc["last_seen"] == "2024-06-01T00:00:00Z"
         assert tc["commit_count"] == 5
         assert tc["commits"] == [{"hash": "abc"}, {"hash": "def"}]
         assert tc["is_removed"] is False
 
-        # Evolution should be truncated
-        assert tc["evolution"][0]["content_has_more"] is True
+        # example-repo should be truncated
+        assert tc["example-repo"][0]["content_has_more"] is True
 
     def test_no_content_field_in_result(self, cache):
         """Test result without content field (edge case)."""

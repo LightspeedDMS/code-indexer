@@ -1,4 +1,4 @@
-"""EVO-64616: a golden refresh heals a base clone whose origin was repointed,
+"""issue-64616: a golden refresh heals a base clone whose origin was repointed,
 when its content is still the registered repository's -- and keeps the stop
 otherwise.
 

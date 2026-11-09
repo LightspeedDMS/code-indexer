@@ -1,4 +1,4 @@
-"""Unit tests for ScipBackendFactory (EVO-65021)."""
+"""Unit tests for ScipBackendFactory (issue-65021)."""
 
 import pytest
 
