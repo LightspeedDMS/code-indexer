@@ -1,0 +1,1055 @@
+"""SCIP query backend abstraction layer."""
+
+from cidx_scip._platform import INDEX_DIRNAME
+import logging
+import os
+import stat
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
+
+try:
+    from pysqlite3 import dbapi2 as sqlite3
+except ImportError:
+    import sqlite3
+
+from cidx_scip._platform import capabilities
+from cidx_scip._platform import NOT_FOUND_FETCH_ERRORS
+from cidx_scip._platform import is_immutable_versioned_snapshot
+from cidx_scip._platform import (
+    has_git_segment,
+    is_readable_within_root,
+    lexical_relative_path,
+    resolve_if_within_root,
+)
+
+from .primitives import QueryResult, _find_scip_repo_root, resolve_scip_trust_root
+
+if TYPE_CHECKING:
+    from cidx_scip._platform import ContentSeamSource
+
+logger = logging.getLogger(__name__)
+
+#: How SCIP context reads name themselves to the content seam (its warnings).
+CONTENT_SEAM_CONSUMER = "SCIP context"
+#: Files per content-seam ``fetch`` for context lines: bounds the bytes in
+#: flight, while one call per file would be a round trip each.
+CONTENT_SEAM_FETCH_BATCH_FILES = 64
+
+# Story #609: scip_db_version recorded once the query indexes exist.
+SCIP_DB_INDEXED_VERSION = 2
+
+
+class _OpenedFileUnverifiable(OSError):
+    """The real path of an opened file cannot be determined (e.g. this host
+    has no ``/proc`` fd links), so its containment cannot be verified."""
+
+
+def _scip_context_seam(
+    db_path: Path, trusted_root: Optional[Path], resolved_root: Optional[Path]
+) -> Optional[Tuple["ContentSeamSource", Path]]:
+    """The content seam SCIP context lines are read through, with the
+    repository path it was asked about; None to read this machine's disk.
+
+    The kernel's content seam capability always answers with a source
+    (``file_service.content_seam_source``, shared with the file tools, X-Ray
+    and semantic search: a versioned snapshot maps to its golden repo's base
+    clone, a pod-local repository stays local). None -- the local read,
+    unchanged -- is that source's implementation saying the files are a
+    directory on this machine (``pod_directory``); otherwise the repository is
+    not on this pod (it holds only the index state) and is read through it.
+    """
+    repo_root = _content_seam_root(db_path, trusted_root, resolved_root)
+    if repo_root is None:
+        return None
+    source = capabilities.content_seam_source(
+        str(repo_root), consumer=CONTENT_SEAM_CONSUMER
+    )
+    if capabilities.pod_directory(source) is not None:
+        return None
+    return source, repo_root
+
+
+def _content_seam_root(
+    db_path: Path, trusted_root: Optional[Path], resolved_root: Optional[Path]
+) -> Optional[Path]:
+    """The repository path the content seam is asked about.
+
+    The db's own UNRESOLVED root (the directory above ``.code-indexer/scip``)
+    is the path the golden-repo registry and the content service know the repository
+    by: the index root is ``<repo>/.code-indexer`` under every IndexStore. It
+    is used whenever it IS the trusted root; a caller-selected trusted root
+    that differs is used as given.
+    """
+    derived = _find_scip_repo_root(Path(db_path).parent)
+    if trusted_root is None:
+        return derived
+    if derived is not None and resolve_scip_trust_root(db_path) == resolved_root:
+        return derived
+    return Path(trusted_root)
+
+
+@dataclass
+class ImpactResult:
+    """Result of impact analysis query."""
+
+    file_path: str
+    symbol_count: int
+    symbols: List[str]
+
+
+@dataclass
+class CallChain:
+    """Result of call chain tracing query."""
+
+    path: List[str]  # Symbol names in execution order
+    length: int  # Number of hops in chain
+    has_cycle: bool  # True if path contains cycle
+
+
+class SCIPBackend(ABC):
+    """Abstract base class for SCIP query backends."""
+
+    @abstractmethod
+    def find_definition(self, symbol: str, exact: bool = False) -> List[QueryResult]:
+        """
+        Find definition locations for a symbol.
+
+        Args:
+            symbol: Symbol name to search for
+            exact: If True, match exact symbol name; if False, match substring
+
+        Returns:
+            List of QueryResult objects with definition locations
+        """
+        pass
+
+    @abstractmethod
+    def find_references(
+        self, symbol: str, limit: int = 100, exact: bool = False
+    ) -> List[QueryResult]:
+        """
+        Find all references to a symbol.
+
+        Args:
+            symbol: Symbol name to search for
+            limit: Maximum number of results to return
+            exact: If True, match exact symbol name; if False, match substring
+
+        Returns:
+            List of QueryResult objects with reference locations
+        """
+        pass
+
+    @abstractmethod
+    def get_dependencies(
+        self, symbol: str, depth: int = 1, exact: bool = False
+    ) -> List[QueryResult]:
+        """
+        Get symbols that this symbol depends on.
+
+        Args:
+            symbol: Symbol name to analyze
+            depth: Depth of transitive dependencies (1 = direct only)
+            exact: If True, match exact symbol name; if False, match substring
+
+        Returns:
+            List of QueryResult objects with dependency information
+        """
+        pass
+
+    @abstractmethod
+    def get_dependents(
+        self, symbol: str, depth: int = 1, exact: bool = False
+    ) -> List[QueryResult]:
+        """
+        Get symbols that depend on this symbol.
+
+        Args:
+            symbol: Symbol name to analyze
+            depth: Depth of transitive dependents (1 = direct only)
+            exact: If True, match exact symbol name; if False, match substring
+
+        Returns:
+            List of QueryResult objects with dependent information
+        """
+        pass
+
+    @abstractmethod
+    def analyze_impact(self, symbol: str, depth: int = 3) -> List[ImpactResult]:
+        """
+        Analyze impact of changing symbol (transitive dependents grouped by file).
+
+        Args:
+            symbol: Symbol name to analyze
+            depth: Maximum dependency depth (1-10, default 3)
+
+        Returns:
+            List of ImpactResult objects with file_path, symbol_count, and symbols
+        """
+        pass
+
+    @abstractmethod
+    def trace_call_chain(
+        self,
+        from_symbol: str,
+        to_symbol: str,
+        max_depth: int = 5,
+        limit: int = 100,
+        timeout_errors: Optional[List[str]] = None,
+    ) -> List[CallChain]:
+        """
+        Trace all call chains from entry point to target function.
+
+        Args:
+            from_symbol: Entry point symbol name
+            to_symbol: Target function symbol name
+            max_depth: Maximum path length (default 5). The recursive-CTE
+                query enumerates ALL distinct paths (not shortest-path),
+                so DatabaseBackend clamps this down to MAX_DEPTH_CAP (3,
+                in scip/database/queries.py) regardless of what is passed
+                here (Bug #1603).
+            limit: Maximum number of paths to return (default 100)
+            timeout_errors: Optional list this call appends a message to
+                if the underlying query times out (Bug #1603 code review
+                Priority 1) -- callers must treat a non-empty list as a
+                genuine failure, not an empty/partial success.
+
+        Returns:
+            List of CallChain objects with path, length, and has_cycle
+        """
+        pass
+
+
+class DatabaseBackend(SCIPBackend):
+    """SQLite database backend for SCIP queries."""
+
+    def __init__(
+        self,
+        db_path: Path,
+        project_root: str = "",
+        scip_file: Optional[Path] = None,
+        trusted_root: Optional[Path] = None,
+    ):
+        """
+        Initialize database backend.
+
+        Args:
+            db_path: Path to .scip.db database file
+            project_root: Project root path for QueryResult objects
+            scip_file: Optional path to .scip protobuf file for hybrid mode (ALL symbol references)
+            trusted_root: Repository root that source-context reads and the
+                version-marker write are confined to. When None it is the
+                directory above ``.code-indexer/scip`` in the db's unresolved
+                path; with no such root, context is omitted and no marker is
+                written. Never taken from ``project_root``.
+        """
+        self._resolved_root = resolve_scip_trust_root(db_path, trusted_root)
+        # The content seam context lines are read through, when delegated;
+        # resolved once, on the first context read (see _context_seam).
+        self._trusted_root = trusted_root
+        self._seam_memo: Optional[Tuple["ContentSeamSource", Path]] = None
+        self._seam_resolved = False
+        # Bug #1616: a .scip.db living under an immutable golden-repo
+        # versioned snapshot (.versioned/{ns}/v_<ts>/...) is genuinely
+        # read-only on disk. Opening it read-write "succeeds" silently
+        # (SQLite auto-downgrades a failed O_RDWR open to read-only when
+        # SQLITE_OPEN_CREATE is set), but any later write attempt --
+        # namely the lazy index-creation migration below -- then raises
+        # "attempt to write a readonly database". Detect the condition
+        # via the SAME canonical predicate the rest of the codebase uses
+        # for this exact class of path -- the predicate itself is purely
+        # structural (no filesystem access) -- and open read-only + skip
+        # the migration write entirely when true.
+        #
+        # Code-review follow-up (Item 1): the canonical predicate's
+        # canonical clause requires ".versioned" to appear as a specific
+        # path component (parts[-3]), so a path that doesn't even contain
+        # the ".versioned" substring is provably not a snapshot without
+        # needing the predicate at all, so the cheap string check runs first.
+        # The predicate is a pure path rule (utils/snapshot_paths.py); it no
+        # longer lives in the server package.
+        self.db_path = db_path
+        if ".versioned" in str(db_path):
+            self.read_only = is_immutable_versioned_snapshot(str(db_path))
+        else:
+            self.read_only = False
+        if self.read_only:
+            # Path.as_uri() percent-encodes URI-special characters (?, #, %,
+            # spaces, ...) present in the path itself, so a literal f-string
+            # interpolation here would risk SQLite misparsing a path that
+            # happens to contain one of those characters. Path(db_path) also
+            # hardens against a plain str db_path (the sole production call
+            # site always passes a Path, but the type isn't runtime-enforced,
+            # and the else branch below already tolerates str via
+            # sqlite3.connect). Path.resolve() DOES touch the filesystem
+            # (readlink/stat) -- no new exposure versus the sqlite3.connect
+            # call on the very next line, which also blocks on I/O.
+            self.conn = sqlite3.connect(
+                Path(db_path).resolve().as_uri() + "?mode=ro", uri=True
+            )
+        else:
+            self.conn = sqlite3.connect(db_path)
+        self.project_root = project_root
+        self.scip_file = scip_file
+
+        # Run migration to ensure indexes exist (Story #609). Skipped for
+        # read-only snapshots (Bug #1616): the connection cannot write, and
+        # an immutable snapshot's indexes (or lack thereof) were fixed at
+        # generation time -- there is nothing this call could durably fix.
+        if not self.read_only:
+            self._ensure_migration_complete()
+
+    def _ensure_migration_complete(self) -> None:
+        """
+        Ensure SCIP database indexes exist, with fast-path version check.
+
+        Version tracking prevents redundant index creation checks on every query.
+        Migration is idempotent, so safe to run multiple times if version tracking fails.
+
+        Performance:
+        - Fast path (version >= 2): <1ms (version check only)
+        - Migration path (version < 2): ~100-500ms (create 5 indexes)
+
+        Never called when ``self.read_only`` is True (Bug #1616) -- the
+        connection has no write capability in that case.
+        """
+        from ..database.migration import (
+            ensure_indexes_created,
+            get_scip_db_version,
+            update_scip_db_version,
+        )
+
+        # Determine config path (Story #609).
+        #
+        # Bug #1630: self.project_root is the SUB-PROJECT's own directory
+        # for a sub-project database, not the repo root, and it may come
+        # from index metadata. The scip_db_version marker is a single
+        # repo-wide value at the ONE real <repo_root>/.code-indexer/
+        # config.json, and it is read and written only inside the trusted
+        # repository root (self._resolved_root, see __init__). Without a
+        # trusted root (a db outside the ".code-indexer/scip" layout, e.g. a
+        # synthetic fixture) the marker is skipped silently; a config path
+        # resolving outside the root is skipped with a WARNING. Either way
+        # the idempotent index creation still runs.
+        config_path = None
+        if self._resolved_root is not None:
+            config_path = resolve_if_within_root(
+                self._resolved_root / INDEX_DIRNAME / "config.json",
+                self._resolved_root,
+            )
+            if config_path is None:
+                logger.warning(
+                    "SCIP version marker not recorded: config path does not "
+                    "resolve inside repository root %s",
+                    self._resolved_root,
+                )
+        if config_path is None:
+            ensure_indexes_created(self.conn)
+            return
+
+        # Fast path: skip migration once the indexed schema version is recorded
+        current_version = get_scip_db_version(config_path)
+        if current_version >= SCIP_DB_INDEXED_VERSION:
+            return  # Already migrated
+
+        # Migration path: Create indexes and update version
+        ensure_indexes_created(self.conn)
+        update_scip_db_version(config_path, SCIP_DB_INDEXED_VERSION)
+
+    def _read_lines_within_root(self, candidate: Path) -> Optional[List[str]]:
+        """Return ``candidate``'s lines when the file actually opened lies
+        inside ``self._resolved_root`` and not inside the repository's .git;
+        ``None`` when it does not.
+
+        The path is checked first (so a file outside the root, or resolving
+        into .git, is never even opened), then opened, then the OPENED
+        file's real path is verified through ``/proc/self/fd`` against the
+        same rule and read from that descriptor only -- a symlink swapped
+        between check and open cannot redirect the read. Where ``/proc`` fd
+        links are unavailable the read fails closed with
+        ``_OpenedFileUnverifiable``.
+
+        Raises:
+            _OpenedFileUnverifiable: The opened file's real path cannot be
+                determined on this host.
+            OSError: An in-root file is missing, not a regular file, or
+                cannot be read.
+        """
+        root = self._resolved_root
+        assert root is not None  # callers check before reading
+        try:
+            if not is_readable_within_root(candidate, root):
+                return None
+        except ValueError:  # e.g. an embedded NUL byte in a stored path
+            return None
+        fd = os.open(candidate, os.O_RDONLY | os.O_NOCTTY | os.O_NONBLOCK)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise OSError(f"not a regular file: {candidate}")
+            try:
+                opened = Path(os.readlink(f"/proc/self/fd/{fd}"))
+            except OSError as exc:
+                raise _OpenedFileUnverifiable(str(exc)) from exc
+            try:
+                opened_relative = opened.relative_to(root)
+            except ValueError:
+                return None
+            if has_git_segment(opened_relative.parts):
+                return None
+            with os.fdopen(fd, "rb", closefd=False) as handle:
+                data = handle.read()
+        finally:
+            os.close(fd)
+        return data.decode("utf-8", errors="replace").splitlines()
+
+    def _read_context_lines(self, results: List[QueryResult]) -> None:
+        """
+        Populate the ``context`` field on each result with its source line.
+
+        Reads are grouped by file path to avoid re-opening the same file for every
+        result.  If a file cannot be read (missing, permission error, encoding error)
+        the context for that file's results stays ``None`` — no exception is raised.
+
+        Line numbers in the SCIP database are 0-based; ``context`` receives the raw
+        line string with the trailing newline stripped.
+
+        Where the lines come from: this machine's disk, or -- when the server's
+        content backend is delegated, so the repository is not on this pod --
+        the content seam (``_seam_context_lines``). The local read is
+        unchanged (``_local_context_lines``).
+
+        SCIP context lines are read only from within the repository root.
+        Stored paths come from the database itself, so each one is confined
+        to the trusted repository root resolved once in ``__init__`` -- never
+        to ``project_root``, which may be a monorepo sub-project directory
+        (Bug #1630) or come from index metadata. With no trusted root every
+        context stays ``None``. Refusals, and reads whose opened file cannot
+        be verified on this host, are each summarised in one WARNING.
+
+        Args:
+            results: List of QueryResult objects to mutate in-place.
+        """
+        if not self.project_root or not results:
+            return  # Cannot resolve relative paths without a project root
+
+        if self._resolved_root is None:
+            logger.warning(
+                "SCIP context omitted for %d result(s): index %s has no "
+                "repository root to confine source reads to",
+                len(results),
+                self.db_path,
+            )
+            return
+
+        # Group result indices by relative file path to read each file at most once.
+        from collections import defaultdict
+
+        indices_by_file: Dict[str, List[int]] = defaultdict(list)
+        for idx, result in enumerate(results):
+            indices_by_file[result.file_path].append(idx)
+
+        try:
+            seam = self._context_seam()
+        except Exception as exc:  # registry or backend wiring, whatever it is
+            self._warn_content_backend_unavailable(len(indices_by_file), exc)
+            return
+        if seam is None:
+            lines_by_file = self._local_context_lines(indices_by_file)
+        else:
+            lines_by_file = self._seam_context_lines(indices_by_file, *seam)
+
+        for rel_path, lines in lines_by_file.items():
+            for idx in indices_by_file[rel_path]:
+                line_num = results[idx].line  # 0-based
+                if 0 <= line_num < len(lines):
+                    results[idx].context = lines[line_num]
+
+    def _context_seam(self) -> Optional[Tuple["ContentSeamSource", Path]]:
+        """The content seam (and repository path) context is read through, or
+        None for the local disk; resolved once per backend. A failure to
+        resolve it raises and is not remembered (the next query asks again)."""
+        if not self._seam_resolved:
+            self._seam_memo = _scip_context_seam(
+                self.db_path, self._trusted_root, self._resolved_root
+            )
+            self._seam_resolved = True
+        return self._seam_memo
+
+    def _local_context_lines(
+        self, indices_by_file: Dict[str, List[int]]
+    ) -> Dict[str, List[str]]:
+        """Each stored path's lines, read from this machine's disk within the
+        trusted root (``_read_lines_within_root``)."""
+        project_root_path = Path(self.project_root)
+        lines_by_file: Dict[str, List[str]] = {}
+        refused = 0
+        unverifiable = 0
+        for rel_path in indices_by_file:
+            candidate = (project_root_path / rel_path).absolute()
+            try:
+                lines = self._read_lines_within_root(candidate)
+            except _OpenedFileUnverifiable:
+                unverifiable += 1
+                continue
+            except OSError:
+                # File missing or unreadable — leave context as None for these results.
+                continue
+            if lines is None:
+                refused += 1
+                continue
+            lines_by_file[rel_path] = lines
+
+        if refused:
+            self._warn_refused(refused)
+        if unverifiable:
+            logger.warning(
+                "SCIP context omitted for %d file(s): opened-file "
+                "verification is unavailable on this host (no /proc fd links)",
+                unverifiable,
+            )
+        return lines_by_file
+
+    def _seam_context_lines(
+        self,
+        indices_by_file: Dict[str, List[int]],
+        source: "ContentSeamSource",
+        repo_root: Path,
+    ) -> Dict[str, List[str]]:
+        """Each stored path's lines, fetched through the content seam.
+
+        Nothing is read from this pod: each stored path is confined LEXICALLY
+        to the repository (``_seam_relative_path``; outside the root, or into
+        its ``.git``, is refused as locally) and the backend,
+        which never follows a symlink, serves the bytes. Files are fetched in
+        batches of ``CONTENT_SEAM_FETCH_BATCH_FILES``. Soft on failure: a file
+        the backend reports missing has no context (as a missing local file);
+        any other per-file error, and a backend that fails outright -- after
+        which it is not asked again for this query -- are each summarised in
+        one WARNING.
+        """
+        wanted: Dict[str, List[str]] = {}  # repo-relative path -> stored paths
+        refused = 0
+        for rel_path in indices_by_file:
+            relative = self._seam_relative_path(rel_path, repo_root)
+            if relative is None:
+                refused += 1
+            else:
+                wanted.setdefault(relative, []).append(rel_path)
+        if refused:
+            self._warn_refused(refused)
+
+        lines_by_file: Dict[str, List[str]] = {}
+        unreadable = 0
+        relatives = list(wanted)
+        for start in range(0, len(relatives), CONTENT_SEAM_FETCH_BATCH_FILES):
+            batch = relatives[start : start + CONTENT_SEAM_FETCH_BATCH_FILES]
+            answered: Set[str] = set()
+            try:
+                for fetched in source.backend.fetch(source.root, batch):
+                    if fetched.path not in wanted or fetched.path in answered:
+                        continue
+                    answered.add(fetched.path)
+                    if fetched.error is None:
+                        lines = fetched.data.decode(
+                            "utf-8", errors="replace"
+                        ).splitlines()
+                        for stored in wanted[fetched.path]:
+                            lines_by_file[stored] = lines
+                    elif fetched.error not in NOT_FOUND_FETCH_ERRORS:
+                        unreadable += 1
+            except Exception as exc:  # the backend's transport, whatever it is
+                self._warn_content_backend_unavailable(
+                    len(relatives) - start - len(answered), exc
+                )
+                break
+            unreadable += len(batch) - len(answered)  # no record = not served
+        if unreadable:
+            logger.warning(
+                "SCIP context omitted for %d file(s) the content backend could "
+                "not serve from %s",
+                unreadable,
+                source.root,
+            )
+        return lines_by_file
+
+    def _seam_relative_path(self, rel_path: str, repo_root: Path) -> Optional[str]:
+        """The repository-relative POSIX path the content seam is asked for,
+        or None when the stored path leaves the repository or enters its
+        ``.git``. Decided from the strings alone (``lexical_relative_path``):
+        nothing on this pod is read.
+
+        The stored path is relative to ``project_root`` (a monorepo
+        sub-project's own directory, Bug #1630), which lies under the
+        repository by its unresolved path or by its resolved one.
+        """
+        candidate = Path(self.project_root, rel_path)
+        for root in (repo_root, self._resolved_root):
+            if root is None:
+                continue
+            relative = lexical_relative_path(candidate, root)
+            if relative is not None:
+                return None if has_git_segment(relative.split("/")) else relative
+        return None
+
+    def _warn_refused(self, refused: int) -> None:
+        logger.warning(
+            "SCIP context omitted for %d stored path(s) that do not "
+            "resolve inside repository root %s",
+            refused,
+            self._resolved_root,
+        )
+
+    def _warn_content_backend_unavailable(self, files: int, exc: Exception) -> None:
+        logger.warning(
+            "SCIP context omitted for %d file(s): the content backend is "
+            "unavailable (%s: %s)",
+            files,
+            type(exc).__name__,
+            exc,
+        )
+
+    def find_definition(self, symbol: str, exact: bool = False) -> List[QueryResult]:
+        """Find definition locations using database queries."""
+        from ..database.queries import find_definition as db_find_definition
+
+        db_results = db_find_definition(self.conn, symbol, exact=exact)
+
+        # Convert database results to QueryResult objects
+        results = []
+        for row in db_results:
+            # Filter out parameter definitions (noise)
+            if "().(" in row["symbol_name"]:
+                continue
+
+            result = QueryResult(
+                symbol=row["symbol_name"],
+                project=self.project_root,
+                file_path=row["file_path"],
+                line=row["line"],
+                column=row["column"],
+                kind="definition",
+            )
+            results.append(result)
+
+        # For simple name queries (without "#" or "("), if we found class definitions,
+        # filter out method/attribute definitions to reduce noise
+        if "#" not in symbol and "(" not in symbol:
+            has_class_definitions = any(r.symbol.endswith("#") for r in results)
+            if has_class_definitions:
+                results = [r for r in results if r.symbol.endswith("#")]
+
+        self._read_context_lines(results)
+        return results
+
+    def find_references(
+        self, symbol: str, limit: int = 100, exact: bool = False
+    ) -> List[QueryResult]:
+        """Find references using database queries."""
+        from ..database.queries import find_references as db_find_references
+
+        # Database backend supports both exact and substring matching
+        db_results = db_find_references(self.conn, symbol, limit=limit, exact=exact)
+
+        # Convert database results to QueryResult objects
+        results = []
+        for row in db_results:
+            result = QueryResult(
+                symbol=row["symbol_name"],
+                project=self.project_root,
+                file_path=row["file_path"],
+                line=row["line"],
+                column=row["column"],
+                kind="reference",
+            )
+            results.append(result)
+
+        self._read_context_lines(results)
+        return results
+
+    def get_dependencies(
+        self, symbol: str, depth: int = 1, exact: bool = False
+    ) -> List[QueryResult]:
+        """Get dependencies using database queries."""
+        from ..database.queries import get_dependencies as db_get_dependencies
+
+        # Find definition to get symbol_id
+        definitions = self.find_definition(symbol, exact=exact)
+        if not definitions:
+            return []
+
+        # Get symbol_id from database
+        cursor = self.conn.cursor()
+        results = []
+
+        for defn in definitions:
+            cursor.execute("SELECT id FROM symbols WHERE name = ?", (defn.symbol,))
+            row = cursor.fetchone()
+            if row is None:
+                continue
+
+            symbol_id = row[0]
+
+            # SQL CTE handles class→method expansion via target_and_nested
+            db_results = db_get_dependencies(
+                self.conn, symbol_id, depth=depth, scip_file=self.scip_file
+            )
+
+            # Convert database results to QueryResult objects
+            seen_symbols = set()  # Deduplicate across all definitions
+            for db_row in db_results:
+                # Deduplicate by symbol name
+                if db_row["symbol_name"] in seen_symbols:
+                    continue
+                seen_symbols.add(db_row["symbol_name"])
+
+                result = QueryResult(
+                    symbol=db_row["symbol_name"],
+                    project=self.project_root,
+                    file_path=db_row["file_path"],
+                    line=db_row["line"],
+                    column=db_row["column"],
+                    kind="dependency",
+                    relationship=db_row.get("relationship"),
+                    depth=db_row.get("depth"),
+                )
+                results.append(result)
+
+        return results
+
+    def get_dependents(
+        self, symbol: str, depth: int = 1, exact: bool = False
+    ) -> List[QueryResult]:
+        """Get dependents using database queries."""
+        from ..database.queries import get_dependents as db_get_dependents
+
+        # Find definition to get symbol_id
+        definitions = self.find_definition(symbol, exact=exact)
+        if not definitions:
+            return []
+
+        # Get symbol_id from database
+        cursor = self.conn.cursor()
+        results = []
+
+        for defn in definitions:
+            cursor.execute("SELECT id FROM symbols WHERE name = ?", (defn.symbol,))
+            row = cursor.fetchone()
+            if row is None:
+                continue
+
+            symbol_id = row[0]
+
+            # Query database for dependents
+            db_results = db_get_dependents(
+                self.conn, symbol_id, depth=depth, scip_file=self.scip_file
+            )
+
+            # Convert database results to QueryResult objects
+            for db_row in db_results:
+                result = QueryResult(
+                    symbol=db_row["symbol_name"],
+                    project=self.project_root,
+                    file_path=db_row["file_path"],
+                    line=db_row["line"],
+                    column=db_row["column"],
+                    kind="dependent",
+                    relationship=db_row.get("relationship"),
+                    depth=db_row.get("depth"),
+                )
+                results.append(result)
+
+        return results
+
+    def analyze_impact(self, symbol: str, depth: int = 3) -> List[ImpactResult]:
+        """Analyze impact of changing symbol using database queries."""
+        from ..database.queries import analyze_impact as db_analyze_impact
+
+        # Validate depth parameter
+        if depth < 1 or depth > 10:
+            raise ValueError(f"Depth must be between 1 and 10, got {depth}")
+
+        # Find symbol definitions (same pattern as get_dependencies)
+        definitions = self.find_definition(symbol, exact=True)
+        if not definitions:
+            return []
+
+        # Get symbol IDs
+        cursor = self.conn.cursor()
+        all_impact_results = []
+
+        for defn in definitions:
+            cursor.execute("SELECT id FROM symbols WHERE name = ?", (defn.symbol,))
+            row = cursor.fetchone()
+            if row is None:
+                continue
+
+            symbol_id = row[0]
+            db_results = db_analyze_impact(
+                self.conn, symbol_id, depth=depth, scip_file=self.scip_file
+            )
+
+            # Convert to ImpactResult objects
+            for db_row in db_results:
+                all_impact_results.append(
+                    ImpactResult(
+                        file_path=db_row["file_path"],
+                        symbol_count=db_row["symbol_count"],
+                        symbols=db_row["symbols"],
+                    )
+                )
+
+        # Merge results from multiple definitions
+        # Group by file_path and deduplicate symbols
+        merged: Dict[str, ImpactResult] = {}
+        for result in all_impact_results:
+            if result.file_path in merged:
+                # Extend symbols list
+                merged[result.file_path].symbols.extend(result.symbols)
+                # Deduplicate symbols using set
+                merged[result.file_path].symbols = list(
+                    set(merged[result.file_path].symbols)
+                )
+                # Recalculate symbol_count after deduplication
+                merged[result.file_path].symbol_count = len(
+                    merged[result.file_path].symbols
+                )
+            else:
+                # Ensure initial result also has deduplicated symbols
+                result.symbols = list(set(result.symbols))
+                result.symbol_count = len(result.symbols)
+                merged[result.file_path] = result
+
+        # Sort by symbol_count DESC
+        return sorted(merged.values(), key=lambda r: r.symbol_count, reverse=True)
+
+    def _expand_class_to_methods(self, symbol_id: int) -> List[int]:
+        """
+        Expand CLASS/INTERFACE symbol to all nested methods.
+
+        If symbol is a CLASS or INTERFACE, returns list of all nested method IDs.
+        Otherwise returns [symbol_id].
+
+        This is needed because call_graph contains method-level entries, not class-level.
+        When user searches from/to a CLASS name, we need to expand to all methods.
+
+        Args:
+            symbol_id: Symbol ID to potentially expand
+
+        Returns:
+            List of symbol IDs (either [symbol_id] or list of nested method IDs)
+        """
+        cursor = self.conn.cursor()
+
+        # Check if symbol is CLASS or INTERFACE
+        cursor.execute("SELECT kind, name FROM symbols WHERE id = ?", (symbol_id,))
+        row = cursor.fetchone()
+
+        if not row:
+            return [symbol_id]
+
+        kind, symbol_name = row
+
+        # Check if this is a class/interface
+        # kind may be NULL in some SCIP indexes (e.g., Python)
+        # Fall back to symbol naming: classes end with "#" (e.g., "Foo#")
+        is_class = (kind in ("Class", "Interface")) or (
+            kind is None and symbol_name.endswith("#")
+        )
+
+        if not is_class:
+            # Not a class/interface, return as-is
+            return [symbol_id]
+
+        # Expand to all nested methods
+        # SCIP uses hierarchical naming: com/example/Foo# for class, com/example/Foo#method(). for methods
+        # Pattern: symbol_name ends with '#', methods are symbol_name + method_name
+        # Note: kind field may be NULL in some SCIP indexes (e.g., Python), so we filter by
+        # symbol naming convention: methods end with "()" or "()."
+        cursor.execute(
+            """
+            SELECT id FROM symbols
+            WHERE name LIKE ? || '%'
+            AND name != ?
+            AND (name LIKE '%()' OR name LIKE '%().')
+        """,
+            (symbol_name, symbol_name),
+        )
+
+        method_ids = [r[0] for r in cursor.fetchall()]
+
+        # Return method IDs only, never include the class ID itself
+        # If no methods found, return empty list (not [symbol_id])
+        return method_ids
+
+    def _expand_method_to_scopes(self, symbol_id: int) -> List[int]:
+        """
+        Expand METHOD symbol to include all internal scopes (parameters, locals).
+
+        Call graph stores relationships at a very granular level - from PARAMETERS
+        and LOCAL VARIABLES inside methods, not from the methods themselves.
+        For example, the method CustomChain#chat(). (ID 381) doesn't appear as a
+        caller in call_graph, but CustomChain#chat().(attempt) (ID 385) does.
+
+        This function expands a method ID to include all its internal scopes so
+        call chain analysis can find the actual call relationships.
+
+        Args:
+            symbol_id: Symbol ID to potentially expand
+
+        Returns:
+            List of symbol IDs (method itself + all internal scopes)
+        """
+        cursor = self.conn.cursor()
+
+        # Get symbol name
+        cursor.execute("SELECT name FROM symbols WHERE id = ?", (symbol_id,))
+        row = cursor.fetchone()
+
+        if not row:
+            return [symbol_id]
+
+        symbol_name = row[0]
+
+        # Check if this is a method (ends with ().)
+        if not symbol_name.endswith("()."):
+            return [symbol_id]
+
+        # Find all internal scopes: symbol_name + (scope_name)
+        # Example: CustomChain#chat(). expands to:
+        #   - CustomChain#chat().(self)
+        #   - CustomChain#chat().(query)
+        #   - CustomChain#chat().(attempt)
+        cursor.execute(
+            """
+            SELECT id FROM symbols
+            WHERE name LIKE ? || '%'
+        """,
+            (symbol_name,),
+        )
+
+        scope_ids = [r[0] for r in cursor.fetchall()]
+
+        # Return method ID + all internal scope IDs
+        return scope_ids if scope_ids else [symbol_id]
+
+    def trace_call_chain(
+        self,
+        from_symbol: str,
+        to_symbol: str,
+        max_depth: int = 5,
+        limit: int = 100,
+        timeout_errors: Optional[List[str]] = None,
+    ) -> List[CallChain]:
+        """Trace call chains from entry point to target using database."""
+        from ..database.queries import trace_call_chain_v2_batched
+
+        # Find symbol IDs for from/to symbols (use fuzzy matching for user queries)
+        from_defs = self.find_definition(from_symbol, exact=False)
+        to_defs = self.find_definition(to_symbol, exact=False)
+
+        if not from_defs or not to_defs:
+            return []
+
+        cursor = self.conn.cursor()
+
+        # Phase 1: Collect ALL from_ids (no queries yet)
+        all_from_ids = set()
+        for from_def in from_defs:
+            cursor.execute("SELECT id FROM symbols WHERE name = ?", (from_def.symbol,))
+            from_row = cursor.fetchone()
+            if not from_row:
+                continue
+            from_id = from_row[0]
+
+            # Expand CLASS/INTERFACE to methods (call_graph only has method entries)
+            from_ids = self._expand_class_to_methods(from_id)
+
+            # Skip if class has no methods (empty expansion means no call_graph entries exist)
+            if not from_ids:
+                continue
+
+            # Further expand methods to internal scopes (parameters, locals) where actual calls happen
+            expanded_from_ids = []
+            for fid in from_ids:
+                expanded_from_ids.extend(self._expand_method_to_scopes(fid))
+            from_ids = expanded_from_ids if expanded_from_ids else from_ids
+
+            # Collect all IDs (no queries)
+            all_from_ids.update(from_ids)
+
+        # Phase 2: Collect ALL to_ids (no queries yet)
+        all_to_ids = set()
+        for to_def in to_defs:
+            cursor.execute("SELECT id FROM symbols WHERE name = ?", (to_def.symbol,))
+            to_row = cursor.fetchone()
+            if not to_row:
+                continue
+            to_id = to_row[0]
+
+            # Expand CLASS/INTERFACE to methods
+            to_ids = self._expand_class_to_methods(to_id)
+
+            # Skip if class has no methods (empty expansion means no call_graph entries exist)
+            if not to_ids:
+                continue
+
+            # Further expand methods to internal scopes
+            expanded_to_ids = []
+            for tid in to_ids:
+                expanded_to_ids.extend(self._expand_method_to_scopes(tid))
+            to_ids = expanded_to_ids if expanded_to_ids else to_ids
+
+            # Collect all IDs (no queries)
+            all_to_ids.update(to_ids)
+
+        # Remove self-loops from IDs (prevent trivial zero-length paths)
+        all_from_ids = all_from_ids - all_to_ids.intersection(all_from_ids)
+
+        # Early return if no IDs collected
+        if not all_from_ids or not all_to_ids:
+            return []
+
+        # Phase 3: ONE batched query with all IDs (Story #610)
+        db_results, error_msg = trace_call_chain_v2_batched(
+            self.conn,
+            from_symbol_ids=list(all_from_ids),
+            to_symbol_ids=list(all_to_ids),
+            max_depth=max_depth,
+            limit=limit,
+        )
+
+        if error_msg:
+            # Log timeout/error, AND propagate it (Bug #1603 code review
+            # Priority 1) so callers know the (probably empty/partial)
+            # results below do not mean "no chains found" -- they mean the
+            # query was cut off.
+            import logging
+
+            logger = logging.getLogger(__name__)
+            logger.warning(f"trace_call_chain batched query: {error_msg}")
+            if timeout_errors is not None:
+                timeout_errors.append(error_msg)
+
+        # Convert to CallChain objects
+        all_chains = []
+        for db_row in db_results:
+            all_chains.append(
+                CallChain(
+                    path=db_row["path"],
+                    length=db_row["length"],
+                    has_cycle=db_row["has_cycle"],
+                )
+            )
+
+        # Deduplicate and sort
+        seen = set()
+        unique_chains = []
+        for chain in all_chains:
+            path_key = tuple(chain.path)
+            if path_key not in seen:
+                seen.add(path_key)
+                unique_chains.append(chain)
+
+        return sorted(unique_chains, key=lambda c: c.length)[:limit]
