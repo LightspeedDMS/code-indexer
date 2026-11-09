@@ -261,7 +261,7 @@ class OIDCProviderConfig:
 
 @dataclass
 class TrustedGatewayConfig:
-    """trust an mcp-gateway as an external RS256 bearer-token issuer.
+    """trust an api-gateway as an external RS256 bearer-token issuer.
 
     When enabled, cidx validates per-user RS256 JWTs the gateway forwards (verified
     against the gateway JWKS) and JIT-provisions the user via the OIDC path, so cidx
@@ -1312,7 +1312,7 @@ METADATA_READ_SOURCES = (METADATA_READ_SOURCE_REGISTRY, METADATA_READ_SOURCE_FIL
 #: ``auto`` is a selection, not a sink: :func:`resolve_metadata_outbox_sink`
 #: turns it into one of the other two from the ``content_backend`` setting.
 METADATA_OUTBOX_SINK_AUTO = "auto"
-METADATA_OUTBOX_SINK_WORKSPACE_MCP = "workspace-mcp"
+METADATA_OUTBOX_SINK_WORKSPACE_MCP = "the content service"
 METADATA_OUTBOX_SINK_LOCAL_FILES = "local-files"
 METADATA_OUTBOX_SINKS = (
     METADATA_OUTBOX_SINK_AUTO,
@@ -1325,9 +1325,9 @@ DEFAULT_METADATA_OUTBOX_DRAIN_TIMEOUT_S = 600
 def resolve_metadata_outbox_sink(sink: str, content_backend: Optional[str]) -> str:
     """The sink a ``metadata_outbox_sink`` value selects on this server.
 
-    ``auto`` follows the content backend: ``workspace-mcp`` when it is
+    ``auto`` follows the content backend: ``the content service`` when it is
     ``delegated`` (the golden-repos volume is not on this pod, so only
-    workspace-mcp can write the files), else ``local-files`` -- so a server
+    the content service can write the files), else ``local-files`` -- so a server
     with no delegated backend behaves exactly as before ``auto`` existed.
     Every other value, including an unknown one, is returned unchanged.
     """
@@ -1359,9 +1359,9 @@ class ControlPlaneMetadataConfig:
       A change commits with an outbox row; the sweeper on the leader replays
       it to the file.
     - ``metadata_outbox_sink``: how the sweeper writes the files.
-      ``workspace-mcp`` (the mount-less fleet: through the server's content
-      writer, workspace-mcp's ``POST /content/write``), ``local-files`` (this
-      pod's own disk), or ``auto`` (default): ``workspace-mcp`` when
+      ``the content service`` (the mount-less fleet: through the server's content
+      writer, the content service's ``POST /content/write``), ``local-files`` (this
+      pod's own disk), or ``auto`` (default): ``the content service`` when
       ``content_backend`` is ``delegated``, else ``local-files``. The sweeper
       only ever sees the resolved name (:func:`resolve_metadata_outbox_sink`).
     - ``metadata_outbox_drain_timeout_s``: with (resolved) ``local-files``,
@@ -1637,16 +1637,16 @@ class CowDaemonConfig:
 
 
 @dataclass
-class WorkspaceMcpConfig:
-    """workspace-mcp delegated clone-backend configuration ( Phase 1).
+class ContentServiceConfig:
+    """the content service delegated clone-backend configuration ( Phase 1).
 
     When ``clone_backend="delegated"``, per-user activation clones are performed
-    by workspace-mcp (the disk owner) via its ``cow_clone_path`` endpoint instead
-    of a local ``cp``, so cidx does no filesystem copy itself. workspace-mcp runs
+    by the content service (the disk owner) via its ``cow_clone_path`` endpoint instead
+    of a local ``cp``, so cidx does no filesystem copy itself. the content service runs
     on reflink-capable storage, making the clone a real near-instant CoW.
     """
 
-    endpoint: str = ""  # workspace-mcp base URL exposing cow_clone_path (e.g. https://.../workspace)
+    endpoint: str = ""  # the content service base URL exposing cow_clone_path (e.g. https://.../workspace)
     api_key: str = (
         ""  # bearer token (shared-authorizer); sent as Authorization: Bearer {api_key}
     )
@@ -1836,7 +1836,7 @@ class ServerConfig:
     resource_config: Optional[ServerResourceConfig] = None
     cache_config: Optional[CacheConfig] = None
     oidc_provider_config: Optional[OIDCProviderConfig] = None
-    # trust an mcp-gateway as an external RS256 bearer issuer (default off).
+    # trust an api-gateway as an external RS256 bearer issuer (default off).
     trusted_gateway_config: Optional["TrustedGatewayConfig"] = None
     telemetry_config: Optional[TelemetryConfig] = None
 
@@ -1951,7 +1951,7 @@ class ServerConfig:
     cluster: Optional[ClusterConfig] = None  # Cluster node identity
     clone_backend: str = "local"  # Story #510: "local", "ontap", "cow-daemon", or "delegated"
     git_backend: str = (
-        "local"  # "local" (in-process git) or "delegated" (git-mcp)
+        "local"  # "local" (in-process git) or "delegated" (the git service)
     )
     # Content seam: where repository BYTES come from. "local" reads this
     # container's filesystem (the default, and what every deployment does
@@ -1987,8 +1987,8 @@ class ServerConfig:
     feature_settings: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     feature_bootstrap_settings: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     cow_daemon: Optional[CowDaemonConfig] = None  # Story #510: CoW daemon settings
-    workspace_mcp: Optional[WorkspaceMcpConfig] = (
-        None  # workspace-mcp delegated clone backend settings
+    content_service: Optional[ContentServiceConfig] = (
+        None  # the content service delegated clone backend settings
     )
     # 's scip_backend left with the cidx-scip feature (modular phase
     # 4d): feature_bootstrap_settings["scip"]["scip_backend"], filled from a
@@ -3110,12 +3110,12 @@ class ServerConfigManager:
         if "cow_daemon" in config_dict and isinstance(config_dict["cow_daemon"], dict):
             config_dict["cow_daemon"] = CowDaemonConfig(**config_dict["cow_daemon"])
 
-        # Convert workspace_mcp dict to WorkspaceMcpConfig
-        if "workspace_mcp" in config_dict and isinstance(
-            config_dict["workspace_mcp"], dict
+        # Convert content_service dict to ContentServiceConfig
+        if "content_service" in config_dict and isinstance(
+            config_dict["content_service"], dict
         ):
-            config_dict["workspace_mcp"] = WorkspaceMcpConfig(
-                **config_dict["workspace_mcp"]
+            config_dict["content_service"] = ContentServiceConfig(
+                **config_dict["content_service"]
             )
 
         # Story #565: Convert password_expiry_config dict to PasswordExpiryConfig

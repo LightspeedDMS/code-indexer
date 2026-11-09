@@ -28,7 +28,7 @@ class OIDCManager:
         self.provider = None
         self._oauth_backend = oauth_backend
         # Identity-link store. Defaults to the shared oauth.db. a caller
-        # trusting a SEPARATE issuer (e.g. the mcp-gateway) passes a distinct db_path so
+        # trusting a SEPARATE issuer (e.g. the api-gateway) passes a distinct db_path so
         # its oidc_identity_links table can never collide on `subject` with another trust
         # domain's (the interactive-SSO IdP) -- the links table is subject-unique with no
         # issuer column, so a shared table would merge two issuers' subjects into one user.

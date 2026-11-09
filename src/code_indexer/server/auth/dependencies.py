@@ -52,7 +52,7 @@ mcp_credential_manager: Optional["MCPCredentialManager"] = None
 api_key_manager: Optional[ApiKeyManager] = None
 # Story #563: Server config reference for non-SSO API restriction check
 server_config: Optional["ServerConfig"] = None
-# authenticator for per-user RS256 JWTs forwarded by a trusted mcp-gateway.
+# authenticator for per-user RS256 JWTs forwarded by a trusted api-gateway.
 # Set by lifespan only when trusted_gateway_config.enabled; None otherwise (default off),
 # so the /mcp dispatch below no-ops on deployments that don't front cidx with the gateway.
 gateway_identity_authenticator: Optional["GatewayIdentityAuthenticator"] = None
@@ -795,8 +795,8 @@ async def get_current_user_for_mcp(request: Request) -> User:
     if user:
         return user
 
-    # Priority 1.5: trusted mcp-gateway per-user RS256 bearer.
-    # When cidx is fronted by the mcp-gateway, the gateway forwards each end user's
+    # Priority 1.5: trusted api-gateway per-user RS256 bearer.
+    # When cidx is fronted by the api-gateway, the gateway forwards each end user's
     # identity as an RS256 JWT. Validate it against the gateway JWKS and JIT-provision
     # the user via the OIDC path so cidx enforces its OWN per-user access. Only tokens
     # whose issuer matches the configured gateway are handled here; everything else

@@ -1,7 +1,7 @@
-"""validate per-user RS256 JWTs forwarded by a trusted mcp-gateway.
+"""validate per-user RS256 JWTs forwarded by a trusted api-gateway.
 
 cidx's own credentials are HS256 JWTs (``JWTManager``) + ``cidx_sk_`` API keys. When
-cidx is fronted by the mcp-gateway, the gateway forwards each end user's identity as
+cidx is fronted by the api-gateway, the gateway forwards each end user's identity as
 an RS256 JWT signed with the gateway key (published at the gateway JWKS). This
 validator lets cidx trust the gateway as an *external* issuer: it verifies the RS256
 signature against the gateway JWKS and the ``iss`` / ``aud`` / ``exp`` claims, then
@@ -48,7 +48,7 @@ class GatewayIdentity:
 
 
 class GatewayJwtValidator:
-    """Validate RS256 JWTs issued by a trusted mcp-gateway against its JWKS."""
+    """Validate RS256 JWTs issued by a trusted api-gateway against its JWKS."""
 
     def __init__(
         self,

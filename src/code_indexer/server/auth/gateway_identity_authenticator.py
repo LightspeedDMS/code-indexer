@@ -1,7 +1,7 @@
 """authenticate a gateway-forwarded RS256 JWT into a cidx User.
 
 Bridges :class:`GatewayJwtValidator` (crypto/claims) and ``OIDCManager`` (JIT
-provisioning + group mapping). Given a bearer token that the trusted mcp-gateway
+provisioning + group mapping). Given a bearer token that the trusted api-gateway
 forwarded on behalf of an end user:
 
 1. confirm the token is from the trusted gateway (``handles``),
