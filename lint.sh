@@ -70,24 +70,11 @@ main() {
     # tree has no __init__.py (a "tests" package would collide with the
     # repository's), so it is checked on its own; the core it imports is checked
     # by the run above (--follow-imports=silent).
-    if ! run_command "mypy --explicit-package-bases --check-untyped-defs --follow-imports=silent packages/features/cidx-xray/src/cidx_xray packages/features/cidx-xray/tests" "mypy type check (cidx-xray)"; then
-        all_passed=false
-    fi
-
-    # The wiki feature's sources and tests, the same way.
-    if ! run_command "mypy --explicit-package-bases --check-untyped-defs --follow-imports=silent packages/features/cidx-wiki/src/cidx_wiki packages/features/cidx-wiki/tests" "mypy type check (cidx-wiki)"; then
-        all_passed=false
-    fi
-
-    # The memory feature's sources and tests, the same way.
-    if ! run_command "mypy --explicit-package-bases --check-untyped-defs --follow-imports=silent packages/features/cidx-memory/src/cidx_memory packages/features/cidx-memory/tests" "mypy type check (cidx-memory)"; then
-        all_passed=false
-    fi
-
-    # The dependency map feature's sources and tests, the same way.
-    if ! run_command "mypy --explicit-package-bases --check-untyped-defs --follow-imports=silent packages/features/cidx-depmap/src/cidx_depmap packages/features/cidx-depmap/tests" "mypy type check (cidx-depmap)"; then
-        all_passed=false
-    fi
+    for feature in xray scip wiki memory depmap; do
+        if ! run_command "mypy --explicit-package-bases --check-untyped-defs --follow-imports=silent packages/features/cidx-${feature}/src/cidx_${feature} packages/features/cidx-${feature}/tests" "mypy type check (cidx-${feature})"; then
+            all_passed=false
+        fi
+    done
 
     # Story #1034 AC15: anti-orphan check — no direct cp+reflink in production code
     echo -e "${BLUE}Running Story #1034 AC15 anti-orphan check...${NC}"
