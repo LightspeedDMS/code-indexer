@@ -1,0 +1,6 @@
+{# Feature add-on pages (server/features/web.py): only those the viewer may open. #}
+{% if request is defined and request.app.state.feature_nav is defined %}
+{% for entry in request.app.state.feature_nav(request) %}
+<li><a href="{{ entry.path }}" {% if current_page == entry.path %}aria-current="page"{% endif %}>{{ entry.label }}</a></li>
+{% endfor %}
+{% endif %}
