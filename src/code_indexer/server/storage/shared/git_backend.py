@@ -1,7 +1,7 @@
 """
 Git backend abstraction for cidx's internal git operations.
 
-EVO-64616 Phase 2 (EVO-64678) — the git sibling of ``CloneBackend``
+issue-64616 Phase 2 (issue-64678) — the git sibling of ``CloneBackend``
 (``storage/shared/clone_backend.py``). cidx's job is semantic search; it should
 do **no git work itself**. Today git runs as scattered raw
 ``subprocess.run(["git", ...])`` across the golden-repo and activated-repo
@@ -14,7 +14,7 @@ a pluggable backend:
   ``utils.git_runner`` (:class:`CoreGitProcessRunner`: SSH-safe env +
   ``safe.directory`` handling). This is the DEFAULT.
 - ``GitMcpBackend``    — (Phase 3, shipped as the ``cidx_git_backend`` plugin)
-  delegates each operation to the git-mcp spoke. Not defined here.
+  delegates each operation to the the git service spoke. Not defined here.
 
 The Protocol uses structural subtyping (``typing.Protocol``), NOT inheritance,
 mirroring ``CloneBackend``. Selection is config-driven in
@@ -147,7 +147,7 @@ def head_branch(
 
     A detached HEAD is a normal state (a repository pinned to a tag or commit)
     and is reported as ``None``. ANY other failure -- a transport error to
-    git-mcp, a path that is not a repository -- raises: reading it as
+    the git service, a path that is not a repository -- raises: reading it as
     "detached" would make refresh silently skip the pull, which is exactly how
     a pod without the repository on its disk used to fail.
     """

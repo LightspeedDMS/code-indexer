@@ -4,12 +4,12 @@ The sibling of ``GitBackend``/``CloneBackend``/``RipgrepBackend``: cidx's job is
 semantic search, and reading a repository's bytes off a shared mount is a thing it
 should not have to own. Today every indexing read goes straight to the filesystem,
 which is why cidx needs the golden-repos NFS mount at all. This module makes that
-one hop pluggable so the reads can move to workspace-mcp, which owns filesystem
+one hop pluggable so the reads can move to the content service, which owns filesystem
 access by charter.
 
 - ``LocalContentBackend`` -- walks and reads the mount exactly as today. The
   DEFAULT, so selecting nothing is a zero-behaviour-change.
-- a delegated backend -- calls workspace-mcp's ``/content/manifest`` and
+- a delegated backend -- calls the content service's ``/content/manifest`` and
   ``/content/fetch``. Supplied by a plugin, not defined here, mirroring
   ``GitMcpBackend``.
 
@@ -96,7 +96,7 @@ from cidx_backend_workspace.content import (
 
 logger = logging.getLogger(__name__)
 
-# ``ABSENT_ROOT_STATUS`` / ``ABSENT_ROOT_MARKER``: how workspace-mcp answers a
+# ``ABSENT_ROOT_STATUS`` / ``ABSENT_ROOT_MARKER``: how the content service answers a
 # manifest whose ROOT does not exist (HTTP 400, ``source_path does not exist:
 # <path>``). The delegated plugin raises that as an error carrying ``status``
 # and the response ``detail``. ``LocalContentBackend`` lists such a root as
@@ -151,7 +151,7 @@ _DIRECTORY_FETCH_ERRORS = frozenset({"EISDIR", os.strerror(errno.EISDIR)})
 # advertises nothing gets none of them and keeps working, exactly as before.
 #
 # Support is also VERIFIED on every answer. The plugin reports a page it had
-# to produce by walking and filtering itself (``emulated``: workspace-mcp
+# to produce by walking and filtering itself (``emulated``: the content service
 # predates the options), and any server that ignores ``prefix``/``max_depth``
 # returns entries outside the scope. Either way the backend is treated as not
 # honouring them for the rest of the process, and :func:`query_manifest_pages`

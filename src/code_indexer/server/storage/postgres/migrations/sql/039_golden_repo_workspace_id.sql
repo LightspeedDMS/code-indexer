@@ -1,11 +1,11 @@
--- Migration 039: workspace-mcp workspace_id retention for golden repos
--- (EVO-65021).
+-- Migration 039: the content service workspace_id retention for golden repos
+-- (issue-65021).
 --
--- SCIP compile builds are delegated to sandbox-mcp, which operates on a
--- workspace-mcp workspace addressed as `sb-{workspace_id}`. cidx therefore has
--- to hand sandbox-mcp the SAME workspace_id that workspace-mcp used to provision
+-- SCIP compile builds are delegated to the sandbox service, which operates on a
+-- the content service workspace addressed as `sb-{workspace_id}`. cidx therefore has
+-- to hand the sandbox service the SAME workspace_id that the content service used to provision
 -- the golden repo -- but golden repo metadata previously kept only the on-disk
--- clone_path, not the workspace-mcp handle.
+-- clone_path, not the the content service handle.
 --
 -- Additive, backward-compatible change: a nullable `workspace_id` column.
 -- Existing rows stay NULL until the id is captured at (re-)registration or

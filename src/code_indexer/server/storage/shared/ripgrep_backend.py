@@ -4,14 +4,14 @@ The sibling of ``GitBackend``/``CloneBackend``/the SCIP indexer seam: cidx's job
 is semantic search, and the ripgrep binary it shells out to is a tool it should
 not have to carry. ``RegexSearchService`` builds an ``rg`` argv and hands it to
 ``SubprocessExecutor``; this module makes that one hop pluggable so the execution
-can move to workspace-mcp, which owns content search by charter.
+can move to the content service, which owns content search by charter.
 
 - ``LocalRipgrepBackend`` -- runs the argv through ``SubprocessExecutor`` exactly
   as today. The DEFAULT, so selecting nothing is a zero-behaviour-change. It
   lives in ``cidx-backend-workspace`` (entry ``local``) and is reached through
   the seam resolver (:func:`local_ripgrep_backend`); the executor reaches it
   as the injected :class:`SubprocessExecutorRunner`.
-- a delegated backend -- posts the same argv to workspace-mcp and returns its
+- a delegated backend -- posts the same argv to the content service and returns its
   result. Supplied by a plugin, not defined here, mirroring ``GitMcpBackend``.
 
 WHY THE SEAM SITS HERE AND NOT HIGHER. ``RegexSearchService`` is ~2,600 lines of
@@ -38,7 +38,7 @@ did. In particular:
   passes it only to a backend whose ``run`` names the parameter
   (:func:`accepts_stop_after_matches`), so a backend predating it keeps working.
 * CANCELLATION is the other way a delegated run is stopped early, and the one
-  the workspace-mcp plugin implements: the caller awaits ``run`` as a task,
+  the the content service plugin implements: the caller awaits ``run`` as a task,
   tails ``output_file_path``, and cancels the task once it has enough complete
   match lines. A delegated backend must treat cancellation as "stop now":
   close its connection so the server kills ripgrep, and leave the lines it

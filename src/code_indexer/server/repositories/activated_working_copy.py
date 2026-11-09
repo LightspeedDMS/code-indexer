@@ -1,5 +1,5 @@
 """
-Where an activated repository's working copy lives: this pod, or workspace-mcp.
+Where an activated repository's working copy lives: this pod, or the content service.
 
 An activated repository is a user's writable copy of a golden repository at
 ``<activated_repos_dir>/<username>/<user_alias>``. Under the local content
@@ -8,13 +8,13 @@ backend (the default) that path is a directory on this pod's disk and
 has -- :class:`LocalWorkingCopies` is that code, unchanged.
 
 Under ``content_backend='delegated'`` the pod has no repository volume. The
-working copy exists only on workspace-mcp's storage, at the SAME absolute path,
+working copy exists only on the content service's storage, at the SAME absolute path,
 and :class:`DelegatedWorkingCopies` reaches it there:
 
-* lifecycle -- create / exists / remove through workspace-mcp's clone-path
+* lifecycle -- create / exists / remove through the content service's clone-path
   endpoints (``POST /clone-path`` with ``if_absent``, ``/clone-path/stat``,
   ``/clone-path/delete``), via :class:`DelegatedCloneBackend`;
-* git -- the git backend, which must then be git-mcp (addressed by the same
+* git -- the git backend, which must then be the git service (addressed by the same
   path, its ``cow_path``);
 * content reads and writes -- the content seam at the same path (file tools).
 
@@ -45,14 +45,14 @@ PathLike = Union[str, "os.PathLike[str]"]
 #: The ``.git/info/exclude`` line that keeps cidx's index state out of git.
 INDEX_STATE_EXCLUDE_LINE = f"/{INDEX_DIRNAME}/"
 #: Under delegated: a ``.gitignore`` INSIDE the index state that ignores
-#: everything there, itself included (workspace-mcp never writes under .git).
+#: everything there, itself included (the content service never writes under .git).
 INDEX_STATE_GITIGNORE = f"{INDEX_DIRNAME}/.gitignore"
 INDEX_STATE_GITIGNORE_BODY = b"# cidx index state: never committed\n*\n"
 
 
 def exclude_index_state_locally(path: PathLike) -> None:
     """Add ``/.code-indexer/`` to the repository's ``.git/info/exclude``,
-    once (EVO-64616): cidx's index state is never the user's to commit."""
+    once (issue-64616): cidx's index state is never the user's to commit."""
     git_dir = os.path.join(os.fspath(path), ".git")
     if not os.path.isdir(git_dir):
         raise OSError(f"no .git directory in {os.fspath(path)}")
@@ -71,9 +71,9 @@ def exclude_index_state_locally(path: PathLike) -> None:
 
 
 def exclude_index_state_via_writer(path: PathLike) -> None:
-    """The same for a repository on workspace-mcp (EVO-64616).
+    """The same for a repository on the content service (issue-64616).
 
-    workspace-mcp refuses every write under ``.git`` and git-mcp has no tool
+    the content service refuses every write under ``.git`` and the git service has no tool
     for ``info/exclude``, so the index state ignores itself: a ``.gitignore``
     of ``*`` inside ``.code-indexer/``, written through the content writer (an
     unconditional, idempotent write)."""
@@ -137,12 +137,12 @@ class LocalWorkingCopies:
             shutil.rmtree(path, ignore_errors=True)
 
     def exclude_index_state(self, path: PathLike) -> None:
-        """Keep ``.code-indexer/`` out of git's view of the copy (EVO-64616)."""
+        """Keep ``.code-indexer/`` out of git's view of the copy (issue-64616)."""
         exclude_index_state_locally(path)
 
 
 class DelegatedWorkingCopies:
-    """The working copy is on workspace-mcp's storage, at the same path."""
+    """The working copy is on the content service's storage, at the same path."""
 
     is_delegated = True
 
@@ -169,12 +169,12 @@ class DelegatedWorkingCopies:
         return self._store.delete_working_copy(os.fspath(path))
 
     def move(self, source_path: str, dest_path: str, *, timeout: Any = None) -> bool:
-        """Rename the copy (workspace-mcp ``/clone-path/move``); False when
-        workspace-mcp has no move route, so the caller copies instead."""
+        """Rename the copy (the content service ``/clone-path/move``); False when
+        the content service has no move route, so the caller copies instead."""
         return self._store.move_working_copy(source_path, dest_path, timeout=timeout)
 
     def exclude_index_state(self, path: PathLike) -> None:
-        """Keep ``.code-indexer/`` out of git's view of the copy (EVO-64616)."""
+        """Keep ``.code-indexer/`` out of git's view of the copy (issue-64616)."""
         exclude_index_state_via_writer(path)
 
     def discard(self, path: PathLike) -> None:
@@ -186,7 +186,7 @@ class DelegatedWorkingCopies:
         except Exception as exc:  # the original failure is what callers report
             logger.error(
                 "RESOURCE LEAK WARNING: could not remove the working copy at "
-                "'%s' on workspace-mcp after a failure: %s",
+                "'%s' on the content service after a failure: %s",
                 os.fspath(path),
                 exc,
             )
@@ -215,13 +215,13 @@ def working_copies_for(clone_backend: Any, git_backend: Any) -> WorkingCopies:
         raise WorkingCopyUnavailableError(
             "Activated repositories are not on this server (content_backend="
             "'delegated') and the clone backend is "
-            f"{type(clone_backend).__name__}, not workspace-mcp. Set "
-            "clone_backend='delegated' (workspace_mcp.endpoint)."
+            f"{type(clone_backend).__name__}, not the content service. Set "
+            "clone_backend='delegated' (the content service.endpoint)."
         )
     if git_backend is None or isinstance(git_backend, LocalGitBackend):
         raise WorkingCopyUnavailableError(
             "Activated repositories are not on this server (content_backend="
             "'delegated') but git runs locally. Set git_backend='delegated' "
-            "(git-mcp) so git reaches the working copy."
+            "(the git service) so git reaches the working copy."
         )
     return DelegatedWorkingCopies(clone_backend)

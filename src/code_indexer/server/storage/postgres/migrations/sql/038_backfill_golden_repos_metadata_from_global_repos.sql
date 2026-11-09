@@ -5,7 +5,7 @@
 -- repos from global_repos. The golden-repo seeder reads from
 -- golden_repos_metadata via the API, so every repo that existed ONLY in
 -- global_repos appeared "new" on each seeder run, triggering a redundant
--- clone + lifecycle Claude call (~$3/job on Opus, ~800 jobs/day).
+-- clone + lifecycle Claude call .
 --
 -- global_repos stores aliases with a "-global" suffix
 -- (e.g. "account-customizations-global"); golden_repos_metadata stores

@@ -130,7 +130,7 @@ _LAUNCH_DEFAULT_HOST, _LAUNCH_DEFAULT_PORT, _LAUNCH_DEFAULT_WORKERS = (
 # Hnswlib fallback constants (Bug #160)
 # Note: Using /var/tmp/ instead of /tmp/ because systemd PrivateTmp=yes isolates /tmp
 HNSWLIB_FALLBACK_PATH = Path("/var/tmp/cidx-hnswlib")
-HNSWLIB_REPO_URL = "https://github.com/LightspeedDMS/hnswlib.git"
+HNSWLIB_REPO_URL = "https://github.com/example-group/example-repo.git"
 # Bug #1392: quick `python -c` probe for check_integrity/repair_orphans,
 # same budget as the existing _hnswlib_importable() import probe.
 HNSWLIB_CAPABILITY_PROBE_TIMEOUT_SECONDS = 10
@@ -224,7 +224,7 @@ SCIP_PYTHON_PACKAGE = "@sourcegraph/scip-python"
 SCIP_PYTHON_INSTALL_TIMEOUT_SECONDS = 300  # npm install can be slow; generous budget
 
 # Story #997: Pace-maker install/update constants
-PACE_MAKER_REPO_URL = "https://github.com/LightspeedDMS/claude-pace-maker.git"
+PACE_MAKER_REPO_URL = "https://github.com/example-group/example-repo.git"
 PACE_MAKER_GIT_TIMEOUT = 60
 PACE_MAKER_INSTALL_TIMEOUT = 120
 PACE_MAKER_CMD_TIMEOUT = 10
@@ -1026,7 +1026,7 @@ class DeploymentExecutor:
         """Clone hnswlib to standalone location as fallback when submodule fails.
 
         Bug #160: Fallback mechanism to bypass submodule lock file permission errors.
-        Clones LightspeedDMS/hnswlib fork (has check_integrity method) to /var/tmp.
+        Clones example-group/example-repo fork (has check_integrity method) to /var/tmp.
 
         Returns:
             True if successful, False otherwise

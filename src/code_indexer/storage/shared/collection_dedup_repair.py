@@ -1,5 +1,5 @@
 """Metadata-only dedup + renumber repair for legacy SHARDED_JSON collections
-(Bug #1502, https://github.com/LightspeedDMS/code-indexer/issues/1502).
+(Bug #1502, https://github.com/example-group/example-repo).
 
 Confirmed root cause: ``chunk_index`` (which feeds a point's identity via
 ``point_id = md5(f"{project_id}_{file_hash}_{chunk_index}")``) used to be

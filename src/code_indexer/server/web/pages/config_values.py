@@ -118,7 +118,7 @@ RESTART_REQUIRED_FIELDS = [
     "payload_max_fetch_size_chars",
     "payload_cache_ttl_seconds",
     "payload_cleanup_interval_seconds",
-    # EVO-66121 trusted_gateway.* — the gateway authenticator is built once at startup
+    # issue-66121 trusted_gateway.* — the gateway authenticator is built once at startup
     # (gateway_auth_wiring.build_gateway_authenticator); no live reload. Only the field
     # names UNIQUE to this section are listed (the hint matches by bare field name, so
     # shared names like "enabled"/"email_claim" would wrongly flag other sections too;
@@ -145,7 +145,7 @@ _VALID_CONFIG_SECTIONS = (
     "password_security",
     "totp_elevation",  # Bug #943: TOTP step-up elevation runtime config
     "oidc",
-    "trusted_gateway",  # EVO-66121: trusted mcp-gateway RS256 bearer issuer
+    "trusted_gateway",  # issue-66121: trusted the API gateway RS256 bearer issuer
     "telemetry",
     "langfuse",
     "search_limits",
@@ -303,7 +303,7 @@ def _get_current_config() -> dict:
         # Provide defaults if OIDC config is missing
         oidc_config = asdict(OIDCProviderConfig())
 
-    # EVO-66121: trusted mcp-gateway bearer config (defaults if missing)
+    # issue-66121: trusted the API gateway bearer config (defaults if missing)
     trusted_gateway_config = settings.get("trusted_gateway")
     if not trusted_gateway_config:
         trusted_gateway_config = asdict(TrustedGatewayConfig())

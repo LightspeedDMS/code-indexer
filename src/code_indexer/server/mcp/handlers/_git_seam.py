@@ -1,4 +1,4 @@
-"""Read git remote state through the configured GitBackend seam (EVO-64678).
+"""Read git remote state through the configured GitBackend seam (issue-64678).
 
 The MCP git-write and pull-request handlers resolved a repository's remote URL by
 shelling out to ``git remote get-url`` directly. That bypassed the seam, so with
