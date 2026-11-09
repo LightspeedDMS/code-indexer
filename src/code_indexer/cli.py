@@ -21,6 +21,7 @@ from typing import (
     Any,
     List,
     Literal,
+    Tuple,
     cast,
 )
 
@@ -45,14 +46,12 @@ from .utils.exception_logger import ExceptionLogger
 from .mode_detection.command_mode_detector import CommandModeDetector, find_project_root
 from .disabled_commands import require_mode
 from . import __version__
-from .cli_scip import scip_group
 from .cli_git import git_group
 from .cli_files import files_group
 from .cli_cicd import cicd_group
 from .cli_help import help_group
 from .cli_keys import keys_group
 from .cli_index import index_remote_group
-from .cli_xray import xray_group
 
 # Module-level imports for test mocking (noqa: F401 = intentionally unused for test patching)
 from .api_clients.admin_client import AdminAPIClient  # noqa: F401
@@ -1157,6 +1156,8 @@ def _execute_semantic_search(
     config_manager,
     console: Console,
     file_extensions: Optional[str] = None,
+    content_backend: str = "local",
+    git_backend: str = "local",
 ) -> List[Dict[str, Any]]:
     """Execute semantic search - extracted for parallel execution in hybrid mode.
 
@@ -1322,11 +1323,19 @@ def _execute_semantic_search(
         # Check if project uses git-aware indexing
         from .services.git_topology_service import GitTopologyService
 
-        git_topology_service = GitTopologyService(config.codebase_dir)
+        # The server stamps --git-backend=delegated on a query it spawns in a
+        # directory that holds index state only: the branch filter then asks
+        # the git-backend plugin, never local git in an empty directory.
+        query_git_backend = _query_git_backend(git_backend)
+        git_topology_service = GitTopologyService(
+            config.codebase_dir, git_backend=query_git_backend
+        )
         is_git_aware = git_topology_service.is_git_available()
 
         # Initialize query service for git-aware filtering
-        query_service = GenericQueryService(config.codebase_dir, config)
+        query_service = GenericQueryService(
+            config.codebase_dir, config, git_backend=query_git_backend
+        )
 
         # Determine if we should use branch-aware querying
         if is_git_aware:
@@ -1449,58 +1458,27 @@ def _execute_semantic_search(
         # Limit to requested number after filtering
         results = git_results[:limit]
 
-        # Apply staleness detection to local query results
+        # Apply staleness detection to local query results -- only where the
+        # files are on this machine. With --content-backend=delegated they are
+        # not, and asking the content backend would page the whole repository's
+        # manifest per query: results carry no staleness instead of a wrong one.
         if results:
             try:
                 staleness_start = time.time()
-                from .api_clients.remote_query_client import QueryResultItem
-                from .remote.staleness_detector import StalenessDetector
+                enhanced_results = _query_staleness(
+                    results, project_root, content_backend
+                )
+                if enhanced_results is not None:
+                    timing_info["staleness_detection_ms"] = (
+                        time.time() - staleness_start
+                    ) * 1000
 
-                query_result_items = []
-                for result in results:
-                    payload = result["payload"]
-
-                    # Extract file metadata for staleness comparison
-                    file_last_modified = payload.get("file_last_modified")
-                    indexed_at = payload.get("indexed_at")
-
-                    # Convert indexed_at ISO timestamp to Unix timestamp float
-                    indexed_timestamp = None
-                    if indexed_at:
-                        try:
-                            from datetime import datetime
-
-                            dt = datetime.fromisoformat(indexed_at.rstrip("Z"))
-                            indexed_timestamp = dt.timestamp()
-                        except (ValueError, AttributeError):
-                            indexed_timestamp = None
-
-                    query_item = QueryResultItem(
-                        similarity_score=result["score"],
-                        file_path=payload.get("path", "unknown"),
-                        line_number=payload.get("line_start", 1),
-                        code_snippet=payload.get("content", ""),
-                        repository_alias=project_root.name,
-                        file_last_modified=file_last_modified,
-                        indexed_timestamp=indexed_timestamp,
+                    # Annotate results with staleness detection metadata.
+                    # No reranker in this function — use preserve_order=False so
+                    # fresh results sort before stale ones (staleness-first ordering).
+                    results = _annotate_staleness(
+                        results, enhanced_results, preserve_order=False
                     )
-                    query_result_items.append(query_item)
-
-                # Apply staleness detection in local mode
-                staleness_detector = StalenessDetector()
-                enhanced_results = staleness_detector.apply_staleness_detection(
-                    query_result_items, project_root, mode="local"
-                )
-                timing_info["staleness_detection_ms"] = (
-                    time.time() - staleness_start
-                ) * 1000
-
-                # Annotate results with staleness detection metadata.
-                # No reranker in this function — use preserve_order=False so
-                # fresh results sort before stale ones (staleness-first ordering).
-                results = _annotate_staleness(
-                    results, enhanced_results, preserve_order=False
-                )
 
             except Exception as _staleness_exc:
                 # Staleness detection is best-effort; continue with original results.
@@ -1722,7 +1700,28 @@ def create_auth_client(server_url: str, project_root: Path):
 
 
 class ModeAwareGroup(click.Group):
-    """Custom Click Group that adds mode compatibility icons to command help."""
+    """Custom Click Group that adds mode compatibility icons to command help.
+
+    Also serves feature add-on commands (``cli_commands()``): consulted only
+    for a name that is not built in, and when listing commands, so built-in
+    commands import nothing for features (cli_features.py).
+    """
+
+    def get_command(self, ctx, cmd_name):
+        command = super().get_command(ctx, cmd_name)
+        if command is not None or self is not cli:
+            return command
+        from code_indexer.cli_features import feature_command
+
+        return feature_command(cmd_name)
+
+    def list_commands(self, ctx):
+        builtin = super().list_commands(ctx)
+        if self is not cli:
+            return builtin
+        from code_indexer.cli_features import listed_feature_commands
+
+        return sorted(builtin + listed_feature_commands(builtin))
 
     def format_commands(self, ctx, formatter):
         """Format commands with mode compatibility icons."""
@@ -1944,9 +1943,6 @@ def cli(
         console.print(f"📁 Project root: {project_root}", style="dim")
 
 
-# Register SCIP commands
-cli.add_command(scip_group)
-
 # Register Git commands (Story #737)
 cli.add_command(git_group)
 
@@ -1966,8 +1962,10 @@ cli.add_command(keys_group)
 # Story #656: Register Remote index management commands (implemented in cli_index.py)
 cli.add_command(index_remote_group)
 
-# Story #975: Register X-Ray CLI commands (implemented in cli_xray.py)
-cli.add_command(xray_group)
+# Story #975: `cidx xray` is the cidx-xray feature's cli_commands()
+# contribution, and (modular phase 4d) `cidx scip` the cidx-scip feature's,
+# found by entry point whenever the distribution is installed
+# (cli_features.py; ModeAwareGroup asks it for names that are not built in).
 
 
 @cli.group("groups")
@@ -2842,6 +2840,32 @@ def _install_embedding_stats_writer_for_index() -> None:
             )
 
             EmbeddingStatsWriter.set_active(NoOpWriter())
+
+        # read per-job correlation tags from the env vars
+        # threaded by the parent and install them as process-level
+        # fallbacks so every EmbeddingCallRecord produced by this child
+        # carries the repo alias, job id, and cluster node id.
+        try:
+            from .server.storage.postgres.embedding_stats_child_wiring import (
+                EMBEDDING_STATS_GOLDEN_REPO_ALIAS_ENV,
+                EMBEDDING_STATS_JOB_ID_ENV,
+                EMBEDDING_STATS_NODE_ID_ENV,
+            )
+            from .server.services.embedding_call_instrumentation import (
+                set_process_embed_stats_tags,
+            )
+
+            set_process_embed_stats_tags(
+                golden_repo_alias=os.environ.get(EMBEDDING_STATS_GOLDEN_REPO_ALIAS_ENV),
+                job_id=os.environ.get(EMBEDDING_STATS_JOB_ID_ENV),
+                node_id=os.environ.get(EMBEDDING_STATS_NODE_ID_ENV),
+            )
+        except Exception as exc:
+            logger.debug(
+                "_install_embedding_stats_writer_for_index: failed to set "
+                "embed stats tags (non-fatal): %s",
+                exc,
+            )
     else:
         from .server.services.embedding_stats_writer import (
             EmbeddingStatsWriter,
@@ -3133,6 +3157,28 @@ def _resolve_hnsw_sync_epoch_enabled_for_cli() -> bool:
     "timeout, retries, ...) is left untouched.",
 )
 @click.option(
+    "--content-backend",
+    type=click.Choice(["local", "delegated"]),
+    default="local",
+    hidden=True,
+    help="Internal: where repository bytes are read from. 'local' (default) "
+    "reads this machine's disk. 'delegated' reads through the content-backend "
+    "plugin the server is configured with (CIDX_CONTENT_BACKEND or the "
+    "code_indexer.content_backend entry point), and fails rather than falling "
+    "back to the disk. Stamped by the server on the commands it spawns.",
+)
+@click.option(
+    "--git-backend",
+    type=click.Choice(["local", "delegated"]),
+    default="local",
+    hidden=True,
+    help="Internal: who answers git questions about the repository (HEAD's "
+    "commit and branch, recorded in the index). 'local' (default) runs git "
+    "here. 'delegated' asks the git-backend plugin the server is configured "
+    "with (the git-backend plugin), for a repository this machine does not hold. Stamped by "
+    "the server on the commands it spawns.",
+)
+@click.option(
     "--stats-attribution",
     default=None,
     hidden=True,
@@ -3180,6 +3226,8 @@ def index(
     migrate_chunks_to_sqlite: bool = False,
     ignore_resume_state: bool = False,
     server_managed_provider_settings: bool = False,
+    content_backend: str = "local",
+    git_backend: str = "local",
     stats_attribution=None,
     exit_with_parent: Optional[int] = None,
 ):
@@ -3380,6 +3428,21 @@ def index(
         )
     except ValueError as exc:
         console.print(f"❌ {exc}", style="red")
+        sys.exit(1)
+
+    # Temporal indexing reads only history, and with --git-backend delegated it
+    # reads it through the git seam (the git-backend plugin). Delegated CONTENT with LOCAL git
+    # means the repository is not on this machine and nothing can read its
+    # history: refused here, before --clear can wipe anything, rather than index
+    # an empty history.
+    if index_commits and content_backend == "delegated" and git_backend == "local":
+        console.print(
+            "❌ Temporal indexing (--index-commits) with --content-backend "
+            "delegated needs --git-backend delegated: the repository's history "
+            "is not on this machine. Refusing instead of indexing an empty "
+            "history.",
+            style="red",
+        )
         sys.exit(1)
 
     # Validate --diff-context flag (must happen before daemon delegation)
@@ -3923,8 +3986,19 @@ def index(
                 _temporal_coll_name = resolve_temporal_collection_name(
                     cast(str, config.temporal.active_embedder)
                 )
+                # None keeps local git; delegated reads the history through
+                # the git seam, and fails here, before any work, if the plugin
+                # is missing.
+                temporal_git_backend = (
+                    None
+                    if git_backend == "local"
+                    else _build_index_git_backend(git_backend)
+                )
                 temporal_indexer = TemporalIndexer(
-                    config_manager, vector_store, collection_name=_temporal_coll_name
+                    config_manager,
+                    vector_store,
+                    collection_name=_temporal_coll_name,
+                    git_backend=temporal_git_backend,
                 )
 
                 # Cost estimation warning for all-branches (no confirmation prompt)
@@ -3933,20 +4007,32 @@ def index(
                     try:
                         import subprocess
 
-                        result = subprocess.run(
-                            ["git", "branch", "-a"],
-                            cwd=config.codebase_dir,
-                            capture_output=True,
-                            text=True,
-                            check=True,
-                        )
-                        branch_count = len(
-                            [
-                                line
-                                for line in result.stdout.split("\n")
-                                if line.strip() and not line.strip().startswith("*")
-                            ]
-                        )
+                        if temporal_git_backend is not None:
+                            # `git branch -a` less the current branch's line.
+                            branch_count = max(
+                                len(
+                                    temporal_git_backend.list_branches(
+                                        str(config.codebase_dir), all_refs=True
+                                    )
+                                )
+                                - 1,
+                                0,
+                            )
+                        else:
+                            result = subprocess.run(
+                                ["git", "branch", "-a"],
+                                cwd=config.codebase_dir,
+                                capture_output=True,
+                                text=True,
+                                check=True,
+                            )
+                            branch_count = len(
+                                [
+                                    line
+                                    for line in result.stdout.split("\n")
+                                    if line.strip() and not line.strip().startswith("*")
+                                ]
+                            )
 
                         if branch_count > 50:
                             console.print(
@@ -4236,15 +4322,15 @@ def index(
         try:
             config = _load_config_for_index()
 
-            # Check if indexing progress file exists
-            progress_file = config_manager.config_path.parent / "indexing_progress.json"
-            if not progress_file.exists():
-                console.print("❌ No indexing progress found", style="red")
-                console.print(
-                    "💡 Run 'cidx index' first to create the semantic index",
-                    style="yellow",
-                )
-                sys.exit(1)
+            # the FTS index is (re)built ENTIRELY from files discovered on
+            # disk via FileFinder below — it never reads the semantic index or
+            # indexing_progress.json. Requiring that progress file here was a spurious
+            # precondition that made `cidx index --rebuild-fts-index` exit 1 on any
+            # repo indexed OUT-OF-BAND (e.g. cidx server / seeder-registered golden
+            # repos, whose semantic index lives server-side, not as a local progress
+            # file) — which is exactly the fleet the on-by-default FTS backfill sweep
+            # targets. The genuine "nothing to index" case is still handled by the
+            # `no discovered_files` check below.
 
             # Lazy import FTS components
             from .services.fts_lifecycle import (
@@ -4257,6 +4343,12 @@ def index(
             # Use FileFinder to discover files from disk (respects gitignore, base + override config)
             # This is 60-180x faster than scanning vector JSONs for large codebases
             file_finder = FileFinder(config)
+            # The server's FTS backfill spawns exactly this command. Under a
+            # delegated backend there is no SmartIndexer pass, so the manifest
+            # is built here: discovery and text both come from it, not the disk.
+            fts_backend, fts_manifest = _delegated_fts_source(
+                content_backend, file_finder
+            )
             discovered_files = list(file_finder.find_files())
 
             if not discovered_files:
@@ -4299,7 +4391,11 @@ def index(
                     progress.advance(task)
 
                 fts_rebuild_result = rebuild_fts_index_from_disk(
-                    config, discovered_files, _on_file
+                    config,
+                    discovered_files,
+                    _on_file,
+                    backend=fts_backend,
+                    manifest=fts_manifest,
                 )
 
             # Files missing from FTS (fts_lifecycle's per-file rule): the
@@ -4421,8 +4517,26 @@ def index(
         metadata_path = _get_provider_metadata_path(
             config_manager.config_path.parent, _primary_provider
         )
+        # One backend for every indexer this run builds. None keeps the
+        # local default untouched; delegated fails here, before any work,
+        # if the plugin is missing -- never a silent read of the disk.
+        repo_content_backend = (
+            None
+            if content_backend == "local"
+            else _build_index_content_backend(content_backend)
+        )
+        # Same rule for git: None keeps local git; delegated fails here, before
+        # any work, if the plugin is missing.
+        repo_git_backend = (
+            None if git_backend == "local" else _build_index_git_backend(git_backend)
+        )
         smart_indexer = SmartIndexer(
-            config, embedding_provider, vector_store_client, metadata_path
+            config,
+            embedding_provider,
+            vector_store_client,
+            metadata_path,
+            content_backend=repo_content_backend,
+            git_backend=repo_git_backend,
         )
 
         # Get git status and display
@@ -4890,7 +5004,12 @@ def index(
                 config_manager.config_path.parent, _extra_provider
             )
             _extra_indexer = SmartIndexer(
-                config, _extra_embedding, _extra_client, _extra_metadata
+                config,
+                _extra_embedding,
+                _extra_client,
+                _extra_metadata,
+                content_backend=repo_content_backend,
+                git_backend=repo_git_backend,
             )
             _extra_stats = _extra_indexer.smart_index(
                 force_full=clear,
@@ -4968,6 +5087,92 @@ def index(
             # EVERY exit path (normal return, sys.exit -> SystemExit, or any
             # exception) so it is never leaked past the mutation lifecycle.
             _index_mutation_lock_ctx.__exit__(None, None, None)
+
+
+def _build_index_git_backend(backend_type: str) -> Any:
+    """Build the git backend ``cidx index --git-backend`` selected."""
+    from .server.startup.git_backend_wiring import build_named_git_backend
+
+    return build_named_git_backend(backend_type)
+
+
+def _query_git_backend(backend_type: str) -> Any:
+    """The git backend ``cidx query --git-backend`` selected; None for local."""
+    if backend_type == "local":
+        return None
+    return _build_index_git_backend(backend_type)
+
+
+def _query_staleness(
+    results: List[Dict[str, Any]], project_root: Path, content_backend: str
+) -> Optional[List[Any]]:
+    """Staleness of *results* against this machine's files, or None when it is
+    not checked: with ``--content-backend=delegated`` the files are not here
+    (``_query_reads_local_files``) and nothing is stat'ed."""
+    if not _query_reads_local_files(content_backend):
+        return None
+    from .api_clients.remote_query_client import QueryResultItem
+    from .remote.staleness_detector import StalenessDetector
+
+    query_result_items = []
+    for result in results:
+        payload = result["payload"]
+        # Convert indexed_at ISO timestamp to Unix timestamp float
+        indexed_timestamp = None
+        indexed_at = payload.get("indexed_at")
+        if indexed_at:
+            try:
+                from datetime import datetime
+
+                indexed_timestamp = datetime.fromisoformat(
+                    indexed_at.rstrip("Z")
+                ).timestamp()
+            except (ValueError, AttributeError):
+                indexed_timestamp = None
+        query_result_items.append(
+            QueryResultItem(
+                similarity_score=result["score"],
+                file_path=payload.get("path", "unknown"),
+                line_number=payload.get("line_start", 1),
+                code_snippet=payload.get("content", ""),
+                repository_alias=project_root.name,
+                file_last_modified=payload.get("file_last_modified"),
+                indexed_timestamp=indexed_timestamp,
+            )
+        )
+    enhanced: List[Any] = StalenessDetector().apply_staleness_detection(
+        query_result_items, project_root, mode="local"
+    )
+    return enhanced
+
+
+def _query_reads_local_files(backend_type: str) -> bool:
+    """Whether ``cidx query`` may stat result files on this machine for
+    staleness: only with the local content backend. Delegated, the files are
+    not here (a stat would call every result deleted), and the content backend
+    has no per-file lookup -- staleness is skipped, never guessed."""
+    return backend_type == "local"
+
+
+def _build_index_content_backend(backend_type: str) -> Any:
+    """Build the content backend ``cidx index --content-backend`` selected."""
+    from .server.startup.content_backend_wiring import build_named_content_backend
+
+    return build_named_content_backend(backend_type)
+
+
+def _delegated_fts_source(backend_type: str, file_finder: Any) -> Tuple[Any, Any]:
+    """(backend, manifest) for a delegated FTS rebuild, or (None, None) for local.
+
+    The manifest is attached to ``file_finder`` (discovery reads from it), built
+    the same way the indexing pass builds it.
+    """
+    if backend_type == "local":
+        return None, None
+    from .indexing.file_finder import attach_delegated_manifest
+
+    backend = _build_index_content_backend(backend_type)
+    return backend, attach_delegated_manifest(file_finder, backend)
 
 
 @cli.command()
@@ -5802,6 +6007,29 @@ def _annotate_staleness(
         "Only meaningful when --rerank-query is also provided."
     ),
 )
+@click.option(
+    "--content-backend",
+    "content_backend",
+    type=click.Choice(["local", "delegated"]),
+    default="local",
+    hidden=True,
+    help="Internal: where the repository's files are. 'local' (default): on "
+    "this machine, and results are checked for staleness against them. "
+    "'delegated': not here (the content-backend plugin holds them), so results "
+    "carry no staleness instead of calling every file deleted. Stamped by the "
+    "server on the queries it spawns.",
+)
+@click.option(
+    "--git-backend",
+    "git_backend",
+    type=click.Choice(["local", "delegated"]),
+    default="local",
+    hidden=True,
+    help="Internal: who answers the branch filter's git questions (HEAD's "
+    "branch, commit and tree, commit reachability). 'local' (default) runs git "
+    "here; 'delegated' asks the git-backend plugin (the git-backend plugin). Stamped by the "
+    "server on the queries it spawns.",
+)
 @click.pass_context
 @require_mode("local", "remote", "proxy")
 def query(
@@ -5834,6 +6062,8 @@ def query(
     rerank_query: Optional[str],
     rerank_instruction: Optional[str],
     file_extensions: Optional[str] = None,
+    content_backend: str = "local",
+    git_backend: str = "local",
 ):
     """Search the indexed codebase using semantic similarity.
 
@@ -6753,6 +6983,8 @@ def query(
                     config_manager=ctx.obj["config_manager"],
                     console=console,
                     file_extensions=file_extensions,
+                    content_backend=content_backend,
+                    git_backend=git_backend,
                 )
 
                 # Wait for BOTH to complete (parallel execution)
@@ -7344,11 +7576,19 @@ def query(
 
         # BranchAwareIndexer removed - using HighThroughputProcessor git-aware methods
 
-        git_topology_service = GitTopologyService(config.codebase_dir)
+        # The server stamps --git-backend=delegated on a query it spawns in a
+        # directory that holds index state only: the branch filter then asks
+        # the git-backend plugin, never local git in an empty directory.
+        query_git_backend = _query_git_backend(git_backend)
+        git_topology_service = GitTopologyService(
+            config.codebase_dir, git_backend=query_git_backend
+        )
         is_git_aware = git_topology_service.is_git_available()
 
         # Initialize query service for git-aware filtering
-        query_service = GenericQueryService(config.codebase_dir, config)
+        query_service = GenericQueryService(
+            config.codebase_dir, config, git_backend=query_git_backend
+        )
 
         # Determine if we should use branch-aware querying
         if is_git_aware:
@@ -7668,64 +7908,32 @@ def query(
                 health_monitor=health_monitor,
             )
 
-        # Apply staleness detection to local query results
+        # Apply staleness detection to local query results -- only where the
+        # files are on this machine. With --content-backend=delegated they are
+        # not, and asking the content backend would page the whole repository's
+        # manifest per query: results carry no staleness instead of a wrong one.
         if results:
             try:
                 staleness_start = time.time()
-                # Convert local results to QueryResultItem format for staleness detection
-                from .api_clients.remote_query_client import QueryResultItem
-                from .remote.staleness_detector import StalenessDetector
+                enhanced_results = _query_staleness(
+                    results, project_root, content_backend
+                )
+                if enhanced_results is not None:
+                    timing_info["staleness_detection_ms"] = (
+                        time.time() - staleness_start
+                    ) * 1000
 
-                query_result_items = []
-                for result in results:
-                    payload = result["payload"]
-
-                    # Extract file metadata for staleness comparison
-                    file_last_modified = payload.get("file_last_modified")
-                    indexed_at = payload.get("indexed_at")
-
-                    # Convert indexed_at ISO timestamp to Unix timestamp float
-                    indexed_timestamp = None
-                    if indexed_at:
-                        try:
-                            from datetime import datetime
-
-                            dt = datetime.fromisoformat(indexed_at.rstrip("Z"))
-                            indexed_timestamp = dt.timestamp()
-                        except (ValueError, AttributeError):
-                            indexed_timestamp = None
-
-                    query_item = QueryResultItem(
-                        similarity_score=result["score"],
-                        file_path=payload.get("path", "unknown"),
-                        line_number=payload.get("line_start", 1),
-                        code_snippet=payload.get("content", ""),
-                        repository_alias=project_root.name,
-                        file_last_modified=file_last_modified,
-                        indexed_timestamp=indexed_timestamp,
+                    # Annotate results with staleness detection metadata.
+                    # When a reranker was applied (effective_rerank_query is set),
+                    # pass preserve_order=True so _annotate_staleness iterates
+                    # `results` (reranked order) and does not clobber it with the
+                    # staleness-sort that apply_staleness_detection uses internally
+                    # (bug #965).  Without a reranker, fresh results sort first.
+                    results = _annotate_staleness(
+                        results,
+                        enhanced_results,
+                        preserve_order=bool(effective_rerank_query),
                     )
-                    query_result_items.append(query_item)
-
-                # Apply staleness detection in local mode
-                staleness_detector = StalenessDetector()
-                enhanced_results = staleness_detector.apply_staleness_detection(
-                    query_result_items, project_root, mode="local"
-                )
-                timing_info["staleness_detection_ms"] = (
-                    time.time() - staleness_start
-                ) * 1000
-
-                # Annotate results with staleness detection metadata.
-                # When a reranker was applied (effective_rerank_query is set),
-                # pass preserve_order=True so _annotate_staleness iterates
-                # `results` (reranked order) and does not clobber it with the
-                # staleness-sort that apply_staleness_detection uses internally
-                # (bug #965).  Without a reranker, fresh results sort first.
-                results = _annotate_staleness(
-                    results,
-                    enhanced_results,
-                    preserve_order=bool(effective_rerank_query),
-                )
 
             except Exception as e:
                 # Graceful fallback - continue with original results if staleness detection fails
@@ -10013,9 +10221,35 @@ def uninstall(ctx, wipe_all: bool, confirm: bool):
 )
 @click.option("--verbose", is_flag=True, help="Show detailed information about fixes")
 @click.option("--force", is_flag=True, help="Apply fixes without confirmation prompts")
+@click.option(
+    "--content-backend",
+    type=click.Choice(["local", "delegated"]),
+    default="local",
+    hidden=True,
+    help="Internal: where the repository's files are. 'delegated' means they "
+    "are not on this machine, so the project id and git state the index run "
+    "recorded are kept instead of being re-derived here. Stamped by the server.",
+)
+@click.option(
+    "--git-backend",
+    type=click.Choice(["local", "delegated"]),
+    default="local",
+    hidden=True,
+    help="Internal: who answers git questions about the repository. "
+    "'delegated' keeps the git state the index run recorded through the "
+    "server's git backend instead of asking this machine's git. Stamped by "
+    "the server.",
+)
 @click.pass_context
 @require_mode("local", "remote", "proxy")
-def fix_config(ctx, dry_run: bool, verbose: bool, force: bool):
+def fix_config(
+    ctx,
+    dry_run: bool,
+    verbose: bool,
+    force: bool,
+    content_backend: str = "local",
+    git_backend: str = "local",
+):
     """Fix corrupted configuration files.
 
     \b
@@ -10097,7 +10331,11 @@ def fix_config(ctx, dry_run: bool, verbose: bool, force: bool):
             console.print(f"  📄 Metadata file: {config_dir / 'metadata.json'}")
 
         # Initialize repairer
-        repairer = ConfigurationRepairer(config_dir, dry_run=dry_run)
+        repairer = ConfigurationRepairer(
+            config_dir,
+            dry_run=dry_run,
+            repository_backend_delegated="delegated" in (content_backend, git_backend),
+        )
 
         # Run the fix process
         result = repairer.fix_configuration()
@@ -19676,6 +19914,40 @@ def global_group(ctx):
     pass
 
 
+def _global_activate_delegated_refusal() -> Optional[str]:
+    """Why ``cidx global activate`` must not run on this host, or None.
+
+    It registers an alias pointing at ``<golden-repos>/repos/<name>/.code-indexer/index``
+    on THIS host's disk. Under the server's ``content_backend: delegated`` the
+    repositories live on the configured content backend content-backend plugin and each pod's index state is its own,
+    so that alias -- written to the registry every pod shares -- would name a
+    path no other pod has. The selection is read from the server config
+    (``CIDX_SERVER_DATA_DIR``, default ``~/.cidx-server``): this command runs
+    outside the server process. No server config means a plain CLI host:
+    nothing to refuse. An unreadable one is refused too -- the backend cannot
+    be known.
+    """
+    from .server.startup.content_backend_wiring import content_backend_name
+    from .server.utils.config_manager import ServerConfigManager
+
+    try:
+        server_config = ServerConfigManager().load_config()
+    except ValueError as exc:
+        return (
+            f"cannot read the server config to tell whether repositories are "
+            f"on this host ({exc}); refusing to register an alias"
+        )
+    if server_config is None or content_backend_name(server_config) != "delegated":
+        return None
+    return (
+        "'cidx global activate' is not available when the server's "
+        "content_backend is 'delegated': repositories live on the configured content backend content-backend plugin and "
+        "an alias to this host's index would be unreadable on every other pod. "
+        "Add or refresh the golden repository through the server "
+        "(POST /api/admin/golden-repos or the refresh endpoint) instead."
+    )
+
+
 @global_group.command("activate")
 @click.argument("repo_name")
 @click.pass_context
@@ -19703,6 +19975,11 @@ def global_activate(ctx, repo_name: str):
     from .global_repos.global_activation import GlobalActivator, GlobalActivationError
 
     console = Console()
+
+    refusal = _global_activate_delegated_refusal()
+    if refusal is not None:
+        console.print(f"[red]Error: {refusal}[/red]")
+        sys.exit(1)
 
     # Get golden repos directory
     golden_repos_dir = os.environ.get("CIDX_GOLDEN_REPOS_DIR")
@@ -20249,6 +20526,3 @@ def watch_stop_command(ctx):
 
 if __name__ == "__main__":
     main()
-
-
-# SCIP commands registered via cli_scip import
