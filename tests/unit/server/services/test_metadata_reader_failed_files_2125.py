@@ -6,7 +6,7 @@ failed in its provider metadata, even when the child exited 0.
 - ``retryable_paths``: recorded paths that still exist under the clone --
   the files a path-based retry can reach (a vanished file would otherwise
   be retried forever);
-- ``unattributed`` (EVO-64616): per provider, failures counted above its
+- ``unattributed`` (issue-64616): per provider, failures counted above its
   recorded paths -- they owe a full reconcile, not a per-file retry;
 - ``known``: False when a metadata file is unreadable or malformed (never
   read as "no failure").
@@ -203,7 +203,7 @@ def test_delegated_clone_counts_recorded_paths_without_the_disk(
 
 def test_unattributed_is_counted_per_provider(tmp_path: Path) -> None:
     """A path another provider recorded does not attribute this provider's
-    count: each provider's excess is its own (EVO-64616)."""
+    count: each provider's excess is its own (issue-64616)."""
     a, b = _files(tmp_path, "a.py", "b.py")
     _write(
         tmp_path,

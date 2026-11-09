@@ -427,7 +427,7 @@ class TestListFilesByPath:
 
 
 class TestCollectFilesPruneWalk:
-    """EVO-66189: _collect_files uses os.walk with in-place pruning of excluded dirs
+    """issue-66189: _collect_files uses os.walk with in-place pruning of excluded dirs
     (not rglob + post-hoc filter). Verify full recursion into real dirs and that the
     excluded subtrees are never surfaced — the same output, minus the wasted stats."""
 

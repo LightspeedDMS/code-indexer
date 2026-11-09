@@ -25,7 +25,7 @@ class TestAddGoldenRepoRequestTemporalFields:
 
 
 class TestAddGoldenRepoRequestWorkspaceId:
-    """EVO-65021 seam #3: workspace_id capture field on the registration model."""
+    """issue-65021 seam #3: workspace_id capture field on the registration model."""
 
     def test_defaults_to_none(self):
         from code_indexer.server.app import AddGoldenRepoRequest

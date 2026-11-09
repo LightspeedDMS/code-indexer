@@ -235,7 +235,7 @@ class TestPodPullRoundTrip:
         assert loop._process_one_job() is True
 
         # Reconstructed from metadata.
-        # EVO-66105: IndexJobClaimLoop injects the claimed row's job_id into
+        # issue-66105: IndexJobClaimLoop injects the claimed row's job_id into
         # metadata so executors can thread it to
         # build_embedding_stats_child_env for per-job VoyageAI cost
         # correlation. These assertions predate that and were comparing
@@ -290,7 +290,7 @@ class TestPodPullRoundTrip:
             node_id="node-2",
         )
         assert loop._process_one_job() is True
-        # EVO-66105: IndexJobClaimLoop injects the claimed row's job_id into
+        # issue-66105: IndexJobClaimLoop injects the claimed row's job_id into
         # metadata so executors can thread it to
         # build_embedding_stats_child_env for per-job VoyageAI cost
         # correlation. These assertions predate that and were comparing
@@ -462,7 +462,7 @@ class TestPodPullRoundTripRealSubmitBug1430:
             "`executing_node IS NULL` claim predicate and hangs PENDING "
             "forever."
         )
-        # EVO-66105: IndexJobClaimLoop injects the claimed row's job_id into
+        # issue-66105: IndexJobClaimLoop injects the claimed row's job_id into
         # metadata so executors can thread it to
         # build_embedding_stats_child_env for per-job VoyageAI cost
         # correlation. These assertions predate that and were comparing

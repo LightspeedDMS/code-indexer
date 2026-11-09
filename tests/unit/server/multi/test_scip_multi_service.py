@@ -733,7 +733,7 @@ class TestSCIPMultiServicePartialFailure:
 
 
 class TestSCIPMultiServiceLiveGoldenFallback:
-    """EVO-65021: the delegated golden SCIP build is ASYNC and lands index.scip.db in the
+    """issue-65021: the delegated golden SCIP build is ASYNC and lands index.scip.db in the
     LIVE golden dir, while the ``-global`` alias resolves to a versioned snapshot forked
     before the scip completed. ``_get_scip_file_for_repo`` must fall back to the live DB
     when the snapshot lacks it, but still prefer the snapshot DB when present."""

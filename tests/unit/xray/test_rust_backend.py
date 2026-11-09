@@ -2061,7 +2061,7 @@ def test_large_candidate_list_does_not_overflow_argv_bug_1612():
     this raises an unhandled OSError: [Errno 7] Argument list too long. After
     the fix (file-based candidate handoff), the call completes normally.
 
-    EVO-64616: none of these files exists, so xray-cli reads none of them --
+    issue-64616: none of these files exists, so xray-cli reads none of them --
     which is "nothing was scanned", the module's whole-batch failure (ONE
     tuple, ``file_path == ""``), never a silent per-spec "no findings". Its
     count is xray-cli's own ``files_errored``: every one of the num_paths

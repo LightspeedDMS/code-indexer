@@ -479,7 +479,7 @@ class TestMcpOmniConfiguredPerRepoCap:
         access_svc = AccessFilteringService(MagicMock())
         fake_app = MagicMock()
         fake_app.state.payload_cache = None
-        # No delegated search backend (EVO-69846): a MagicMock attribute would
+        # No delegated search backend (issue-69846): a MagicMock attribute would
         # read as one and route the omni search away from the local leaf.
         fake_app.state.search_backend = None
         recorder = _Recorder()

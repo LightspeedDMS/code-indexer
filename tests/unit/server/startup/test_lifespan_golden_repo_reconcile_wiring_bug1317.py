@@ -71,10 +71,10 @@ class TestLifespanGoldenRepoReconcileWiringBug1317:
         assert except_match is not None, "no 'except' found after the reconcile call"
 
     def test_backend_registry_set_on_app_state_before_reconcile(self):
-        """EVO-66819: app.state.backend_registry must be assigned BEFORE the
+        """issue-66819: app.state.backend_registry must be assigned BEFORE the
         golden-repo reconcile runs.
 
-        The reconcile's is_globally_active() + EVO-66808 index_path repair resolve
+        The reconcile's is_globally_active() + issue-66808 index_path repair resolve
         the shared registry via GlobalActivator -> resolve_backend_registry_state(),
         which reads app.state.backend_registry. If that assignment happens AFTER the
         reconcile (as it did originally, ~700 lines later), then in postgres/cluster
@@ -93,7 +93,7 @@ class TestLifespanGoldenRepoReconcileWiringBug1317:
         assert call is not None
         assert assign.start() < call.start(), (
             "app.state.backend_registry must be set BEFORE "
-            "reconcile_golden_repo_registry() runs (EVO-66819) -- otherwise "
+            "reconcile_golden_repo_registry() runs (issue-66819) -- otherwise "
             "GlobalActivator falls back to an empty per-node registry during the "
             "startup reconcile and repairs nothing in cluster mode."
         )

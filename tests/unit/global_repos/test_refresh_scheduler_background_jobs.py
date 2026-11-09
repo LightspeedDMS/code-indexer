@@ -183,7 +183,7 @@ class TestRefreshSchedulerBackgroundJobManagerIntegration:
             call_args = mock_background_job_manager.submit_job.call_args
             submitted_func = call_args.kwargs["func"]
 
-            # Execute the lambda. EVO-66113: the worker declares a `job_id`
+            # Execute the lambda. issue-66113: the worker declares a `job_id`
             # parameter that BackgroundJobManager._execute_job injects from the
             # dequeued job tuple (race-free, replacing the removed mutable holder);
             # simulate that injection and assert job_id is forwarded to

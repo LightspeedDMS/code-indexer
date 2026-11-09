@@ -163,7 +163,7 @@ def test_add_golden_repo_inaccessible_error_redacts_userinfo(tmp_path: Path) -> 
 def test_validate_git_repository_warns_with_the_backend_error_redacted(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """EVO-64616: the reason ls-remote failed (e.g. git-mcp refusing a paged
+    """issue-64616: the reason ls-remote failed (e.g. the git service refusing a paged
     answer) is logged at WARNING -- the caller only says "inaccessible"."""
     manager = GoldenRepoManager(data_dir=str(tmp_path / "data"))
 
@@ -172,7 +172,7 @@ def test_validate_git_repository_warns_with_the_backend_error_redacted(
 
         def ls_remote(self, url: str, **kw: object) -> bool:
             raise subprocess.CalledProcessError(
-                1, "git-mcp", stderr=f"paginated result for {ORIGIN}"
+                1, "the git service", stderr=f"paginated result for {ORIGIN}"
             )
 
     setattr(manager, "_git_backend", PagedBackend())

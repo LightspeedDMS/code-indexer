@@ -502,7 +502,7 @@ class TestSubmitRefreshJobForceReset:
             force_reset=True,
             progress_callback=None,
             tracked_by_caller=True,
-            # EVO-66113: BackgroundJobManager injects the assigned job_id into
+            # issue-66113: BackgroundJobManager injects the assigned job_id into
             # any worker declaring a `job_id` param; _refresh_worker forwards it.
             cancel_check=None,
             job_id=None,
@@ -554,7 +554,7 @@ class TestSubmitRefreshJobForceReset:
             force_reset=False,
             progress_callback=None,
             tracked_by_caller=True,
-            # EVO-66113: BackgroundJobManager injects the assigned job_id into
+            # issue-66113: BackgroundJobManager injects the assigned job_id into
             # any worker declaring a `job_id` param; _refresh_worker forwards it.
             cancel_check=None,
             job_id=None,
@@ -600,7 +600,7 @@ class TestSubmitRefreshJobForceReset:
             force_reset=False,
             progress_callback=None,
             tracked_by_caller=True,
-            # EVO-66113: BackgroundJobManager injects the assigned job_id into
+            # issue-66113: BackgroundJobManager injects the assigned job_id into
             # any worker declaring a `job_id` param; _refresh_worker forwards it.
             cancel_check=None,
             job_id=None,

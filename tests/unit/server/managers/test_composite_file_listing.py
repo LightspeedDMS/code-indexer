@@ -308,7 +308,7 @@ def mock_activated_repo():
 
 
 class _NonLocalBackend(LocalContentBackend):
-    """A NON-local backend over the very same tree (workspace-mcp's view)."""
+    """A NON-local backend over the very same tree (the content service's view)."""
 
     @property
     def is_local(self) -> bool:

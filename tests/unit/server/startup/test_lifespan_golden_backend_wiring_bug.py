@@ -188,7 +188,7 @@ class TestGoldenRepoMetadataBackendContract:
             True,  # enable_temporal
             None,  # temporal_options
             False,  # wiki_enabled
-            None,  # workspace_id (EVO-65021)
+            None,  # workspace_id (issue-65021)
         )
 
         result = GoldenRepoMetadataPostgresBackend._row_to_dict_basic(sample_row)
@@ -222,7 +222,7 @@ class TestGoldenRepoMetadataBackendContract:
         db_path = str(tmp_path / "test.db")
 
         # Create the table and insert a row directly
-        # EVO-65021 added golden_repos_metadata.workspace_id. Build the schema
+        # issue-65021 added golden_repos_metadata.workspace_id. Build the schema
         # through the backend's own ensure_table_exists() rather than a
         # hand-rolled CREATE TABLE, so this fixture cannot drift out of sync
         # with production the next time a column is added.
@@ -277,7 +277,7 @@ class TestGoldenRepoMetadataBackendContract:
 
         # SQLite side: real backend with in-memory DB
         db_path = str(tmp_path / "parity.db")
-        # EVO-65021 added golden_repos_metadata.workspace_id. Build the schema
+        # issue-65021 added golden_repos_metadata.workspace_id. Build the schema
         # through the backend's own ensure_table_exists() rather than a
         # hand-rolled CREATE TABLE, so this fixture cannot drift out of sync
         # with production the next time a column is added.
@@ -313,7 +313,7 @@ class TestGoldenRepoMetadataBackendContract:
             False,
             None,
             False,
-            None,  # workspace_id (EVO-65021)
+            None,  # workspace_id (issue-65021)
         )
         pg_dict = GoldenRepoMetadataPostgresBackend._row_to_dict_basic(sample_row)
         pg_keys = set(pg_dict.keys())

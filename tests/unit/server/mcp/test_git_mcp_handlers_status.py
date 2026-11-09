@@ -138,7 +138,7 @@ class TestGitStatusHandler:
     def test_git_status_global_golden_short_circuits_without_subprocess(
         self, mock_user, mock_git_service
     ):
-        """EVO-66189: a read-only ``-global`` golden repo that is NOT in write mode
+        """issue-66189: a read-only ``-global`` golden repo that is NOT in write mode
         returns clean *without* shelling out to git — the real ``git status`` over the
         shared NFS working tree costs ~30s on a large monolith (killed at the
         git_local_timeout), and golden repos are always clean at their pinned snapshot.
@@ -174,7 +174,7 @@ class TestGitStatusHandler:
     def test_git_status_global_nonexistent_repo_still_errors(
         self, mock_user, mock_git_service
     ):
-        """EVO-66189 regression guard: the short-circuit must not bypass the
+        """issue-66189 regression guard: the short-circuit must not bypass the
         repo-existence check normally enforced by ``_resolve_git_repo_path`` — a
         nonexistent ``-global`` alias still returns the "not found" error instead of a
         fake clean status."""
@@ -204,7 +204,7 @@ class TestGitStatusHandler:
     def test_git_status_global_local_repo_still_errors(
         self, mock_user, mock_git_service
     ):
-        """EVO-66189 regression guard: a ``local://``-backed golden repo still returns
+        """issue-66189 regression guard: a ``local://``-backed golden repo still returns
         the "does not support git operations" error instead of a fake clean status."""
         from code_indexer.server.mcp import handlers
         from code_indexer.server.mcp.handlers import _legacy, files
@@ -234,7 +234,7 @@ class TestGitStatusHandler:
     def test_git_status_global_unauthorized_user_still_errors(
         self, mock_user, mock_git_service
     ):
-        """EVO-66189 regression guard: the Story #387 access-control denial (the
+        """issue-66189 regression guard: the Story #387 access-control denial (the
         resolver returns "not found" for repos outside the user's accessible set, by
         design, to avoid leaking existence to unauthorized users) still produces an
         error instead of a fake clean status."""

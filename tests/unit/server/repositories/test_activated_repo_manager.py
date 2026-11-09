@@ -519,7 +519,7 @@ class TestActivatedRepoManager:
             json.dump(repo_data, f)
 
         # Mock git operations that simulate branch not existing anywhere.
-        # EVO-64678: git now runs through the git seam, which invokes
+        # issue-64678: git now runs through the git seam, which invokes
         # subprocess.run(..., check=True). Since subprocess.run itself is
         # mocked here, this stub must reproduce that contract: a non-zero
         # returncode with check=True raises CalledProcessError.

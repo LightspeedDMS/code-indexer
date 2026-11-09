@@ -134,8 +134,8 @@ class TestMaskUrlCredentials:
 
 class TestStripUrlCredentials:
     """strip_url_credentials REMOVES the credential (vs mask's ``***``), yielding a
-    still-valid URL — used before a repo URL is PERSISTED when git-mcp owns auth
-    (EVO-64616), so the PAT lives only in git-mcp."""
+    still-valid URL — used before a repo URL is PERSISTED when the git service owns auth
+    (issue-64616), so the PAT lives only in the git service."""
 
     def test_strips_oauth2_token_to_valid_url(self):
         from code_indexer.server.logging_utils import strip_url_credentials

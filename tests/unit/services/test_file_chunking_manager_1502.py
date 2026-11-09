@@ -392,7 +392,7 @@ class TestBug1502MultimodalOnlyAllFailuresFailLoud:
     (0 == 0), so the file completed with chunks_processed=0 and
     success=True despite NOTHING being persisted.
 
-    EVO-64616: every chunk's text now reaches the text index, so such a
+    issue-64616: every chunk's text now reaches the text index, so such a
     file keeps its text and succeeds; the failed multimodal embedding is
     counted on the result, never silent."""
 
@@ -510,7 +510,7 @@ def _process_with_multimodal_client(
 
 
 class TestImageChunksWithoutMultimodalIndex:
-    """EVO-64616: with multimodal indexing off (EVO-65484) no multimodal
+    """issue-64616: with multimodal indexing off (issue-65484) no multimodal
     client exists, and image-bearing chunks were still routed away from the
     text path -- embedded nowhere. jplanner's 5605 .htm pages, every chunk
     of which references an image, failed with "No batches created" on every

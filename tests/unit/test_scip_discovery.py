@@ -269,7 +269,7 @@ class TestProjectDiscovery:
         assert go_service.build_file == Path("go-service/go.mod")
 
     # ------------------------------------------------------------------ #
-    # EVO-66190: multi-module build roots (Gradle settings / Maven <modules>)
+    # issue-66190: multi-module build roots (Gradle settings / Maven <modules>)
     # ------------------------------------------------------------------ #
 
     def test_gradle_multiproject_builds_once_at_root(self, tmp_path):

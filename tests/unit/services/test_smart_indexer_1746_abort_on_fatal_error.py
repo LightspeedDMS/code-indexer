@@ -245,7 +245,7 @@ class TestIncrementalIndexAbortsOnFatalError:
         meta["embedding_model"] = "voyage-code-3"
         meta["files_to_index"] = []
         meta["current_file_index"] = 0
-        # EVO-64616: an index already checked for files missing chunks.
+        # issue-64616: an index already checked for files missing chunks.
         meta[CHUNK_COVERAGE_KEY] = CHUNK_COVERAGE_VERSION
         indexer.progressive_metadata._save_metadata()
 

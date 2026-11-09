@@ -91,7 +91,7 @@ class TestPodPullSubmit:
     def test_the_exact_pod_pull_op_set(self):
         # The memory-heavy index builds (incl. semantic_backfill_reindex — a re-embed is
         # as heavy as add), PLUS two that are pod-pull WITHOUT being memory-heavy:
-        # fts_backfill_build (EVO-66445, a cheap local tantivy rebuild) and
+        # fts_backfill_build (issue-66445, a cheap local tantivy rebuild) and
         # global_repo_refresh (background-work audit — _MEMORY_HEAVY_OPS gates the LOCAL
         # pool worker, which a pod-pull row never reaches, and adding refresh there would
         # newly throttle a solo/sqlite server that has always run them ungated; the

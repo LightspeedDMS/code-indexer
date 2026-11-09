@@ -42,7 +42,7 @@ def test_all_server_config_fields_are_classified() -> None:
             "resource_config",
             "cache_config",
             "oidc_provider_config",
-            "trusted_gateway_config",  # EVO-66121 — runtime, not bootstrap
+            "trusted_gateway_config",  # issue-66121 — runtime, not bootstrap
             "telemetry_config",
             "search_limits_config",
             "golden_repos_config",
@@ -102,7 +102,7 @@ def test_all_server_config_fields_are_classified() -> None:
             "host",  # Story #1197 — runtime (cluster-propagated via shared DB row)
             "port",  # Story #1197 — runtime (cluster-propagated via shared DB row)
             "hnsw_orphan_repair_sweep_config",  # Story #1360 — runtime Web UI setting
-            "fts_backfill_sweep_config",  # EVO-66445 — persisted runtime config (dict->dataclass on load; no Config-screen control yet)
+            "fts_backfill_sweep_config",  # issue-66445 — persisted runtime config (dict->dataclass on load; no Config-screen control yet)
             "semantic_backfill_sweep_config",  # semantic backfill sweep — persisted runtime config, as fts_backfill_sweep_config
             "search_timeouts_config",  # Story #1398 — runtime Web UI setting (search/embedding/rerank timeouts)
             "embedding_stats_config",  # Story #1418 Phase 3 — runtime Web UI setting (embedding/reranker call tracking)

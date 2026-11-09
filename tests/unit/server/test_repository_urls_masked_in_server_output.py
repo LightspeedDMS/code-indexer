@@ -73,7 +73,7 @@ def test_fetch_decision_for_unrecognised_origin_omits_userinfo(
 
     manager = ActivatedRepoManager.__new__(ActivatedRepoManager)
     manager.logger = logging.getLogger("test.activated_repo_manager")
-    # EVO-64678: the manager reads the origin through its git seam; the local
+    # issue-64678: the manager reads the origin through its git seam; the local
     # backend is what __init__ installs by default.
     manager._git_backend = local_git_backend()
     caplog.set_level(logging.DEBUG)

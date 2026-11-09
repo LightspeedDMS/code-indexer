@@ -160,10 +160,10 @@ class TestLocalUnchangedRegression:
 
 
 class TestScipLiveFallbackWhenSnapshotLacksScip:
-    """EVO-66086: the delegated golden SCIP build is async and lands index.scip.db in the LIVE
+    """issue-66086: the delegated golden SCIP build is async and lands index.scip.db in the LIVE
     golden dir, but the alias points at a versioned snapshot forked BEFORE that build. When the
     snapshot's ``.code-indexer/scip`` dir exists (from embeddings) but has NO ``*.scip.db``,
-    find_scip_files must fall back to the live golden dir -- mirroring the EVO-65021 live-fallback
+    find_scip_files must fall back to the live golden dir -- mirroring the issue-65021 live-fallback
     in scip_multi_service._get_scip_file_for_repo -- instead of returning []."""
 
     def test_falls_back_to_live_golden_scip_when_snapshot_lacks_scip_db(self, tmp_path):
@@ -187,7 +187,7 @@ class TestScipLiveFallbackWhenSnapshotLacksScip:
             repository_alias="analyzer-global", username=TEST_USER
         )
         assert live_db in files, (
-            "EVO-66086: when the alias snapshot has no scip.db, SCIP must fall back to the live "
+            "issue-66086: when the alias snapshot has no scip.db, SCIP must fall back to the live "
             f"golden dir's index.scip.db. Got: {files}"
         )
 

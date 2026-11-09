@@ -450,7 +450,7 @@ class TestTemporalIndexingInIndexSource:
         self, scheduler, registry, source_repo, monkeypatch
     ):
         """With git delegated the temporal child reads the history through
-        git-mcp: it runs, carrying both seam flags, instead of being skipped."""
+        the git service: it runs, carrying both seam flags, instead of being skipped."""
         from code_indexer.global_repos import refresh_scheduler as rs
         from code_indexer.server.startup import content_backend_wiring as wiring
         from code_indexer.server.utils import index_command_layout as icl

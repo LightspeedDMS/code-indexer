@@ -35,7 +35,7 @@ def _proc(returncode=0, stdout="", stderr=""):
 def _queue(results):
     """Build a ``subprocess.run`` side_effect that honors ``check=True``.
 
-    EVO-64678: GitPullUpdater now routes git through the ``LocalGitBackend``
+    issue-64678: GitPullUpdater now routes git through the ``LocalGitBackend``
     seam, which calls ``run_git_command(..., check=True)``. A plain list
     side_effect hands the caller a non-zero ``CompletedProcess`` WITHOUT
     raising -- something the real ``subprocess.run`` never does under

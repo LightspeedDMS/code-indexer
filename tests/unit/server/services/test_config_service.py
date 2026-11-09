@@ -625,7 +625,7 @@ def test_clone_backend_cow_daemon_are_bootstrap_keys() -> None:
 
 
 def test_scip_backend_survives_the_bootstrap_strip(tmp_path) -> None:
-    """EVO-65365: scip_backend must survive the bootstrap strip.
+    """issue-65365: scip_backend must survive the bootstrap strip.
 
     It selects the SCIP backend at startup, before the runtime DB is
     available. Since modular phase 4d it is the cidx-scip feature's bootstrap

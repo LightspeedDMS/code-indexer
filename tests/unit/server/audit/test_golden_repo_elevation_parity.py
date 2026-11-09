@@ -235,7 +235,7 @@ def test_mcp_admin_without_totp_is_told_to_set_it_up(env) -> None:
 
 
 class TestRename:
-    """EVO-64616: the rename doors are elevation-gated like removal; past
+    """issue-64616: the rename doors are elevation-gated like removal; past
     the gate the request reaches the rename's own checks (never a 403)."""
 
     def _rest(self, env: DoorsEnv):
@@ -274,7 +274,7 @@ class TestRename:
 
 
 class TestCatalogSync:
-    """EVO-64616: the catalog sync doors are elevation-gated."""
+    """issue-64616: the catalog sync doors are elevation-gated."""
 
     def test_rest_refused_without_an_elevation_window(self, env) -> None:
         resp = env.rest("POST", "/api/admin/golden-catalog/sync", json={})

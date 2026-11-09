@@ -655,7 +655,7 @@ class TestExposedRebuildFTSIndex:
     def test_exposed_rebuild_fts_index_no_longer_requires_progress_file(
         self, service, tmp_path
     ):
-        """EVO-66445: a missing indexing_progress.json must NOT be an error.
+        """issue-66445: a missing indexing_progress.json must NOT be an error.
 
         The FTS rebuild is built from FileFinder-discovered files, so it does not need
         the semantic index's progress file (which cidx-server / seeder-registered golden

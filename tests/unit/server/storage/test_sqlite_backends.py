@@ -2373,7 +2373,7 @@ class TestGoldenRepoMetadataSqliteBackend:
 
 
 class TestGlobalReposUpdateIndexPath:
-    """EVO-66808: targeted update_index_path repoints a stale index_path without
+    """issue-66808: targeted update_index_path repoints a stale index_path without
     disturbing any other registry column."""
 
     def _backend(self, tmp_path: Path):

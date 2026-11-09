@@ -1445,7 +1445,7 @@ class TestGetContextMethod:
             assert len(result["files"]) == 1
 
     def test_get_context_scopes_scip_dir_to_alias(self):
-        """EVO-66189: get_context must scope the composite's scip_dir to the alias's own
+        """issue-66189: get_context must scope the composite's scip_dir to the alias's own
         .code-indexer/scip (like get_impact), NOT the whole golden-repos root — otherwise
         get_smart_context globs every repo's *.scip.db over NFS and blows the watchdog."""
         import tempfile

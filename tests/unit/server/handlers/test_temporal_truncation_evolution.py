@@ -34,7 +34,7 @@ class TestAC2EvolutionContentTruncation:
                 "file_path": "/path/to/file.py",
                 "content": "small main content",
                 "temporal_context": {
-                    "evolution": [
+                    "example-repo": [
                         {
                             "commit_hash": "abc123",
                             "content": large_evo_content,
@@ -54,7 +54,7 @@ class TestAC2EvolutionContentTruncation:
             truncated = _apply_temporal_payload_truncation(results)  # Sync call
 
         result = truncated[0]
-        evo_entry = result["temporal_context"]["evolution"][0]
+        evo_entry = result["temporal_context"]["example-repo"][0]
 
         # Evolution content should be truncated
         assert "content_preview" in evo_entry
@@ -85,7 +85,7 @@ class TestAC2EvolutionContentTruncation:
             {
                 "content": "main content",
                 "temporal_context": {
-                    "evolution": [
+                    "example-repo": [
                         {
                             "commit_hash": "abc123",
                             "content": small_evo_content,
@@ -103,7 +103,7 @@ class TestAC2EvolutionContentTruncation:
 
             truncated = _apply_temporal_payload_truncation(results)  # Sync call
 
-        evo_entry = truncated[0]["temporal_context"]["evolution"][0]
+        evo_entry = truncated[0]["temporal_context"]["example-repo"][0]
 
         # Content should NOT be truncated
         assert evo_entry["content"] == small_evo_content
@@ -131,7 +131,7 @@ class TestAC3EvolutionDiffTruncation:
                 "file_path": "/path/to/file.py",
                 "content": "main content",
                 "temporal_context": {
-                    "evolution": [
+                    "example-repo": [
                         {
                             "commit_hash": "abc123",
                             "content": "small content",
@@ -150,7 +150,7 @@ class TestAC3EvolutionDiffTruncation:
 
             truncated = _apply_temporal_payload_truncation(results)  # Sync call
 
-        evo_entry = truncated[0]["temporal_context"]["evolution"][0]
+        evo_entry = truncated[0]["temporal_context"]["example-repo"][0]
 
         # Diff should be truncated
         assert "diff_preview" in evo_entry
@@ -177,7 +177,7 @@ class TestAC3EvolutionDiffTruncation:
             {
                 "content": "main content",
                 "temporal_context": {
-                    "evolution": [
+                    "example-repo": [
                         {
                             "commit_hash": "abc123",
                             "content": "content",
@@ -195,7 +195,7 @@ class TestAC3EvolutionDiffTruncation:
 
             truncated = _apply_temporal_payload_truncation(results)  # Sync call
 
-        evo_entry = truncated[0]["temporal_context"]["evolution"][0]
+        evo_entry = truncated[0]["temporal_context"]["example-repo"][0]
 
         # Diff should NOT be truncated
         assert evo_entry["diff"] == small_diff
@@ -216,7 +216,7 @@ class TestAC3EvolutionDiffTruncation:
             {
                 "content": "main",
                 "temporal_context": {
-                    "evolution": [
+                    "example-repo": [
                         {
                             "commit_hash": "abc123",
                             "content": large_content,
@@ -234,7 +234,7 @@ class TestAC3EvolutionDiffTruncation:
 
             truncated = _apply_temporal_payload_truncation(results)  # Sync call
 
-        evo_entry = truncated[0]["temporal_context"]["evolution"][0]
+        evo_entry = truncated[0]["temporal_context"]["example-repo"][0]
 
         # Both should be truncated with different handles
         assert evo_entry["content_preview"] == "C" * PREVIEW_SIZE
@@ -265,7 +265,7 @@ class TestAC4MultipleEvolutionEntries:
             {
                 "content": "main",
                 "temporal_context": {
-                    "evolution": [
+                    "example-repo": [
                         {
                             "commit_hash": "commit1",
                             "content": "A" * (PREVIEW_SIZE + 1000),
@@ -293,7 +293,7 @@ class TestAC4MultipleEvolutionEntries:
 
             truncated = _apply_temporal_payload_truncation(results)  # Sync call
 
-        evolution = truncated[0]["temporal_context"]["evolution"]
+        evolution = truncated[0]["temporal_context"]["example-repo"]
 
         # Entry 1: both content and diff truncated
         assert evolution[0]["content_preview"] == "A" * PREVIEW_SIZE
@@ -329,7 +329,7 @@ class TestAC4MultipleEvolutionEntries:
         """Test that empty evolution array is handled correctly."""
         from code_indexer.server.mcp.handlers import _apply_temporal_payload_truncation
 
-        results = [{"content": "main content", "temporal_context": {"evolution": []}}]
+        results = [{"content": "main content", "temporal_context": {"example-repo": []}}]
 
         with patch(
             "code_indexer.server.mcp.handlers.app_module.app.state"
@@ -339,4 +339,4 @@ class TestAC4MultipleEvolutionEntries:
             truncated = _apply_temporal_payload_truncation(results)  # Sync call
 
         # Evolution should remain empty array
-        assert truncated[0]["temporal_context"]["evolution"] == []
+        assert truncated[0]["temporal_context"]["example-repo"] == []

@@ -76,7 +76,7 @@ def manager(data_dir):
 def _assert_rollback_checkout(mock_run):
     """Assert exactly one rollback ``git checkout main`` ran on the base clone.
 
-    EVO-64678: the rollback now routes through the git seam
+    issue-64678: the rollback now routes through the git seam
     (``LocalGitBackend`` -> ``utils.git_runner``), which still lands on the
     globally patched ``subprocess.run`` but supplies its own ``cwd`` as a
     ``Path`` plus ``text``/``timeout``/``env`` kwargs. The invariant under test

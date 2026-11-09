@@ -97,7 +97,7 @@ class TestOwnershipCheckpointAfterCloneStructurally:
         )
 
     def test_delegated_checkpoint_sits_between_clone_and_next_git_call(self):
-        """Content seam: the same ordering when workspace-mcp makes the copy."""
+        """Content seam: the same ordering when the content service makes the copy."""
         _assert_checkpoint_between(
             ActivatedRepoManager._clone_delegated_working_copy, "clone"
         )

@@ -61,7 +61,7 @@ def updater(repo_path):
 def _checked(side_effect):
     """Wrap a side_effect so it mirrors real subprocess.run(check=True).
 
-    EVO-64678 routes git through the seam -> run_git_command(check=True), so a
+    issue-64678 routes git through the seam -> run_git_command(check=True), so a
     fake that merely RETURNED a non-zero result would read as SUCCESS to the
     production path and the failure under test would never surface. Raising here
     keeps each test's canned returncode/stdout/stderr exactly as written.
@@ -374,7 +374,7 @@ class TestStderrOnlyDiagnosticsFixedInUpdate:
         )
 
         with patch("subprocess.run") as mock_run:
-            # EVO-64678: the seam reaches git via run_git_command(check=True),
+            # issue-64678: the seam reaches git via run_git_command(check=True),
             # so the fake must raise on a non-zero result as real subprocess does.
             mock_run.side_effect = _checked_seq([git_status_ok, git_pull_fail])
 

@@ -68,7 +68,7 @@ class TestSQLMigrationFiles:
             )
 
     def test_migration_prefixes_are_unique(self):
-        """No two migrations may share a numeric prefix (EVO-65021): a collision
+        """No two migrations may share a numeric prefix (issue-65021): a collision
         makes their relative order filesystem-dependent and ambiguous. This
         caught the 038 workspace_id/embedding-call-stats collision.
 
@@ -92,7 +92,7 @@ class TestSQLMigrationFiles:
             seen[prefix] = f.name
 
     def test_workspace_id_migration_renumbered_to_039(self):
-        """EVO-65021: the golden-repo workspace_id migration lives at 039 (038
+        """issue-65021: the golden-repo workspace_id migration lives at 039 (038
         was already taken by embedding_call_stats on master)."""
         migrations_dir = Path("src/code_indexer/server/storage/postgres/migrations/sql")
         assert (migrations_dir / "039_golden_repo_workspace_id.sql").exists()

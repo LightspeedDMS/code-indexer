@@ -219,7 +219,7 @@ class TestFtsBootstrap:
         meta["current_file_index"] = 0
         # Watermark tells incremental path this commit is already indexed.
         meta["branch_commit_watermarks"] = {current_branch: head_commit}
-        # EVO-64616: an index already checked for files missing chunks.
+        # issue-64616: an index already checked for files missing chunks.
         meta[CHUNK_COVERAGE_KEY] = CHUNK_COVERAGE_VERSION
         indexer.progressive_metadata._save_metadata()
 

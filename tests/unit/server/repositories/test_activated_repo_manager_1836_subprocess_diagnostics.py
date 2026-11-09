@@ -72,7 +72,7 @@ def _fail_with_stderr(cmd, stderr: str) -> Mock:
 def _honour_check(cmd, response, kwargs):
     """Mirror real subprocess.run(check=True): raise on a non-zero return code.
 
-    EVO-64678 routes git through run_git_command(check=True), so a fake that only
+    issue-64678 routes git through run_git_command(check=True), so a fake that only
     RETURNED a non-zero response would never surface the failure a test is driving
     -- the seam would read it as success. Raising here keeps each test's canned
     stdout/stderr/returncode intact while matching what the production path sees.
@@ -262,7 +262,7 @@ class TestSyncWithGoldenRepositoryDiagnostics:
 
         overrides = {
             ("git", "fetch", "golden"): _ok(("git", "fetch", "golden")),
-            # EVO-64678: the seam issues `git diff --name-only <spec>`
+            # issue-64678: the seam issues `git diff --name-only <spec>`
             # (flag before spec), not upstream's spec-first ordering.
             (
                 "git",
@@ -275,7 +275,7 @@ class TestSyncWithGoldenRepositoryDiagnostics:
             ),
         }
 
-        # EVO-64678: these commands now reach git through the seam
+        # issue-64678: these commands now reach git through the seam
         # (LocalGitBackend -> run_git_command), so the fake must cover
         # git_runner's subprocess too, not just this module's.
         _run = _make_run(overrides)
@@ -530,7 +530,7 @@ class TestCloneWithCopyOnWriteAdditionalDiagnostics:
         m._clone_backend.create_clone_at_path.side_effect = _fake_create_clone
 
         overrides = {
-            # EVO-64678: the seam's config_set() writes the repo-local config
+            # issue-64678: the seam's config_set() writes the repo-local config
             # (git's default location), so there is no explicit --local flag.
             (
                 "git",
@@ -547,7 +547,7 @@ class TestCloneWithCopyOnWriteAdditionalDiagnostics:
             ),
         }
 
-        # EVO-64678: these commands now reach git through the seam
+        # issue-64678: these commands now reach git through the seam
         # (LocalGitBackend -> run_git_command), so the fake must cover
         # git_runner's subprocess too, not just this module's.
         _run = _make_run(overrides)
@@ -572,7 +572,7 @@ class TestCloneWithCopyOnWriteAdditionalDiagnostics:
         assert checkstat_warnings, f"expected checkstat warning, got: {caplog.records}"
         assert "checkstat diagnostic on stdout" in checkstat_warnings[0]
 
-        # EVO-64678: `git update-index --refresh` goes through the seam with
+        # issue-64678: `git update-index --refresh` goes through the seam with
         # check=False -- a non-zero exit there means "the index was merely out
         # of date", which is the normal case after a CoW clone and was always
         # non-fatal. It therefore raises nothing and warns nothing by design;

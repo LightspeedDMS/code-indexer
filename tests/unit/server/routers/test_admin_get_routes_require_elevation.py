@@ -59,7 +59,7 @@ ALLOWLIST: Dict[str, str] = {
     "/api/admin/hnsw-orphan-sweep/stats": "maintenance sweep counters",
     "/api/admin/jobs/stats": "aggregate job counts by status and type",
     "/api/admin/jobs/{job_id}": (
-        "status of one background job by id (the EVO-64609 alias of "
+        "status of one background job by id (the issue-64609 alias of "
         "/api/jobs/{job_id}), polled with non-elevated service tokens by the "
         "golden-repo seeder and orchestrator workers; one job's submitter, "
         "no user list"

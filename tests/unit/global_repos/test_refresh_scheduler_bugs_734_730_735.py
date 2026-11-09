@@ -235,7 +235,7 @@ class TestBug730ScipGenerateHasTimeout:
         The SCIP ``subprocess.run(scip_command, ...)`` call must NOT have a
         'timeout' keyword argument (Bug #1218).
 
-        EVO-65021 (s05) extracted the local SCIP subprocess out of
+        issue-65021 (s05) extracted the local SCIP subprocess out of
         ``_index_source`` into ``_run_source_scip`` (the local fallback of the
         single delegated funnel), so this guard now inspects that method.
 

@@ -169,7 +169,7 @@ class TestContentBackendStamp:
 class TestGitBackendStamp:
     """The git selection travels to the child the same way.
 
-    On a pod that does not hold the repository the child must ask git-mcp for
+    On a pod that does not hold the repository the child must ask the git service for
     HEAD's commit and branch; without the flag it records "unknown", and
     refresh then re-indexes every cycle.
     """
@@ -235,7 +235,7 @@ class TestPodLocalRepos:
     """local:// repositories are created and written on THIS pod; a delegated
     backend cannot see them, so their spawns read the pod's disk. cidx-meta is
     the exception for CONTENT: every server-side writer puts it with
-    workspace-mcp under a delegated content backend, so its spawns read the
+    the content service under a delegated content backend, so its spawns read the
     content through the configured backend -- but it is no git repository a
     git backend holds, so git stays local."""
 
@@ -246,7 +246,7 @@ class TestPodLocalRepos:
             (None, "cidx-meta", True),
             (None, "cidx-meta-global", True),
             ("https://gitlab.com/x/y.git", "y", False),
-            ("/data/data/golden-repos/y", "y", False),  # in place, with workspace-mcp
+            ("/data/data/golden-repos/y", "y", False),  # in place, with the content service
             (None, None, False),
         ],
     )

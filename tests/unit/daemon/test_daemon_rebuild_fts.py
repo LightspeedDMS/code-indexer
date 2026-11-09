@@ -335,7 +335,7 @@ class TestDaemonRebuildFTS:
 
     def test_rebuild_without_progress_file_succeeds(self):
         """
-        EVO-66445 regression (daemon RPC twin of the CLI fix): the daemon FTS rebuild
+        issue-66445 regression (daemon RPC twin of the CLI fix): the daemon FTS rebuild
         must succeed with NO indexing_progress.json.
 
         exposed_rebuild_fts_index builds the Tantivy index entirely from

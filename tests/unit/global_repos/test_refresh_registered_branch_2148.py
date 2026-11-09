@@ -462,7 +462,7 @@ def test_postgres_mode_registry_supplied_store_is_used(
     assert current_branch(master) == "main"
 
 
-# EVO-64678: the branch check reads the clone's branch through the git seam
+# issue-64678: the branch check reads the clone's branch through the git seam
 # (head_branch -> GitBackend.symbolic_ref), not `git branch --show-current`.
 BRANCH_READ_ARGV = ["git", "symbolic-ref", "--short", "HEAD"]
 BRANCH_READ_STDERR = "fatal: example branch read failure"
@@ -492,7 +492,7 @@ def raise_on_git(
     """The refresh's git call starting with *argv_prefix* raises
     TimeoutExpired, as a hung git does at its timeout; every other call
     runs the real git. Patched at the git seam's local runner, where every
-    git command of the scheduler's LocalGitBackend bottoms out (EVO-64678)."""
+    git command of the scheduler's LocalGitBackend bottoms out (issue-64678)."""
     real = _git_backend_module.run_git_command
     raised: list = []
 

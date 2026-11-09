@@ -282,7 +282,7 @@ class TestTimeoutedCloneCleansUpPartialDest:
         end = src.index(end_marker, start)
         branch = src[start:end]
         # The cleanup is the shared partial-clone discard (local: rmtree;
-        # content seam: workspace-mcp delete), whose local half is checked.
+        # content seam: the content service delete), whose local half is checked.
         assert "self._discard_clone_after_failure(" in branch, (
             "The 'except subprocess.TimeoutExpired:' branch in "
             "_clone_with_copy_on_write does not discard the partial clone."

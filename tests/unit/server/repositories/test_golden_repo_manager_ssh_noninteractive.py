@@ -33,7 +33,7 @@ def _make_manager():
     resource_config.git_pull_timeout = 60
     resource_config.git_clone_timeout = 120
     manager.resource_config = resource_config
-    # EVO-64678: __init__ is bypassed here, so wire the git seam explicitly.
+    # issue-64678: __init__ is bypassed here, so wire the git seam explicitly.
     # LocalGitBackend runs git through git_runner, which builds the
     # non-interactive env this test asserts on, then calls subprocess.run.
     from code_indexer.server.storage.shared.git_backend import local_git_backend
@@ -130,7 +130,7 @@ def test_cb_git_fetch_and_validate_all_git_calls_have_noninteractive_env(tmp_pat
         side_effect=[
             _make_successful_subprocess_result(),
             branch_result,
-            # EVO-64616: the plain fetch probing the clone's refspec.
+            # issue-64616: the plain fetch probing the clone's refspec.
             _make_successful_subprocess_result(),
         ],
     ) as mock_run:

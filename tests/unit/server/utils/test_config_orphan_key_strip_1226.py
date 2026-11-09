@@ -91,7 +91,7 @@ class TestLaunchRestartGenerationOrphanKey:
 
 
 class TestQueryVectorCacheConfigOrphanKey:
-    """EVO-70528 -- the fork-only query_vector_cache_config key is gone from
+    """issue-70528 -- the fork-only query_vector_cache_config key is gone from
     ServerConfig but is still in persisted config.json files; it must not log a
     WARNING on every process start (the runtime QueryEmbeddingCacheConfig
     replaced it, with a different shape, so there is nothing to migrate)."""

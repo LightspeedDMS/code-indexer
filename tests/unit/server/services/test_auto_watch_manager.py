@@ -205,7 +205,7 @@ class TestAutoWatchManagerTimeout:
 
 class TestAutoWatchUnderADelegatedContentBackend:
     """Content seam: with content_backend=delegated the repository is not on the
-    pod (workspace-mcp serves it), so there is nothing to put an inotify watch on.
+    pod (the content service serves it), so there is nothing to put an inotify watch on.
     Starting one would watch an empty dir, or a mount about to be removed, and
     never see a change -- a silent failure rather than a refused one."""
 

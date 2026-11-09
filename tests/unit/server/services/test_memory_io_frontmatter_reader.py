@@ -114,7 +114,7 @@ def test_rejects_non_positive_bound(tmp_path: Path, max_bytes: int) -> None:
 def test_delegated_frontmatter_comes_from_the_content_backend(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Under a delegated content backend the memory lives with workspace-mcp:
+    """Under a delegated content backend the memory lives with the content service:
     the read goes through the content seam and never touches this pod's
     disk, with the same bound and body-free result."""
     from tests.unit.server.cidx_meta_seam_fakes import MetaWorld

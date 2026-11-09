@@ -295,7 +295,7 @@ class TestExpectedOrphanKeys:
 
 
 class TestRemovedScipDelegationKeys:
-    """EVO-64616: keys only the removed SCIP delegation read.
+    """issue-64616: keys only the removed SCIP delegation read.
 
     ``scip_build_stateless`` (the removed ``scip_backend='delegated'``),
     ``scip_query_backend`` and ``scip_sandbox`` (the removed SCIP query
@@ -307,7 +307,7 @@ class TestRemovedScipDelegationKeys:
         "scip_build_stateless": True,
         "scip_query_backend": "local",
         "scip_sandbox": {
-            "endpoint": "http://sandbox-mcp.claude-code-indexer:8200",
+            "endpoint": "http://the sandbox service.claude-code-indexer:8200",
             "api_key": "scip-token",
         },
     }
@@ -339,7 +339,7 @@ class TestRemovedScipDelegationKeys:
 
 
 class TestReadConfigFile:
-    """``read_config_file`` returns config.json as written (EVO-64616): the
+    """``read_config_file`` returns config.json as written (issue-64616): the
     startup check for a removed key needs the keys load_config strips."""
 
     def test_returns_the_file_with_keys_load_config_strips(self, tmp_path):

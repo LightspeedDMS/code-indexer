@@ -513,7 +513,7 @@ class TestBrowseDirectoryFilterParametersResponseFormat:
 
 
 class TestBrowseDirectoryIndexedOnlyRouting:
-    """EVO-66189: indexed_only must serve from the index even for a non-recursive
+    """issue-66189: indexed_only must serve from the index even for a non-recursive
     single-dir browse of a -global repo — it must NOT take the scandir
     list_directory_level fast-path (which ignores the flag)."""
 

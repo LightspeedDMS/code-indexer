@@ -76,7 +76,7 @@ def scheduler(tmp_path: Path) -> RefreshScheduler:
 def _write(repo: Path, provider: str, **fields: str) -> None:
     meta_dir = repo / ".code-indexer"
     meta_dir.mkdir(exist_ok=True)
-    # EVO-64616: an index checked for missing chunks.
+    # issue-64616: an index checked for missing chunks.
     data = {CHUNK_COVERAGE_KEY: CHUNK_COVERAGE_VERSION, **fields}
     (meta_dir / f"metadata-{provider}.json").write_text(json.dumps(data))
 

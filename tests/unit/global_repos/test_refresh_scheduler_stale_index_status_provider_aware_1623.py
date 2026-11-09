@@ -92,7 +92,7 @@ def _actual_head(repo_dir: Path) -> str:
 
 
 def _write_metadata(source_path: Path, filename: str, **fields):
-    # EVO-64616: an index checked for missing chunks, unless a test says not.
+    # issue-64616: an index checked for missing chunks, unless a test says not.
     fields.setdefault(CHUNK_COVERAGE_KEY, CHUNK_COVERAGE_VERSION)
     meta_dir = source_path / ".code-indexer"
     meta_dir.mkdir(parents=True, exist_ok=True)

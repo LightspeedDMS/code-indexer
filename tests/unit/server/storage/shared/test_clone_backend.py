@@ -449,7 +449,7 @@ class TestCloneBackendFactory:
         from code_indexer.server.utils.config_manager import WorkspaceMcpConfig
 
         wsm_config = WorkspaceMcpConfig(
-            endpoint="http://workspace-mcp:8080",
+            endpoint="http://the content service:8080",
             api_key="secret-key",
             mount_point="/mnt/nfs/cidx",
         )
@@ -551,7 +551,7 @@ class TestProtocolConformance:
         from code_indexer.server.utils.config_manager import WorkspaceMcpConfig
 
         config = WorkspaceMcpConfig(
-            endpoint="http://workspace-mcp:8080",
+            endpoint="http://the content service:8080",
             api_key="key",
             mount_point="/mnt/nfs/cidx",
         )
@@ -1818,8 +1818,8 @@ class TestCloneBackendFactoryMissingConfig:
 
 
 # ---------------------------------------------------------------------------
-# DelegatedCloneBackend (EVO-64616): delegates the activated-repo CoW clone
-# to workspace-mcp; performs NO cidx-side filesystem copy.
+# DelegatedCloneBackend (issue-64616): delegates the activated-repo CoW clone
+# to the content service; performs NO cidx-side filesystem copy.
 # ---------------------------------------------------------------------------
 
 
@@ -1831,7 +1831,7 @@ def _make_wsm_config(timeout_seconds: int = 30):
     from code_indexer.server.utils.config_manager import WorkspaceMcpConfig
 
     return WorkspaceMcpConfig(
-        endpoint="http://workspace-mcp:8080",
+        endpoint="http://the content service:8080",
         api_key="test-api-key",
         mount_point="/mnt/nfs/cidx",
         timeout_seconds=timeout_seconds,
@@ -1862,7 +1862,7 @@ def _mock_delegated_requests(post_resp=None, post_side_effect=None):
 
 
 class TestDelegatedCloneBackendCreateCloneAtPath:
-    """create_clone_at_path forwards to workspace-mcp over HTTP (no local cp)."""
+    """create_clone_at_path forwards to the content service over HTTP (no local cp)."""
 
     def test_posts_source_and_dest_to_cow_clone_path(self, tmp_path):
         backend = _make_delegated_backend(str(tmp_path))
@@ -1876,7 +1876,7 @@ class TestDelegatedCloneBackendCreateCloneAtPath:
 
         mock_req.post.assert_called_once()
         url = mock_req.post.call_args[0][0]
-        assert url == "http://workspace-mcp:8080/clone-path"
+        assert url == "http://the content service:8080/clone-path"
         body = mock_req.post.call_args[1]["json"]
         assert body["source_path"] == "/mnt/nfs/cidx/src/repo"
         assert body["dest_path"] == "/mnt/nfs/cidx/activated/u/repo"
@@ -1982,7 +1982,7 @@ class TestDelegatedCloneBackendCreateCloneAtPath:
 
 class TestDelegatedCloneBackendWorkingCopies:
     """Mount-less activations: clone (if_absent), stat and delete of a working
-    copy through workspace-mcp, never looking at this pod's disk."""
+    copy through the content service, never looking at this pod's disk."""
 
     def test_clone_working_copy_sends_if_absent_and_skips_visibility(self, tmp_path):
         from code_indexer.server.storage.shared.clone_backend import (
@@ -2002,7 +2002,7 @@ class TestDelegatedCloneBackendWorkingCopies:
             result = backend.clone_working_copy("/g/repo", "/a/u/repo")
 
         assert result == "/a/u/repo"
-        assert mock_req.post.call_args[0][0] == "http://workspace-mcp:8080/clone-path"
+        assert mock_req.post.call_args[0][0] == "http://the content service:8080/clone-path"
         assert mock_req.post.call_args[1]["json"] == {
             "source_path": "/g/repo",
             "dest_path": "/a/u/repo",
@@ -2082,8 +2082,8 @@ class TestDelegatedCloneBackendWorkingCopies:
 
 
 class TestDelegatedCloneBackendMoveWorkingCopy:
-    """EVO-64616: POST /clone-path/move {from, to} -- an atomic rename; a
-    workspace-mcp without the route answers 404 naming no path: False, so the
+    """issue-64616: POST /clone-path/move {from, to} -- an atomic rename; a
+    the content service without the route answers 404 naming no path: False, so the
     caller copies instead."""
 
     def test_move_posts_from_and_to(self, tmp_path):
@@ -2150,7 +2150,7 @@ class TestDelegatedCloneBackendMoveAnswers:
 
 class TestDelegatedCloneBackendSnapshotMethods:
     """Snapshot-registry / delete methods run locally on the shared mount
-    (composed LocalCloneBackend) — no workspace-mcp call, no working-tree copy."""
+    (composed LocalCloneBackend) — no the content service call, no working-tree copy."""
 
     def test_delete_clone_removes_directory(self, tmp_path):
         backend = _make_delegated_backend(str(tmp_path))

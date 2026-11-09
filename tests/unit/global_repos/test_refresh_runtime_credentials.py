@@ -256,7 +256,7 @@ def test_reclone_stores_no_credentials(
     master = tmp_path / "golden-repos" / "repo"
     master.mkdir(parents=True)
     scheduler = object.__new__(RefreshScheduler)
-    # EVO-64678: the re-clone runs through the scheduler's git seam; the local
+    # issue-64678: the re-clone runs through the scheduler's git seam; the local
     # backend is what __init__ installs by default.
     scheduler._git_backend = local_git_backend()
 

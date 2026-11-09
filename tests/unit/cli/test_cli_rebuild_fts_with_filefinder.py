@@ -201,7 +201,7 @@ class TestRebuildFTSWithFileFinder:
 
     def test_rebuild_without_progress_file_succeeds(self):
         """
-        EVO-66445 regression: --rebuild-fts-index must succeed with NO
+        issue-66445 regression: --rebuild-fts-index must succeed with NO
         indexing_progress.json.
 
         The FTS index is built entirely from FileFinder-discovered files on disk, so it

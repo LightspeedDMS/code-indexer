@@ -421,7 +421,7 @@ def test_a_stale_failure_counter_is_reported_but_never_retried(
     child: FakeIndexChild,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """EVO-64616: a provider counting failures it recorded no path for
+    """issue-64616: a provider counting failures it recorded no path for
     (``stale``: failed_files=5, failed_file_paths=[]) used to be "reported
     but never retried", so the count -- and the missing files -- stayed
     forever. It now owes a retry like any recorded failure (same owed-retry

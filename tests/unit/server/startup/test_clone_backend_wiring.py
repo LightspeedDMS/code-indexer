@@ -1150,12 +1150,12 @@ class TestCommit1Injection:
 
 
 # ---------------------------------------------------------------------------
-# delegated backend (EVO-64616): clone delegated to workspace-mcp
+# delegated backend (issue-64616): clone delegated to the content service
 # ---------------------------------------------------------------------------
 
 
 def _make_delegated_config(
-    endpoint: str = "http://workspace-mcp:8080",
+    endpoint: str = "http://the content service:8080",
     api_key: str = "secret",
 ) -> MagicMock:
     """Minimal config with clone_backend='delegated'."""
@@ -1228,7 +1228,7 @@ class TestDelegatedBackend:
             build_snapshot_manager(cfg, versioned_base=str(tmp_path))
 
     def test_delegated_raises_when_health_check_fails_no_fallback(self, tmp_path):
-        """An unreachable workspace-mcp fails fast — no silent local fallback."""
+        """An unreachable the content service fails fast — no silent local fallback."""
         from code_indexer.server.startup.clone_backend_wiring import (
             build_snapshot_manager,
         )
@@ -1236,7 +1236,7 @@ class TestDelegatedBackend:
         cfg = _make_delegated_config()
         with patch(
             "code_indexer.server.startup.clone_backend_wiring._check_workspace_mcp_health",
-            side_effect=RuntimeError("workspace-mcp not reachable"),
+            side_effect=RuntimeError("the content service not reachable"),
         ):
             with pytest.raises(RuntimeError, match="not reachable"):
                 build_snapshot_manager(cfg, versioned_base=str(tmp_path))
@@ -1257,10 +1257,10 @@ class TestCheckWorkspaceMcpHealth:
         mock_requests.get.return_value = mock_resp
 
         with patch.dict(sys.modules, {"requests": mock_requests}):
-            _check_workspace_mcp_health("http://workspace-mcp:8080", "key")
+            _check_workspace_mcp_health("http://the content service:8080", "key")
 
         url = mock_requests.get.call_args[0][0]
-        assert url == "http://workspace-mcp:8080/clone-path/health"
+        assert url == "http://the content service:8080/clone-path/health"
         headers = mock_requests.get.call_args[1]["headers"]
         assert headers["Authorization"] == "Bearer key"
 
@@ -1281,12 +1281,12 @@ class TestCheckWorkspaceMcpHealth:
         with patch.dict(sys.modules, {"requests": mock_requests}):
             with pytest.raises(RuntimeError, match="not reachable"):
                 _check_workspace_mcp_health(
-                    "http://workspace-mcp:8080", "key", wait_seconds=0 # gitleaks:allow
+                    "http://the content service:8080", "key", wait_seconds=0 # gitleaks:allow
                 )
         assert mock_requests.get.call_count == 1
 
     def test_waits_for_a_workspace_mcp_that_is_still_starting(self):
-        """EVO-64616: a pod started during a workspace-mcp restart kept no
+        """issue-64616: a pod started during a the content service restart kept no
         clone backend until its own restart; startup now retries."""
         import sys
         from code_indexer.server.startup.clone_backend_wiring import (
@@ -1314,7 +1314,7 @@ class TestCheckWorkspaceMcpHealth:
 
         with patch.dict(sys.modules, {"requests": mock_requests}):
             _check_workspace_mcp_health(
-                "http://workspace-mcp:8080",
+                "http://the content service:8080",
                 "key",
                 wait_seconds=60,
                 sleep=sleep,
@@ -1340,7 +1340,7 @@ class TestCheckWorkspaceMcpHealth:
         with patch.dict(sys.modules, {"requests": mock_requests}):
             with pytest.raises(RuntimeError, match="waited 12s"):
                 w._check_workspace_mcp_health(
-                    "http://workspace-mcp:8080",
+                    "http://the content service:8080",
                     "key",
                     sleep=sleep,
                     clock=lambda: now[0],
@@ -1369,7 +1369,7 @@ class TestCheckWorkspaceMcpHealth:
         with patch.dict(sys.modules, {"requests": mock_requests}):
             with pytest.raises(RuntimeError, match=f"HTTP {status}"):
                 w._check_workspace_mcp_health(
-                    "http://workspace-mcp:8080",
+                    "http://the content service:8080",
                     "key",
                     wait_seconds=60,
                     sleep=slept.append,
@@ -1390,7 +1390,7 @@ class TestCheckWorkspaceMcpHealth:
         with patch.dict(sys.modules, {"requests": mock_requests}):
             with pytest.raises(RuntimeError, match="not reachable"):
                 w._check_workspace_mcp_health(
-                    "http://workspace-mcp:8080",
+                    "http://the content service:8080",
                     "key",
                     wait_seconds=60,
                     sleep=lambda s: None,

@@ -991,7 +991,7 @@ class TestFileChunkingManagerValidation:
         """
         Test that chunks with images[] field are routed to VoyageMultimodalClient.
 
-        This validates the routing logic (EVO-64616):
+        This validates the routing logic (issue-64616):
         1. EVERY chunk's text is submitted to the regular vector_manager
         2. Chunks with images[] are ALSO submitted to the multimodal path
         """
@@ -1029,7 +1029,7 @@ class TestFileChunkingManagerValidation:
         test_file_path.write_text("# Test\n\n![image](image.png)\n\nText")
         (tmp_path / "image.png").write_bytes(b"placeholder-image-bytes")
 
-        # Routing applies only while a multimodal client exists (EVO-64616):
+        # Routing applies only while a multimodal client exists (issue-64616):
         # without one, an image chunk's text is embedded like any other.
         multimodal_client = Mock()
         multimodal_client.get_multimodal_embedding.return_value = [0.2] * 1024
@@ -1165,7 +1165,7 @@ class TestFileChunkingManagerValidation:
             assert len(call_args[1]["image_paths"]) == 1
             assert call_args[1]["image_paths"][0] == test_image_path
 
-            # 2. Every chunk's text went to vector_manager (EVO-64616)
+            # 2. Every chunk's text went to vector_manager (issue-64616)
             assert [c["text"] for c in mock_vector_manager.submitted_chunks] == [
                 "# Test\n\n![Test Image](test_image.png)",
                 "Some text content.",
@@ -1331,7 +1331,7 @@ class TestFileChunkingManagerValidation:
             assert len(stored_embedding) == 1024
 
             # 3. Every chunk's text went through the normal vector_manager
-            #    path (EVO-64616)
+            #    path (issue-64616)
             assert [c["text"] for c in mock_vector_manager.submitted_chunks] == [
                 "# Architecture\n\n![Diagram](diagram.png)",
                 "Description here.",

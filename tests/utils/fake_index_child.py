@@ -14,7 +14,7 @@ call:
   no-work path (the default);
 
 Every other mode that exits 0 records the current chunk coverage version, as
-the real child does once it has checked the store (EVO-64616).
+the real child does once it has checked the store (issue-64616).
 - ``stale``: exit 0, a ``failed_files`` counter of 5 with no recorded path
   (failures no path-based retry reaches: refresh owes a full reconcile);
 - ``defect``: exit 88 (Story #2122 run-spend meter defect), the provider

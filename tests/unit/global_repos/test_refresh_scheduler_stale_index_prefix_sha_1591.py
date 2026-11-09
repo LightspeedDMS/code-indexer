@@ -152,7 +152,7 @@ def _write_metadata(source_path: Path, filename: str = "metadata.json", **fields
     metadata-voyage-ai.json, 13 metadata-cohere.json, only 2 bare legacy
     metadata.json. Bug #1591's provider-aware fix must read THIS file,
     not just the legacy one. The index is one checked for missing chunks
-    (EVO-64616) unless a test says not.
+    (issue-64616) unless a test says not.
     """
     fields.setdefault(CHUNK_COVERAGE_KEY, CHUNK_COVERAGE_VERSION)
     meta_dir = source_path / ".code-indexer"
