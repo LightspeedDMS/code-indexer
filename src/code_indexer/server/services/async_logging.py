@@ -17,12 +17,15 @@ thread, off the hot path.
 
 Design notes
 ------------
-* ``IdentityQueueHandler.prepare()`` is an identity no-op: it returns the record
-  unchanged. The stdlib ``QueueHandler.prepare`` formats ``record.message`` and
+* ``IdentityQueueHandler.prepare()`` does not format: it hands the listener a
+  shallow copy of the record with its args intact. The stdlib ``QueueHandler.prepare`` formats ``record.message`` and
   nulls ``record.args`` (useful for cross-process pickling). Our handlers are
   in-process, so doing that on the enqueue side would move formatting back onto
   the hot path -- defeating the purpose. Formatting happens on the listener
-  thread inside the real handlers.
+  thread inside the real handlers. The copy matters: the listener's handlers
+  redact their record in place, and a handler on the calling thread (pytest's
+  log capture, or one added without the redacting filter) may be formatting the
+  caller's record at that moment and write the unredacted traceback back.
 * Bounded queue (anti-unbounded-memory, Messi Rule #14) with a drop policy that
   mirrors :class:`SQLiteLogHandler`: ERROR/CRITICAL block briefly on a full queue
   rather than be lost; lower-severity records drop and are counted + surfaced via
@@ -36,6 +39,7 @@ Design notes
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import logging.handlers
 import queue
@@ -70,10 +74,10 @@ class IdentityQueueHandler(logging.handlers.QueueHandler):
 
     Two deliberate departures from the stdlib ``QueueHandler``:
 
-    1. :meth:`prepare` is an identity no-op -- it returns the record unchanged
-       (does NOT set ``record.message`` and does NOT null ``record.args``). The
-       in-process listener formats on its own thread; pre-formatting here would
-       put the cost back on the request hot path.
+    1. :meth:`prepare` does not format -- it returns a shallow copy of the
+       record (does NOT set ``record.message`` and does NOT null
+       ``record.args``). The in-process listener formats on its own thread;
+       pre-formatting here would put the cost back on the request hot path.
     2. :meth:`enqueue` implements a bounded-queue drop policy (the parent class
        does an unbounded ``queue.put_nowait`` and lets ``queue.Full`` propagate).
        ERROR/CRITICAL records block briefly; lower-severity records drop and are
@@ -95,13 +99,17 @@ class IdentityQueueHandler(logging.handlers.QueueHandler):
         return self._dropped
 
     def prepare(self, record: logging.LogRecord) -> logging.LogRecord:
-        """Return the record unchanged -- formatting happens on the listener.
+        """Return an unformatted copy of the record -- formatting happens on
+        the listener.
 
         The stdlib implementation calls ``self.format(record)`` and then nulls
         ``record.args`` / ``record.exc_info`` so the record can be pickled across
         a process boundary. Our QueueListener and its handlers run in-process, so
-        we keep the raw record and let the real handlers format it on the listener
-        thread (off the request hot path).
+        we keep the raw fields and let the real handlers format them on the
+        listener thread (off the request hot path). The listener gets its own
+        shallow copy because its handlers redact in place (see the module
+        docstring); the context below is injected first, so the caller's record
+        and the copy carry the same ids.
 
         Bug #1641: this method runs synchronously on the ORIGINAL calling
         (request) thread -- the last point before the record is handed off
@@ -143,7 +151,7 @@ class IdentityQueueHandler(logging.handlers.QueueHandler):
         inject_correlation_id(record)
         inject_trace_context(record)
         inject_otel_context(record)
-        return record
+        return copy.copy(record)
 
     def _record_drop(self) -> None:
         """Count a dropped record and surface it via a throttled stderr warning.

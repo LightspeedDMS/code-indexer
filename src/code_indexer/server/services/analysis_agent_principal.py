@@ -118,6 +118,8 @@ ANALYSIS_AGENT_TOOLS = frozenset(
         "poll_search_job",
         "cidx_fetch_cached_payload",
         "get_cached_content",
+        # The cidx-scip feature's tools: registered only where "scip" is
+        # enabled; elsewhere these names match no tool.
         "scip_definition",
         "scip_references",
         "scip_dependencies",
@@ -143,6 +145,8 @@ ANALYSIS_AGENT_TOOLS = frozenset(
         "git_file_at_revision",
         "git_search_commits",
         "git_search_diffs",
+        # The cidx-depmap feature's tools: registered only where "depmap" is
+        # enabled; elsewhere these names match no tool.
         "depmap_find_consumers",
         "depmap_get_cross_domain_graph",
         "depmap_get_domain_summary",

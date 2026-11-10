@@ -3,7 +3,9 @@ the bound on forced reconciles that leave it unchanged.
 
 When git reports no new commits, RefreshScheduler still forces a reconcile
 if a provider's index metadata shows an interrupted run or a commit other
-than the working-tree HEAD. This module turns the metadata of EVERY provider
+than the working-tree HEAD -- or recorded failures it still owes (issue-64616:
+an unattributed count or retryable paths, ``owed_failures_signal``). This
+module turns the metadata of EVERY provider
 (metadata_reader.read_index_states) plus the HEAD into one signal. Its key
 names the provider file, the stale value and HEAD, so two checks with the
 same key saw the same unchanged condition; a new commit or a status change
@@ -19,9 +21,14 @@ paths and the signal is forced again on the next cycle.
 from __future__ import annotations
 
 import logging
-from typing import Any, NamedTuple, Optional, Sequence
+import os
+import threading
+import time
+from collections import deque
+from typing import Any, Callable, Deque, NamedTuple, Optional, Sequence
 
 from code_indexer.server.services.metadata_reader import IndexState
+from code_indexer.services.chunk_coverage import CHUNK_COVERAGE_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +50,22 @@ _HEX_DIGITS = frozenset("0123456789abcdef")
 STATUS_SIGNAL = "status"
 # A recorded commit is not HEAD.
 COMMIT_DRIFT_SIGNAL = "commit_drift"
+# issue-64616: the last run recorded failures it still owes -- recorded paths
+# that still exist (retryable), or a failure COUNT with no recorded path
+# (unattributed, which only a reconcile finds). No upstream change will ever
+# re-run them, so the refresh must, bounded like every other signal.
+OWED_FAILURES_SIGNAL = "owed_failures"
+# issue-64616: a completed index not yet checked against the current chunk
+# routing (chunk_coverage) -- files indexed while image chunks bypassed the
+# text index are missing chunks, and reconcile re-processes only those. No
+# upstream change is needed for that, so the refresh forces it once.
+CHUNK_COVERAGE_SIGNAL = "chunk_coverage"
+# A completed index with no trigram index: it is built in a refresh's indexing
+# step, which a repository with nothing new upstream never reaches, so regex
+# search on it full-scans forever. The forced run is incremental (nothing is
+# re-embedded) and must publish, because the trigram index is not part of the
+# metadata a "nothing changed" check reads.
+TRIGRAM_SIGNAL = "trigram"
 
 
 class StaleSignal(NamedTuple):
@@ -52,13 +75,27 @@ class StaleSignal(NamedTuple):
     all_completed: bool  # every provider's recorded status is "completed"
 
     @property
+    def needs_reconcile(self) -> bool:
+        """Whether the forced run must be a ``--reconcile``. A chunk coverage
+        check runs in every incremental run of an unchecked index, which
+        reads only the stored payloads -- not every file -- so it needs none
+        (issue-64616); neither does building a trigram index, which re-embeds
+        nothing."""
+        return self.kind not in (CHUNK_COVERAGE_SIGNAL, TRIGRAM_SIGNAL)
+
+    @property
     def may_skip_unchanged_publish(self) -> bool:
         """True when a forced reconcile of this signal that changed nothing
         may publish nothing: only commit drift with every provider's run
         completed (the published snapshot already holds that content). A
         status signal means the previous run never published, so its
-        reconcile always publishes even when it finds nothing to index."""
-        return self.kind == COMMIT_DRIFT_SIGNAL and self.all_completed
+        reconcile always publishes even when it finds nothing to index. A
+        chunk coverage check that found every file complete changed nothing
+        either (issue-64616)."""
+        return (
+            self.kind in (COMMIT_DRIFT_SIGNAL, CHUNK_COVERAGE_SIGNAL)
+            and self.all_completed
+        )
 
 
 def stale_signal_from_states(
@@ -111,6 +148,141 @@ def stale_signal_from_states(
             all_completed=all_completed,
         )
     return None
+
+
+def owed_failures_signal(
+    failures: Any, head: Optional[str], alias_name: str
+) -> Optional[StaleSignal]:
+    """The signal of failures the last run recorded and still owes, or None.
+
+    *failures* is ``metadata_reader.read_recorded_failures``'s answer. Only a
+    KNOWN record owes (unknown metadata is the settle path's concern): a
+    retryable recorded path, or an unattributed count. Its key carries both
+    counts and HEAD, so a reconcile that heals nothing leaves the same key and
+    is bounded by ``admit_forced_reconcile`` like any other signal."""
+    if not failures.known or not (failures.unattributed or failures.retryable_paths):
+        return None
+    return StaleSignal(
+        key=(
+            f"owed failures unattributed={failures.unattributed} "
+            f"retryable={failures.retryable_paths} HEAD={head}"
+        ),
+        message=(
+            f"Recorded indexing failures of {alias_name} are still owed "
+            f"({failures.unattributed} without a path, {failures.retryable_paths} "
+            "retryable file(s)) despite no new git changes (issue-64616)"
+        ),
+        kind=OWED_FAILURES_SIGNAL,
+        all_completed=False,
+    )
+
+
+def chunk_coverage_signal(
+    states: Sequence[IndexState], head: Optional[str], alias_name: str
+) -> Optional[StaleSignal]:
+    """The signal of a completed provider index not yet checked against the
+    current chunk routing, or None (issue-64616, ``chunk_coverage``).
+
+    Only a COMPLETED run's metadata is judged: any other status is the
+    status signal's concern. The key carries the recorded version and HEAD,
+    so a reconcile that does not record the current version is bounded by
+    ``admit_forced_reconcile`` like any other signal."""
+    all_completed = all(state.status == "completed" for state in states)
+    for state in states:
+        if (
+            state.status != "completed"
+            or state.chunk_coverage_version >= CHUNK_COVERAGE_VERSION
+        ):
+            continue
+        return StaleSignal(
+            key=(
+                f"{state.source} chunk_coverage_version="
+                f"{state.chunk_coverage_version} HEAD={head}"
+            ),
+            message=(
+                f"Index of {alias_name} ({state.source}) was not checked for "
+                "files missing some of their chunks (issue-64616)"
+            ),
+            kind=CHUNK_COVERAGE_SIGNAL,
+            all_completed=all_completed,
+        )
+    return None
+
+
+def trigram_missing_signal(
+    states: Sequence[IndexState], head: Optional[str], alias_name: str
+) -> Optional[StaleSignal]:
+    """The signal of a completed index that has no trigram index, or None.
+
+    The caller has established that the trigram index is missing and can be
+    built here. Only a COMPLETED run's index is judged: any other status is
+    the status signal's concern, and no recorded state means no index. The
+    key carries HEAD, so a run that builds nothing leaves the same key and is
+    bounded by ``admit_forced_reconcile`` like any other signal."""
+    if not states or not all(state.status == "completed" for state in states):
+        return None
+    return StaleSignal(
+        key=f"trigram index missing HEAD={head}",
+        message=f"{alias_name} has no trigram index for regex search",
+        kind=TRIGRAM_SIGNAL,
+        all_completed=True,
+    )
+
+
+class ForcedRunPacer:
+    """At most ``max_runs`` admitted per ``window_seconds`` (sliding window).
+
+    Paces a backlog -- every repository of a fleet is missing the same index --
+    so the forced runs drain gradually instead of all at once. It bounds one
+    process; the durable per-repository bound is ``admit_forced_reconcile``.
+    A refused attempt records nothing, so it neither extends the window nor
+    touches a repository's forced-reconcile count (the caller must not clear
+    that count to defer: a cleared count would never reach its bound).
+    """
+
+    def __init__(
+        self,
+        max_runs: int,
+        window_seconds: float,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.max_runs = max_runs
+        self.window_seconds = window_seconds
+        self._clock = clock
+        self._admitted: Deque[float] = deque()
+        self._lock = threading.Lock()
+
+    def try_acquire(self) -> bool:
+        now = self._clock()
+        with self._lock:
+            while self._admitted and now - self._admitted[0] >= self.window_seconds:
+                self._admitted.popleft()
+            if len(self._admitted) >= self.max_runs:
+                return False
+            self._admitted.append(now)
+            return True
+
+
+#: Turns the trigram backfill ON (``1`` / ``true``); off when unset. A refresh
+#: that forces a run for every repository missing a trigram index touches the
+#: whole fleet, so an environment opts in deliberately, the way the semantic
+#: backfill ships off until an operator enables it.
+TRIGRAM_BACKFILL_ENV = "CIDX_TRIGRAM_BACKFILL"
+
+
+def trigram_backfill_enabled() -> bool:
+    return os.environ.get(TRIGRAM_BACKFILL_ENV, "") in ("1", "true", "True")
+
+
+#: Forced trigram builds admitted per process per window. Each is a full refresh
+#: cycle (incremental index, trigram build, publish of a new snapshot), so a
+#: fleet of ~900 repositories drains over hours, not in one burst.
+TRIGRAM_FORCED_RUNS_PER_WINDOW = 4
+TRIGRAM_FORCED_WINDOW_SECONDS = 300.0
+trigram_forced_run_pacer = ForcedRunPacer(
+    max_runs=TRIGRAM_FORCED_RUNS_PER_WINDOW,
+    window_seconds=TRIGRAM_FORCED_WINDOW_SECONDS,
+)
 
 
 def admit_forced_reconcile(

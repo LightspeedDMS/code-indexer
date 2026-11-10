@@ -1348,6 +1348,17 @@ class JobTracker:
             fetched = conn.execute(sql, params).fetchall()
         return [_tracked_job_to_dict(_row_to_tracked_job(row)) for row in fetched]
 
+    def active_job_id(self, operation_type: str, repo_alias: str) -> Optional[str]:
+        """The job_id of the active (pending or running) job for
+        (*operation_type*, *repo_alias*), or None.
+
+        One direct, cluster-wide lookup -- unlike ``check_operation_conflict``'s
+        paginated ``list_jobs`` scan, which can miss the row (Bug #1220). A
+        store read failure RAISES: a caller deciding whether it may write must
+        never read "could not ask" as "no job".
+        """
+        return self._find_blocking_active_job_id(operation_type, repo_alias)
+
     def check_operation_conflict(
         self,
         operation_type: str,

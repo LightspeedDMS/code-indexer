@@ -30,18 +30,20 @@ from code_indexer.server.repositories.activated_repo_manager import (
 )
 from code_indexer.server.services.config_service import get_config_service  # noqa: F401
 from code_indexer.global_repos.alias_manager import AliasManager
+from ._catalog_history import guard_branch_tools
+from .cached_payload import _register as _cached_payload_register
+from .cancel_job import _register as _cancel_job_register
 
 # Shared utilities extracted to _utils.py (Story #496 refactoring)
 from . import _utils  # noqa: F401 — tests patch _legacy._utils
+from code_indexer.server.startup.content_backend_wiring import (
+    is_content_seam_delegated,
+)
 from ._catalog_history import catalog_history_refusal
 from ._utils import (
-    _get_scip_audit_repository,  # noqa: F401 — re-exported via handlers namespace
     _get_golden_repos_dir,
     _get_global_repo,
     _get_access_filtering_service,
-    _get_scip_query_service,  # noqa: F401 — re-exported via handlers namespace
-    _apply_scip_payload_truncation,  # noqa: F401 — re-exported via handlers namespace
-    _validate_symbol_format,  # noqa: F401 — re-exported via handlers namespace
     # Re-imported for test patch compatibility (tests patch _legacy.X)
     _expand_wildcard_patterns,  # noqa: F401
     _get_query_tracker,  # noqa: F401
@@ -105,8 +107,6 @@ from .repos import _register as _repos_register  # noqa: F401, E402
 
 _repos_register(HANDLER_REGISTRY)
 
-from ._catalog_history import guard_branch_tools  # noqa: E402
-
 guard_branch_tools(HANDLER_REGISTRY)
 
 from .repos import (  # noqa: F401, E402
@@ -122,6 +122,8 @@ from .repos import (  # noqa: F401, E402
     check_hnsw_health,
     add_golden_repo,
     remove_golden_repo,
+    rename_golden_repo,
+    sync_golden_catalog,
     refresh_golden_repo,
     change_golden_repo_branch,
     get_all_repositories_status,
@@ -203,18 +205,36 @@ def _resolve_repo_path(repo_identifier: str, golden_repos_dir: str) -> Optional[
     """
     # Step 0: Try alias JSON target_path (authoritative for read operations)
     # AliasManager.read_alias() returns the versioned snapshot path
-    aliases_path = Path(golden_repos_dir) / "aliases"
-    if aliases_path.is_dir():
-        alias_manager = AliasManager(str(aliases_path))
+    from code_indexer.global_repos.alias_manager import resolve_alias_or_index_path
+
+    delegated = is_content_seam_delegated()
+    alias_manager = AliasManager.existing(Path(golden_repos_dir) / "aliases")
+    if alias_manager is not None:
+        # Bug #1315: look up repo_entry for index_path fallback
+        legacy_repo_entry = _get_global_repo(repo_identifier)
         # Try the identifier directly (e.g. "cidx-meta-global")
-        alias_path = alias_manager.read_alias(repo_identifier)
-        if alias_path and Path(alias_path).is_dir():
+        alias_path = resolve_alias_or_index_path(
+            alias_manager,
+            alias_name=repo_identifier,
+            repo_entry=legacy_repo_entry,
+            skip_fs_check=delegated,
+        )
+        if alias_path and (delegated or Path(alias_path).is_dir()):
             return str(alias_path)
         # If not -global, try with -global suffix
         if not repo_identifier.endswith("-global"):
-            alias_path = alias_manager.read_alias(f"{repo_identifier}-global")
-            if alias_path and Path(alias_path).is_dir():
+            legacy_repo_entry_global = _get_global_repo(f"{repo_identifier}-global")
+            alias_path = resolve_alias_or_index_path(
+                alias_manager,
+                alias_name=f"{repo_identifier}-global",
+                repo_entry=legacy_repo_entry_global,
+                skip_fs_check=delegated,
+            )
+            if alias_path and (delegated or Path(alias_path).is_dir()):
                 return str(alias_path)
+
+    if delegated:
+        return _registry_index_path_dir(repo_identifier)
 
     # Try as full path first
     if not repo_identifier.endswith("-global"):
@@ -264,22 +284,76 @@ def _resolve_repo_path(repo_identifier: str, golden_repos_dir: str) -> Optional[
         return versioned_path
 
     # Fallback: Return index_path if it exists as a directory (for non-git operations like regex_search)
-    if index_path:
-        index_path_obj = Path(index_path)
-        if index_path_obj.is_dir():
-            return str(index_path)
+    return _registry_index_path_dir(repo_identifier)
 
+
+def _registry_index_path_dir(repo_identifier: str) -> Optional[str]:
+    """The registry's index_path for *repo_identifier* when it is a directory."""
+    repo_entry = _get_global_repo(repo_identifier)
+    index_path = repo_entry.get("index_path") if repo_entry else None
+    if index_path and (is_content_seam_delegated() or Path(index_path).is_dir()):
+        return str(index_path)
     return None
 
 
-def _resolve_git_repo_path(
+def _has_git_dir(repo_path: str) -> bool:
+    """Whether *repo_path* is a git working copy: ``.git`` on this pod, or --
+    when the repository is not on this pod -- asked of the git seam.
+
+    The seam probe is ``rev-parse --is-inside-work-tree``: git-mcp's git_exec
+    policy refuses ``--git-dir`` (an absolute path on the git-mcp pod), so
+    probing with it failed every git tool on an activated repository.
+    """
+    if not is_content_seam_delegated():
+        return (Path(repo_path) / ".git").exists()
+    from code_indexer.server.services.git_tools_seam import delegated_git_tools
+
+    tools = delegated_git_tools()
+    if tools is None:
+        return False
+    probe = tools.run(
+        ["git", "rev-parse", "--is-inside-work-tree"], repo_path, check=False
+    )
+    return probe.returncode == 0 and probe.stdout.strip() == "true"
+
+
+def _resolve_delegated_activated_git_path(
     repository_alias: str, username: str
+) -> Tuple[Optional[str], Optional[str]]:
+    """The user's activated copy on a pod without it: the registry (the
+    server's DI-wired manager) says whether it is activated for THIS user,
+    and the git seam whether it is a git working copy."""
+    manager = _utils._get_activated_repo_manager()
+    if manager is None or not manager.user_has_activated_repo(
+        username, repository_alias
+    ):
+        return None, f"User-activated repository '{repository_alias}' not found."
+    repo_path = str(
+        manager.get_activated_repo_path(username=username, user_alias=repository_alias)
+    )
+    if not _has_git_dir(repo_path):
+        return None, (
+            f"Repository '{repository_alias}' does not have a .git directory "
+            "and does not support git operations."
+        )
+    return repo_path, None
+
+
+def _resolve_git_repo_path(
+    repository_alias: str, username: str, *, via_git_backend: bool = False
 ) -> Tuple[Optional[str], Optional[str]]:
     """Resolve repository path for git operations.
 
     For global repos (ending in -global): validates that the resolved path
     has a .git directory. Local repos (e.g. cidx-meta-global backed by
     local://) have no .git and git operations are not meaningful.
+
+    With ``content_backend: delegated`` a golden repository is not on this pod
+    (no ``.git`` to probe). A caller that runs git through the git seam
+    (``via_git_backend``, see ``delegated_golden_git_backend``) gets the path
+    git-mcp sees it at -- the base clone behind a versioned snapshot. Every
+    other caller runs local git, so it gets a refusal naming why instead of
+    the misleading "is a local repository".
 
     For user-activated repos: returns the activated-repo path if it exists.
 
@@ -310,22 +384,24 @@ def _resolve_git_repo_path(
         resolved = _resolve_repo_path(repository_alias, golden_repos_dir)
         if resolved is None:
             return None, f"Repository '{repository_alias}' not found."
-        if not (Path(resolved) / ".git").exists():
+        if is_content_seam_delegated():
+            return _resolve_delegated_golden_git_path(
+                repository_alias, username, resolved, via_git_backend=via_git_backend
+            )
+        if not _has_git_dir(resolved):
             return None, (
                 f"Repository '{repository_alias}' is a local repository "
                 "and does not support git operations."
             )
 
-        # Story #387: Group access check - invisible repo pattern
-        # Strip -global suffix to match base name stored in accessible repos set
-        access_filtering_service = _get_access_filtering_service()
-        if access_filtering_service is not None:
-            base_alias = repository_alias[: -len("-global")]
-            accessible = access_filtering_service.get_accessible_repos(username)
-            if base_alias not in accessible:
-                return None, f"Repository '{repository_alias}' not found."
+        denied = _golden_access_denied(repository_alias, username)
+        if denied is not None:
+            return None, denied
 
         return resolved, None
+
+    if is_content_seam_delegated():
+        return _resolve_delegated_activated_git_path(repository_alias, username)
 
     # Bug #1151: derive data_dir from CIDX_SERVER_DATA_DIR (same as service_init.py:162-163/195)
     # so non-default-data-dir deployments resolve activated repos correctly.
@@ -348,15 +424,49 @@ def _resolve_git_repo_path(
     return repo_path, None
 
 
+def _golden_access_denied(repository_alias: str, username: str) -> Optional[str]:
+    """Story #387 group access check (invisible repo pattern): the error, or None."""
+    # Strip -global suffix to match base name stored in accessible repos set
+    access_filtering_service = _get_access_filtering_service()
+    if access_filtering_service is not None:
+        base_alias = repository_alias[: -len("-global")]
+        accessible = access_filtering_service.get_accessible_repos(username)
+        if base_alias not in accessible:
+            return f"Repository '{repository_alias}' not found."
+    return None
+
+
+def _resolve_delegated_golden_git_path(
+    repository_alias: str, username: str, resolved: str, *, via_git_backend: bool
+) -> Tuple[Optional[str], Optional[str]]:
+    """``_resolve_git_repo_path`` for a golden repo on a delegated pod.
+
+    Access is checked first, so a refusal never reveals an invisible repo.
+    """
+    from code_indexer.server.services.delegated_refusal import delegated_refusal
+    from code_indexer.server.startup.content_backend_wiring import (
+        golden_repo_content_root,
+    )
+
+    denied = _golden_access_denied(repository_alias, username)
+    if denied is not None:
+        return None, denied
+    if not via_git_backend:
+        return None, delegated_refusal(
+            f"This git tool on golden repository '{repository_alias}'",
+            "it runs git on this pod, and only git-mcp holds the repository",
+        )
+    content_root = golden_repo_content_root(resolved, consumer="git tools")
+    return str(content_root), None
+
+
 # Extracted to files.py (Story #496)
 from .files import handle_directory_tree  # noqa: F401, E402
 
 # Register file operation handlers from files.py (Story #496)
 from .files import _register as _files_register  # noqa: E402
-from .memory import _register as _memory_register  # noqa: E402
 
 _files_register(HANDLER_REGISTRY)
-_memory_register(HANDLER_REGISTRY)
 _search_register(HANDLER_REGISTRY)
 
 
@@ -368,32 +478,12 @@ from .ssh_keys import (  # noqa: F401, E402
 )
 from .ssh_keys import _register as _ssh_keys_register  # noqa: E402
 from .guides import _register as _guides_register  # noqa: E402
-from .scip import _register as _scip_register  # noqa: E402
 
 _ssh_keys_register(HANDLER_REGISTRY)
 _guides_register(HANDLER_REGISTRY)
-_scip_register(HANDLER_REGISTRY)
 
-# SCIP handlers extracted to scip.py (Story #496).
-# Re-exported here so that tests importing directly from _legacy continue to work.
-from .scip import (  # noqa: F401, E402
-    scip_definition,
-    scip_references,
-    scip_dependencies,
-    scip_dependents,
-    scip_impact,
-    scip_callchain,
-    scip_context,
-    get_scip_audit_log,
-    handle_scip_pr_history,
-    handle_scip_cleanup_history,
-    handle_scip_cleanup_workspaces,
-    handle_scip_cleanup_status,
-    _parse_log_details as _parse_log_details,
-    _get_pr_logs_from_service as _get_pr_logs_from_service,
-    _get_cleanup_logs_from_service as _get_cleanup_logs_from_service,
-    _execute_workspace_cleanup,
-)
+# SCIP handlers moved into the cidx-scip feature (modular phase 4d): the core
+# installs them from the feature's tools() when "scip" is enabled.
 
 
 # =============================================================================
@@ -520,8 +610,6 @@ _cicd_register(HANDLER_REGISTRY)
 # Story #679: Semantic Search with Payload Control - Cache Retrieval Handler
 # ============================================================================
 
-from .depmap import _register as _depmap_register  # noqa: E402
-
 
 # handle_query_audit_logs, handle_enter_maintenance_mode, handle_exit_maintenance_mode
 # extracted to admin.py (Story #496)
@@ -530,7 +618,7 @@ from .depmap import _register as _depmap_register  # noqa: E402
 # handle_get_maintenance_status extracted to admin.py (Story #496)
 # handle_scip_pr_history, handle_scip_cleanup_history, handle_scip_cleanup_workspaces,
 # handle_scip_cleanup_status, _cleanup_job_state, _execute_workspace_cleanup
-# extracted to scip.py (Story #496)
+# moved into the cidx-scip feature (modular phase 4d)
 
 
 # list_repo_categories extracted to repos.py (Story #496)
@@ -569,27 +657,23 @@ from .admin import (  # noqa: F401, E402
     handle_set_global_config,
     trigger_reindex,
     get_index_status,
-    handle_trigger_dependency_analysis,
 )
 
-from .xray import _register as _xray_register  # noqa: E402
-from .xray_batch import _register as _xray_batch_register  # noqa: E402
-from .xray_graph import _register as _xray_graph_register  # noqa: E402
-
 _admin_register(HANDLER_REGISTRY)
-_depmap_register(HANDLER_REGISTRY)
-_xray_register(HANDLER_REGISTRY)
-_xray_batch_register(HANDLER_REGISTRY)
-_xray_graph_register(HANDLER_REGISTRY)
+# cidx_fetch_cached_payload and cancel_job serve every tool. X-Ray's own MCP
+# tools are contributed by the cidx-xray feature (tools() hook), installed by
+# server/features/tools.py when "xray" is in enabled_features.
+_cached_payload_register(HANDLER_REGISTRY)
+_cancel_job_register(HANDLER_REGISTRY)
 
 
 # ---------------------------------------------------------------------------
 # Module-level forwarding for mock-patch compatibility
 # ---------------------------------------------------------------------------
 # When domain handlers are extracted from this module into separate files
-# (e.g. scip.py, guides.py), those modules import utilities like
-# `_get_scip_query_service` directly from `_utils`.  Tests that patch
-# `code_indexer.server.mcp.handlers._legacy._get_scip_query_service` would
+# (e.g. guides.py, ssh_keys.py), those modules import utilities like
+# `_mcp_response` directly from `_utils`.  Tests that patch
+# `code_indexer.server.mcp.handlers._legacy._mcp_response` would
 # normally only update the binding in THIS module's global dict, leaving the
 # domain module's binding untouched.
 #
@@ -605,7 +689,6 @@ class _LegacyForwardingModule(types.ModuleType):
         super().__setattr__(name, value)
         if not name.startswith("__"):
             for _submod_name in (
-                "code_indexer.server.mcp.handlers.scip",
                 "code_indexer.server.mcp.handlers.guides",
                 "code_indexer.server.mcp.handlers.ssh_keys",
                 "code_indexer.server.mcp.handlers.pull_requests",
@@ -616,7 +699,6 @@ class _LegacyForwardingModule(types.ModuleType):
                 "code_indexer.server.mcp.handlers.files",
                 "code_indexer.server.mcp.handlers.repos",
                 "code_indexer.server.mcp.handlers.search",
-                "code_indexer.server.mcp.handlers.depmap",
             ):
                 _submod = sys.modules.get(_submod_name)
                 if _submod is not None and name in _submod.__dict__:

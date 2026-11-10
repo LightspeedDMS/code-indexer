@@ -30,13 +30,6 @@ logger = logging.getLogger(__name__)
 _postgres_pools_for_cleanup: List[Any] = []
 _postgres_pools_lock = threading.Lock()
 
-# Story #1787 S2 amendment AC16: node-local TTL for the K-calibration read
-# cache -- keeps calibration reads off any future admission hot path
-# without ever letting nodes diverge (the underlying store is always the
-# same cluster-shared database; this only bounds how often each node
-# re-reads it). See TTLCachedKProvider's own docstring for the rationale.
-_XRAY_K_CALIBRATION_TTL_SECONDS = 300.0
-
 
 def _cleanup_postgres_pools() -> None:
     """Close all PostgreSQL connection pools on process exit (Bug #567).
@@ -133,9 +126,6 @@ def initialize_services() -> Dict[str, Any]:
         RepositoryListingManager,
     )
     from code_indexer.server.query.semantic_query_manager import SemanticQueryManager
-    from code_indexer.server.services.workspace_cleanup_service import (
-        WorkspaceCleanupService,
-    )
     from code_indexer.server.app_helpers import set_server_start_time
     from code_indexer.server.startup.bootstrap import (
         migrate_legacy_cidx_meta,
@@ -206,27 +196,22 @@ def initialize_services() -> Dict[str, Any]:
         extra={"correlation_id": get_correlation_id()},
     )
 
-    # Story #1787 S2 amendment AC14 (dual-review defect H4/H6): the X-Ray
-    # graph-build wire-file cache must ALSO be governor-visible for YELLOW
-    # proactive eviction. attach_cache() is single-slot -- a second,
-    # unguarded call here would silently REPLACE the HNSW registration, so
-    # both caches are composed behind ONE CompositeLRUCache before the
-    # sole attach_cache() call (ADR-003 Decision 4).
-    from code_indexer.server.services.xray_graph_governor.cache_proxy import (
-        XrayGraphCacheProxy,
-        set_xray_graph_cache,
-    )
-    from code_indexer.server.services.xray_graph_governor.cache_governor_bridge import (
+    # Story #1787 S2 amendment AC14 (ADR-003 Decision 4): attach_cache() is
+    # single-slot, so every governor-visible cache sits behind ONE
+    # CompositeLRUCache. The HNSW cache is the core's; a feature add-on adds
+    # its own (X-Ray's graph wire-file cache) through the server platform's
+    # attach_governed_cache() when it starts.
+    from code_indexer.server.feature_platform import set_governed_cache_composite
+    from code_indexer.server.services.governed_cache_composite import (
         CompositeLRUCache,
     )
 
-    _xray_graph_cache = XrayGraphCacheProxy()
-    _xray_composite_cache = CompositeLRUCache(
-        [_server_hnsw_cache, _xray_graph_cache], floor_per_cache=YELLOW_LRU_FLOOR
+    _governed_composite_cache = CompositeLRUCache(
+        [_server_hnsw_cache], floor_per_cache=YELLOW_LRU_FLOOR
     )
-    set_xray_graph_cache(_xray_graph_cache)
+    set_governed_cache_composite(_governed_composite_cache)
     # Story 4: wire caches into governor for YELLOW proactive LRU eviction.
-    _memory_governor.attach_cache(_xray_composite_cache)
+    _memory_governor.attach_cache(_governed_composite_cache)
 
     # Initialize server-side FTS cache for FTS query performance
     _server_fts_cache = get_global_fts_cache()
@@ -267,6 +252,17 @@ def initialize_services() -> Dict[str, Any]:
     from code_indexer.server.services.config_service import get_config_service
 
     config_service = get_config_service()
+
+    # issue-64616: SCIP query delegation was removed. A config.json still setting
+    # scip_query_backend to anything but 'local' stops startup here, before the
+    # SQLite runtime-config initialisation below strips config.json to
+    # bootstrap keys and with it the removed key. A config.json read failure is
+    # only logged.
+    from code_indexer.server.startup.removed_scip_settings import (
+        check_scip_query_backend_at_startup,
+    )
+
+    check_scip_query_backend_at_startup(config_service.config_manager.read_config_file)
     server_config = config_service.get_config()
 
     # Story #528: JWT secret manager init moved after storage mode detection below,
@@ -448,21 +444,23 @@ def initialize_services() -> Dict[str, Any]:
             extra={"correlation_id": get_correlation_id()},
         )
 
-    # Story #1787 S2 amendment AC16 (dual-review defect H4/H6): construct
-    # the TTL-cached K-calibration provider now that the storage-mode-
-    # appropriate backend (SQLite or PostgreSQL) is known. Installed as a
-    # process-level singleton (mirroring set_memory_governor()) so a
-    # future graph-build call site retrieves this SAME instance.
-    from code_indexer.server.services.xray_graph_governor.k_calibration_store import (
-        TTLCachedKProvider,
-        set_xray_k_provider,
+    # Content seam step 5a: golden-repo aliases and write-mode markers live in
+    # the registry. Installed before anything below can resolve or publish an
+    # alias; the import of the existing files runs on a daemon thread, with
+    # reads falling back to the files until it finishes.
+    from code_indexer.server.startup.content_backend_wiring import (
+        content_backend_name as _content_backend_name,
+    )
+    from code_indexer.server.startup.control_plane_metadata_wiring import (
+        install_registry_metadata,
     )
 
-    _xray_k_ttl_provider = TTLCachedKProvider(
-        store=_backend_registry.xray_k_calibration,
-        ttl_seconds=_XRAY_K_CALIBRATION_TTL_SECONDS,
+    install_registry_metadata(
+        _backend_registry,
+        Path(data_dir) / "golden-repos",
+        storage_mode=_storage_mode,
+        content_backend=_content_backend_name(server_config),
     )
-    set_xray_k_provider(_xray_k_ttl_provider)
 
     # Bug #575: Wire session manager to DB backend (SQLite or PG) for cluster support.
     # The module-level singleton starts in JSON file mode; set_backend() switches it
@@ -529,37 +527,49 @@ def initialize_services() -> Dict[str, Any]:
         storage_backend=_backend_registry.oauth if _backend_registry else None,
     )
 
-    # Story #19: Initialize SCIP audit database eagerly at startup
-    # This ensures scip_audit.db exists before health checks run,
-    # preventing RED status on fresh installs.
-    from code_indexer.server.startup.database_init import initialize_scip_audit_database
-
-    scip_audit_path = initialize_scip_audit_database(server_data_dir)
-    if scip_audit_path:
-        logger.info(
-            f"SCIP audit database initialized: {scip_audit_path}",
-            extra={"correlation_id": get_correlation_id()},
-        )
-    else:
-        logger.warning(
-            format_error_log(
-                "APP-GENERAL-028",
-                "SCIP audit database initialization failed (non-blocking)",
-            )
-        )
-
-    # Initialize SCIPAuditRepository with backend support for cluster mode
-    from code_indexer.server.repositories.scip_audit import SCIPAuditRepository
-
-    scip_audit_repository = SCIPAuditRepository(
-        storage_backend=_backend_registry.scip_audit if _backend_registry else None,
-    )
-
     # Load server configuration for resource limits and timeouts
     server_config = config_service.get_config()
 
     # Initialize managers with resource configuration
     # (data_dir and db_path_str already computed above for storage mode detection)
+
+    # issue-64678 Phase 3: resolve the git backend ONCE and share it across every
+    # git-executing manager built here. `local` (default) yields a plain
+    # LocalGitBackend — identical to prior behaviour; `delegated` yields the
+    # git-mcp-backed backend (fails loud if the plugin is unavailable).
+    from code_indexer.server.startup.git_backend_wiring import (
+        build_configured_git_backend,
+    )
+
+    _git_backend = build_configured_git_backend(server_config)
+
+    # Content seam, same shape: the golden-repo manager has to know whether the
+    # repositories are on this pod (local) or with workspace-mcp (delegated).
+    from code_indexer.server.startup.content_backend_wiring import (
+        build_configured_content_backend,
+    )
+
+    _content_backend = build_configured_content_backend(server_config)
+
+    # issue-64616: a delegated content backend needs a CLI invoker plugin for
+    # description generation -- checked once here, not per golden repo add.
+    # Skipped while generation is opted out, so the flag stays a rollback lever.
+    from code_indexer.server.services.cli_invoker_plugin import (
+        require_invoker_for_delegated_content,
+    )
+    from code_indexer.server.startup.content_backend_wiring import (
+        content_backend_name,
+    )
+    from code_indexer.server.utils.config_manager import (
+        golden_description_generation_enabled,
+    )
+
+    require_invoker_for_delegated_content(
+        content_backend_name(server_config),
+        description_generation_enabled=golden_description_generation_enabled(
+            server_config
+        ),
+    )
 
     golden_repo_manager = GoldenRepoManager(
         data_dir=data_dir,
@@ -568,6 +578,8 @@ def initialize_services() -> Dict[str, Any]:
         storage_backend=(
             _backend_registry.golden_repo_metadata if _backend_registry else None
         ),
+        git_backend=_git_backend,
+        content_backend=_content_backend,
     )
     if _backend_registry is not None:
         golden_repo_manager._global_repos_backend = _backend_registry.global_repos
@@ -730,6 +742,7 @@ def initialize_services() -> Dict[str, Any]:
         data_dir=data_dir,
         golden_repo_manager=golden_repo_manager,
         background_job_manager=background_job_manager,
+        git_backend=_git_backend,
     )
 
     # Inject ActivatedRepoManager for cascade deletion support
@@ -768,13 +781,6 @@ def initialize_services() -> Dict[str, Any]:
         background_job_manager=background_job_manager,
     )
 
-    # Initialize WorkspaceCleanupService for SCIP workspace cleanup (Story #647)
-    workspace_cleanup_service = WorkspaceCleanupService(
-        config=server_config,
-        job_manager=background_job_manager,
-        workspace_root="/tmp",  # Standard temp directory for SCIP workspaces
-    )
-
     # Initialize MCP credential manager
     from code_indexer.server.auth.mcp_credential_manager import MCPCredentialManager
 
@@ -806,7 +812,6 @@ def initialize_services() -> Dict[str, Any]:
         "activated_repo_manager": activated_repo_manager,
         "repository_listing_manager": repository_listing_manager,
         "semantic_query_manager": semantic_query_manager,
-        "workspace_cleanup_service": workspace_cleanup_service,
         "mcp_credential_manager": mcp_credential_manager,
         "mcp_registration_service": mcp_registration_service,
         "config_service": config_service,
@@ -819,7 +824,6 @@ def initialize_services() -> Dict[str, Any]:
         "backend_registry": _backend_registry,
         "_server_hnsw_cache": _server_hnsw_cache,
         "_server_fts_cache": _server_fts_cache,
-        "scip_audit_repository": scip_audit_repository,
         "latency_tracker": latency_tracker,
         "memory_governor": _memory_governor,
     }

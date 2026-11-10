@@ -52,6 +52,7 @@ from .vector_quantizer import VectorQuantizer
 from .projection_matrix_manager import ProjectionMatrixManager
 from .temporal_metadata_store import TemporalMetadataStore
 from .hnsw_stale_logger import log_hnsw_stale
+from code_indexer.utils.blob_hash import git_blob_hash_bytes
 from code_indexer.utils.file_locking import fsync_directory, nfs_safe_fsync
 from code_indexer.utils.content_availability import CONTENT_UNAVAILABLE_KEY
 from code_indexer.utils.source_text_decoding import (
@@ -678,7 +679,7 @@ class PathIndex:
         self.save_snapshot(self.snapshot(), path)
 
     @classmethod
-    def load(cls, path: Path) -> "PathIndex":
+    def load(cls, path: Path, *, strict: bool = False) -> "PathIndex":
         """Load path index from disk. Returns an empty ``PathIndex`` if
         the file is missing OR corrupt/truncated (Bug #1575 round 6 item
         3: never raise uncaught -- a bad bin must not brick
@@ -687,6 +688,10 @@ class PathIndex:
 
         Args:
             path: File path to load from
+            strict: raise ``ValueError`` for a corrupt/unreadable file instead
+                of treating it as absent -- for a READER that would otherwise
+                serve "no files" (the listing served from the index must fall
+                back to the walk, never answer empty).
         """
         instance = cls()
 
@@ -697,6 +702,10 @@ class PathIndex:
             with open(path, "rb") as f:
                 serialized_data = msgpack.load(f)
         except (ValueError, msgpack.exceptions.UnpackException, OSError) as exc:
+            if strict:
+                raise ValueError(
+                    f"Corrupt/unreadable path_index.bin at {path}"
+                ) from exc
             logging.getLogger(__name__).warning(
                 "Corrupt/unreadable path_index.bin at %s -- treating as absent (%s)",
                 path,
@@ -705,6 +714,8 @@ class PathIndex:
             return instance
 
         if not isinstance(serialized_data, dict):
+            if strict:
+                raise ValueError(f"path_index.bin at {path} is not a mapping")
             logging.getLogger(__name__).warning(
                 "path_index.bin at %s did not deserialize to a dict -- "
                 "treating as absent",
@@ -719,6 +730,15 @@ class PathIndex:
         }
 
         return instance
+
+    def file_paths(self) -> List[str]:
+        """Repo-relative paths of every indexed file (the reverse-index keys).
+
+        issue-66189: a cheap file listing that avoids stat-walking the working tree over
+        NFS — the keys are exactly the indexed source files (already excludes .code-indexer/
+        .git/gitignored). Caller holds no lock: read-only snapshot of the loaded index.
+        """
+        return list(self._path_index.keys())
 
 
 class FilesystemVectorStore:
@@ -986,6 +1006,9 @@ class FilesystemVectorStore:
         self._cached_repo_root: Optional[Path] = None
         self._repo_root_cached: bool = False
         self._repo_root_lock: threading.Lock = threading.Lock()
+        # Set by an indexing pass whose repository is behind a delegated
+        # content or git backend (mark_repository_delegated).
+        self._repository_delegated: bool = False
 
         # Story #1456: production write-path opt-in (see __init__ docstring).
         # Bug #1528: the caller's TRI-STATE value is ALSO retained verbatim,
@@ -3842,63 +3865,17 @@ class FilesystemVectorStore:
                 )
         return len(deleted)
 
-    def _prepare_vector_data(
-        self,
-        point_id: str,
-        vector: np.ndarray,
-        payload: Dict[str, Any],
-        repo_root: Optional[Path],
-    ) -> Dict[str, Any]:
-        """Prepare vector data with git-aware storage logic.
+    def mark_repository_delegated(self) -> None:
+        """This store indexes a repository that is NOT on this machine.
 
-        Args:
-            point_id: Unique point identifier
-            vector: Vector data
-            payload: Point payload
-            repo_root: Git repository root (None if not a git repo)
-
-        Returns:
-            Dictionary ready for JSON serialization
+        Called by an indexing pass reading through a delegated content (or git)
+        backend. Writes then never ask local git for the repository root, its
+        HEAD blob hashes or its uncommitted files: every chunk keeps its text
+        (``chunk_text``), so its content never depends on a git object store
+        this machine does not have -- what such a pod got before, by local git
+        failing, now by decision.
         """
-        data = {
-            "id": point_id,
-            "vector": vector.tolist(),
-            "file_path": payload.get("path", ""),
-            "start_line": payload.get("start_line", 0),
-            "end_line": payload.get("end_line", 0),
-            "metadata": {
-                "language": payload.get("language", ""),
-                "type": payload.get("type", "content"),
-            },
-        }
-
-        file_path = payload.get("path", "")
-
-        # Git-aware chunk storage logic
-        if repo_root:
-            # Check if this specific file has uncommitted changes
-            has_uncommitted = self._file_has_uncommitted_changes(file_path, repo_root)
-
-            if not has_uncommitted:
-                # File is clean: try to get blob hash
-                blob_hash = self._get_git_blob_hash(file_path, repo_root)
-                if blob_hash:
-                    # Store only blob hash (space efficient)
-                    data["git_blob_hash"] = blob_hash
-                    data["indexed_with_uncommitted_changes"] = False
-                else:
-                    # File not in git (untracked): store chunk text
-                    data["chunk_text"] = payload.get("content", "")
-                    data["indexed_with_uncommitted_changes"] = True
-            else:
-                # File has uncommitted changes: store chunk text
-                data["chunk_text"] = payload.get("content", "")
-                data["indexed_with_uncommitted_changes"] = True
-        else:
-            # Non-git repo: always store chunk_text
-            data["chunk_text"] = payload.get("content", "")
-
-        return data
+        self._repository_delegated = True
 
     def _get_repo_root(self) -> Optional[Path]:
         """Get git repository root directory (memoized).
@@ -3907,9 +3884,14 @@ class FilesystemVectorStore:
         Both positive (Path) and negative (None) results are cached after the
         first call so the subprocess runs at most once per instance.
 
+        None, without running git, for a delegated repository
+        (``mark_repository_delegated``).
+
         Returns:
             Path to git repo root, or None if not a git repo
         """
+        if getattr(self, "_repository_delegated", False):
+            return None
         with self._repo_root_lock:
             if self._repo_root_cached:
                 return self._cached_repo_root
@@ -3929,63 +3911,6 @@ class FilesystemVectorStore:
                 self._cached_repo_root = None
             self._repo_root_cached = True
             return self._cached_repo_root
-
-    def _file_has_uncommitted_changes(self, file_path: str, repo_root: Path) -> bool:
-        """Check if a specific file has uncommitted changes.
-
-        Args:
-            file_path: Relative path to file from repo root
-            repo_root: Git repository root
-
-        Returns:
-            True if file has uncommitted changes, False otherwise
-        """
-        try:
-            # Check git status for this specific file
-            result = subprocess.run(
-                ["git", "status", "--porcelain", file_path],
-                cwd=repo_root,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-
-            # If output is non-empty, file has uncommitted changes
-            return len(result.stdout.strip()) > 0
-
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            # If git command fails, assume file has changes (safe fallback)
-            return True
-
-    def _get_git_blob_hash(self, file_path: str, repo_root: Path) -> Optional[str]:
-        """Get git blob hash for a file.
-
-        Args:
-            file_path: Relative path to file
-            repo_root: Git repository root
-
-        Returns:
-            Git blob hash or None if not found
-        """
-        try:
-            result = subprocess.run(
-                ["git", "ls-tree", "HEAD", file_path],
-                cwd=repo_root,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-
-            if result.returncode == 0 and result.stdout:
-                # Parse output: "mode type hash\tfilename"
-                parts = result.stdout.split()
-                if len(parts) >= 3:
-                    return parts[2]  # Return blob hash
-
-            return None
-
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            return None
 
     def _atomic_write_json(
         self, file_path: Path, data: Dict[str, Any], fsync: bool = False
@@ -7716,13 +7641,22 @@ class FilesystemVectorStore:
             )
             if parallel_executor is not None:
                 _audit_run_ctx = contextvars.copy_context()
+                # The audit runs after this read has returned and released
+                # its served checkouts: it carries its own copy of them
+                # (released when the audit ends, or below when it never runs)
+                # so an eviction cannot remove the index it is reading.
+                from code_indexer.server.services.served_index_cache import (
+                    carry_served_index_reads,
+                )
+
+                _carried_audit = carry_served_index_reads(_run_deep_fidelity_audit)
 
                 def _run_audit_out_of_band(
                     _ctx: "contextvars.Context" = _audit_run_ctx,
                     _kwargs: Dict[str, Any] = _audit_kwargs,
                 ) -> None:
                     try:
-                        _ctx.run(_run_deep_fidelity_audit, **_kwargs)  # type: ignore[misc]
+                        _ctx.run(_carried_audit, **_kwargs)
                     except Exception as _audit_exc:  # noqa: BLE001
                         # fail-open: audit never breaks primary search, but
                         # the failure must be observable (Bug #1822
@@ -7737,6 +7671,7 @@ class FilesystemVectorStore:
                 if not _deep_fidelity_audit_gate.acquire(blocking=False):
                     # Bug #1822 (DEFECT 1): bounded capacity exhausted --
                     # skip observably rather than queue without limit.
+                    _carried_audit.release()
                     self.logger.warning(
                         "deep fidelity audit skipped: audit capacity exhausted"
                     )
@@ -7748,6 +7683,7 @@ class FilesystemVectorStore:
                         with _deep_fidelity_audit_executor_lock:
                             _deep_fidelity_audit_executor.submit(_run_audit_out_of_band)
                     except Exception as _submit_exc:  # noqa: BLE001
+                        _carried_audit.release()
                         _deep_fidelity_audit_gate.release()
                         # fail-open: a shutting-down executor must never
                         # break search, but the rejection must be observable
@@ -8044,9 +7980,14 @@ class FilesystemVectorStore:
         # Enhance with content and staleness
         t0 = time.time()
         enhanced_results = []
+        # One content-backend read per file for this query: several results can
+        # be chunks of the same file, and each read pulls the whole file.
+        fetch_memo: Dict[str, Any] = {}
         for result in limited_results:
             vector_data = result.pop("_vector_data")
-            content, staleness = self._get_chunk_content_with_staleness(vector_data)
+            content, staleness = self._get_chunk_content_with_staleness(
+                vector_data, fetch_memo=fetch_memo
+            )
             result["payload"]["content"] = content
             result["staleness"] = staleness
             # Return chunk_text at root level for optimization contract
@@ -8058,7 +7999,11 @@ class FilesystemVectorStore:
 
         return (enhanced_results, timing) if return_timing else enhanced_results
 
-    def _get_chunk_content_with_staleness(self, vector_data: Dict[str, Any]) -> tuple:
+    def _get_chunk_content_with_staleness(
+        self,
+        vector_data: Dict[str, Any],
+        fetch_memo: Optional[Dict[str, Any]] = None,
+    ) -> tuple:
         """Retrieve chunk content with staleness detection.
 
         Strategy:
@@ -8068,6 +8013,9 @@ class FilesystemVectorStore:
 
         Args:
             vector_data: Vector data dictionary from JSON
+            fetch_memo: Per-query cache of content-backend reads, keyed by
+                file path, shared across one search's results. None reads
+                every time.
 
         Returns:
             Tuple of (content, staleness_info)
@@ -8117,6 +8065,20 @@ class FilesystemVectorStore:
             start_line = payload.get("line_start", 0)
             end_line = payload.get("line_end", 0)
             stored_hash = vector_data.get("git_blob_hash", "")
+
+            # The repository is not on this pod: every tier below asks the
+            # local disk or the local git object store, and would report each
+            # chunk's file as deleted. Read it through the content backend.
+            content_backend_source = self._content_backend_source()
+            if content_backend_source is not None:
+                return self._chunk_through_content_backend(
+                    content_backend_source,
+                    file_path,
+                    start_line,
+                    end_line,
+                    stored_hash,
+                    fetch_memo,
+                )
 
             # Tier 1: Try reading from current file
             full_path = self.project_root / file_path
@@ -8217,6 +8179,97 @@ class FilesystemVectorStore:
             "is_stale": False,
             "staleness_indicator": None,
             "staleness_reason": None,
+        }
+
+    def _content_backend_source(self) -> Optional[Any]:
+        """The content seam this store's repository is read through, or None.
+
+        None -- the local tiers, unchanged -- when the content seam's
+        implementation says the files are a directory on this pod
+        (``pod_directory``); otherwise the repository is not on this pod.
+        Resolved once per store: it maps a versioned snapshot to its base clone,
+        which reads the golden repo registry.
+        """
+        if not getattr(self, "_content_backend_source_resolved", False):
+            from ..server.services.file_service import (
+                content_seam_source,
+                pod_directory,
+            )
+
+            source = content_seam_source(
+                str(self.project_root), consumer="Semantic search content"
+            )
+            self._content_backend_source_memo = (
+                None if pod_directory(source) is not None else source
+            )
+            self._content_backend_source_resolved = True
+        return self._content_backend_source_memo
+
+    @staticmethod
+    def _chunk_through_content_backend(
+        source: Any,
+        file_path: str,
+        start_line: int,
+        end_line: int,
+        stored_hash: str,
+        fetch_memo: Optional[Dict[str, Any]] = None,
+    ) -> tuple:
+        """A blob-hash chunk's content and staleness, read through the seam.
+
+        The same answers as the local tiers: unchanged -> the chunk's lines,
+        fresh; changed -> stale "Modified"; gone -> stale "Deleted". The one
+        difference: the INDEXED version of a changed file lives in the git
+        object store, which no seam serves, so it is reported unavailable rather
+        than replaced by lines of the current file that may not be the chunk.
+        Never skips the hash check: the backend serves the base clone, which
+        can be newer than an immutable snapshot's index.
+
+        A backend that raises (transport failure, malformed reply) yields a
+        stale "Error" record, as the local tiers do, rather than failing the
+        whole search. Each file is read once per *fetch_memo*, and a failure is
+        remembered too, so a down backend is not asked again for every chunk.
+        """
+        from ..server.services.file_service import fetch_one
+
+        fetched: Any = None if fetch_memo is None else fetch_memo.get(file_path)
+        if fetched is None:
+            try:
+                fetched = fetch_one(source, file_path)
+            except Exception as exc:  # plugin errors are not all OSError
+                fetched = exc
+            if fetch_memo is not None:
+                fetch_memo[file_path] = fetched
+        if isinstance(fetched, Exception):
+            return f"[Error retrieving content: {fetched}]", {
+                "is_stale": True,
+                "staleness_indicator": "❌ Error",
+                "staleness_reason": "retrieval_failed",
+                "hash_mismatch": False,
+            }
+        if fetched.error is not None:
+            return f"[File deleted, cannot retrieve: {fetched.error}]", {
+                "is_stale": True,
+                "staleness_indicator": "🗑️ Deleted",
+                "staleness_reason": "file_deleted",
+                "hash_mismatch": False,
+            }
+        current_hash = fetched.blob_sha or git_blob_hash_bytes(fetched.data)
+        if current_hash != stored_hash:
+            return "[Content unavailable: file modified since indexing]", {
+                "is_stale": True,
+                "staleness_indicator": "⚠️ Modified",
+                "staleness_reason": "file_modified_after_indexing",
+                "hash_mismatch": True,
+            }
+        # Decoded and split exactly as indexing decoded the file and as the
+        # local tier reads it (Bug #1991): a utf-8/replace read here would
+        # return different lines for a Latin-1/CP1252 source.
+        lines = split_source_lines(decode_source_text(fetched.data))
+        return "".join(lines[(start_line - 1) : end_line]), {
+            "is_stale": False,
+            "staleness_indicator": None,
+            "staleness_reason": None,
+            "hash_mismatch": False,
         }
 
     def _compute_file_hash(self, file_path: Path) -> str:

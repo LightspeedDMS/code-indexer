@@ -33,6 +33,8 @@ from typing import (
 
 from ..utils.config_manager import (
     CidxMetaBackupConfig,
+    METADATA_OUTBOX_SINKS,
+    METADATA_READ_SOURCES,
     RerankConfig,
     ServerConfig,
     ServerConfigManager,
@@ -102,6 +104,12 @@ class _ChangeAttempt:
     after: Optional[ServerConfig] = None
     published: bool = False
     updated_by: str = _runtime_row.UPDATER_WEB_UI  # recorded on the runtime row
+
+
+def _repo_cidx_config_path(repo_path: str) -> Path:
+    """The repository's cidx config (``.code-indexer/config.json``): the file
+    every extension seed, sync and restore here reads and writes."""
+    return Path(repo_path) / ".code-indexer" / "config.json"
 
 
 @dataclass
@@ -229,6 +237,14 @@ def _alias_lock_settings(config: ServerConfig) -> Dict[str, Any]:
     }
 
 
+def _control_plane_metadata_settings(config: ServerConfig) -> Dict[str, Any]:
+    """Return control_plane_metadata settings for the Web UI Config screen
+    (content seam step 5a: aliases and write-mode markers in the registry)."""
+    cpm = config.control_plane_metadata_config
+    assert cpm is not None  # Guaranteed by ServerConfig.__post_init__
+    return asdict(cpm)
+
+
 def _search_timeouts_settings(config: ServerConfig) -> Dict[str, Any]:
     """Return search_timeouts settings dict from ServerConfig (Issue #1398).
 
@@ -334,6 +350,14 @@ BOOTSTRAP_KEYS = frozenset(
         "enable_predeactivation_leak_scan",  # Story #1032 - bootstrap flag to restore pre-flight leak scan
         "orphan_trash_sweep_per_startup_cap",  # Story #1032 HIGH #3 - cap startup orphan sweep entries
         "clone_backend",  # Story #510 / #1034 - needed pre-DB by build_snapshot_manager() at lifespan startup
+        "git_backend",  # issue-64678 - needed pre-DB by build_git_backend() at lifespan startup
+        "content_backend",  # content seam - read pre-DB by build_configured_content_backend() at lifespan startup (parallels clone_backend/git_backend; without it config.json is stripped and content silently falls back to 'local', i.e. reading a mount a delegated pod may not have)
+        "ripgrep_backend",  # ripgrep seam - read pre-DB by build_configured_ripgrep_backend() at startup (parallels content_backend; without it config.json is stripped and regex search silently falls back to the local binary)
+        "search_backend",  # search seam - read pre-DB by build_configured_search_backend() at startup (parallels ripgrep_backend; without it config.json is stripped and search silently falls back to local index files a delegated pod may not have)
+        "index_store_backend",  # IndexStore step 2 - read pre-DB by build_configured_index_store() at startup (parallels ripgrep_backend; without it config.json is stripped and refresh silently keeps indexes pod-local, never published)
+        "enabled_features",  # modular phase 3 - read pre-DB by build_feature_registry() while the app is created; without it config.json is stripped and an enabled-but-missing feature would silently not load
+        "feature_bootstrap_settings",  # modular phase 4a - feature config keys declared bootstrap (cidx_sdk.ConfigKey.bootstrap), read before the runtime DB exists
+        "workspace_mcp",  # issue-64616 - endpoint/api_key read pre-DB by the delegated clone/git backends at startup
         "cow_daemon",  # Story #510 / #1034 - daemon config for CowDaemonBackend wiring at startup
     }
 )
@@ -345,8 +369,6 @@ UPDATER_SEED = _runtime_row.UPDATER_SEED
 # a rate-limited WARNING (approx 5 min at 30s poll interval).
 PENDING_RESTART_WARN_THRESHOLD = 10
 
-# Bug #875: minimum bounds for new claude_cli settings
-_MIN_FACT_CHECK_TIMEOUT_SECONDS = 60
 _MIN_SCHEDULED_CATCHUP_INTERVAL_MINUTES = 1
 
 
@@ -638,6 +660,7 @@ class ConfigService:
         assert config.resource_config is not None
         assert config.password_security is not None
         assert config.oidc_provider_config is not None
+        assert config.trusted_gateway_config is not None  # issue-66121
         assert config.telemetry_config is not None
         # Story #3 - Configuration Consolidation: Assert new config objects
         assert config.search_limits_config is not None
@@ -751,15 +774,6 @@ class ConfigService:
                 "description_refresh_interval_hours": config.claude_integration_config.description_refresh_interval_hours,
                 "description_refresh_enabled": config.claude_integration_config.description_refresh_enabled,
                 "research_assistant_timeout_seconds": config.claude_integration_config.research_assistant_timeout_seconds,
-                "dependency_map_enabled": config.claude_integration_config.dependency_map_enabled,
-                "dependency_map_interval_hours": config.claude_integration_config.dependency_map_interval_hours,
-                "dependency_map_pass_timeout_seconds": config.claude_integration_config.dependency_map_pass_timeout_seconds,
-                "dependency_map_pass1_max_turns": config.claude_integration_config.dependency_map_pass1_max_turns,
-                "dependency_map_pass2_max_turns": config.claude_integration_config.dependency_map_pass2_max_turns,
-                "dependency_map_delta_max_turns": config.claude_integration_config.dependency_map_delta_max_turns,
-                "refinement_enabled": config.claude_integration_config.refinement_enabled,
-                "refinement_interval_hours": config.claude_integration_config.refinement_interval_hours,
-                "refinement_domains_per_run": config.claude_integration_config.refinement_domains_per_run,
                 "claude_auth_mode": config.claude_integration_config.claude_auth_mode,
                 "llm_creds_provider_url": config.claude_integration_config.llm_creds_provider_url,
                 "llm_creds_provider_api_key": (
@@ -769,8 +783,6 @@ class ConfigService:
                     or None
                 ),
                 "llm_creds_provider_consumer_id": config.claude_integration_config.llm_creds_provider_consumer_id,
-                "dep_map_fact_check_enabled": config.claude_integration_config.dep_map_fact_check_enabled,
-                "dep_map_auto_repair_enabled": config.claude_integration_config.dep_map_auto_repair_enabled,
             },
             # OIDC/SSO authentication
             "oidc": {
@@ -790,9 +802,20 @@ class ConfigService:
                 "groups_claim": config.oidc_provider_config.groups_claim,
                 "group_mappings": config.oidc_provider_config.group_mappings,
             },
-            # SCIP workspace cleanup (Story #647, Story #15 AC2: moved to scip_config)
-            "scip_cleanup": {
-                "scip_workspace_retention_days": config.scip_config.scip_workspace_retention_days,
+            # issue-66121: trusted mcp-gateway RS256 bearer issuer (default off)
+            "trusted_gateway": {
+                "enabled": config.trusted_gateway_config.enabled,
+                "issuer": config.trusted_gateway_config.issuer,
+                "jwks_uri": config.trusted_gateway_config.jwks_uri,
+                "audience": config.trusted_gateway_config.audience,
+                "username_claim": config.trusted_gateway_config.username_claim,
+                "email_claim": config.trusted_gateway_config.email_claim,
+                "groups_claim": config.trusted_gateway_config.groups_claim,
+                "default_role": config.trusted_gateway_config.default_role,
+                "require_email_verification": config.trusted_gateway_config.require_email_verification,
+                "enable_jit_provisioning": config.trusted_gateway_config.enable_jit_provisioning,
+                "leeway_seconds": config.trusted_gateway_config.leeway_seconds,
+                "group_mappings": config.trusted_gateway_config.group_mappings,
             },
             # Telemetry configuration (Story #695)
             "telemetry": {
@@ -894,11 +917,6 @@ class ConfigService:
             },
             "scip": {
                 "temporal_stale_threshold_days": config.scip_config.temporal_stale_threshold_days,
-                # P3 settings (AC31-AC34)
-                "scip_reference_limit": config.scip_config.scip_reference_limit,
-                "scip_dependency_depth": config.scip_config.scip_dependency_depth,
-                "scip_callchain_max_depth": config.scip_config.scip_callchain_max_depth,
-                "scip_callchain_limit": config.scip_config.scip_callchain_limit,
             },
             # Story #3 - Phase 2: P2 settings (AC12-AC14, AC27-AC28)
             "git_timeouts": {
@@ -979,6 +997,7 @@ class ConfigService:
             # configuration -- was defined but never wired into this dict.
             "temporal_legacy_migration": _temporal_legacy_migration_settings(config),
             "alias_lock": _alias_lock_settings(config),
+            "control_plane_metadata": _control_plane_metadata_settings(config),
             "content_limits": _content_limits_settings(config),
             # Issue #1398 - Query & search timeouts Web UI configuration
             "search_timeouts": _search_timeouts_settings(config),
@@ -986,11 +1005,6 @@ class ConfigService:
             "embedding_stats": _embedding_stats_settings(config),
             # Story #1404 - Global temporal indexing floor date configuration
             "temporal_indexing": _temporal_indexing_settings(config),
-            # Story #977 - X-Ray precision AST-aware code search configuration
-            "xray": {
-                "xray_timeout_seconds": config.xray_config.xray_timeout_seconds,  # type: ignore[union-attr]
-                "xray_worker_threads": config.xray_config.xray_worker_threads,  # type: ignore[union-attr]
-            },
             # Story #223 - AC4: Indexing configuration
             "indexing": {
                 "indexable_extensions": (
@@ -1036,34 +1050,11 @@ class ConfigService:
                     if config.indexing_config is not None
                     else False
                 ),
-            },
-            # Story #323 - Wiki metadata fields configuration
-            # Story #325 - Configurable metadata display order
-            "wiki_config": {
-                "enable_header_block_parsing": (
-                    config.wiki_config.enable_header_block_parsing
-                    if config.wiki_config is not None
+                # issue-65484: golden-repo description-generation gate display wiring
+                "golden_description_generation_enabled": (
+                    config.indexing_config.golden_description_generation_enabled
+                    if config.indexing_config is not None
                     else True
-                ),
-                "enable_article_number": (
-                    config.wiki_config.enable_article_number
-                    if config.wiki_config is not None
-                    else True
-                ),
-                "enable_publication_status": (
-                    config.wiki_config.enable_publication_status
-                    if config.wiki_config is not None
-                    else True
-                ),
-                "enable_views_seeding": (
-                    config.wiki_config.enable_views_seeding
-                    if config.wiki_config is not None
-                    else True
-                ),
-                "metadata_display_order": (
-                    config.wiki_config.metadata_display_order
-                    if config.wiki_config is not None
-                    else ""
                 ),
             },
             # Issue #1159 — Search event log settings
@@ -1082,18 +1073,6 @@ class ConfigService:
             "voyage_reranker_model": rerank_cfg.voyage_reranker_model,
             "cohere_reranker_model": rerank_cfg.cohere_reranker_model,
             "overfetch_multiplier": rerank_cfg.overfetch_multiplier,
-        }
-
-        # Memory retrieval settings (Story #883)
-        from code_indexer.server.utils.config_manager import MemoryRetrievalConfig
-
-        mem_cfg = config.memory_retrieval_config or MemoryRetrievalConfig()
-        settings["memory_retrieval"] = {
-            "memory_retrieval_enabled": mem_cfg.memory_retrieval_enabled,
-            "memory_voyage_min_score": mem_cfg.memory_voyage_min_score,
-            "memory_cohere_min_score": mem_cfg.memory_cohere_min_score,
-            "memory_retrieval_k_multiplier": mem_cfg.memory_retrieval_k_multiplier,
-            "memory_retrieval_max_body_chars": mem_cfg.memory_retrieval_max_body_chars,
         }
 
         # Query embedding cache settings (Story #1107 S3)
@@ -1175,8 +1154,8 @@ class ConfigService:
             self._update_claude_cli_setting(config, key, value)
         elif category == "oidc":
             self._update_oidc_setting(config, key, value)
-        elif category == "scip_cleanup":
-            self._update_scip_cleanup_setting(config, key, value)
+        elif category == "trusted_gateway":
+            self._update_trusted_gateway_setting(config, key, value)
         elif category == "telemetry":
             self._update_telemetry_setting(config, key, value)
         elif category == "langfuse":
@@ -1233,24 +1212,18 @@ class ConfigService:
         # Issue #1546 Phase 2 - DB-backed alias lock rollout gate
         elif category == "alias_lock":
             self._update_alias_lock_setting(config, key, value)
+        # Content seam step 5a - control-plane metadata read source / dual-write
+        elif category == "control_plane_metadata":
+            self._update_control_plane_metadata_setting(config, key, value)
         # Issue #1398 - Query & search timeouts Web UI configuration
         elif category == "search_timeouts":
             self._update_search_timeouts_setting(config, key, value)
-        # Story #977 - X-Ray precision AST-aware code search configuration
-        elif category == "xray":
-            self._update_xray_setting(config, key, value)
         # Story #223 - AC4: Indexing configuration
         elif category == "indexing":
             self._update_indexing_setting(config, key, value)
-        # Story #323 - Wiki metadata fields configuration
-        elif category == "wiki":
-            self._update_wiki_setting(config, key, value)
         # Story #652 - Reranking configuration
         elif category == "rerank":
             self._update_rerank_setting(config, key, value)
-        # Story #883 - Memory retrieval configuration
-        elif category == "memory_retrieval":
-            self._update_memory_retrieval_setting(config, key, value)
         # Story #885 - Lifecycle analysis timeouts
         elif category == "lifecycle_analysis":
             self._update_lifecycle_analysis_setting(config, key, value)
@@ -2264,24 +2237,6 @@ class ConfigService:
             claude_config.description_refresh_enabled = value in ["true", True, "True"]
         elif key == "research_assistant_timeout_seconds":
             claude_config.research_assistant_timeout_seconds = int(value)
-        elif key == "dependency_map_enabled":
-            claude_config.dependency_map_enabled = value in ["true", True, "True"]
-        elif key == "dependency_map_interval_hours":
-            claude_config.dependency_map_interval_hours = max(1, int(value))
-        elif key == "dependency_map_pass_timeout_seconds":
-            claude_config.dependency_map_pass_timeout_seconds = max(60, int(value))
-        elif key == "dependency_map_pass1_max_turns":
-            claude_config.dependency_map_pass1_max_turns = max(0, int(value))
-        elif key == "dependency_map_pass2_max_turns":
-            claude_config.dependency_map_pass2_max_turns = max(0, int(value))
-        elif key == "dependency_map_delta_max_turns":
-            claude_config.dependency_map_delta_max_turns = max(0, int(value))
-        elif key == "refinement_enabled":
-            claude_config.refinement_enabled = value in ["true", True, "True"]
-        elif key == "refinement_interval_hours":
-            claude_config.refinement_interval_hours = max(1, int(value))
-        elif key == "refinement_domains_per_run":
-            claude_config.refinement_domains_per_run = min(50, max(1, int(value)))
         elif key in _LLM_CREDS_ROUTE_ONLY_KEYS:
             # The provider key is reused only with the provider URL it was
             # saved with; only /api/llm-creds/save-config enforces that, so
@@ -2293,14 +2248,6 @@ class ConfigService:
             )
         elif key == "llm_creds_provider_consumer_id":
             claude_config.llm_creds_provider_consumer_id = str(value) if value else ""
-        elif key == "dep_map_fact_check_enabled":
-            claude_config.dep_map_fact_check_enabled = _parse_bool(value)
-        elif key == "dep_map_auto_repair_enabled":
-            claude_config.dep_map_auto_repair_enabled = _parse_bool(value)
-        elif key == "fact_check_timeout_seconds":
-            claude_config.fact_check_timeout_seconds = max(
-                _MIN_FACT_CHECK_TIMEOUT_SECONDS, int(value)
-            )
         elif key == "scheduled_catchup_enabled":
             claude_config.scheduled_catchup_enabled = _parse_bool(value)
         elif key == "scheduled_catchup_interval_minutes":
@@ -2370,16 +2317,62 @@ class ConfigService:
         else:
             raise ValueError(f"Unknown OIDC setting: {key}")
 
-    def _update_scip_cleanup_setting(
+    def _update_trusted_gateway_setting(
         self, config: ServerConfig, key: str, value: Any
     ) -> None:
-        """Update a SCIP cleanup setting (Story #647, Story #15 AC2: use scip_config)."""
-        scip_config = config.scip_config
-        assert scip_config is not None  # Guaranteed by ServerConfig.__post_init__
-        if key == "scip_workspace_retention_days":
-            scip_config.scip_workspace_retention_days = int(value)
+        """Update a trusted mcp-gateway bearer-auth setting (issue-66121).
+
+        Note: the gateway authenticator is built once at startup from this config
+        (see gateway_auth_wiring.build_gateway_authenticator), so changes take effect
+        on the next server restart -- there is no live reload for this section.
+        """
+        tg = config.trusted_gateway_config
+        assert tg is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "enabled":
+            tg.enabled = value in ["true", True]
+        elif key == "issuer":
+            tg.issuer = str(value)
+        elif key == "jwks_uri":
+            tg.jwks_uri = str(value)
+        elif key == "audience":
+            tg.audience = str(value)
+        elif key == "username_claim":
+            tg.username_claim = str(value)
+        elif key == "email_claim":
+            tg.email_claim = str(value)
+        elif key == "groups_claim":
+            tg.groups_claim = str(value)
+        elif key == "default_role":
+            tg.default_role = str(value)
+        elif key == "require_email_verification":
+            tg.require_email_verification = value in ["true", True]
+        elif key == "enable_jit_provisioning":
+            tg.enable_jit_provisioning = value in ["true", True]
+        elif key == "leeway_seconds":
+            tg.leeway_seconds = int(value)
+        elif key == "group_mappings":
+            import json
+
+            if isinstance(value, (dict, list)):
+                tg.group_mappings = value
+            elif isinstance(value, str):
+                try:
+                    parsed = json.loads(value)
+                    if not isinstance(parsed, (dict, list)):
+                        raise ValueError(
+                            f"Invalid JSON for group_mappings: must be dict or list, got {type(parsed)}"
+                        )
+                    tg.group_mappings = parsed
+                except json.JSONDecodeError:
+                    raise ValueError(
+                        f"Invalid JSON for group_mappings: {value}. Expected format: [{{'external_group_id': 'guid', 'cidx_group': 'admins'}}]"
+                    )
+            else:
+                raise ValueError(
+                    f"Invalid type for group_mappings: {type(value)}. Expected dict, list, or JSON string"
+                )
         else:
-            raise ValueError(f"Unknown SCIP cleanup setting: {key}")
+            raise ValueError(f"Unknown trusted_gateway setting: {key}")
 
     def _update_telemetry_setting(
         self, config: ServerConfig, key: str, value: Any
@@ -2489,28 +2482,6 @@ class ConfigService:
         else:
             raise ValueError(f"Unknown langfuse setting: {key}")
 
-    def _update_wiki_setting(self, config: ServerConfig, key: str, value: Any) -> None:
-        """Update a wiki metadata configuration setting (Story #323)."""
-        from ..utils.config_manager import WikiConfig
-
-        if config.wiki_config is None:
-            config.wiki_config = WikiConfig()
-        wiki = config.wiki_config
-        bool_value = value in ["true", True, "True", "1"]
-        if key == "enable_header_block_parsing":
-            wiki.enable_header_block_parsing = bool_value
-        elif key == "enable_article_number":
-            wiki.enable_article_number = bool_value
-        elif key == "enable_publication_status":
-            wiki.enable_publication_status = bool_value
-        elif key == "enable_views_seeding":
-            wiki.enable_views_seeding = bool_value
-        elif key == "metadata_display_order":
-            # String field — store as-is (not a boolean toggle)
-            wiki.metadata_display_order = str(value)
-        else:
-            raise ValueError(f"Unknown wiki setting: {key}")
-
     def _update_rerank_setting(
         self, config: ServerConfig, key: str, value: Any
     ) -> None:
@@ -2526,28 +2497,6 @@ class ConfigService:
             rerank.overfetch_multiplier = int(value)
         else:
             raise ValueError(f"Unknown rerank setting: {key}")
-
-    def _update_memory_retrieval_setting(
-        self, config: ServerConfig, key: str, value: Any
-    ) -> None:
-        """Update a memory retrieval configuration setting (Story #883)."""
-        from code_indexer.server.utils.config_manager import MemoryRetrievalConfig
-
-        if config.memory_retrieval_config is None:
-            config.memory_retrieval_config = MemoryRetrievalConfig()
-        mem = config.memory_retrieval_config
-        if key == "memory_retrieval_enabled":
-            mem.memory_retrieval_enabled = _parse_bool(value)
-        elif key == "memory_voyage_min_score":
-            mem.memory_voyage_min_score = float(value)
-        elif key == "memory_cohere_min_score":
-            mem.memory_cohere_min_score = float(value)
-        elif key == "memory_retrieval_k_multiplier":
-            mem.memory_retrieval_k_multiplier = int(value)
-        elif key == "memory_retrieval_max_body_chars":
-            mem.memory_retrieval_max_body_chars = int(value)
-        else:
-            raise ValueError(f"Unknown memory_retrieval setting: {key}")
 
     def _update_query_embedding_cache_setting(
         self, config: ServerConfig, key: str, value: Any
@@ -2787,22 +2736,16 @@ class ConfigService:
             raise ValueError(f"Unknown health setting: {key}")
 
     def _update_scip_setting(self, config: ServerConfig, key: str, value: Any) -> None:
-        """Update a SCIP setting (Story #3 - Phase 2)."""
+        """Update a setting of the config screen's SCIP category (Story #3 -
+        Phase 2): the core's temporal staleness threshold, the one key its
+        historical ``scip_config`` keeps. The cidx-scip feature's settings
+        change through the feature config door (``features/web.py``)."""
         scip = config.scip_config
         assert scip is not None  # Guaranteed by ServerConfig.__post_init__
         if key == "temporal_stale_threshold_days":
             scip.temporal_stale_threshold_days = int(value)
-        # P3 settings (AC31-AC34)
-        elif key == "scip_reference_limit":
-            scip.scip_reference_limit = int(value)
-        elif key == "scip_dependency_depth":
-            scip.scip_dependency_depth = int(value)
-        elif key == "scip_callchain_max_depth":
-            scip.scip_callchain_max_depth = int(value)
-        elif key == "scip_callchain_limit":
-            scip.scip_callchain_limit = int(value)
         else:
-            raise ValueError(f"Unknown SCIP setting: {key}")
+            raise ValueError(f"Unknown scip setting: {key}")
 
     def _update_git_timeouts_setting(
         self, config: ServerConfig, key: str, value: Any
@@ -3034,6 +2977,43 @@ class ConfigService:
         else:
             raise ValueError(f"Unknown alias_lock setting: {key}")
 
+    def _update_control_plane_metadata_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update a control_plane_metadata setting (content seam step 5a).
+
+        ``metadata_read_source`` must be one of METADATA_READ_SOURCES -- an
+        unknown value is rejected rather than silently read as the default,
+        since it decides where every alias is resolved from.
+        """
+        cpm = config.control_plane_metadata_config
+        assert cpm is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "metadata_read_source":
+            source = str(value).strip().lower()
+            if source not in METADATA_READ_SOURCES:
+                raise ValueError(
+                    f"metadata_read_source must be one of "
+                    f"{list(METADATA_READ_SOURCES)}, got {value!r}"
+                )
+            cpm.metadata_read_source = source
+        elif key == "metadata_file_dual_write":
+            cpm.metadata_file_dual_write = _parse_bool(value)
+        elif key == "metadata_outbox_sink":
+            sink = str(value).strip().lower()
+            if sink not in METADATA_OUTBOX_SINKS:
+                raise ValueError(
+                    f"metadata_outbox_sink must be one of "
+                    f"{list(METADATA_OUTBOX_SINKS)}, got {value!r}"
+                )
+            cpm.metadata_outbox_sink = sink
+        elif key == "metadata_outbox_drain_timeout_s":
+            timeout = int(value)
+            if timeout < 1:
+                raise ValueError("metadata_outbox_drain_timeout_s must be >= 1")
+            cpm.metadata_outbox_drain_timeout_s = timeout
+        else:
+            raise ValueError(f"Unknown control_plane_metadata setting: {key}")
+
     def _update_hnsw_orphan_sweep_setting(
         self, config: ServerConfig, key: str, value: Any
     ) -> None:
@@ -3168,32 +3148,6 @@ class ConfigService:
             ti.index_floor_date = None if value is None else str(value)
         else:
             raise ValueError(f"Unknown temporal_indexing setting: {key}")
-
-    def _update_xray_setting(self, config: ServerConfig, key: str, value: Any) -> None:
-        """Update an X-Ray setting (Story #977)."""
-        xray = config.xray_config
-        assert xray is not None  # Guaranteed by ServerConfig.__post_init__
-        if key == "xray_timeout_seconds":
-            xray.xray_timeout_seconds = int(value)
-        elif key == "xray_worker_threads":
-            xray.xray_worker_threads = int(value)
-            try:
-                from code_indexer.server.mcp.handlers.xray import (
-                    _get_xray_cell_limiter as _gcl,
-                )
-
-                _cl = _gcl()
-                if _cl is not None:
-                    _cl.set_limit(int(value))
-            except Exception as exc:
-                logger.warning(
-                    "Failed to live-reload xray cell limiter for "
-                    "xray_worker_threads=%s: %s",
-                    value,
-                    exc,
-                )
-        else:
-            raise ValueError(f"Unknown xray setting: {key}")
 
     def save_all_settings(self, settings: Dict[str, Dict[str, Any]]) -> None:
         """
@@ -3370,6 +3324,17 @@ class ConfigService:
             )
             return
 
+        # issue-65484: golden-repo description-generation gate (default ON).
+        if key == "golden_description_generation_enabled":
+            indexing.golden_description_generation_enabled = _parse_bool(value)
+            self.save_config(config)
+            logger.info(
+                "Updated indexing.golden_description_generation_enabled to %s",
+                indexing.golden_description_generation_enabled,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return
+
         if key != "indexable_extensions":
             raise ValueError(f"Unknown indexing setting: {key}")
 
@@ -3420,7 +3385,7 @@ class ConfigService:
             alias = repo.get("alias", "")
             try:
                 repo_path = manager.get_actual_repo_path(alias)
-                cidx_config_path = Path(repo_path) / ".code-indexer" / "config.json"
+                cidx_config_path = _repo_cidx_config_path(repo_path)
                 if not cidx_config_path.exists():
                     continue
                 with open(cidx_config_path, "r") as f:
@@ -3447,7 +3412,7 @@ class ConfigService:
         server_exts = config.indexing_config.indexable_extensions
         cli_exts = [ext.lstrip(".") for ext in server_exts]
 
-        cidx_config_path = Path(repo_path) / ".code-indexer" / "config.json"
+        cidx_config_path = _repo_cidx_config_path(repo_path)
         if not cidx_config_path.exists():
             return
 
@@ -3483,7 +3448,7 @@ class ConfigService:
         server_exts_bare: Set[str] = {ext.lstrip(".") for ext in server_exts}
         cli_exts_sorted = sorted(server_exts_bare)
 
-        cidx_config_path = Path(repo_path) / ".code-indexer" / "config.json"
+        cidx_config_path = _repo_cidx_config_path(repo_path)
         if not cidx_config_path.exists():
             return None
 
@@ -3508,6 +3473,30 @@ class ConfigService:
         except Exception as e:
             logger.warning("Could not sync extensions for %s: %s", repo_path, e)
             return None
+
+    def restore_repo_extensions(self, repo_path: str, drift: ExtensionDrift) -> None:
+        """Undo :meth:`sync_repo_extensions_if_drifted`'s write of *drift*.
+
+        For a caller that could not act on the drift (its file listing
+        failed): with the repo config back on its old extensions, the next
+        refresh detects the same drift and reconciles then, instead of
+        finding the config already synced and never reconciling.
+        Errors propagate.
+        """
+        cidx_config_path = _repo_cidx_config_path(repo_path)
+        with open(cidx_config_path, "r") as f:
+            repo_config = json.load(f)
+        synced: Set[str] = {
+            str(ext).lstrip(".") for ext in repo_config.get("file_extensions", [])
+        }
+        repo_config["file_extensions"] = sorted((synced - drift.added) | drift.removed)
+        write_json_atomic(cidx_config_path, repo_config, indent=2)
+        logger.info(
+            "Restored pre-sync file_extensions for %s (%d added, %d removed undone)",
+            repo_path,
+            len(drift.added),
+            len(drift.removed),
+        )
 
     def read_committed_section(self, section: str) -> Tuple[int, Dict[str, Any]]:
         """ONE read of the committed runtime row: ``(version, section dict)``.

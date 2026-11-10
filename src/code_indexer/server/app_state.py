@@ -49,7 +49,6 @@ class AppState:
     activated_repo_manager: Optional[Any]  # ActivatedRepoManager
     repository_listing_manager: Optional[Any]  # RepositoryListingManager
     semantic_query_manager: Optional[Any]  # SemanticQueryManager
-    workspace_cleanup_service: Optional[Any]  # WorkspaceCleanupService
 
     # Auth / group management (set in lifespan)
     group_manager: Optional[Any]  # GroupManager
@@ -73,9 +72,6 @@ class AppState:
     description_refresh_scheduler: Optional[Any]  # DescriptionRefreshScheduler
     data_retention_scheduler: Optional[Any]  # DataRetentionScheduler
 
-    # Dependency map service (set in lifespan)
-    dependency_map_service: Optional[Any]  # DependencyMapService
-
     # Self-monitoring (set in lifespan)
     self_monitoring_service: Optional[Any]  # SelfMonitoringService
     self_monitoring_repo_root: Optional[str]  # str path to repo root
@@ -94,11 +90,6 @@ class AppState:
     # Logging database path (set in lifespan)
     log_db_path: Optional[str]  # str path to SQLite log DB
 
-    # Shared technical memory store (set in lifespan, Story #877)
-    # Optional[Any] avoids circular import — concrete type is MemoryStoreService
-    # from code_indexer.server.services.memory_store_service (wired at runtime).
-    memory_store_service: Optional[Any]  # MemoryStoreService
-
     def __init__(self) -> None:
         """Initialize all attributes to None."""
         self.golden_repo_manager = None
@@ -106,7 +97,6 @@ class AppState:
         self.activated_repo_manager = None
         self.repository_listing_manager = None
         self.semantic_query_manager = None
-        self.workspace_cleanup_service = None
 
         self.group_manager = None
         self.audit_service = None
@@ -124,8 +114,6 @@ class AppState:
         self.description_refresh_scheduler = None
         self.data_retention_scheduler = None
 
-        self.dependency_map_service = None
-
         self.self_monitoring_service = None
         self.self_monitoring_repo_root = None
         self.self_monitoring_github_repo = None
@@ -136,7 +124,6 @@ class AppState:
         self.langfuse_sync_service = None
         self.ssh_migration_result = None
         self.log_db_path = None
-        self.memory_store_service = None
 
 
 def get_app_state(request: Request) -> AppState:

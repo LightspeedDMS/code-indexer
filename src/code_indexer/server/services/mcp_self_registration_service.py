@@ -10,7 +10,8 @@ import base64
 import logging
 import subprocess
 import threading
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Any, Dict, Iterator, Optional
 
 from code_indexer.server.services.analysis_agent_principal import (
     ANALYSIS_AGENT_USERNAME,
@@ -22,6 +23,14 @@ if TYPE_CHECKING:
     from code_indexer.server.services.group_access_manager import GroupAccessManager
 
 logger = logging.getLogger(__name__)
+
+#: Cluster-wide advisory-lock key (``hashtext``) serialising the analysis
+#: agents' credential get-or-create across pods.
+CREDENTIAL_LOCK_KEY = "cidx-analysis-agent-credential"
+
+
+class _PeerStoredCredential(Exception):
+    """A peer committed a different agent credential while this one was minted."""
 
 
 class MCPSelfRegistrationService:
@@ -68,6 +77,45 @@ class MCPSelfRegistrationService:
         )  # Story #203 Finding 5: Thread safety
         self._cached_auth_header: Optional[str] = None
         self._group_manager: Optional["GroupAccessManager"] = None
+        # Separate from _registration_lock: ensure_registered holds that one
+        # while it calls get_or_create_credentials.
+        self._credential_lock = threading.Lock()
+        self._pool: Any = None
+
+    @property
+    def group_manager_wired(self) -> bool:
+        """True once startup handed over the group store."""
+        return self._group_manager is not None
+
+    def set_connection_pool(self, pool: Any) -> None:
+        """Cluster mode: serialise the credential get-or-create across pods
+        with a PostgreSQL advisory lock taken on *pool*."""
+        self._pool = pool
+
+    @contextmanager
+    def _single_flight(self) -> Iterator[None]:
+        """One credential get-or-create at a time: in this process always,
+        and across the cluster when a connection pool is wired.
+
+        Without it every pod starting together finds no stored credential
+        and mints its own live ``cidx-analysis-agent`` credential (N pods,
+        N credentials, only the last one recorded in the config).
+        """
+        with self._credential_lock:
+            if self._pool is None:
+                yield
+                return
+            with self._pool.connection() as conn:
+                conn.execute(
+                    "SELECT pg_advisory_lock(hashtext(%s))", (CREDENTIAL_LOCK_KEY,)
+                )
+                try:
+                    yield
+                finally:
+                    conn.execute(
+                        "SELECT pg_advisory_unlock(hashtext(%s))",
+                        (CREDENTIAL_LOCK_KEY,),
+                    )
 
     def set_group_manager(self, group_manager: "GroupAccessManager") -> None:
         """Wire the group store (built later in startup than this service)."""
@@ -172,8 +220,35 @@ class MCPSelfRegistrationService:
         If stored, validates they still exist in credential manager.
         If not stored or invalidated, creates new credentials.
 
+        Single-flight (``_single_flight``) and idempotent: the stored
+        credential is written only over the one this call read, so a peer
+        that committed first wins and this call adopts it (revoking the one
+        it minted) instead of leaving a second live credential behind.
+
         Returns:
             Dict with client_id and client_secret, or None on error
+        """
+        with self._single_flight():
+            for _ in range(2):
+                try:
+                    return self._get_or_create_credentials()
+                except _PeerStoredCredential:
+                    logger.info(
+                        "MCP self-registration: a peer stored the agent "
+                        "credential first; adopting it"
+                    )
+            logger.error(
+                "MCP self-registration: the stored agent credential kept "
+                "changing; no credential is used"
+            )
+            return None
+
+    def _get_or_create_credentials(self) -> Optional[Dict[str, str]]:
+        """One get-or-create attempt (see :meth:`get_or_create_credentials`).
+
+        Raises:
+            _PeerStoredCredential: a peer committed another credential after
+                this attempt read the config; the one minted here is revoked.
         """
         # Load config
         config = self._config_manager.load_config()
@@ -222,6 +297,7 @@ class MCPSelfRegistrationService:
             else:
                 logger.info("Stored MCP credential no longer valid, creating new one")
 
+        observed = stored_config.client_id
         try:
             cred = self._mcp_credential_manager.generate_credential_audited(
                 ANALYSIS_AGENT_USERNAME,
@@ -232,12 +308,24 @@ class MCPSelfRegistrationService:
             # Store in config (Story #203 Finding 1: update dataclass fields).
             # Bug #2017: only these two fields, applied to the COMMITTED
             # configuration -- never a write-back of the copy read above.
+            # Insert-if-unchanged: a committed client id other than the one
+            # read above is a peer's newer credential, never overwritten.
             def _store(candidate: Any) -> None:
                 section = candidate.mcp_self_registration
+                if section.client_id != observed:
+                    raise _PeerStoredCredential()
                 section.client_id = cred["client_id"]
                 section.client_secret = cred["client_secret"]
 
-            self._config_manager.apply_system_change(_store)
+            try:
+                self._config_manager.apply_system_change(_store)
+            except _PeerStoredCredential:
+                self._mcp_credential_manager.revoke_credential_audited(
+                    ANALYSIS_AGENT_USERNAME,
+                    cred["credential_id"],
+                    actor=SystemComponent.MCP_SELF_REGISTRATION,
+                )
+                raise
 
             logger.info("Generated new MCP self-registration credentials")
             return {
@@ -245,6 +333,8 @@ class MCPSelfRegistrationService:
                 "client_secret": cred["client_secret"],
             }
 
+        except _PeerStoredCredential:
+            raise
         except Exception as e:
             logger.error("Failed to generate MCP credentials (%s)", type(e).__name__)
             return None

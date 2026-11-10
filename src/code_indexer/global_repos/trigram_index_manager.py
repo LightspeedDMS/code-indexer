@@ -22,10 +22,22 @@ import subprocess
 import tempfile
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable, List, Optional, Set, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
 
-from ..utils.never_indexed_paths import SkippedPathReporter, has_unstorable_name
+from ..utils.index_store import INDEX_DIRNAME, index_root
 from .regex_trigram import trigrams
 
 logger = logging.getLogger(__name__)
@@ -177,6 +189,21 @@ _TEMP_SUFFIX = ".db.building"
 _SCHEMA_VERSION = 1
 # ^ why hex of the name bytes, not TEXT; sqlite refuses a surrogate-escaped str. An older index lacks the table = no such names
 _UNSTORABLE_TABLE = "unstorable_names"
+
+
+def _unstorable_names(conn: "sqlite3.Connection") -> List[str]:
+    present = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (_UNSTORABLE_TABLE,),
+    ).fetchone()
+    if present is None:
+        return []
+    return [
+        os.fsdecode(bytes.fromhex(row[0]))
+        for row in conn.execute(f"SELECT name_hex FROM {_UNSTORABLE_TABLE}")
+    ]
+
+
 # Skip trigram extraction for files larger than this (still recorded as an
 # always-candidate so matches inside them are never missed). Keeps build I/O and
 # db size bounded; large files are rare and ripgrep handles them in the pass.
@@ -201,22 +228,318 @@ _COMMIT_EVERY_FILES = 2000
 _STALE_BUILD_FILE_AGE_SECONDS = 6 * 60 * 60
 
 
-def _unstorable_names(conn: "sqlite3.Connection") -> List[str]:
-    present = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-        (_UNSTORABLE_TABLE,),
-    ).fetchone()
-    if present is None:
-        return []
+def trigram_prefilter_available() -> bool:
+    """Whether a trigram index can be built and trusted on this server.
+
+    With a local content backend the index is built by listing (``rg
+    --files``) and reading every file on THIS disk. Under a delegated content
+    backend the repository is not here, so that build would list nothing and an
+    index built while the files WERE here would steer searches at paths this
+    pod cannot read. There the pre-filter exists only when ripgrep is delegated
+    too: refresh then builds the index from ``rg --files`` and bytes fetched
+    where the repository is (:func:`build_trigram_index_through_backends`), and
+    the candidates go back there as explicit ``/content/rg`` paths. False when
+    the setting cannot be read -- a missing pre-filter costs time, a wrong one
+    costs results.
+    """
+    from code_indexer.server.startup.content_backend_wiring import (
+        content_backend_name_or_none,
+    )
+
+    name = content_backend_name_or_none()
+    if name == "local":
+        return True
+    return name == "delegated" and delegated_trigram_backends() is not None
+
+
+def delegated_trigram_backends() -> Optional[Tuple[Any, Any]]:
+    """``(content backend, ripgrep backend)`` when BOTH are delegated on the
+    running server -- the pair a trigram index is built through and searched
+    with on a pod that does not hold the repositories -- else None."""
+    from code_indexer.server.startup.content_backend_wiring import (
+        server_content_backend,
+    )
+    from code_indexer.server.startup.ripgrep_backend_wiring import (
+        server_ripgrep_backend,
+    )
+
+    content = server_content_backend()
+    ripgrep = server_ripgrep_backend()
+    if content is None or content.is_local or ripgrep is None or ripgrep.is_local:
+        return None
+    return content, ripgrep
+
+
+#: ``rg --files`` output above this is refused rather than truncated: a
+#: truncated listing would make the index a SUBSET of what ripgrep searches.
+_RG_FILES_MAX_OUTPUT_BYTES = 256 * 1024 * 1024
+_RG_FILES_TIMEOUT_SECONDS = 600.0
+#: The ceilings a DELEGATED ripgrep backend accepts: it sends the run to
+#: workspace-mcp's ``POST /content/rg`` as ``timeout_ms`` / ``max_output_bytes``,
+#: and workspace-mcp rejects anything over ``CONTENT_RG_MAX_TIMEOUT_MS``
+#: (300 000 ms) or ``CONTENT_RG_MAX_OUTPUT_BYTES`` (64 MiB, content-rg.service.ts)
+#: with a 400 -- which failed EVERY delegated trigram build while the listing
+#: asked for 600 s / 256 MiB (issue-64616). Applied only at that boundary
+#: (:func:`_listing_limits`); a local rg keeps the full budget.
+_DELEGATED_RG_MAX_TIMEOUT_SECONDS = 300.0
+_DELEGATED_RG_MAX_OUTPUT_BYTES = 64 * 1024 * 1024
+#: Directories the change-detection manifest skips: ``rg --files`` never lists
+#: them (``.git`` and cidx's own hidden index state).
+_MANIFEST_PRUNE_DIRS: Tuple[str, ...] = (INDEX_DIRNAME, ".git")
+
+
+class TrigramListingError(RuntimeError):
+    """``rg --files`` through the ripgrep backend did not produce a complete
+    listing, so no index may be built from it."""
+
+
+#: The listing argv. workspace-mcp's ``/content/rg`` admits only the regex
+#: search's own shape (``--json -e PATTERN ... -- PATH``), never ``--files``,
+#: so the walk is listed by a search that matches each searchable file exactly
+#: once: ``\A[\s\S]`` in multiline mode is the file's first character. Its
+#: ``begin`` events are the walk -- ripgrep's own gitignore, hidden-file and
+#: binary rules, which explicit candidate paths would otherwise bypass. An
+#: empty file is not listed, and cannot hold a match either.
+_LISTING_PATTERN = r"\A[\s\S]"
+
+
+def _listing_argv(root: Path, paths_only: bool) -> List[str]:
+    """The listing search's argv: ``--files-with-matches`` prints just the paths of
+    the files that match, ``--json`` also carries the matched text of every file
+    (205 MB for a repository of 28 thousand files, where the paths are 2.4 MB)."""
     return [
-        os.fsdecode(bytes.fromhex(row[0]))
-        for row in conn.execute(f"SELECT name_hex FROM {_UNSTORABLE_TABLE}")
+        "rg",
+        "--files-with-matches" if paths_only else "--json",
+        "--multiline",
+        "-e",
+        _LISTING_PATTERN,
+        "-g",
+        f"!{INDEX_DIRNAME}/**",
+        "-g",
+        "!.git/**",
+        "--",
+        str(root),
     ]
+
+
+def _json_text(value: Any) -> Optional[str]:
+    """ripgrep's ``{"text": ...}`` or base64 ``{"bytes": ...}`` as a str."""
+    import base64
+
+    if not isinstance(value, dict):
+        return None
+    if isinstance(value.get("text"), str):
+        return str(value["text"])
+    if isinstance(value.get("bytes"), str):
+        raw = base64.b64decode(value["bytes"])
+        return raw.decode("utf-8", errors="surrogateescape")
+    return None
+
+
+def _listed_paths(output_file: str, root: Path) -> List[str]:
+    """Repo-relative paths of the ``begin`` events in a listing run's output."""
+    import json
+
+    root_text = os.path.normpath(str(root))
+    paths: List[str] = []
+    with open(output_file, "rb") as fh:
+        for line in fh:
+            try:
+                event = json.loads(line)
+            except ValueError as exc:
+                raise TrigramListingError(f"unparseable listing output: {exc}") from exc
+            if not isinstance(event, dict) or event.get("type") != "begin":
+                continue
+            path = _json_text((event.get("data") or {}).get("path"))
+            if path is None:
+                raise TrigramListingError("listing event without a path")
+            paths.append(_repo_relative(path, root_text))
+    return paths
+
+
+def _repo_relative(path: str, root_text: str) -> str:
+    """*path* as listed by ripgrep, relative to the repository root; a path that
+    is not under it is refused (the index would name files it cannot serve)."""
+    rel = os.path.relpath(os.path.normpath(path), root_text)
+    if rel == "." or rel.startswith(".." + os.sep) or rel == "..":
+        raise TrigramListingError(f"listed path outside the root: {path!r}")
+    return rel.replace(os.sep, "/")
+
+
+def _listed_paths_only(output_file: str, root: Path) -> List[str]:
+    """Repo-relative paths of a ``--files-with-matches`` run: one per line."""
+    root_text = os.path.normpath(str(root))
+    paths: List[str] = []
+    with open(output_file, "rb") as fh:
+        for raw in fh:
+            line = raw.rstrip(b"\r\n")
+            if line:
+                paths.append(
+                    _repo_relative(
+                        line.decode("utf-8", errors="surrogateescape"), root_text
+                    )
+                )
+    return paths
+
+
+def _listing_limits(ripgrep_backend: Any) -> Tuple[float, int]:
+    """The listing's ``(timeout_seconds, max_output_bytes)`` for
+    *ripgrep_backend*: the full budget for a local rg, capped at
+    workspace-mcp's ``/content/rg`` limits otherwise (a backend that does not
+    say it is local is treated as delegated)."""
+    if getattr(ripgrep_backend, "is_local", False) is True:
+        return _RG_FILES_TIMEOUT_SECONDS, _RG_FILES_MAX_OUTPUT_BYTES
+    return (
+        min(_RG_FILES_TIMEOUT_SECONDS, _DELEGATED_RG_MAX_TIMEOUT_SECONDS),
+        min(_RG_FILES_MAX_OUTPUT_BYTES, _DELEGATED_RG_MAX_OUTPUT_BYTES),
+    )
+
+
+class _PathsOnlyListingRefused(TrigramListingError):
+    """The ripgrep backend could not run the paths-only listing at all (a
+    transport or protocol failure, no exit code): a server that predates it
+    answers 400. The JSON listing is tried instead."""
+
+
+def list_ripgrep_files(ripgrep_backend: Any, root: Path) -> List[str]:
+    """Exactly the files ripgrep searches at *root*, listed WHERE ripgrep runs.
+
+    Candidates go back to ripgrep as explicit paths, which bypass its ignore
+    rules, so the index must cover exactly ripgrep's own walk -- this asks
+    ripgrep for it (see ``_LISTING_PATTERN``). A run that timed out, was
+    capped or failed raises: a partial listing would make the index a SUBSET
+    of what ripgrep searches, and silently drop matches.
+
+    The listing prints only the paths (``--files-with-matches``). A backend that
+    cannot run that -- a workspace-mcp that predates it -- gets the ``--json``
+    listing instead, which selects the same files but is far larger.
+    """
+    try:
+        return _list_ripgrep_files(ripgrep_backend, root, paths_only=True)
+    except _PathsOnlyListingRefused as exc:
+        _log_paths_only_refused_once(exc)
+    return _list_ripgrep_files(ripgrep_backend, root, paths_only=False)
+
+
+_paths_only_refusal_logged = False
+
+
+def _log_paths_only_refused_once(exc: Exception) -> None:
+    """Said once per process, not once per repository per refresh."""
+    global _paths_only_refusal_logged
+    if _paths_only_refusal_logged:
+        return
+    _paths_only_refusal_logged = True
+    logger.warning(
+        "The paths-only trigram listing was refused (%s); using the --json "
+        "listing, whose output can exceed the delegated size cap on a large "
+        "repository",
+        exc,
+    )
+
+
+def _list_ripgrep_files(
+    ripgrep_backend: Any, root: Path, *, paths_only: bool
+) -> List[str]:
+    import asyncio
+    import concurrent.futures
+
+    timeout_seconds, max_output_bytes = _listing_limits(ripgrep_backend)
+    fd, out_name = tempfile.mkstemp(prefix="rg_listing_", suffix=".jsonl")
+    os.close(fd)
+    try:
+
+        def _run() -> Any:
+            return asyncio.run(
+                ripgrep_backend.run(
+                    argv=_listing_argv(root, paths_only),
+                    working_dir=str(root),
+                    output_file_path=out_name,
+                    timeout_seconds=timeout_seconds,
+                    max_output_bytes=max_output_bytes,
+                )
+            )
+
+        # A fresh thread owns the event loop: the caller may itself be running
+        # inside one (asyncio.run refuses to nest).
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            result = pool.submit(_run).result()
+        if result.timed_out or result.output_capped:
+            raise TrigramListingError(
+                "ripgrep listing did not complete (timed out or output capped)"
+            )
+        if result.found_no_matches:
+            return []
+        if result.is_error:
+            message = (
+                f"ripgrep listing failed: exit_code={result.exit_code} "
+                f"{(result.stderr_output or result.error_message)[:300]}"
+            )
+            if paths_only and result.exit_code is None:
+                raise _PathsOnlyListingRefused(message)
+            raise TrigramListingError(message)
+        if paths_only:
+            try:
+                return _listed_paths_only(out_name, root)
+            except TrigramListingError as exc:
+                # One path per line cannot carry every name (a newline in one);
+                # the JSON listing can, and refuses what is truly outside the root.
+                raise _PathsOnlyListingRefused(f"unreadable listing: {exc}") from exc
+        return _listed_paths(out_name, root)
+    finally:
+        try:
+            os.unlink(out_name)
+        except OSError:
+            pass
+
+
+def manifest_facts(content_backend: Any, root: Path) -> Dict[str, ManifestFacts]:
+    """Per-path size, mtime and (when sent) blob hash, without hashing.
+
+    Asks for ``hash: false`` -- change detection needs size and mtime, and the
+    hash is the expensive part of a manifest -- through
+    ``query_manifest_pages``, so a backend that cannot skip it still works.
+    """
+    from code_indexer.server.storage.shared.content_backend import (
+        query_manifest_pages,
+    )
+
+    facts: Dict[str, ManifestFacts] = {}
+    for page in query_manifest_pages(
+        content_backend, str(root), prune_dirs=_MANIFEST_PRUNE_DIRS, want_hash=False
+    ):
+        for entry in page.entries:
+            if entry.is_symlink:
+                continue
+            facts[entry.path] = ManifestFacts(
+                size=int(entry.size or 0),
+                mtime_ns=entry.mtime_ns,
+                blob_sha=entry.blob_sha,
+            )
+    return facts
+
+
+def build_trigram_index_through_backends(
+    index_dir: Path, content_backend: Any, ripgrep_backend: Any, root: Path
+) -> DelegatedBuildStats:
+    """Build *index_dir*'s trigram index for the repository at *root* without
+    it being on this pod: list with ripgrep where it is, fetch only the files
+    whose size/mtime changed since the index on this pod was built."""
+    files = list_ripgrep_files(ripgrep_backend, root)
+    facts = manifest_facts(content_backend, root)
+    return TrigramIndexManager(index_dir).build_delegated(
+        content_backend, files, root, facts
+    )
 
 
 def trigram_index_dir(repo_path: Path) -> Path:
     """Return the trigram index directory of the repository at ``repo_path``."""
-    return Path(repo_path) / ".code-indexer" / "trigram_index"
+    return index_root(repo_path) / "trigram_index"
+
+
+def trigram_index_present(repo_path: Path) -> bool:
+    """True when ``repo_path`` has a populated, current-schema trigram index."""
+    return TrigramIndexManager(trigram_index_dir(repo_path)).exists()
 
 
 def remove_leftover_build_files(
@@ -265,6 +588,44 @@ def remove_leftover_build_files(
             index_dir,
         )
     return removed
+
+
+def _data_trigrams(data: bytes) -> Set[str]:
+    """Trigrams of *data*'s printable text runs, lower-cased (see the build)."""
+    tris: Set[str] = set()
+    for m in _PRINTABLE_RUN.finditer(data):
+        tris |= trigrams(m.group().decode("ascii").lower())
+    return tris
+
+
+@dataclass(frozen=True)
+class ManifestFacts:
+    """What the content manifest says about one file, for change detection."""
+
+    size: int
+    mtime_ns: Optional[int]
+    blob_sha: Optional[str]
+
+    @property
+    def change_key(self) -> Optional[str]:
+        """Equal across two builds only if the file is unchanged: size and
+        mtime when the manifest has an mtime, else the blob hash, else None
+        (unknown -- always fetched)."""
+        if self.mtime_ns is not None:
+            return f"s{self.size}:m{self.mtime_ns}"
+        if self.blob_sha:
+            return f"b{self.blob_sha}"
+        return None
+
+
+@dataclass(frozen=True)
+class DelegatedBuildStats:
+    """How a delegated build got its files."""
+
+    files: int
+    carried: int
+    fetched: int
+    oversized: int
 
 
 class TrigramIndexManager:
@@ -404,30 +765,38 @@ class TrigramIndexManager:
         Returns the number of files recorded.
         """
         repo_path = Path(repo_path)
-        listed = (
+        rel_files = (
             list(file_list)
             if file_list is not None
             else self._enumerate_files(repo_path)
         )
-        skipped = SkippedPathReporter(
-            logger,
-            where=" in the trigram index",
-            noun="file(s)",
-            summary_subject="file(s) whose names are not valid UTF-8 in this trigram build",
+        rows = ((rel, *self._file_trigrams(repo_path / rel)) for rel in rel_files)
+        count = self._write_index(rows)
+        logger.info(
+            "TrigramIndexManager: built index for %s (%d files) at %s",
+            repo_path,
+            count,
+            self._db_path,
         )
-        rel_files: List[str] = []
-        unstorable: List[str] = []
-        for rel in listed:
-            if has_unstorable_name(rel):
-                unstorable.append(rel)
-                skipped.report(
-                    rel,
-                    "its name is not valid UTF-8, so it is searched without the index",
-                )
-            else:
-                rel_files.append(rel)
-        skipped.summarize()
+        return count
 
+    def _write_index(
+        self,
+        rows: Iterable["tuple[str, Set[str], bool]"],
+        *,
+        carry_from: Optional[Path] = None,
+        carry_paths: Optional[Iterable[str]] = None,
+        change_keys: Optional[Dict[str, str]] = None,
+    ) -> int:
+        """Write a new index from ``(path, trigrams, indexed)`` rows and publish it.
+
+        ``carry_from``/``carry_paths``: an earlier index whose rows for exactly
+        those paths (unchanged files) are copied over with their postings, so
+        their bytes need not be read again. ``change_keys`` is stored per path
+        (``file_keys``) for the next incremental build to compare against; an
+        index without it simply carries nothing forward. Neither changes what
+        :meth:`exists` or :meth:`query` read, so the schema version stands.
+        """
         self._dir.mkdir(parents=True, exist_ok=True)
         # Build into a UNIQUE temp file (not a fixed ".db.building" name): in
         # cluster mode this index dir lives on shared NFS under the golden repo,
@@ -469,64 +838,10 @@ class TrigramIndexManager:
                 """
             )
             count = 0
-            batch: List[tuple] = []
-            for rel in rel_files:
-                file_id = count + 1
-                tris, indexed = self._file_trigrams(repo_path / rel)
-                conn.execute(
-                    "INSERT INTO files (id, path, indexed) VALUES (?, ?, ?)",
-                    (file_id, rel, 1 if indexed else 0),
-                )
-                for t in tris:
-                    batch.append((t, file_id))
-                    if len(batch) >= _INSERT_BATCH:
-                        conn.executemany(
-                            "INSERT INTO postings (trigram, file_id) VALUES (?, ?)",
-                            batch,
-                        )
-                        batch.clear()
-                count += 1
-                if count % _COMMIT_EVERY_FILES == 0:
-                    if batch:
-                        conn.executemany(
-                            "INSERT INTO postings (trigram, file_id) VALUES (?, ?)",
-                            batch,
-                        )
-                        batch.clear()
-                    conn.commit()  # flush dirty pages, bound memory
-            if batch:
-                conn.executemany(
-                    "INSERT INTO postings (trigram, file_id) VALUES (?, ?)", batch
-                )
-            conn.commit()
-            # Composite (trigram, file_id) index: serves both "file_ids of the
-            # rarest trigram" (WHERE trigram=?) and the per-candidate membership
-            # seek (WHERE trigram=? AND file_id=?) that the rarest-first
-            # intersection relies on -- so checking "does file X contain trigram
-            # T" is O(1), not a scan of T's whole posting list.
-            conn.execute("CREATE INDEX idx_postings_tc ON postings(trigram, file_id)")
-            # Index the always-candidate flag so fetching unindexed files is a
-            # seek, not a full scan of the (large) files table.
-            conn.execute("CREATE INDEX idx_files_indexed ON files(indexed)")
-            conn.commit()
-            # Document frequency per trigram + total file count, so the query can
-            # order the required trigrams rarest-first.
-            conn.execute(
-                "CREATE TABLE trigram_df AS "
-                "SELECT trigram, COUNT(*) AS df FROM postings GROUP BY trigram"
-            )
-            conn.execute("CREATE INDEX idx_trigram_df ON trigram_df(trigram)")
-            conn.execute(f"CREATE TABLE {_UNSTORABLE_TABLE} (name_hex TEXT NOT NULL)")
-            conn.executemany(
-                f"INSERT INTO {_UNSTORABLE_TABLE} (name_hex) VALUES (?)",
-                [(os.fsencode(rel).hex(),) for rel in unstorable],
-            )
-            conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value INTEGER)")
-            conn.executemany(
-                "INSERT INTO meta (key, value) VALUES (?, ?)",
-                [("file_count", count), ("schema_version", _SCHEMA_VERSION)],
-            )
-            conn.commit()
+            if carry_from is not None and carry_paths is not None:
+                count = self._carry_rows(conn, carry_from, carry_paths)
+            count = self._insert_rows(conn, rows, count)
+            self._finalize(conn, count, change_keys)
         except BaseException:
             # A failed build must not leave its half-written temp behind. Each
             # build's temp is unique, so this only ever removes our own file --
@@ -541,13 +856,229 @@ class TrigramIndexManager:
             conn.close()
 
         os.replace(tmp_path, self._db_path)  # atomic publish
+        return count
+
+    @staticmethod
+    def _carry_rows(
+        conn: "sqlite3.Connection", previous: Path, paths: Iterable[str]
+    ) -> int:
+        """Copy *paths*' rows and postings from the index at *previous*.
+
+        One sequential pass over the old postings (a join on path), never a
+        per-file lookup: the old index has no ``file_id`` index to seek by.
+        Returns the number of files carried; new ids follow on from them.
+        """
+        conn.execute("ATTACH DATABASE ? AS prev", (str(previous),))
+        try:
+            conn.execute("CREATE TEMP TABLE carry (path TEXT PRIMARY KEY)")
+            conn.executemany(
+                "INSERT OR IGNORE INTO carry (path) VALUES (?)",
+                ((p,) for p in paths),
+            )
+            conn.execute(
+                "INSERT INTO files (path, indexed) "
+                "SELECT f.path, f.indexed FROM prev.files f "
+                "JOIN carry c ON c.path = f.path ORDER BY f.id"
+            )
+            # A path index for the id mapping below, dropped again so the
+            # published index is the same shape as a full build's.
+            conn.execute("CREATE INDEX carry_files_path ON files(path)")
+            conn.execute(
+                "CREATE TEMP TABLE id_map (old INTEGER PRIMARY KEY, new INTEGER)"
+            )
+            conn.execute(
+                "INSERT INTO id_map (old, new) "
+                "SELECT pf.id, f.id FROM prev.files pf JOIN main.files f "
+                "ON f.path = pf.path"
+            )
+            conn.execute(
+                "INSERT INTO postings (trigram, file_id) "
+                "SELECT p.trigram, m.new FROM prev.postings p "
+                "JOIN id_map m ON m.old = p.file_id"
+            )
+            carried = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+            conn.commit()
+            conn.execute("DROP TABLE carry")
+            conn.execute("DROP TABLE id_map")
+            conn.execute("DROP INDEX carry_files_path")
+        finally:
+            conn.execute("DETACH DATABASE prev")
+        return int(carried)
+
+    @staticmethod
+    def _insert_rows(
+        conn: "sqlite3.Connection",
+        rows: Iterable["tuple[str, Set[str], bool]"],
+        count: int,
+    ) -> int:
+        """Insert ``(path, trigrams, indexed)`` rows after the first *count* ids."""
+        batch: List[tuple] = []
+        added = 0
+        for rel, tris, indexed in rows:
+            file_id = count + 1
+            conn.execute(
+                "INSERT INTO files (id, path, indexed) VALUES (?, ?, ?)",
+                (file_id, rel, 1 if indexed else 0),
+            )
+            for t in tris:
+                batch.append((t, file_id))
+                if len(batch) >= _INSERT_BATCH:
+                    conn.executemany(
+                        "INSERT INTO postings (trigram, file_id) VALUES (?, ?)",
+                        batch,
+                    )
+                    batch.clear()
+            count += 1
+            added += 1
+            if added % _COMMIT_EVERY_FILES == 0:
+                if batch:
+                    conn.executemany(
+                        "INSERT INTO postings (trigram, file_id) VALUES (?, ?)",
+                        batch,
+                    )
+                    batch.clear()
+                conn.commit()  # flush dirty pages, bound memory
+        if batch:
+            conn.executemany(
+                "INSERT INTO postings (trigram, file_id) VALUES (?, ?)", batch
+            )
+        conn.commit()
+        return count
+
+    @staticmethod
+    def _finalize(
+        conn: "sqlite3.Connection",
+        count: int,
+        change_keys: Optional[Dict[str, str]],
+    ) -> None:
+        """Indexes, document frequencies, the meta stamp and the change keys."""
+        # Composite (trigram, file_id) index: serves both "file_ids of the
+        # rarest trigram" (WHERE trigram=?) and the per-candidate membership
+        # seek (WHERE trigram=? AND file_id=?) that the rarest-first
+        # intersection relies on -- so checking "does file X contain trigram
+        # T" is O(1), not a scan of T's whole posting list.
+        conn.execute("CREATE INDEX idx_postings_tc ON postings(trigram, file_id)")
+        # Index the always-candidate flag so fetching unindexed files is a
+        # seek, not a full scan of the (large) files table.
+        conn.execute("CREATE INDEX idx_files_indexed ON files(indexed)")
+        conn.commit()
+        # Document frequency per trigram + total file count, so the query can
+        # order the required trigrams rarest-first.
+        conn.execute(
+            "CREATE TABLE trigram_df AS "
+            "SELECT trigram, COUNT(*) AS df FROM postings GROUP BY trigram"
+        )
+        conn.execute("CREATE INDEX idx_trigram_df ON trigram_df(trigram)")
+        conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value INTEGER)")
+        conn.executemany(
+            "INSERT INTO meta (key, value) VALUES (?, ?)",
+            [("file_count", count), ("schema_version", _SCHEMA_VERSION)],
+        )
+        if change_keys is not None:
+            conn.execute(
+                "CREATE TABLE file_keys (path TEXT PRIMARY KEY, change_key TEXT)"
+            )
+            conn.executemany(
+                "INSERT INTO file_keys (path, change_key) VALUES (?, ?)",
+                change_keys.items(),
+            )
+        conn.commit()
+
+    def previous_change_keys(self) -> Dict[str, str]:
+        """The change keys the current index was built with, or {} when it has
+        none (absent, stale-schema, or built from the local disk)."""
+        if not self.exists():
+            return {}
+        try:
+            uri = f"{self._db_path.resolve().as_uri()}?mode=ro"
+            with sqlite3.connect(uri, uri=True) as conn:
+                # Only files that WERE indexed: an always-candidate row may be
+                # one the backend failed to read last time, and carrying it
+                # forward would keep it unindexed for as long as it is unchanged.
+                return {
+                    str(path): str(key)
+                    for path, key in conn.execute(
+                        "SELECT k.path, k.change_key FROM file_keys k "
+                        "JOIN files f ON f.path = k.path WHERE f.indexed = 1"
+                    )
+                    if key is not None
+                }
+        except sqlite3.Error:
+            return {}
+
+    def build_delegated(
+        self,
+        content_backend: Any,
+        file_list: Sequence[str],
+        root: Path,
+        manifest: Dict[str, "ManifestFacts"],
+    ) -> "DelegatedBuildStats":
+        """Build the index from bytes fetched through *content_backend*.
+
+        For a pod that does not hold the repository: *file_list* is exactly
+        what ripgrep would search at *root* (``rg --files`` run where the
+        repository is), *manifest* the content manifest's facts per path.
+        A file whose change key (size + mtime, or blob hash) equals the one
+        the current index recorded keeps its postings; only the rest are
+        fetched, in byte-budgeted batches. A file too large to index, or one
+        the backend could not read, is an always-candidate, as in the local
+        build. A transport failure raises and leaves the current index.
+        """
+        from ..indexing.fetch_planner import plan_fetch_batches
+
+        previous = self.previous_change_keys()
+        keys: Dict[str, str] = {}
+        carried: List[str] = []
+        to_fetch: List[str] = []
+        oversized: List[str] = []
+        for rel in file_list:
+            facts = manifest.get(rel)
+            key = facts.change_key if facts is not None else None
+            if key is not None:
+                keys[rel] = key
+            if key is not None and previous.get(rel) == key:
+                carried.append(rel)
+            elif facts is not None and facts.size > _MAX_INDEX_BYTES:
+                oversized.append(rel)
+            else:
+                to_fetch.append(rel)
+
+        def size_of(rel: str) -> Optional[int]:
+            facts = manifest.get(rel)
+            return facts.size if facts is not None else None
+
+        def rows() -> Iterator["tuple[str, Set[str], bool]"]:
+            for rel in oversized:
+                yield rel, set(), False  # large -> always-candidate (rg scans it)
+            for batch in plan_fetch_batches(to_fetch, size_of):
+                for record in content_backend.fetch(str(root), batch):
+                    if record.error is not None or len(record.data) > _MAX_INDEX_BYTES:
+                        yield record.path, set(), False
+                        continue
+                    yield record.path, _data_trigrams(record.data), True
+
+        count = self._write_index(
+            rows(),
+            carry_from=self._db_path if carried else None,
+            carry_paths=carried if carried else None,
+            change_keys=keys,
+        )
         logger.info(
-            "TrigramIndexManager: built index for %s (%d files) at %s",
-            repo_path,
+            "TrigramIndexManager: built index for %s through the content backend "
+            "(%d files: %d carried over, %d fetched, %d too large) at %s",
+            root,
             count,
+            len(carried),
+            len(to_fetch),
+            len(oversized),
             self._db_path,
         )
-        return count
+        return DelegatedBuildStats(
+            files=count,
+            carried=len(carried),
+            fetched=len(to_fetch),
+            oversized=len(oversized),
+        )
 
     def _enumerate_files(self, repo_path: Path) -> List[str]:
         """List repo-relative files ripgrep would search (gitignore-aware)."""
@@ -591,10 +1122,7 @@ class TrigramIndexManager:
         # of its raw bytes bloating the index. Correct: a match's required
         # literals are printable and contiguous, so they fall within one run and
         # their trigrams are captured here.
-        tris: Set[str] = set()
-        for m in _PRINTABLE_RUN.finditer(data):
-            tris |= trigrams(m.group().decode("ascii").lower())
-        return tris, True
+        return _data_trigrams(data), True
 
     # ------------------------------------------------------------------
     # Query
@@ -642,6 +1170,14 @@ class TrigramIndexManager:
                         f"trigram index query for {self._db_path} cancelled "
                         f"after timeout"
                     )
+                # issue-66189: the trigram DB is ~1.2 GB on shared NFS; cold queries were
+                # dominated by NFS page seeks (measured 4-9s cold vs ~0.2s warm). mmap it
+                # so cold pages fault through the OS page cache (shared across queries, no
+                # per-read() syscall), and give the connection a larger page cache. The
+                # rarest-first intersection's temp table is kept in RAM (below) rather than
+                # written back to NFS.
+                conn.execute("PRAGMA mmap_size=2147483648")  # 2 GiB: map the whole DB
+                conn.execute("PRAGMA cache_size=-65536")  # ~64 MB page cache
                 # Order the required trigrams rarest-first (df 0 == absent).
                 df_map = {t: 0 for t in tris}
                 for t, df in conn.execute(
@@ -660,8 +1196,9 @@ class TrigramIndexManager:
                 if df_map[ordered[0]] == 0:
                     return always
 
-                # Rarest-first intersection in a connection-local temp table.
-                conn.execute("PRAGMA temp_store=FILE")
+                # Rarest-first intersection in a connection-local temp table, kept in RAM
+                # (temp_store=MEMORY) instead of written back to shared NFS (temp_store=FILE).
+                conn.execute("PRAGMA temp_store=MEMORY")
                 conn.execute("CREATE TEMP TABLE cand (id INTEGER PRIMARY KEY)")
                 try:
                     conn.execute(

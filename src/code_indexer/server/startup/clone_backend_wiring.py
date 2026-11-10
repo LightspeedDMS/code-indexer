@@ -5,11 +5,19 @@ Story #510 AC8 — builds a VersionedSnapshotManager configured with the
 appropriate CloneBackend based on server config, then makes it available
 for injection into golden-repo lifecycle services.
 
+The backend for the configured mode is a provider on the clone seam's
+entry-point group, reached through the seam resolver
+(``server/services/clone_backend_plugin.py``); this module validates the
+deployment for that mode first and hands the provider its settings.
+
 Fail-fast policy:
 - cow-daemon: daemon health check AND NFS mount check MUST pass.
   If either fails, raise RuntimeError immediately — NO fallback.
+- delegated: workspace-mcp must be configured and answer its health check.
 - ontap: no extra validation (existing ONTAP path is unchanged).
 - local: no external validation needed.
+- anything else: RuntimeError (it used to become ``local`` silently).
+- no module installed for the mode: ``SeamUnavailableError`` naming the seam.
 """
 
 from __future__ import annotations
@@ -18,7 +26,8 @@ import dataclasses
 import logging
 import os
 import subprocess
-from typing import TYPE_CHECKING, Any, Optional
+import time
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 if TYPE_CHECKING:
     from code_indexer.server.utils.config_manager import (
@@ -31,14 +40,121 @@ logger = logging.getLogger(__name__)
 _MIN_DAEMON_VERSION = "0.2.0"
 
 
+#: How long startup waits for workspace-mcp to answer its health check before
+#: giving up on the delegated clone backend (env override, seconds; 0: once).
+WORKSPACE_MCP_STARTUP_WAIT_ENV = "CIDX_WORKSPACE_MCP_STARTUP_WAIT_SECONDS"
+DEFAULT_WORKSPACE_MCP_STARTUP_WAIT_SECONDS = 90.0
+_WORKSPACE_MCP_HEALTH_RETRY_DELAY_SECONDS = 5.0
+
+
+def _workspace_mcp_startup_wait() -> float:
+    raw = os.environ.get(WORKSPACE_MCP_STARTUP_WAIT_ENV)
+    try:
+        value = float(raw) if raw is not None else None
+    except ValueError:
+        value = None
+    if value is None or value < 0:
+        return DEFAULT_WORKSPACE_MCP_STARTUP_WAIT_SECONDS
+    return value
+
+
+def _http_status(exc: BaseException, requests_module: Any) -> Optional[int]:
+    """The HTTP status of a ``raise_for_status`` failure, else None."""
+    if not isinstance(exc, requests_module.exceptions.HTTPError):
+        return None
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    return status if isinstance(status, int) else None
+
+
+def _is_transient_health_failure(exc: BaseException, requests_module: Any) -> bool:
+    """Worth retrying while workspace-mcp starts: it could not be reached
+    (connection refused, DNS, timeout) or answered 5xx (starting, or its
+    gateway is). A 4xx or any other error is an answer, not a delay."""
+    status = _http_status(exc, requests_module)
+    if status is not None:
+        return status >= 500
+    exceptions = requests_module.exceptions
+    return isinstance(exc, (exceptions.ConnectionError, exceptions.Timeout))
+
+
+def _check_workspace_mcp_health(
+    endpoint: str,
+    api_key: str,
+    *,
+    wait_seconds: Optional[float] = None,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> None:
+    """Verify workspace-mcp is reachable before wiring the delegated backend.
+
+    issue-64616: the ``delegated`` clone backend forwards every activated-repo
+    CoW clone to workspace-mcp. If workspace-mcp is unreachable at startup we
+    fail fast — there is NO silent fallback to a local cidx-side copy (that
+    would reintroduce the very filesystem work delegation exists to remove,
+    issue-64615). GETs ``{endpoint}/clone-path/health``.
+
+    Only a transient failure (connection/timeout/5xx,
+    :func:`_is_transient_health_failure`) is retried, for up to *wait_seconds* (default
+    ``CIDX_WORKSPACE_MCP_STARTUP_WAIT_SECONDS``, 90): the snapshot manager is
+    built ONCE, so a pod that starts while workspace-mcp is restarting (a
+    rollout of both) stayed without a clone backend until its own restart --
+    every rename, activation and orphan prune on it refused, for hours, while
+    its siblings worked (issue-64616, tools-test claude-code-indexer-1).
+    """
+    import requests
+
+    health_url = f"{endpoint.rstrip('/')}/clone-path/health"
+    logger.info("Checking workspace-mcp health at %s", health_url)
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    budget = _workspace_mcp_startup_wait() if wait_seconds is None else wait_seconds
+    deadline = clock() + budget
+    while True:
+        try:
+            resp = requests.get(health_url, headers=headers, timeout=10)
+            resp.raise_for_status()
+            break
+        except Exception as exc:
+            status = _http_status(exc, requests)
+            if status is not None and status < 500:
+                # Reachable, and refusing: a wrong api_key (401/403) or
+                # endpoint path (404) will not fix itself -- fail now, and
+                # say so instead of "not reachable" after the whole wait.
+                raise RuntimeError(
+                    f"workspace-mcp at {endpoint} answered its health check "
+                    f"with HTTP {status}: check workspace_mcp.api_key and "
+                    f"workspace_mcp.endpoint. Error: {exc}"
+                ) from exc
+            if not _is_transient_health_failure(exc, requests):
+                raise RuntimeError(
+                    f"workspace-mcp not reachable at {endpoint} for the delegated "
+                    f"clone backend. Ensure workspace-mcp is running and "
+                    f"CIDX_CLONE_BACKEND / workspace_mcp.endpoint is correct. "
+                    f"Error: {exc}"
+                ) from exc
+            if clock() + _WORKSPACE_MCP_HEALTH_RETRY_DELAY_SECONDS > deadline:
+                raise RuntimeError(
+                    f"workspace-mcp not reachable at {endpoint} for the delegated "
+                    f"clone backend (waited {budget:.0f}s). Ensure workspace-mcp "
+                    f"is running and CIDX_CLONE_BACKEND / workspace_mcp.endpoint "
+                    f"is correct. Error: {exc}"
+                ) from exc
+            logger.warning(
+                "workspace-mcp health check failed (%s); retrying in %.0fs",
+                type(exc).__name__,
+                _WORKSPACE_MCP_HEALTH_RETRY_DELAY_SECONDS,
+            )
+            sleep(_WORKSPACE_MCP_HEALTH_RETRY_DELAY_SECONDS)
+    logger.info("workspace-mcp health check: OK")
+
+
 def _check_daemon_health(daemon_url: str) -> None:
     """Verify CoW daemon is reachable via GET /api/v1/health and meets minimum version.
 
     Raises RuntimeError if the daemon does not return HTTP 200, or if the reported
     version is absent or older than 0.2.0.
     """
-    import requests  # noqa: PLC0415
-    from packaging.version import parse as parse_version  # noqa: PLC0415
+    import requests
+    from packaging.version import parse as parse_version
 
     health_url = f"{daemon_url.rstrip('/')}/api/v1/health"
     logger.info("Checking CoW daemon health at %s", health_url)
@@ -69,7 +185,7 @@ def _check_nfs_mount(mount_point: str) -> None:
 
     Raises RuntimeError if the mount point is not healthy.
     """
-    from code_indexer.server.storage.shared.nfs_validator import NfsMountValidator  # noqa: PLC0415
+    from code_indexer.server.storage.shared.nfs_validator import NfsMountValidator
 
     logger.info("Validating NFS mount at %s", mount_point)
     validator = NfsMountValidator(mount_point)
@@ -333,8 +449,8 @@ def build_snapshot_manager(
     ----------
     config:
         Server config object (ServerConfig). Must have a ``clone_backend``
-        field (str: "local", "ontap", or "cow-daemon") and optional
-        ``cow_daemon`` / ``ontap`` sub-configs.
+        field (str: "local", "ontap", "cow-daemon" or "delegated") and
+        optional ``cow_daemon`` / ``ontap`` / ``workspace_mcp`` sub-configs.
     versioned_base:
         Base directory for filesystem CoW snapshots and the LocalCloneBackend.
     activated_repos_dir:
@@ -353,8 +469,12 @@ def build_snapshot_manager(
     Raises
     ------
     RuntimeError
-        If ``clone_backend == "cow-daemon"`` and the daemon is unreachable,
-        or the NFS mount is unhealthy. No fallback is performed.
+        If ``clone_backend`` is not a known mode, or is ``"cow-daemon"`` and
+        the daemon is unreachable or the NFS mount is unhealthy, or is
+        ``"delegated"`` and workspace-mcp is unconfigured or unreachable. No
+        fallback is performed.
+    SeamUnavailableError
+        If no installed module (or more than one) provides the mode.
 
         NOTE (Bug #1337 staging regression fix): golden_repos_dir
         (versioned_base) not resolving under the CoW storage tree no longer
@@ -368,13 +488,34 @@ def build_snapshot_manager(
         symptom rather than the check disabling snapshot_manager as a side
         effect.
     """
-    from code_indexer.server.storage.shared.clone_backend import CloneBackendFactory  # noqa: PLC0415
+    from cidx_sdk.seams.clone import VALID_CLONE_BACKENDS, CloneBackendSettings
+
+    from code_indexer.server.services.clone_backend_plugin import (
+        resolve_clone_backend,
+    )
+    from code_indexer.server.storage.shared.clone_backend import core_clone_services
     from code_indexer.server.storage.shared.snapshot_manager import (
         VersionedSnapshotManager,
-    )  # noqa: PLC0415
+    )
 
     backend_type = getattr(config, "clone_backend", "local") or "local"
     logger.info("Building VersionedSnapshotManager with clone_backend=%r", backend_type)
+    if backend_type not in VALID_CLONE_BACKENDS:
+        # Fail loud: an unrecognised value used to become "local" silently,
+        # cloning on this pod's disk when the operator asked for something
+        # else (a typo of "cow-daemon" or "delegated").
+        raise RuntimeError(
+            f"Unknown clone_backend {backend_type!r}. "
+            f"Valid values are {VALID_CLONE_BACKENDS}."
+        )
+
+    # What the configured mode's provider receives. Each provider is reached
+    # through the seam resolver by the mode's entry name
+    # (code_indexer.clone_backend); none installed for the mode refuses,
+    # naming the seam -- there is no built-in fallback.
+    settings = CloneBackendSettings(
+        services=core_clone_services(), versioned_base=versioned_base
+    )
 
     if backend_type == "cow-daemon":
         # Bug #1337 Gap 1: self-configure daemon_storage_path from the NFS
@@ -395,38 +536,40 @@ def build_snapshot_manager(
         # Optional param -- only checked when the caller supplies it.
         if activated_repos_dir:
             _check_activated_repos_symlink_placement(activated_repos_dir, cow_cfg)
+        settings = dataclasses.replace(settings, cow_daemon=cow_cfg)
+        detail = f"daemon={cow_cfg.daemon_url}, mount={cow_cfg.mount_point}"
 
-        backend = CloneBackendFactory.create(
-            clone_backend_type="cow-daemon",
-            cow_daemon_config=cow_cfg,
-        )
-        logger.info(
-            "VersionedSnapshotManager: using CowDaemonBackend (daemon=%s, mount=%s)",
-            cow_cfg.daemon_url,
-            cow_cfg.mount_point,
-        )
+    elif backend_type == "delegated":
+        # issue-64616: delegate the activated-repo CoW clone to workspace-mcp so
+        # cidx performs NO filesystem clone itself (issue-64615). Fail-fast on an
+        # unreachable workspace-mcp -- NO silent local fallback. cidx does not
+        # translate paths here (unlike cow-daemon); workspace-mcp owns reflink
+        # placement, so the golden/activated symlink-placement checks do not
+        # apply to this backend.
+        wsm_cfg = config.workspace_mcp
+        if wsm_cfg is None or not wsm_cfg.endpoint:
+            raise RuntimeError(
+                "clone_backend='delegated' requires workspace_mcp.endpoint to be "
+                "configured (the workspace-mcp base URL). None was provided."
+            )
+        _check_workspace_mcp_health(wsm_cfg.endpoint, wsm_cfg.api_key)
+        settings = dataclasses.replace(settings, endpoint=wsm_cfg)
+        detail = f"workspace-mcp={wsm_cfg.endpoint}"
 
     elif backend_type == "ontap":
-        backend = CloneBackendFactory.create(
-            clone_backend_type="ontap",
-            versioned_base=versioned_base,
-            ontap_config=config.ontap,
-        )
-        logger.info(
-            "VersionedSnapshotManager: using OntapCloneBackend (mount=%s)",
-            config.ontap.mount_point,
-        )
+        settings = dataclasses.replace(settings, ontap=config.ontap)
+        detail = f"mount={config.ontap.mount_point}"
 
     else:
-        # "local" or any unrecognised value — default to local CoW
-        backend = CloneBackendFactory.create(
-            clone_backend_type="local",
-            versioned_base=versioned_base,
-        )
-        logger.info(
-            "VersionedSnapshotManager: using LocalCloneBackend (versioned_base=%s)",
-            versioned_base,
-        )
+        detail = f"versioned_base={versioned_base}"
+
+    backend = resolve_clone_backend(backend_type, settings)
+    logger.info(
+        "VersionedSnapshotManager: using %s for clone_backend=%r (%s)",
+        type(backend).__name__,
+        backend_type,
+        detail,
+    )
 
     return VersionedSnapshotManager(
         clone_backend=backend, versioned_base=versioned_base

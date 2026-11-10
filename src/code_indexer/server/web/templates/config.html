@@ -45,6 +45,9 @@
     {% include "partials/config_section.html" %}
 </div>
 
+<!-- Feature add-on settings (registered config sections) -->
+{% include "partials/feature_settings.html" %}
+
 <!-- Reset Confirmation Form (hidden) -->
 <form id="reset-form" method="post" action="/admin/config/reset" style="display: none;">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

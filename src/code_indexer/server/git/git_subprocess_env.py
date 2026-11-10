@@ -34,6 +34,7 @@ import logging
 import os
 import re
 import subprocess
+from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 from urllib.parse import quote, unquote
 
@@ -234,13 +235,15 @@ class _LocalGitFailure(Exception):
 
 def _run_local_git(repo_path: str, args: list) -> "subprocess.CompletedProcess[str]":
     """Run a local (no network) git command in ``repo_path``. Raises
-    _LocalGitFailure, after a WARNING, when it times out or cannot start."""
+    _LocalGitFailure, after a WARNING, when it times out or cannot start.
+
+    Through the git chokepoint (issue-64678), so a configuration write is
+    delegated wherever mutations are."""
     try:
-        return subprocess.run(
+        return git_runner.run_git_command(
             ["git", *args],
-            cwd=repo_path,
-            capture_output=True,
-            text=True,
+            cwd=Path(repo_path),
+            check=False,
             timeout=git_runner.REMOTE_RESOLVE_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired as exc:
@@ -314,6 +317,10 @@ def ensure_remote_url_without_credentials(repo_path: str) -> int:
     command line, and no log line names a URL. Local git calls only -- run
     it from a worker/job thread, never on the event loop.
 
+    A delegated server (git-mcp holds the clone, or the repository is not on
+    this pod) rewrites nothing: git-mcp owns the clone's configuration and
+    the credential.
+
     A versioned snapshot, in any layout the server's clone backend produces
     (canonical ``.versioned/<alias>/v_<ts>``, flat ONTAP ``{mount}/v_<ts>``,
     legacy ``{mount}/<alias>/v_<ts>``), is NEVER modified: snapshots are
@@ -325,10 +332,23 @@ def ensure_remote_url_without_credentials(repo_path: str) -> int:
             be rewritten (after a WARNING); the message says what failed and
             names no URL. No credential may be handed to git for the clone.
     """
+    from code_indexer.server.startup.git_backend_wiring import (
+        server_delegated_git_backend,
+    )
     from code_indexer.server.storage.shared.snapshot_manager import (
         is_versioned_snapshot_in_running_server,
     )
 
+    # issue-64616: under a delegated git backend the clone is git-mcp's, which
+    # holds the only credential and stores none in the clone; this pod has no
+    # .git to rewrite (local git here would fail the operation, or rewrite
+    # cidx's own copy of nothing).
+    from code_indexer.server.startup.content_backend_wiring import (
+        is_content_seam_delegated,
+    )
+
+    if server_delegated_git_backend() is not None or is_content_seam_delegated():
+        return 0
     if is_versioned_snapshot_in_running_server(repo_path):
         return 0
     try:

@@ -102,6 +102,26 @@ class GovernorCounters:
     graph_memory_limit_aborts: int = 0
 
 
+def _memory_stat_value(path: str, key: str) -> int:
+    """One counter of a cgroup ``memory.stat`` file; ValueError if absent."""
+    with open(path) as f:
+        for line in f:
+            name, _, value = line.partition(" ")
+            if name == key:
+                return int(value.strip())
+    raise ValueError(f"{key} not in {path}")
+
+
+def _working_set(usage: int, inactive_file: int) -> int:
+    """Memory the cgroup cannot give back without OOM pressure: usage minus
+    the inactive (reclaimable) page cache, floored at 0 -- the kubelet's
+    ``container_memory_working_set_bytes``. Page cache from index reads over
+    NFS is reclaimed by the kernel on demand; counting it as used kept the
+    governor YELLOW/RED on an idle pod and made it evict the caches the
+    queries need."""
+    return max(0, usage - inactive_file)
+
+
 class _MemoryReaders:
     """Default readers that call real cgroup/psutil/proc paths."""
 
@@ -120,6 +140,16 @@ class _MemoryReaders:
     def read_cgroup_v1_usage(self) -> int:
         with open("/sys/fs/cgroup/memory/memory.usage_in_bytes") as f:
             return int(f.read().strip())
+
+    def read_cgroup_v2_inactive_file(self) -> int:
+        """``inactive_file`` of ``memory.stat``: reclaimable page cache."""
+        return _memory_stat_value("/sys/fs/cgroup/memory.stat", "inactive_file")
+
+    def read_cgroup_v1_inactive_file(self) -> int:
+        """``total_inactive_file`` of the v1 ``memory.stat``."""
+        return _memory_stat_value(
+            "/sys/fs/cgroup/memory/memory.stat", "total_inactive_file"
+        )
 
     def read_host_memory(self) -> Any:
         import psutil
@@ -586,8 +616,13 @@ class MemoryGovernor:
         )
 
     def log_gov003_lru_evict(self, *, count: int, freed_mb: float) -> None:
-        """Emit GOV-003 when proactive LRU eviction runs (YELLOW band action)."""
-        logger.info(
+        """Emit GOV-003 after a proactive LRU eviction pass (YELLOW band).
+
+        INFO only when it evicted something: a pass that evicted nothing runs
+        every sample while YELLOW and was most of the logs table's growth;
+        it is logged at DEBUG."""
+        logger.log(
+            logging.INFO if count > 0 or freed_mb > 0 else logging.DEBUG,
             "GOV-003 lru_evict count=%d freed_mb=%.1f band=%s",
             count,
             freed_mb,
@@ -595,8 +630,10 @@ class MemoryGovernor:
         )
 
     def log_gov004_trim(self, *, released: bool) -> None:
-        """Emit GOV-004 after a malloc_trim attempt."""
-        logger.info(
+        """Emit GOV-004 after a malloc_trim attempt -- routine maintenance
+        after every eviction pass, logged at DEBUG (band transitions are the
+        INFO signal, GOV-001)."""
+        logger.debug(
             "GOV-004 malloc_trim released=%s band=%s",
             released,
             self.band.value,
@@ -659,17 +696,43 @@ class MemoryGovernor:
     # Internal — signal computation
     # ------------------------------------------------------------------
 
+    def _inactive_file(self, reader_name: str) -> int:
+        """The cgroup's reclaimable page cache, or 0 when it cannot be read
+        (the sample then counts it as used: the old, conservative reading)."""
+        reader = getattr(self._readers, reader_name, None)
+        if reader is None:
+            return 0
+        try:
+            value = reader()
+        except (FileNotFoundError, ValueError):
+            return 0
+        except OSError as exc:
+            logger.warning(
+                "GOV %s failed, page cache counted as used: %s", reader_name, exc
+            )
+            return 0
+        return value if isinstance(value, int) and value > 0 else 0
+
     def _compute_sample(self) -> MemorySample:
         """Read memory state and return a MemorySample.
 
-        Detection order: cgroup v2 => cgroup v1 => host.
+        Detection order: cgroup v2 => cgroup v1 => host. Used is the working
+        set (usage minus inactive page cache; host: total minus available),
+        never the page cache index reads leave behind.
         Only FileNotFoundError/ValueError are expected on hosts without cgroup
         namespaces; any other OSError is logged as a warning before falling through.
         pswpin read errors propagate to the caller so _tick() can apply fail-safe.
         """
         host_vm = self._readers.read_host_memory()
         host_total: int = host_vm.total
-        host_used: int = host_vm.used
+        # psutil's ``available`` excludes reclaimable cache, like the cgroup
+        # working set; ``used`` is the fallback for a reader that has none.
+        host_available = getattr(host_vm, "available", None)
+        host_used: int = (
+            max(0, host_total - host_available)
+            if isinstance(host_available, int)
+            else host_vm.used
+        )
 
         cgroup_limit: Optional[int] = None
         cgroup_used: Optional[int] = None
@@ -682,7 +745,10 @@ class MemoryGovernor:
                 cgroup_v2_limit = int(v2_max_str.strip())
                 cgroup_v2_current = self._readers.read_cgroup_v2_current()
                 cgroup_limit = cgroup_v2_limit
-                cgroup_used = cgroup_v2_current
+                cgroup_used = _working_set(
+                    cgroup_v2_current,
+                    self._inactive_file("read_cgroup_v2_inactive_file"),
+                )
                 basis = "cgroup_v2"
         except (FileNotFoundError, ValueError):
             # cgroup v2 not available on this host — expected, fall through
@@ -698,7 +764,10 @@ class MemoryGovernor:
                 if v1_limit < _CGROUP_V1_UNLIMITED_THRESHOLD:
                     cgroup_v1_usage = self._readers.read_cgroup_v1_usage()
                     cgroup_limit = v1_limit
-                    cgroup_used = cgroup_v1_usage
+                    cgroup_used = _working_set(
+                        cgroup_v1_usage,
+                        self._inactive_file("read_cgroup_v1_inactive_file"),
+                    )
                     basis = "cgroup_v1"
             except (FileNotFoundError, ValueError):
                 # cgroup v1 not available on this host — expected, fall through

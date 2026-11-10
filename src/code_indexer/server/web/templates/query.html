@@ -50,11 +50,14 @@
                             {% if search_mode == 'temporal' %}checked{% endif %}>
                         <span>Temporal (Git History)</span>
                     </label>
+                    {# SCIP is the scip feature's search mode: offered only while it is enabled. #}
+                    {% if 'scip' in (feature_query_modes or ()) %}
                     <label>
                         <input type="radio" name="search_mode" value="scip"
                             {% if search_mode == 'scip' %}checked{% endif %}>
                         <span>SCIP (Code Intelligence)</span>
                     </label>
+                    {% endif %}
                 </div>
             </fieldset>
 
@@ -160,7 +163,8 @@
                 <small class="field-hint">Scopes results to commits at or before this ref.</small>
             </fieldset>
 
-            <!-- SCIP Query Options (shown only when SCIP mode selected) -->
+            <!-- SCIP Query Options (shown only when SCIP mode selected; the scip feature's mode) -->
+            {% if 'scip' in (feature_query_modes or ()) %}
             <fieldset id="scip-options-fieldset" class="scip-options-fieldset" style="{% if search_mode != 'scip' %}display: none;{% endif %}">
                 <legend>SCIP Query Options</legend>
 
@@ -182,6 +186,7 @@
                     Exact match (no fuzzy symbol matching)
                 </label>
             </fieldset>
+            {% endif %}
 
             <!-- Advanced Options (Collapsible) -->
             <details class="advanced-options">

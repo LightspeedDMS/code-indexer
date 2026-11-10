@@ -54,6 +54,7 @@ from .fulltext_terms import (
 from .membership import request_participants_reader
 from .path_policy import (
     DEP_MAP_DIR,
+    catalog_dep_map_dir,
     MEMORIES_DIR,
     XRAY_PATTERNS_DIR,
     Decision,
@@ -282,10 +283,11 @@ def open_catalog_scope(
     if vis.unrestricted:
         return None
     root = Path(catalog_root)
+    dep_map_dir = catalog_dep_map_dir(root)
     projector = MetaProjector(
-        vis, dep_map_dir=root / DEP_MAP_DIR, universe=process_alias_universe(registry)
+        vis, dep_map_dir=dep_map_dir, universe=process_alias_universe(registry)
     )
-    participants = request_participants_reader(root / DEP_MAP_DIR, projector.model)
+    participants = request_participants_reader(dep_map_dir, projector.model)
     memory_fn = memory_visibility_fn(access_service, vis)
     return CatalogScope(
         vis=vis,

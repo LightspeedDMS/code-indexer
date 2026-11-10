@@ -24,8 +24,12 @@ from typing import Callable, Optional, List, Tuple
 
 from code_indexer.utils.file_locking import nfs_safe_flock, nfs_safe_funlock
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.server.services import cidx_meta_content
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.services.constants import CIDX_META_REPO
+from code_indexer.utils.git_runner import run_git_command
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
+from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -319,15 +323,26 @@ class ClaudeCliManager:
         Returns:
             List of (alias, fallback_path) tuples for each fallback file found
         """
-        if not self._meta_dir or not self._meta_dir.exists():
+        shared = (
+            cidx_meta_content.shared_cidx_meta(self._meta_dir)
+            if self._meta_dir
+            else None
+        )
+        if shared is None and (not self._meta_dir or not self._meta_dir.exists()):
             logger.debug(
                 f"Meta directory not set or doesn't exist: {self._meta_dir}",
                 extra={"correlation_id": get_correlation_id()},
             )
             return []
+        assert self._meta_dir is not None  # narrowed above for both branches
 
         fallbacks = []
-        for path in self._meta_dir.glob("*_README.md"):
+        paths = (
+            [self._meta_dir / name for name in shared.list_names("", "_README.md")]
+            if shared is not None
+            else self._meta_dir.glob("*_README.md")
+        )
+        for path in paths:
             # Extract alias: my-repo_README.md -> my-repo
             alias = path.stem.rsplit("_README", 1)[0]
             fallbacks.append((alias, path))
@@ -469,7 +484,7 @@ class ClaudeCliManager:
 
         # Single commit and re-index after all swaps
         if processed:
-            self._commit_and_reindex(processed)
+            self._commit_and_reindex(processed, job_id=tracked_job_id)
 
         logger.info(
             f"Catch-up complete: {len(processed)} files processed",
@@ -499,7 +514,14 @@ class ClaudeCliManager:
         try:
             # Rename fallback to generated filename
             # In production, would generate new content via Claude CLI
-            fallback_path.rename(generated_path)
+            shared = cidx_meta_content.shared_cidx_meta(self._meta_dir)
+            if shared is not None:
+                if not shared.rename(fallback_path, generated_path, overwrite=True):
+                    raise FileNotFoundError(
+                        f"cidx-meta file not found: {fallback_path}"
+                    )
+            else:
+                fallback_path.rename(generated_path)
             logger.info(
                 f"Processed fallback for {alias}",
                 extra={"correlation_id": get_correlation_id()},
@@ -514,41 +536,55 @@ class ClaudeCliManager:
             )
             return False
 
-    def _commit_and_reindex(self, processed: List[str]) -> None:
+    def _commit_and_reindex(
+        self,
+        processed: List[str],
+        job_id: Optional[str] = None,
+    ) -> None:
         """
         Commit changes and trigger re-index.
 
         Args:
             processed: List of processed aliases
+            job_id: issue-66105 -- optional job_id for embed stats correlation
         """
         if not self._meta_dir:
             return
 
-        try:
-            commit_msg = f"Replace README fallbacks with generated descriptions: {', '.join(processed)}"
-            subprocess.run(
-                ["git", "add", "."],
-                cwd=str(self._meta_dir),
-                capture_output=True,
-                check=True,
-            )
-            subprocess.run(
-                ["git", "commit", "-m", commit_msg],
-                cwd=str(self._meta_dir),
-                capture_output=True,
-                check=False,
-            )
-            logger.info(
-                f"Committed catch-up changes for {len(processed)} files",
-                extra={"correlation_id": get_correlation_id()},
-            )
-        except Exception as e:
-            logger.warning(
-                format_error_log(
-                    "AUTH-GENERAL-013",
-                    f"Git commit failed: {e}",
+        # Shared cidx-meta (delegated content backend): this pod's directory
+        # holds index state only and is no git repository of the content, so
+        # there is nothing to commit here; the reindex below reads the shared
+        # content.
+        if cidx_meta_content.shared_cidx_meta(self._meta_dir) is None:
+            try:
+                commit_msg = f"Replace README fallbacks with generated descriptions: {', '.join(processed)}"
+                # issue-64678: cidx-meta mutations go through the git seam chokepoint
+                # like every other server-side mutation. No invoker claims cidx-meta
+                # today so these still run locally, but they are now seam-visible and
+                # pick up get_git_environment()'s safe.directory handling.
+                run_git_command(
+                    ["git", "add", "."],
+                    cwd=Path(self._meta_dir),
+                    capture_output=True,
+                    check=True,
                 )
-            )
+                run_git_command(
+                    ["git", "commit", "-m", commit_msg],
+                    cwd=Path(self._meta_dir),
+                    capture_output=True,
+                    check=False,
+                )
+                logger.info(
+                    f"Committed catch-up changes for {len(processed)} files",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            except Exception as e:
+                logger.warning(
+                    format_error_log(
+                        "AUTH-GENERAL-013",
+                        f"Git commit failed: {e}",
+                    )
+                )
 
         try:
             # Story #1418: merge CIDX_EMBEDDING_STATS_BOOTSTRAP_DIR
@@ -560,6 +596,7 @@ class ClaudeCliManager:
             )
             from code_indexer.server.utils.index_command_layout import (
                 append_server_layout_args,
+                repo_layout_kwargs,
             )
             from code_indexer.storage.shared.hnsw_sync_state import (
                 resolve_hnsw_sync_epoch_env_var,
@@ -570,7 +607,11 @@ class ClaudeCliManager:
             # Bug #1575 Part C independent re-review: this spawn previously
             # never set CIDX_HNSW_SYNC_EPOCH_POSTGRES_MODE_ENV at all.
             _reindex_env = build_cidx_subprocess_env(
-                build_embedding_stats_child_env(get_config_service().get_config())
+                build_embedding_stats_child_env(
+                    get_config_service().get_config(),
+                    golden_repo_alias="cidx-meta",
+                    job_id=job_id,
+                )
             )
             _reindex_env.update(resolve_hnsw_sync_epoch_env_var())
             from code_indexer.server.services.embedding_stats_attribution import (
@@ -578,13 +619,17 @@ class ClaudeCliManager:
             )
 
             # Story #2118: a catch-up re-index of the existing cidx-meta
-            # collection, run outside any background job.
+            # collection; job_id (issue-66105) is the tracked job when there is
+            # one, else the attribution records ``nojob:<site>``.
             _result = subprocess.run(
+                # cidx-meta's content follows the content backend; its git
+                # (if any) is this pod's.
                 append_server_layout_args(
                     ["cidx", "index"],
+                    **repo_layout_kwargs(None, CIDX_META_REPO),
                     attribution=build_server_stats_attribution(
                         alias="cidx-meta-global",
-                        job_id=None,
+                        job_id=job_id,
                         site="claude_cli_meta_reindex",
                         purpose="refresh",
                     ),
@@ -604,7 +649,7 @@ class ClaudeCliManager:
                     format_error_log(
                         "AUTH-GENERAL-014",
                         f"Re-index failed with exit code {_result.returncode}: "
-                        f"{_result.stderr.decode(errors='replace') if _result.stderr else ''}",
+                        f"{redact_url_credentials(_result.stderr.decode(errors='replace') if _result.stderr else '')}",
                     )
                 )
         except Exception as e:

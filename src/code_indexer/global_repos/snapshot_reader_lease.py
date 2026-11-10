@@ -10,7 +10,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Tuple
+from typing import Optional, Tuple
 
 from code_indexer.utils.never_indexed_paths import LEGACY_LEASE_DIRECTORY_NAME
 
@@ -34,6 +34,26 @@ class LeaseDirectoryAmbiguousError(RuntimeError):
     """
 
 
+#: issue-64616: the pod-local lease directory a server with every repository
+#: backend and the IndexStore delegated installs at startup
+#: (``use_pod_local_lease_directory``). None: the shared directory beside
+#: cidx-meta, exactly as before.
+_pod_local_lease_directory: Optional[Path] = None
+
+
+def use_pod_local_lease_directory(directory: Optional[Path]) -> None:
+    """Keep reader leases in *directory* on this pod's own disk (None: the
+    shared ``golden-repos/.scratch`` directory again).
+
+    Under a delegated IndexStore every snapshot a reader holds is a checkout
+    on this pod, so its leases need be visible to this pod only -- and never
+    on the golden-repos volume. The legacy in-tree directory (inside
+    cidx-meta, on that volume) is then not read either.
+    """
+    global _pod_local_lease_directory
+    _pod_local_lease_directory = None if directory is None else Path(directory)
+
+
 def _new_lease_directory(lease_root: Path) -> Path:
     """The Bug #1871 relocated lease directory: golden-repos/.scratch/....
 
@@ -44,7 +64,15 @@ def _new_lease_directory(lease_root: Path) -> Path:
     ``lease_root.parent`` -- still no positional derivation from a
     snapshot path (Bug #1845's fix stays intact).
     """
+    if _pod_local_lease_directory is not None:
+        return _pod_local_lease_directory
     return Path(lease_root).parent / ".scratch" / "snapshot-reader-leases"
+
+
+def primary_lease_directory(lease_root: Path) -> Path:
+    """The PRIMARY lease directory for *lease_root* (not created): the
+    pod-local one when installed, else ``golden-repos/.scratch/...``."""
+    return _new_lease_directory(lease_root)
 
 
 def ensure_primary_lease_directory(lease_root: Path) -> Path:
@@ -236,7 +264,9 @@ def snapshot_has_live_reader(snapshot_path: str, *, lease_root: Path) -> bool:
     # During rolling upgrades, old nodes may continue renewing the legacy
     # in-tree lease. Check it first so its liveness is never hidden by the
     # relocated directory's state.
-    if scan(_legacy_lease_directory(lease_root), "*.json"):
+    if _pod_local_lease_directory is None and scan(
+        _legacy_lease_directory(lease_root), "*.json"
+    ):
         return True
 
     directory = _lease_directory(snapshot_path, lease_root=lease_root, create=False)

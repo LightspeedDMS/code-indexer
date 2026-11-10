@@ -12,14 +12,55 @@ exception logging.
 import os
 import subprocess
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, Callable, List, Dict, Optional, Sequence, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
+
+from cidx_sdk.seams.git import redact_url_credentials
+
+from code_indexer.utils.git_invoker import get_git_invoker, is_mutating_git
 
 # The ONE bound for local metadata git calls on the push, pull and fetch
 # paths (argument validation, upstream checks, remote URL resolution) --
 # metadata lookups, not indexing work. Read as
 # git_runner.REMOTE_RESOLVE_TIMEOUT_SECONDS at call time.
 REMOTE_RESOLVE_TIMEOUT_SECONDS = 30
+
+
+# Bug #2012 through the git seam: the owning job's cancel check, set for a
+# block of work by ``git_cancel_scope``. Every git command that bottoms out
+# here inside the block -- whichever caller or GitBackend method built it --
+# runs cancellable, so a cancelled refresh stops mid-command without every
+# backend method taking the check as a parameter. Context-local, so it never
+# leaks into another thread's work.
+_scoped_cancel_check: ContextVar[Optional[Callable[[], bool]]] = ContextVar(
+    "cidx_git_cancel_check", default=None
+)
+
+
+@contextmanager
+def git_cancel_scope(cancel_check: Optional[Callable[[], bool]]) -> Iterator[None]:
+    """Make every git command run through ``run_git_command`` in this block
+    cancellable by *cancel_check* (None: leave any enclosing scope as is)."""
+    if cancel_check is None:
+        yield
+        return
+    token = _scoped_cancel_check.set(cancel_check)
+    try:
+        yield
+    finally:
+        _scoped_cancel_check.reset(token)
 
 
 def get_git_environment(project_dir: Path) -> Dict[str, str]:
@@ -77,6 +118,37 @@ def get_git_environment(project_dir: Path) -> Dict[str, str]:
     return env
 
 
+def _mask_url_credentials(value: Any) -> Any:
+    """*value* with the userinfo of every ``scheme://user:secret@host`` URL
+    masked, keeping its type: str and bytes (round-tripped losslessly through
+    surrogateescape) are masked, anything else (None) is returned as is."""
+    if isinstance(value, str):
+        return redact_url_credentials(value)
+    if isinstance(value, bytes):
+        text = value.decode("utf-8", "surrogateescape")
+        return redact_url_credentials(text).encode("utf-8", "surrogateescape")
+    return value
+
+
+_GitFailure = Union[subprocess.CalledProcessError, subprocess.TimeoutExpired]
+
+
+def _without_url_credentials(error: _GitFailure) -> _GitFailure:
+    """*error* with URL credentials masked in what it reports: its command
+    (``str(error)`` prints it -- a ``git clone https://user:token@host/...``
+    carries the token on argv), output and stderr. The command is a new list;
+    the caller's argv is not touched. The ``credentials_url`` route keeps the
+    credential off argv; this covers a URL that embeds one, and output git
+    echoes back whichever route ran it (here or through the GitInvoker)."""
+    if isinstance(error.cmd, (list, tuple)):
+        error.cmd = [_mask_url_credentials(arg) for arg in error.cmd]
+    else:
+        error.cmd = _mask_url_credentials(error.cmd)
+    error.output = _mask_url_credentials(error.output)
+    error.stderr = _mask_url_credentials(error.stderr)
+    return error
+
+
 def run_git_command(
     cmd: List[str],
     cwd: Path,
@@ -92,10 +164,12 @@ def run_git_command(
     """
     Run a git command with proper environment handling for dubious ownership.
 
-    ``cancel_check``: the owning job's cancel check. When set, the command
-    runs through ``run_with_cancel`` (its own process group, terminated on
-    cancel with SubprocessCancelledError); None runs it with
-    ``subprocess.run``.
+    ``cancel_check``: the owning job's cancel check -- this argument, else
+    the enclosing ``git_cancel_scope``'s. When set, the command runs through
+    ``run_with_cancel`` (its own process group, terminated on cancel with
+    SubprocessCancelledError); None runs it with ``subprocess.run``. A
+    delegated mutation cannot be killed mid-request: a cancelled job raises
+    before it is sent.
 
     Args:
         cmd: Git command as a list (e.g., ["git", "status"])
@@ -126,6 +200,39 @@ def run_git_command(
 
     if not cmd or cmd[0] != "git":
         raise ValueError("Command must start with 'git'")
+
+    # Delegation seam (issue-64616 Phase 2): this is the ONE chokepoint every git
+    # call bottoms out at (LocalGitBackend AND GitOperationsService both reach
+    # here), so a deployment that must not run git mutations in the cidx image
+    # installs a GitInvoker and every mutation delegates -- with zero call-site
+    # changes. Reads stay local (is_mutating_git); with no invoker installed the
+    # native subprocess path below runs, exactly as today.
+    if cancel_check is None:
+        cancel_check = _scoped_cancel_check.get()
+
+    invoker = get_git_invoker()
+    if invoker is not None and is_mutating_git(cmd):
+        if cancel_check is not None and cancel_check():
+            from code_indexer.server.utils.cancellable_subprocess import (
+                SubprocessCancelledError,
+            )
+
+            raise SubprocessCancelledError(
+                f"git {cmd[1] if len(cmd) > 1 else ''} not sent: the job was cancelled"
+            )
+        completed: "subprocess.CompletedProcess[str]" = invoker.run(
+            cmd, cwd, timeout=timeout
+        )
+        if check and completed.returncode != 0:
+            raise _without_url_credentials(
+                subprocess.CalledProcessError(
+                    completed.returncode,
+                    cmd,
+                    output=completed.stdout,
+                    stderr=completed.stderr,
+                )
+            )
+        return completed
 
     # Get the proper environment with safe.directory configuration
     env = get_git_environment(cwd)
@@ -193,7 +300,7 @@ def run_git_command(
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
         error.output = redact_supplied(error.output)
         error.stderr = redact_supplied(error.stderr)
-        raise
+        raise _without_url_credentials(error)
     result.stdout = redact_supplied(result.stdout)
     result.stderr = redact_supplied(result.stderr)
     return result
@@ -239,27 +346,22 @@ def run_git_command_with_retry(
 
     while attempt <= MAX_RETRIES:
         try:
-            # Get the proper environment with safe.directory configuration
-            env = get_git_environment(cwd)
-
-            # Merge any environment from kwargs if provided
-            if "env" in kwargs:
-                env.update(kwargs["env"])
-                kwargs_copy = kwargs.copy()
-                kwargs_copy.pop("env")
-            else:
-                kwargs_copy = kwargs
-
-            # Execute git command
-            result = subprocess.run(
+            # Execute via run_git_command so the git-invoker delegation seam
+            # (issue-64616 Phase 2) applies here too: network-touching mutations
+            # (fetch/pull/push) run through the retry path, and delegating a git
+            # command must not depend on which entry point a caller happens to
+            # use. run_git_command builds the safe.directory env, merges any
+            # kwargs env, and raises CalledProcessError on a non-zero exit under
+            # check=True (native AND delegated paths alike), which the retry loop
+            # below catches -- so retry semantics are unchanged.
+            result = run_git_command(
                 cmd,
-                cwd=cwd,
+                cwd,
                 check=check,
                 capture_output=capture_output,
                 text=text,
                 timeout=timeout,
-                env=env,
-                **kwargs_copy,
+                **kwargs,
             )
 
             # Success - return immediately

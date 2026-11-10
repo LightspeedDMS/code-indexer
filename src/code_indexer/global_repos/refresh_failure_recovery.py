@@ -34,6 +34,7 @@ from code_indexer.services.index_failure_exit_codes import (
     ChunkStoreFailureKind,
     FatalChunkStoreIndexError,
 )
+from code_indexer.utils.index_store import index_root
 
 if TYPE_CHECKING:
     from code_indexer.server.services.metadata_reader import RecordedFailures
@@ -322,6 +323,23 @@ def retry_failed_trigger_only_refresh(
     return due
 
 
+def _owed_detail(failures: "RecordedFailures") -> str:
+    """What an owed retry is for, as its record and log name it."""
+    if not failures.known:
+        return "recorded indexing failures unknown"
+    parts = []
+    if failures.retryable_paths:
+        parts.append(f"{failures.retryable_paths} file(s) still owed")
+    if failures.unattributed:
+        # issue-64616: a count with no recorded path -- only a full reconcile
+        # (the refresh runs one, see RefreshScheduler._index_source) finds them.
+        parts.append(
+            f"{failures.unattributed} failure(s) recorded without a path: "
+            "full reconcile owed"
+        )
+    return "; ".join(parts)
+
+
 def settle_publish(
     metadata: "GoldenRepoMetadataBackend",
     alias_name: str,
@@ -340,22 +358,22 @@ def settle_publish(
     WARNING) -- the resolution and an owed retry escalated from the alias's
     owed count are ONE store transaction (resolve_and_record_owed_retry): a
     store failure commits nothing, so the covered pending trigger survives
-    and its lease fires it again. A stale counter or vanished files owe
-    nothing. Returns the owed retry's due time, or None."""
+    and its lease fires it again. Vanished files owe nothing. A failure COUNT with no recorded path (``failures.unattributed``,
+    issue-64616) owes a full reconcile, scheduled the same way, so the owed
+    count's escalating backoff bounds it. Returns the owed retry's due time,
+    or None."""
     if not failures.known:
         logger.warning(
             f"Bug #2125: recorded indexing failures of {alias_name} are "
             f"unknown (unreadable metadata); retried as owed work"
         )
-    owes = not failures.known or failures.retryable_paths > 0
+    owes = (
+        not failures.known or failures.retryable_paths > 0 or failures.unattributed > 0
+    )
     if not (owes and schedule_retry):
         resolve_after_publish(metadata, alias_name, covered_generation)
         return None
-    detail = (
-        f"{failures.retryable_paths} file(s) still owed"
-        if failures.known
-        else "recorded indexing failures unknown"
-    )
+    detail = _owed_detail(failures)
     try:
         count, due_at = metadata.resolve_and_record_owed_retry(
             alias_name, covered_generation, detail, failure_backoff_seconds
@@ -617,23 +635,34 @@ def run_integrity_gate_against_published(
     current_target: Optional[str],
     before_restore: Optional[Callable[[], None]] = None,
     restore_missing_stores: bool = False,
+    healthy_index_dir: Optional[Path] = None,
+    previous_points: Optional[Dict[str, int]] = None,
 ) -> RefreshIntegrityGateResult:
     """Run the Bug #1506 gate on *source_path*'s index, self-healing a
     corrupt collection -- and, with *restore_missing_stores* (Story #2126),
     an established collection whose store is missing -- from the published
     snapshot at *current_target* (read only). No published snapshot yet
     (first refresh: the alias still points at the source) means nothing to
-    restore from."""
-    healthy_index_dir = (
-        Path(current_target) / ".code-indexer" / "index"
-        if current_target and current_target != source_path
-        else None
-    )
+    restore from.
+
+    *healthy_index_dir* overrides where the published index is read from
+    (IndexStore step 2: under a delegated store it is the published version
+    checked out to scratch, ``RefreshScheduler._integrity_baseline``), and
+    *previous_points* -- that index's per-collection point counts, read
+    before indexing -- makes a collection that collapsed to zero fail the
+    gate (an emptied index is healthy SQLite)."""
+    if healthy_index_dir is None:
+        healthy_index_dir = (
+            index_root(current_target) / "index"
+            if current_target and current_target != source_path
+            else None
+        )
     return run_refresh_integrity_gate(
-        source_index_dir=Path(source_path) / ".code-indexer" / "index",
+        source_index_dir=index_root(source_path) / "index",
         healthy_index_dir=healthy_index_dir,
         before_restore=before_restore,
         restore_missing_stores=restore_missing_stores,
+        previous_points=previous_points,
     )
 
 
@@ -645,11 +674,14 @@ def self_heal_after_fatal_chunk_store_failure(
     current_target: Optional[str],
     error: FatalChunkStoreIndexError,
     verify_ownership: Callable[[], None],
+    healthy_index_dir: Optional[Path] = None,
 ) -> None:
     """``cidx index`` failed on a fatal chunk-store error. Called while the
     refresh still holds its publish write lock; never publishes (the caller
     re-raises *error*). *verify_ownership* raises when the lock is lost; it
-    runs first and again immediately before every restore copy."""
+    runs first and again immediately before every restore copy.
+    *healthy_index_dir*: where the published index is read from when it is
+    not at *current_target* (``run_integrity_gate_against_published``)."""
     verify_ownership()
     if error.kind is ChunkStoreFailureKind.MISSING_STORE:
         _restore_missing_stores(
@@ -659,6 +691,7 @@ def self_heal_after_fatal_chunk_store_failure(
             current_target=current_target,
             error=error,
             verify_ownership=verify_ownership,
+            healthy_index_dir=healthy_index_dir,
         )
         return
     if error.kind is not ChunkStoreFailureKind.CORRUPTION:
@@ -670,7 +703,10 @@ def self_heal_after_fatal_chunk_store_failure(
         record_failure_backoff(metadata, alias_name, str(error))
         return
     gate = run_integrity_gate_against_published(
-        source_path, current_target, before_restore=verify_ownership
+        source_path,
+        current_target,
+        before_restore=verify_ownership,
+        healthy_index_dir=healthy_index_dir,
     )
     if gate.passed:
         logger.error(
@@ -698,6 +734,7 @@ def _restore_missing_stores(
     current_target: Optional[str],
     error: FatalChunkStoreIndexError,
     verify_ownership: Callable[[], None],
+    healthy_index_dir: Optional[Path] = None,
 ) -> None:
     """Story #2126: an established collection's store is missing. Restore it
     -- with its metadata, so the next run resumes from the snapshot's commit
@@ -711,6 +748,7 @@ def _restore_missing_stores(
         current_target,
         before_restore=verify_ownership,
         restore_missing_stores=True,
+        healthy_index_dir=healthy_index_dir,
     )
     missing = [f for f in gate.failures if f.store_missing]
     _record_restore_strike(metadata, alias_name, gate)

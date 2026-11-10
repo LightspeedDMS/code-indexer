@@ -12,92 +12,19 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Union
+from typing import Any, Callable, Dict, Optional
 
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.services.sqlite_log_handler import SQLiteLogHandler
 from code_indexer.server.startup.bootstrap import _detect_repo_root
+from code_indexer.server.startup.leader_gate import (
+    await_sweep_leadership as _await_sweep_leadership,
+)
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 from code_indexer.server.utils.registry_factory import STORAGE_MODE_PENDING_SENTINEL
 
 logger = logging.getLogger(__name__)
-
-
-def _ensure_dep_map_output_dir(golden_repos_dir: Union[str, Path]) -> Path:
-    """Eagerly create the dependency-map output directory (Bug #1621).
-
-    Without this, {golden_repos_dir}/cidx-meta/dependency-map/ is only ever
-    created lazily, as a side effect of the first analysis run. That meant
-    `_get_dep_map_output_dir()` (dependency_map_routes.py) returned None for
-    every request on a never-before-visited node -- including the very
-    request that would otherwise trigger the directory's creation -- causing
-    a spurious "Dashboard analysis infrastructure unavailable" error on the
-    first dashboard load. The next poll a few seconds later would then
-    succeed once something else happened to create the directory.
-
-    This is a single, trivial O(1) directory creation, unconditionally safe
-    to run once at startup regardless of whether the dependency-map feature
-    is enabled -- it does not scale with fleet size (unlike golden-repo-count
-    work, which must never run unbacked on the startup path).
-
-    Returns the (created, or already-existing) directory path.
-    """
-    dep_map_dir = Path(golden_repos_dir) / "cidx-meta" / "dependency-map"
-    dep_map_dir.mkdir(parents=True, exist_ok=True)
-    return dep_map_dir
-
-
-def _make_dep_map_repair_invoker_fn(
-    dep_map_dir: Path,
-    tracking_backend: Any,
-    job_tracker: Any,
-    dep_map_service: Any,
-) -> Callable[[str], None]:
-    """Build the repair invoker closure for DependencyMapService (Story #927).
-
-    Extracted as a module-level factory so the wiring can be tested directly
-    (Codex Pass 3 regression guard).
-
-    Story #927 Codex Pass 4-5: the lifespan startup must construct
-    DependencyMapService FIRST, then call this factory with the constructed
-    service instance, then bind the returned closure via
-    ``dependency_map_service.set_repair_invoker_fn(...)`` BEFORE
-    ``start_scheduler()``. The full ordering is:
-        1. dependency_map_service = DependencyMapService(...)
-        2. _dep_map_repair_invoker_fn = _make_dep_map_repair_invoker_fn(...)
-        3. dependency_map_service.set_repair_invoker_fn(_dep_map_repair_invoker_fn)
-        4. dependency_map_service.start_scheduler()
-
-    This late-binding pattern is required because the closure captures
-    ``dep_map_service`` by parameter binding (Python by-value), so the service
-    must exist at factory call time.
-
-    Args:
-        dep_map_dir: Path to the dependency-map directory (captured by closure).
-        tracking_backend: DependencyMapTrackingBackend for job status updates.
-        job_tracker: JobTracker for unified job tracking.
-        dep_map_service: DependencyMapService instance (provides repo metadata + analyzer).
-
-    Returns:
-        A callable(job_id: str) -> None that delegates to _execute_repair_body.
-    """
-
-    def _invoker(job_id: str) -> None:
-        from code_indexer.server.web.dependency_map_routes import (
-            _execute_repair_body,
-        )
-
-        _execute_repair_body(
-            job_id=job_id,
-            output_dir=dep_map_dir,
-            tracking_backend=tracking_backend,
-            job_tracker=job_tracker,
-            activity_journal=None,
-            dep_map_service=dep_map_service,  # Story #927 Pass 2: executor needs repo metadata + analyzer
-        )
-
-    return _invoker
 
 
 def _build_job_counts_callback(job_tracker: Any) -> Callable[[], Dict[str, int]]:
@@ -105,7 +32,7 @@ def _build_job_counts_callback(job_tracker: Any) -> Callable[[], Dict[str, int]]
     cidx.jobs.active/cidx.jobs.queued (Story #1586 AC3/AC6).
 
     Extracted as a module-level factory so the wiring can be tested directly
-    (same pattern as _make_dep_map_repair_invoker_fn above). Composes
+    Composes
     JobTracker's OWN get_active_job_count()/get_queued_jobs_count() --
     never reimplements the counting logic (Messi Rule #4 anti-duplication).
     """
@@ -248,7 +175,7 @@ def _build_repository_counts_callback(
     cidx.repos.total/cidx.repos.indexed (Story #1586 AC3/AC6).
 
     Extracted as a module-level factory so the wiring can be tested directly
-    (same pattern as _make_dep_map_repair_invoker_fn above). total is
+    total is
     len(golden_repo_manager.list_golden_repos()); indexed is the count of
     those repos where golden_repo_manager._index_exists(golden_repo,
     "semantic") is True -- the existing predicate reused exactly as-is
@@ -270,8 +197,8 @@ def _build_repository_counts_callback(
             if not alias:
                 continue
             golden_repo = golden_repo_manager.get_golden_repo(alias)
-            if golden_repo is not None and golden_repo_manager._index_exists(
-                golden_repo, "semantic"
+            if golden_repo is not None and golden_repo_manager.counts_as_indexed(
+                golden_repo
             ):
                 indexed += 1
         return {"total": total, "indexed": indexed}
@@ -346,11 +273,28 @@ async def _migrate_analysis_agent_credential() -> None:
         )
 
 
-def _start_analysis_agent_credential_migration(app: Any, group_manager: Any) -> None:
-    """Wire the group store, then run the credential migration in the
-    background (its CLI calls must never delay readiness); call only after
-    audit capture is bound, so its audit rows are written."""
-    _wire_group_manager_into_mcp_self_registration(group_manager)
+def _start_analysis_agent_credential_migration(app: Any) -> None:
+    """Run the credential migration in the background (its CLI calls must
+    never delay readiness), single-flight across the cluster.
+
+    Call only after the ConfigService reads the PostgreSQL runtime config
+    (postgres mode): before that switch the stored credential is read from,
+    and written to, this pod's bootstrap config, so every pod would mint and
+    keep its own credential. Nothing runs until the group store is wired,
+    which happens only once audit capture is bound (so the migration's audit
+    rows are written); the service could not mint without it anyway.
+    """
+    from code_indexer.server.services.mcp_self_registration_service import (
+        MCPSelfRegistrationService,
+    )
+
+    service = MCPSelfRegistrationService.get_instance()
+    if service is None or not service.group_manager_wired:
+        return
+    registry = getattr(app.state, "backend_registry", None)
+    pool = getattr(registry, "connection_pool", None)
+    if pool is not None:
+        service.set_connection_pool(pool)
     app.state.analysis_agent_credential_migration_task = asyncio.create_task(
         _migrate_analysis_agent_credential()
     )
@@ -361,6 +305,7 @@ _MIGRATION_SHUTDOWN_WAIT_SECONDS = 15.0
 
 
 async def _stop_analysis_agent_credential_migration(app: Any) -> None:
+    """Cancel a still-running startup credential migration at shutdown."""
     task = getattr(app.state, "analysis_agent_credential_migration_task", None)
     if task is None or task.done():
         return
@@ -532,6 +477,7 @@ def _construct_hnsw_orphan_repair_sweep_scheduler(
     golden_repo_manager: Any,  # Any: duck-typed, never imported here.
     backend_registry: Any,  # Any: may be None -- guarded below.
     background_job_manager: Any,  # Any: duck-typed, never imported here.
+    app_state: Any = None,  # Any: FastAPI app.state; None in solo/test wiring.
 ) -> Any:
     """Validate dependencies and build the sweep scheduler (Story #1360).
 
@@ -553,12 +499,26 @@ def _construct_hnsw_orphan_repair_sweep_scheduler(
             "golden_repo_manager.activated_repo_manager is not available"
         )
 
+    # Background-work audit: gate tick submission to the elected leader. A
+    # repair rewrites an on-disk HNSW index on the shared mount, so M4's
+    # race-to-claim is not enough on its own -- see the _loop gate's comment.
+    # app_state is None in solo wiring, where resolve_sweep_leader would answer
+    # True anyway (no election); defaulting the check to "leader" there keeps
+    # single-node behaviour identical without pretending there is an app.state.
+    def _leader_check() -> bool:
+        if app_state is None:
+            return True
+        from code_indexer.server.startup.leader_gate import resolve_sweep_leader
+
+        return resolve_sweep_leader(app_state)
+
     return _HNSWOrphanRepairSweepScheduler(
         golden_repo_manager=golden_repo_manager,
         activated_repo_manager=golden_repo_manager.activated_repo_manager,
         state_backend=backend_registry.hnsw_orphan_sweep_state,
         background_job_manager=background_job_manager,
         config_service=get_config_service(),
+        leader_check=_leader_check,
     )
 
 
@@ -604,7 +564,10 @@ def _start_hnsw_orphan_repair_sweep_scheduler(
     )
     try:
         scheduler = _construct_hnsw_orphan_repair_sweep_scheduler(
-            golden_repo_manager, backend_registry, background_job_manager
+            golden_repo_manager,
+            backend_registry,
+            background_job_manager,
+            app_state=app.state,
         )
         scheduler.start()
     except Exception as e:
@@ -789,6 +752,9 @@ def make_lifespan(
             "CIDX_SERVER_DATA_DIR", str(Path.home() / ".cidx-server")
         )
         golden_repos_dir = Path(server_data_dir) / "data" / "golden-repos"
+        # Where server-wide lock files live (``<server_data_dir>/locks``):
+        # read by feature add-ons that keep file locks (the memory store).
+        app.state.server_data_dir = server_data_dir
 
         # Story #505/#506: Store storage_mode in app.state early so web routes
         # and MCP handlers can access it without re-reading config.
@@ -811,6 +777,7 @@ def make_lifespan(
         # In SQLite mode it contains SQLite backends; in postgres mode, PG
         # backends. MCP handlers use app.state.backend_registry
         # unconditionally.
+        # (issue-66819 is the same fix on the fork side.)
         app.state.backend_registry = backend_registry
 
         # Story #680: Store latency_tracker in app.state for dashboard route access.
@@ -1019,7 +986,7 @@ def make_lifespan(
         # churn that serialized concurrent queries on CPython's process-wide
         # _global_shutdown_lock. SemanticSearchService injects it via
         # app.state.query_executor (see search_service._get_query_executor()).
-        # Mirrors the _mcp_executor / _xray_executor bootstrap-fallback pattern.
+        # Mirrors the _mcp_executor bootstrap-fallback pattern.
         _DEFAULT_QUERY_POOL_SIZE: int = 256
         _query_pool_size = (
             getattr(
@@ -1097,56 +1064,19 @@ def make_lifespan(
                 extra={"correlation_id": get_correlation_id()},
             )
 
-        # Bug #1070: Dedicated xray executor isolated from BJM's 5-worker pool.
-        from code_indexer.server.utils.config_manager import (
-            BackgroundJobsConfig as _BackgroundJobsConfig,
+        # Feature add-ons (modular phases 3-4a; enabled_features, a bootstrap
+        # key). create_app() already loaded them and consumed their hooks
+        # (startup/feature_wiring.py wire_features); this publishes the
+        # registry for the health surfaces. Outside any try for the same
+        # reason as the seam wiring above: for an app not made by
+        # create_app() it loads them here, and a refusal must stop startup.
+        from code_indexer.server.startup.feature_wiring import (
+            load_configured_features,
+            start_features,
+            stop_features,
         )
 
-        _xray_pool_size = _BackgroundJobsConfig().xray_max_concurrent_jobs
-        _xray_executor = ThreadPoolExecutor(max_workers=_xray_pool_size)
-        app.state.xray_executor = _xray_executor
-        from code_indexer.server.mcp.handlers.xray import set_xray_executor
-
-        set_xray_executor(_xray_executor)
-        logger.info(
-            f"xray executor started (max_workers={_xray_pool_size}) (Bug #1070)",
-            extra={"correlation_id": get_correlation_id()},
-        )
-
-        # Global xray cell concurrency limiter — shared by xray_search, xray_explore,
-        # and xray_search_batch cells. Sized from runtime xray_worker_threads config (default 4).
-        from code_indexer.server.services.resizable_limiter import (
-            ResizableLimiter as _ResizableLimiter,
-        )
-
-        try:
-            from code_indexer.server.services.config_service import (
-                get_config_service as _get_cfg,
-            )
-
-            _xray_cell_limit: int = (
-                _get_cfg().get_config().xray_config.xray_worker_threads
-            )  # type: ignore[union-attr]
-        except Exception as _exc:
-            _xray_cell_limit = 4  # safe default if config not yet available
-            logger.warning(
-                "xray_worker_threads config unavailable, defaulting cell limiter to %d: %s",
-                _xray_cell_limit,
-                _exc,
-                extra={"correlation_id": get_correlation_id()},
-            )
-        _xray_cell_limiter = _ResizableLimiter(
-            initial=_xray_cell_limit, k_min=1, k_max=50
-        )
-        app.state.xray_cell_limiter = _xray_cell_limiter
-        from code_indexer.server.mcp.handlers.xray import set_xray_cell_limiter
-
-        set_xray_cell_limiter(_xray_cell_limiter)
-        logger.info(
-            "xray cell limiter started (limit=%d) — shared gate for all xray scan executions",
-            _xray_cell_limit,
-            extra={"correlation_id": get_correlation_id()},
-        )
+        await load_configured_features(app, startup_config)
 
         # Startup: Initialize SQLite database schema and run migrations (Story #702)
         logger.info(
@@ -1507,7 +1437,7 @@ def make_lifespan(
                 ),
             )
             group_manager.set_audit_service(audit_service)
-            _start_analysis_agent_credential_migration(app, group_manager)
+            _wire_group_manager_into_mcp_self_registration(group_manager)
             # Inject into the module-level singleton so all log/query
             # calls from password_audit_logger also route to SQLite.  Off the
             # event loop: switching modes closes the flat-file handler.
@@ -1696,6 +1626,114 @@ def make_lifespan(
                 )
                 app.state.snapshot_manager = None
 
+            # issue-64678 Phase 3: same git backend selection the repo managers use
+            # (local by default; git-mcp-backed when git_backend='delegated'), so
+            # RefreshScheduler's golden-repo git runs through the configured seam.
+            from code_indexer.server.startup.git_backend_wiring import (
+                build_configured_git_backend,
+            )
+
+            # ONE selection, shared. Parked on app.state so the MCP handlers read
+            # remote state through the same backend as the repo managers instead of
+            # shelling out to the local clone (handlers/_git_seam.py).
+            configured_git_backend = build_configured_git_backend(server_config)
+            app.state.git_backend = configured_git_backend
+            # Log the PARKED backend, not just the constructed one. Construction is
+            # already logged by git_backend_wiring, but nothing recorded whether the
+            # handlers actually got it -- and app.state cannot be inspected from
+            # outside the process, so a parking that silently failed would leave them
+            # falling back to LocalGitBackend: correct-looking, wrong backend, and
+            # invisible. This is the only external evidence that the seam is live.
+            logger.info(
+                "GitBackend parked on app.state for MCP handlers: %s "
+                "(owns_credentials=%s)",
+                type(configured_git_backend).__name__,
+                getattr(configured_git_backend, "owns_credentials", "unknown"),
+            )
+
+            # Content seam: ONE selection, parked alongside the git backend so
+            # every consumer reads repository bytes through the same backend.
+            # Local by default, so this is inert until an operator sets
+            # content_backend='delegated'.
+            from code_indexer.server.startup.content_backend_wiring import (
+                build_configured_content_backend,
+            )
+
+            configured_content_backend = build_configured_content_backend(server_config)
+            app.state.content_backend = configured_content_backend
+            # Logged for the same reason the git parking is: app.state cannot be
+            # inspected from outside the process, so a parking that silently
+            # failed would leave consumers on LocalContentBackend -- reading a
+            # mount that a delegated pod may not have, and reporting an empty
+            # repository rather than an error.
+            logger.info(
+                "ContentBackend parked on app.state: %s (is_local=%s)",
+                type(configured_content_backend).__name__,
+                getattr(configured_content_backend, "is_local", "unknown"),
+            )
+
+            # Content seam, write side: the same content_backend selection.
+            # None under local (no plugin is loaded, writes stay on this disk);
+            # delegated requires the code_indexer.content_writer plugin and
+            # raises here without one, so golden-repo write tools never write
+            # a pod that holds no repository.
+            from code_indexer.server.startup.content_writer_wiring import (
+                build_configured_content_writer,
+            )
+
+            configured_content_writer = build_configured_content_writer(server_config)
+            app.state.content_writer = configured_content_writer
+            logger.info(
+                "ContentWriter parked on app.state: %s",
+                type(configured_content_writer).__name__,
+            )
+
+            # Ripgrep seam, same shape: one selection, parked so regex search
+            # reads it rather than constructing its own. Local by default, so
+            # this is inert until an operator sets ripgrep_backend='delegated'.
+            from code_indexer.server.startup.ripgrep_backend_wiring import (
+                build_configured_ripgrep_backend,
+            )
+
+            configured_ripgrep_backend = build_configured_ripgrep_backend(server_config)
+            app.state.ripgrep_backend = configured_ripgrep_backend
+            logger.info(
+                "RipgrepBackend parked on app.state: %s (is_local=%s)",
+                type(configured_ripgrep_backend).__name__,
+                getattr(configured_ripgrep_backend, "is_local", "unknown"),
+            )
+
+            # Search seam, same shape: None under local (existing Tantivy/HNSW
+            # code paths run as today), the plugin backend under delegated.
+            # Stateless EKS pods have no local index files, so delegation
+            # forwards FTS/semantic queries to a remote service.
+            from code_indexer.server.startup.search_backend_wiring import (
+                build_configured_search_backend,
+            )
+
+            configured_search_backend = build_configured_search_backend(server_config)
+            app.state.search_backend = configured_search_backend
+            logger.info(
+                "SearchBackend parked on app.state: %s",
+                type(configured_search_backend).__name__
+                if configured_search_backend is not None
+                else "None (local index-file code paths)",
+            )
+
+            # IndexStore step 2, same shape: local by default, so inert until
+            # an operator sets index_store_backend='delegated'; then each
+            # refresh publishes its built index and snapshots a checked-out one.
+            from code_indexer.server.startup.index_store_wiring import (
+                build_configured_index_store,
+            )
+
+            configured_index_store = build_configured_index_store(server_config)
+            app.state.index_store = configured_index_store
+            logger.info(
+                "IndexStore parked on app.state: %s (is_local=%s)",
+                type(configured_index_store).__name__,
+                configured_index_store.is_local,
+            )
             # Story #2118: refresh embedding volume alarm over the shared
             # stats/metadata backends. None (cannot be built) is published
             # too: health then reports the alarm blind, and the scheduler
@@ -1723,6 +1761,8 @@ def make_lifespan(
                 resource_config=server_config.resource_config,
                 job_tracker=job_tracker,
                 snapshot_manager=snapshot_manager,
+                git_backend=configured_git_backend,
+                index_store=configured_index_store,
                 # Bug #1390: RefreshScheduler's filesystem reconciliation needs
                 # to update golden_repos_metadata (bare-alias-keyed) alongside
                 # global_repos -- without this, cluster mode would silently
@@ -1778,6 +1818,156 @@ def make_lifespan(
             if golden_repo_manager is not None:
                 golden_repo_manager._refresh_scheduler = (
                     global_lifecycle_manager.refresh_scheduler
+                )
+
+            # issue-65484: heal registry/disk drift in the background. Registration
+            # persists the index BEFORE the registry row (add_repo), so a crash / pod
+            # eviction between the two leaves an index with no registry entry; the
+            # workspace-mcp seeder then re-provisions it destructively (issue-65481).
+            # Backfill those rows so the registry is a faithful projection of on-disk
+            # state. Runs OFF the event loop (an NFS scan of the golden set) so pod
+            # readiness is not delayed; idempotent + IntegrityError-tolerant, so all
+            # pods may run it concurrently.
+            if golden_repo_manager is not None:
+                _grm_for_reconcile = golden_repo_manager
+                # issue-65484: run PERIODICALLY, not just at startup. A crash between
+                # index-build and registry-row (or a removeOnDisk that skipped
+                # deregister) can drift the registry at any time; a startup-only heal
+                # leaves that drift until the next pod restart. Default 900s; set
+                # CIDX_REGISTRY_RECONCILE_INTERVAL_SECONDS<=0 for startup-only.
+                try:
+                    _reconcile_interval = int(
+                        os.environ.get(
+                            "CIDX_REGISTRY_RECONCILE_INTERVAL_SECONDS", "900"
+                        )
+                    )
+                except ValueError:
+                    _reconcile_interval = 900
+
+                async def _run_registry_reconcile() -> None:
+                    import anyio.to_thread as _to_thread
+
+                    first = True
+                    while True:
+                        try:
+                            _counts = await _to_thread.run_sync(
+                                _grm_for_reconcile.reconcile_registry_from_filesystem
+                            )
+                            logger.info(
+                                "issue-65484: %s registry reconcile from filesystem: %s",
+                                "startup" if first else "periodic",
+                                _counts,
+                            )
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as _reconcile_err:  # safety
+                            logger.warning(
+                                "issue-65484: registry reconcile failed: %s",
+                                _reconcile_err,
+                                exc_info=True,
+                            )
+                        first = False
+                        if _reconcile_interval <= 0:
+                            return  # startup-only
+                        try:
+                            await asyncio.sleep(_reconcile_interval)
+                        except asyncio.CancelledError:
+                            raise
+
+                # Keep a reference on app.state so the task is not garbage-collected
+                # mid-flight and can be cancelled on shutdown.
+                app.state.registry_reconcile_task = asyncio.create_task(
+                    _run_registry_reconcile()
+                )
+
+                # issue-64616: cidx owns the golden catalog (GitLab) and agent
+                # workspace registration. Each pass is single-flight across the
+                # cluster; both are OFF unless their mode is dry-run or apply.
+                from code_indexer.server.services import catalog_sync_scheduling
+
+                app.state.catalog_sync_tasks = catalog_sync_scheduling.start(
+                    _grm_for_reconcile
+                )
+
+                # issue-65484's periodic SCIP backfill is the cidx-scip feature's
+                # recurring job (modular phase 4d); the leader gate below stays
+                # for the semantic backfill.
+                # issue-66188: avoid startup race where this task's first cycle can
+                # run before cluster leader-election wiring completes. In postgres
+                # mode, hold the leader-gated backfills until cluster-service
+                # init marks the gate ready (set in the cluster-services startup block below).
+                app.state.scip_reconcile_leader_gate_ready = (
+                    storage_mode != "postgres" or backend_registry is None
+                )
+
+                # Semantic (vector) index self-heal backfill — sibling of the SCIP
+                # reconcile. DEFAULT OFF (cost gate): a re-embed spends VoyageAI $, so
+                # it stays inert until the operator sets
+                # semantic_backfill_sweep_config.enabled=true. Leader-gated like SCIP so
+                # one pod enqueues; the re-embed jobs are POD_PULL/memory-heavy.
+                async def _run_semantic_backfill() -> None:
+                    import anyio.to_thread as _to_thread
+
+                    from code_indexer.server.services.config_service import (
+                        get_config_service,
+                    )
+                    from code_indexer.server.services.semantic_backfill.sweep import (
+                        run_semantic_backfill_cycle,
+                    )
+
+                    # When disabled, re-check config on this cheap cadence so flipping it
+                    # on takes effect without a restart.
+                    _POLL_WHEN_DISABLED = 300
+                    while True:
+                        _sleep = _POLL_WHEN_DISABLED
+                        try:
+                            _leader_gate_ready = getattr(
+                                app.state, "scip_reconcile_leader_gate_ready", True
+                            )
+                            if not _leader_gate_ready:
+                                await asyncio.sleep(1)
+                                continue
+                            _le = getattr(app.state, "leader_election", None)
+                            if _le is None or _le.is_leader:
+                                _cfg = (
+                                    get_config_service()
+                                    .get_config()
+                                    .semantic_backfill_sweep_config
+                                )
+                                if _cfg and _cfg.enabled:
+                                    _sleep = max(
+                                        60, int(_cfg.tick_interval_minutes) * 60
+                                    )
+                                    _sc = await _to_thread.run_sync(
+                                        lambda: run_semantic_backfill_cycle(
+                                            golden_repo_manager,
+                                            background_job_manager,
+                                            enabled=True,
+                                            batch_size=int(_cfg.batch_size),
+                                            cooldown_seconds=int(
+                                                _cfg.attempt_cooldown_seconds
+                                            ),
+                                        )
+                                    )
+                                    if _sc.enqueued or _sc.errors:
+                                        logger.info(
+                                            "semantic backfill: %s", _sc.as_dict()
+                                        )
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as _sem_err:  # safety
+                            logger.warning(
+                                "semantic backfill failed: %s",
+                                _sem_err,
+                                exc_info=True,
+                            )
+                        try:
+                            await asyncio.sleep(_sleep)
+                        except asyncio.CancelledError:
+                            raise
+
+                app.state.semantic_backfill_task = asyncio.create_task(
+                    _run_semantic_backfill()
                 )
 
             # Story #1034: inject snapshot_manager into GoldenRepoManager so
@@ -1883,6 +2073,51 @@ def make_lifespan(
                 exc_info=True,
             )
 
+        # issue-65021's scip_backend validation runs in the cidx-scip feature's
+        # on_startup (modular phase 4d): a removed or unknown value still
+        # stops startup.
+
+        # issue-64616: with every repository backend and the IndexStore
+        # delegated, golden-repos holds this pod's index state only. cidx's own
+        # state that used to sit there (payload cache, snapshot-reader leases)
+        # moves to the pod's data directory, and startup REFUSES if any of it
+        # would still be written under golden-repos. Outside any try: a
+        # refusal stops the server instead of degrading it. Inert otherwise.
+        from code_indexer.global_repos.snapshot_reader_lease import (
+            primary_lease_directory,
+            use_pod_local_lease_directory,
+        )
+        from code_indexer.server.services.config_service import (
+            get_config_service as _get_config_service_for_mount,
+        )
+        from code_indexer.server.startup.golden_mount_guard import (
+            check_golden_mount_independence,
+            golden_mount_free,
+            golden_volume_monitoring_skip_reason,
+            legacy_lease_sweep_skip_reason,
+            payload_cache_db_path,
+            snapshot_lease_directory,
+            versioned_snapshot_sweep_skip_reason,
+        )
+
+        _mount_config = _get_config_service_for_mount().get_config()
+        _golden_mount_free = golden_mount_free(_mount_config)
+        use_pod_local_lease_directory(
+            snapshot_lease_directory(server_data_dir) if _golden_mount_free else None
+        )
+        check_golden_mount_independence(
+            _mount_config,
+            golden_repos_dir,
+            {
+                "payload_cache_db": payload_cache_db_path(
+                    _mount_config, golden_repos_dir, server_data_dir
+                ),
+                "snapshot_reader_leases": primary_lease_directory(
+                    Path(golden_repos_dir) / "cidx-meta"
+                ),
+            },
+        )
+
         # Startup: Initialize PayloadCache for semantic search result truncation (Story #679)
         payload_cache = None
         chunk_store_cross_process_poller = None
@@ -1904,7 +2139,9 @@ def make_lifespan(
             payload_cache_config = PayloadCacheConfig.from_server_config(
                 server_config.cache_config
             )
-            cache_db_path = Path(golden_repos_dir) / ".cache" / "payload_cache.db"
+            cache_db_path = payload_cache_db_path(
+                server_config, golden_repos_dir, server_data_dir
+            )
             payload_cache = PayloadCache(
                 db_path=cache_db_path,
                 config=payload_cache_config,
@@ -2172,6 +2409,10 @@ def make_lifespan(
                     exc_info=True,
                 )
 
+        # After the early ConfigService PG pool switch above: the credential
+        # migration must read and write the SHARED runtime config.
+        _start_analysis_agent_credential_migration(app)
+
         # Startup: Auto-seed API keys if server config is blank (Story #20)
         # Bug #1309: This MUST run after the early ConfigService PG pool switch
         # above (so postgres/cluster mode reads the PG-backed config with the
@@ -2373,6 +2614,11 @@ def make_lifespan(
 
         # Startup: Initialize Description Refresh Scheduler (Story #190)
         description_refresh_scheduler = None
+        # Bound before the try below: it is assigned inside it, and the fleet
+        # and temporal-legacy migration schedulers read it later whether or
+        # not that block got that far (an unbound name there was a NameError
+        # reported as "scheduler failed to start", hiding the real cause).
+        refresh_scheduler = None
         logger.info(
             "Server startup: Initializing description refresh scheduler",
             extra={"correlation_id": get_correlation_id()},
@@ -2497,7 +2743,12 @@ def make_lifespan(
                     extra={"correlation_id": get_correlation_id()},
                 )
 
-                # Wire MemoryStoreService for Story #877 (shared technical memory store).
+                # Story #877: the catalog's memory files. The memory store (the
+                # tools and routes that write them) is the cidx-memory feature,
+                # started with the other features; the scope rule that decides
+                # who may see a memory file stays here, in the access-filtering
+                # service, because the files are served by the core's catalog
+                # doors whether or not the feature is installed.
                 # No inner try/except — failures propagate to the outer except at APP-GENERAL-021
                 # which logs a warning without blocking startup, consistent with this block's pattern.
                 from code_indexer.server.startup.nfs_self_check import (
@@ -2761,6 +3012,20 @@ def make_lifespan(
 
             async def _run_orphan_sweep() -> None:
                 try:
+                    # Fleet-wide, not per-node: this sweep deletes activated-repo trash directories on the shared NFS
+                    # mount, cap 100 per startup. Twelve processes racing the same cap
+                    # means twelve concurrent unlink storms over a `hard` NFSv3 mount,
+                    # and each one re-reads a directory another is deleting from.
+                    #
+                    # The lifespan runs once per uvicorn WORKER PROCESS, so on the
+                    # tools-* cluster this closure is created 12x (6 pods x 2 workers).
+                    # Gate it to the elected leader; see startup/leader_gate.py for why
+                    # the gate waits rather than checking once, and why it fails open.
+                    if not await _await_sweep_leadership(
+                        app.state,
+                        sweep_name="Story #1032 AC8 orphan trash sweep",
+                    ):
+                        return
                     import anyio.to_thread as _to_thread
 
                     _swept = await _to_thread.run_sync(
@@ -2848,6 +3113,48 @@ def make_lifespan(
                 )
             )
 
+        # Startup: Initialize golden-repo FTS backfill sweep scheduler (issue-66445).
+        # Reverse-fix half of issue-66445: builds the Tantivy FTS index on golden
+        # repos registered before the forward fix existed (the fleet had a semantic
+        # index but no tantivy_index, so search_mode="fts" errored fleet-wide). On
+        # by default (config-gated), paced, cluster-safe, idempotent (no durable
+        # cursor -- re-discovers repos missing FTS each tick). The FTS rebuild is
+        # FTS-only, so it performs no embedding calls (no VoyageAI cost).
+        fts_backfill_sweep_scheduler = None
+        logger.info(
+            "Server startup: Initializing FTS backfill sweep scheduler",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        try:
+            from code_indexer.server.services.fts_backfill.scheduler import (
+                FtsBackfillSweepScheduler as _FtsBackfillSweepScheduler,
+                resolve_sweep_leader as _resolve_sweep_leader,
+            )
+            from code_indexer.server.services.config_service import get_config_service
+
+            fts_backfill_sweep_scheduler = _FtsBackfillSweepScheduler(
+                golden_repo_manager=golden_repo_manager,
+                background_job_manager=background_job_manager,
+                config_service=get_config_service(),
+                # Gate the sweep to the elected leader so the fleet runs ONE sweep, not
+                # one per pod x worker (which race on each repo's tantivy_index). Read
+                # lazily each cycle since leader_election is wired after this starts.
+                leader_check=lambda: _resolve_sweep_leader(app.state),
+            )
+            fts_backfill_sweep_scheduler.start()
+            app.state.fts_backfill_sweep_scheduler = fts_backfill_sweep_scheduler
+            logger.info(
+                "FTS backfill sweep scheduler started",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-090",
+                    f"Failed to initialize FTS backfill sweep scheduler: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
         # Issue #1548: legacy temporal relocation is independently gated by
         # config flags and must never prevent server startup.
         try:
@@ -2952,167 +3259,14 @@ def make_lifespan(
                 )
             )
 
-        # Startup: Initialize Dependency Map Scheduler (Story #193)
-        dependency_map_service = None
-        logger.info(
-            "Server startup: Initializing dependency map scheduler",
-            extra={"correlation_id": get_correlation_id()},
-        )
+        # Startup reconciliation: orphaned jobs and exports, the cidx-meta
+        # registry, golden-repo registry orphans, leaked snapshots. (The
+        # dependency map's scheduler, formerly started in this block, is the
+        # cidx-depmap feature's on_startup since modular phase 4g.)
         try:
-            from code_indexer.server.services.dependency_map_service import (
-                DependencyMapService,
-            )
-            from code_indexer.global_repos.dependency_map_analyzer import (
-                DependencyMapAnalyzer,
-            )
             from code_indexer.server.services.config_service import get_config_service
 
-            # Get dependencies
             config_service = get_config_service()
-            server_config = config_service.get_config()
-            db_path = str(Path(server_data_dir) / "data" / "cidx_server.db")  # type: ignore[assignment]
-            golden_repos_manager = golden_repo_manager
-
-            # Create tracking backend
-            if backend_registry is not None:
-                tracking_backend = backend_registry.dependency_map_tracking
-            else:
-                from code_indexer.server.storage.sqlite_backends import (
-                    DependencyMapTrackingBackend,
-                )
-
-                tracking_backend = DependencyMapTrackingBackend(db_path)
-            tracking_backend.cleanup_stale_status_on_startup()
-
-            # Create description refresh tracking backend for lifecycle backfill (Epic #725).
-            # This is the DescriptionRefreshTrackingBackend (description_refresh_tracking table),
-            # which is separate from DependencyMapTrackingBackend. Must be passed explicitly
-            # because DependencyMapService only holds DependencyMapTrackingBackend by default.
-            if backend_registry is not None:
-                description_refresh_tracking_backend = (
-                    backend_registry.description_refresh_tracking
-                )
-            else:
-                from code_indexer.server.storage.sqlite_backends import (
-                    DescriptionRefreshTrackingBackend,
-                )
-
-                description_refresh_tracking_backend = (
-                    DescriptionRefreshTrackingBackend(db_path)
-                )
-
-            # Bug #383: Clean stale staging directory on server startup.
-            # A prior crashed analysis may have left dependency-map.staging/ behind.
-            # RefreshScheduler would index it and bake it into versioned snapshots,
-            # polluting semantic search. Remove it before the scheduler starts.
-            try:
-                staging_dir = (
-                    Path(golden_repos_dir) / "cidx-meta" / "dependency-map.staging"
-                )
-                if staging_dir.exists():
-                    import shutil as _shutil
-
-                    _shutil.rmtree(staging_dir)
-                    logger.info(
-                        "Cleaned stale dependency-map.staging directory on startup (Bug #383)",
-                        extra={"correlation_id": get_correlation_id()},
-                    )
-            except Exception as _staging_err:
-                logger.debug(
-                    f"Staging dir startup cleanup failed (non-fatal): {_staging_err}"
-                )
-
-            # Create analyzer
-            cidx_meta_path = Path(golden_repos_dir) / "cidx-meta"
-            analyzer = DependencyMapAnalyzer(
-                golden_repos_root=Path(golden_repos_dir),
-                cidx_meta_path=cidx_meta_path,
-                pass_timeout=server_config.claude_integration_config.dependency_map_pass_timeout_seconds,
-                mcp_registration_service=mcp_registration_service,
-                analysis_model=(
-                    server_config.golden_repos_config.analysis_model
-                    if server_config.golden_repos_config
-                    else "opus"
-                ),
-            )
-
-            # Story #927: cluster dedup pool (None = solo mode)
-            _dep_map_pg_pool = (
-                (
-                    backend_registry.critical_connection_pool
-                    or backend_registry.connection_pool
-                )
-                if storage_mode == "postgres" and backend_registry is not None
-                else None
-            )
-
-            # Story #927: closures capture dep_map_dir, tracking_backend, job_tracker
-            _dep_map_dir = Path(golden_repos_dir) / "cidx-meta" / "dependency-map"
-
-            # Bug #1621: eagerly create the dep-map output directory here, before
-            # anything below checks for its existence. Without this, a
-            # never-before-visited node has no cidx-meta/dependency-map/ on disk
-            # until the first analysis run happens to create it lazily -- so the
-            # very first dashboard HTMX poll sees `_get_dep_map_output_dir()`
-            # return None and renders a spurious "infrastructure unavailable"
-            # error, even though the directory would exist moments later.
-            _ensure_dep_map_output_dir(golden_repos_dir)
-
-            # Bug #1040 follow-up: clean stale sentinel lock files on startup.
-            # Server restart kills analysis threads but leaves sentinel files on
-            # disk, blocking the dep-map UI with a stuck "Processing..." state.
-            # CLUSTER SAFETY (Codex SENTINEL-1): only delete sentinels owned by
-            # THIS node. Sibling nodes may have live jobs behind their sentinels.
-            if _dep_map_dir.exists():
-                import glob as _glob_sentinel
-                import json as _json_sentinel
-                import socket as _socket_sentinel
-
-                _this_node_id = ""
-                try:
-                    _sc_path = Path(server_data_dir) / "config.json"
-                    if _sc_path.exists():
-                        _sc_data = _json_sentinel.loads(
-                            _sc_path.read_text(encoding="utf-8")
-                        )
-                        _this_node_id = (
-                            _sc_data.get("cluster", {}).get("node_id", "") or ""
-                        )
-                    if not _this_node_id:
-                        _this_node_id = _socket_sentinel.gethostname()
-                except Exception:
-                    _this_node_id = _socket_sentinel.gethostname()
-
-                for _stale_lock in _glob_sentinel.glob(
-                    str(_dep_map_dir / "_active_*.lock")
-                ):
-                    try:
-                        _lock_text = Path(_stale_lock).read_text(encoding="utf-8")
-                        _lock_data = _json_sentinel.loads(_lock_text)
-                        _lock_node = _lock_data.get("node_id", "")
-                        if _lock_node and _lock_node != _this_node_id:
-                            logger.info(
-                                "Startup: keeping sentinel %s (owned by %s, we are %s)",
-                                _stale_lock,
-                                _lock_node,
-                                _this_node_id,
-                            )
-                            continue
-                        Path(_stale_lock).unlink()
-                        logger.info(
-                            "Startup: removed stale sentinel %s (owned by %s)",
-                            _stale_lock,
-                            _lock_node or "unknown",
-                        )
-                    except (_json_sentinel.JSONDecodeError, KeyError):
-                        Path(_stale_lock).unlink(missing_ok=True)
-                        logger.info("Startup: removed corrupt sentinel %s", _stale_lock)
-                    except OSError as _e:
-                        logger.warning(
-                            "Startup: failed to remove stale sentinel %s: %s",
-                            _stale_lock,
-                            _e,
-                        )
 
             # Bug #1040 follow-up: fail orphaned running/pending jobs in the DB.
             # Server restart kills threads but leaves job rows as "running" in
@@ -3200,14 +3354,48 @@ def make_lifespan(
 
                 async def _run_golden_repo_reconcile_sweep() -> None:
                     try:
+                        # Fleet-wide, not per-node: this sweep submits removal jobs and triggers stale-index refreshes. Run
+                        # twelve times it submits each removal twelve times and can kick
+                        # off twelve refreshes of the same ~900-repo set.
+                        #
+                        # The lifespan runs once per uvicorn WORKER PROCESS, so on the
+                        # tools-* cluster this closure is created 12x (6 pods x 2 workers).
+                        # Gate it to the elected leader; see startup/leader_gate.py for why
+                        # the gate waits rather than checking once, and why it fails open.
+                        if not await _await_sweep_leadership(
+                            app.state,
+                            sweep_name="Bug #1317/GAP-4 golden-repo registry reconcile",
+                        ):
+                            return
                         import anyio.to_thread as _to_thread
                         from code_indexer.server.services.golden_repo_reconciler import (
                             reconcile_golden_repo_registry,
                         )
 
-                        _reconcile_result = await _to_thread.run_sync(
-                            lambda: reconcile_golden_repo_registry(golden_repo_manager)
+                        # issue-65484/GAP-4: thread the refresh_scheduler through so a
+                        # stale golden-repo index is detected and refreshed, not just
+                        # registry orphans. Upstream's threaded/backgrounded shape is
+                        # kept -- it fixes a real event-loop freeze at ~900 repos.
+                        _reconcile_refresh_scheduler = (
+                            global_lifecycle_manager.refresh_scheduler
+                            if global_lifecycle_manager is not None
+                            else None
                         )
+                        _reconcile_result = await _to_thread.run_sync(
+                            lambda: reconcile_golden_repo_registry(
+                                golden_repo_manager,
+                                refresh_scheduler=_reconcile_refresh_scheduler,
+                            )
+                        )
+                        if _reconcile_result.stale_indexes_found:
+                            logger.info(
+                                "Startup: GAP-4 reconcile found %d stale golden-repo "
+                                "index(es) (%d refresh(es) triggered, %d failed): %s",
+                                len(_reconcile_result.stale_indexes_found),
+                                len(_reconcile_result.stale_indexes_refreshed),
+                                len(_reconcile_result.stale_indexes_failed),
+                                _reconcile_result.stale_indexes_found,
+                            )
                         if _reconcile_result.orphans_found:
                             logger.info(
                                 "Startup: Bug #1317 reconcile found %d "
@@ -3249,7 +3437,18 @@ def make_lifespan(
             # see versioned_snapshot_reclaim.py's module docstring for the
             # conjunctive discriminator that keeps this fail-closed for a
             # repo that still exists.
-            if global_lifecycle_manager is not None and snapshot_manager is not None:
+            from code_indexer.server.startup.index_store_wiring import (
+                server_index_store as _vsr_index_store,
+            )
+
+            _vsr_skip = versioned_snapshot_sweep_skip_reason(_vsr_index_store())
+            if _vsr_skip is not None:
+                # issue-64616: see versioned_snapshot_sweep_skip_reason.
+                logger.info(
+                    "Startup: Bug #1567 versioned-snapshot orphan sweep skipped: %s",
+                    _vsr_skip,
+                )
+            elif global_lifecycle_manager is not None and snapshot_manager is not None:
                 # Production-scale hazard fix: reconcile_versioned_snapshots()
                 # is a plain synchronous `def` performing ~18 filesystem ops
                 # per `.versioned/` namespace. At production scale (~900
@@ -3267,6 +3466,21 @@ def make_lifespan(
                 # _vsr_result -- same rationale as that sibling.
                 async def _run_vsr_sweep() -> None:
                     try:
+                        # Fleet-wide, not per-node: this sweep deletes `.versioned` snapshots -- 229 of them for a single repo,
+                        # ~120GB, confirmed live. Its safety checks (age floor, keep-last-N,
+                        # pointer protection) all read the filesystem and then act on it, so
+                        # twelve concurrent sweeps is a TOCTOU race over which snapshots are
+                        # keepers. This one is why the gate exists.
+                        #
+                        # The lifespan runs once per uvicorn WORKER PROCESS, so on the
+                        # tools-* cluster this closure is created 12x (6 pods x 2 workers).
+                        # Gate it to the elected leader; see startup/leader_gate.py for why
+                        # the gate waits rather than checking once, and why it fails open.
+                        if not await _await_sweep_leadership(
+                            app.state,
+                            sweep_name="Bug #1567 versioned-snapshot orphan sweep",
+                        ):
+                            return
                         import anyio.to_thread as _to_thread
                         from code_indexer.server.services.versioned_snapshot_reconciler import (
                             reconcile_versioned_snapshots,
@@ -3319,6 +3533,29 @@ def make_lifespan(
             # only ever logged.
             async def _run_legacy_lease_sweep() -> None:
                 try:
+                    # Fleet-wide, not per-node: this sweep deletes expired lease files. Twelve sweepers racing over the same
+                    # lease directory means stat-then-unlink on entries another has
+                    # already removed, which is the error path, not the happy one.
+                    #
+                    # The lifespan runs once per uvicorn WORKER PROCESS, so on the
+                    # tools-* cluster this closure is created 12x (6 pods x 2 workers).
+                    # Gate it to the elected leader; see startup/leader_gate.py for why
+                    # the gate waits rather than checking once, and why it fails open.
+                    if not await _await_sweep_leadership(
+                        app.state,
+                        sweep_name="Bug #1871 legacy snapshot-reader-lease sweep",
+                    ):
+                        return
+                    _lease_skip = legacy_lease_sweep_skip_reason(_mount_config)
+                    if _lease_skip is not None:
+                        # issue-64616: leases are pod-local; the legacy directory
+                        # is inside cidx-meta on the golden-repos volume.
+                        logger.info(
+                            "Startup: Bug #1871 legacy snapshot-reader-lease "
+                            "sweep skipped: %s",
+                            _lease_skip,
+                        )
+                        return
                     import anyio.to_thread as _to_thread
                     from code_indexer.global_repos.snapshot_reader_lease import (
                         _legacy_lease_directory,
@@ -3408,105 +3645,12 @@ def make_lifespan(
 
             asyncio.create_task(_run_primary_lease_directory_bootstrap())
 
-            def _dep_map_health_check_fn():
-                from code_indexer.server.services.dep_map_health_detector import (
-                    DepMapHealthDetector,
-                )
-
-                return DepMapHealthDetector().detect(_dep_map_dir)
-
-            # Story #927 Codex Pass 4: construct service FIRST so the closure can
-            # capture the real instance, not the pre-construction None placeholder.
-            dependency_map_service = DependencyMapService(
-                golden_repos_manager=golden_repos_manager,
-                config_manager=config_service,
-                tracking_backend=tracking_backend,
-                analyzer=analyzer,
-                refresh_scheduler=(
-                    global_lifecycle_manager.refresh_scheduler
-                    if global_lifecycle_manager
-                    else None
-                ),
-                job_tracker=job_tracker,  # Story #312: Unified job tracking (Epic #261)
-                description_refresh_tracking_backend=description_refresh_tracking_backend,  # Epic #725
-                pg_pool=_dep_map_pg_pool,  # Story #927: cluster dedup lock
-                health_check_fn=_dep_map_health_check_fn,  # Story #927: anomaly gate
-                repair_invoker_fn=None,  # late-bound below via set_repair_invoker_fn
-                storage_mode=storage_mode,  # Story #927 Pass 2: anti-fallback guard
-            )
-
-            # Build the closure with the real constructed service instance
-            _dep_map_repair_invoker_fn = _make_dep_map_repair_invoker_fn(
-                dep_map_dir=_dep_map_dir,
-                tracking_backend=tracking_backend,
-                job_tracker=job_tracker,
-                dep_map_service=dependency_map_service,  # Story #927 Pass 4: now the real instance
-            )
-
-            # Late-bind the closure into the service
-            dependency_map_service.set_repair_invoker_fn(_dep_map_repair_invoker_fn)
-
-            # Startup migration: delete oversized CLAUDE.md from pre-v10.10 deployments.
-            # Pre-v10.7 code wrote the entire repo catalogue into CLAUDE.md (context overflow).
-            # Pre-v10.10 code renamed it to dep_map_repo_catalogue.md.
-            # v10.10+ no longer creates either file — delete any oversized CLAUDE.md that
-            # remains from a prior version so it does not bloat Claude CLI context.
-            _gr_root = Path(golden_repos_manager.golden_repos_dir)
-            _old_claude_md = _gr_root / "CLAUDE.md"
-            _CLAUDE_MD_MAX_SAFE_SIZE = 10_000  # 10KB; new CLAUDE.md is ~500 bytes
-            try:
-                if (
-                    _old_claude_md.exists()
-                    and _old_claude_md.stat().st_size > _CLAUDE_MD_MAX_SAFE_SIZE
-                ):
-                    logger.info(
-                        "Startup migration: deleting oversized CLAUDE.md (%d bytes) at %s",
-                        _old_claude_md.stat().st_size,
-                        _gr_root,
-                    )
-                    _old_claude_md.unlink()
-            except Exception as _mig_err:
-                logger.warning(
-                    "Startup migration: failed to delete oversized CLAUDE.md (non-fatal): %s",
-                    _mig_err,
-                )
-
-            # Start scheduler — invoker is bound, safe to start
-            dependency_map_service.start_scheduler()
-            app.state.dependency_map_service = dependency_map_service
-
-            # Bug #1153: Wire dep-map cooperative-cancellation handlers so that
-            # BackgroundJobManager.cancel_job() can stop the dep-map worker thread
-            # and release the SharedJobSentinel when a cancel is requested via the
-            # generic MCP cancel_job tool.  Without this, the worker keeps running
-            # and new triggers 409 forever.
-            background_job_manager.register_cancel_handler(
-                "dependency_map_full",
-                dependency_map_service.cancel_running_analysis,
-            )
-            background_job_manager.register_cancel_handler(
-                "dependency_map_delta",
-                dependency_map_service.cancel_running_analysis,
-            )
-
-            if server_config.claude_integration_config.dependency_map_enabled:
-                logger.info(
-                    f"Dependency map scheduler started "
-                    f"(interval: {server_config.claude_integration_config.dependency_map_interval_hours}h)",
-                    extra={"correlation_id": get_correlation_id()},
-                )
-            else:
-                logger.info(
-                    "Dependency map scheduler is disabled (can be enabled in Web UI)",
-                    extra={"correlation_id": get_correlation_id()},
-                )
-
         except Exception as e:
             # Log error but don't block server startup
             logger.warning(
                 format_error_log(
                     "APP-GENERAL-022",
-                    f"Failed to initialize dependency map scheduler: {e}",
+                    f"Startup reconciliation failed: {e}",
                 )
             )
 
@@ -4012,6 +4156,43 @@ def make_lifespan(
                 extra={"correlation_id": get_correlation_id()},
             )
 
+        # issue-66121: trusted mcp-gateway per-user RS256 bearer authenticator (default off).
+        # Validates per-user RS256 JWTs the gateway forwards + JIT-provisions via the OIDC
+        # path (its OWN identity-link store, isolated from interactive SSO), so cidx enforces
+        # its OWN per-user access. build_gateway_authenticator is fail-safe -> None when
+        # disabled/misconfigured, so gateway_identity_authenticator stays None and the /mcp
+        # dispatch no-ops.
+        try:
+            from code_indexer.server.services.config_service import get_config_service
+            from code_indexer.server.auth import dependencies as _gw_deps
+            from code_indexer.server.auth.gateway_auth_wiring import (
+                build_gateway_authenticator,
+            )
+
+            _tg_cfg = get_config_service().get_config()
+            _tg = getattr(_tg_cfg, "trusted_gateway_config", None) if _tg_cfg else None
+            _gw_auth = await build_gateway_authenticator(
+                _tg,
+                user_manager=user_manager,  # module-level Postgres-backed instance
+                jwt_manager=jwt_manager,  # module-level instance
+                group_manager=getattr(app.state, "group_manager", None),
+            )
+            _gw_deps.gateway_identity_authenticator = _gw_auth
+            logger.info(
+                "issue-66121: trusted mcp-gateway bearer auth %s",
+                "enabled" if _gw_auth is not None else "not enabled",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-024",
+                    f"Failed to wire trusted-gateway auth: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
         # Startup: Initialize Langfuse Trace Sync Service (Story #168)
         global langfuse_sync_service
         langfuse_sync_service = None  # type: ignore[name-defined]
@@ -4173,6 +4354,7 @@ def make_lifespan(
         # in this function (immediately after app.state.storage_mode), before
         # GlobalReposLifecycleManager/RefreshScheduler/GlobalActivator are
         # constructed -- see that assignment for the full rationale.
+        # (issue-66819 is the same fix on the fork side.)
 
         # Bug #532: Inject DiagnosticsBackend into the module-level diagnostics_service
         # singleton. We inject it here after backend_registry is available.
@@ -4254,14 +4436,22 @@ def make_lifespan(
                         with open(_cfg_path) as _f:
                             _cfg_data = _json.load(_f)
                             _pg_dsn = _cfg_data.get("postgres_dsn", "")
-                            _cluster_cfg = _cfg_data.get("cluster", {})
+                            # "cluster": null is written by a standalone
+                            # server; `or {}` keeps it from raising here.
+                            _cluster_cfg = _cfg_data.get("cluster") or {}
                             _sharding_enabled = bool(
                                 _cluster_cfg.get("sharding_enabled", False)
                             )
                             _shard_replicas = max(
                                 1, int(_cluster_cfg.get("shard_replicas", 1))
                             )
-                except Exception:
+                except Exception as exc:
+                    logger.warning(
+                        "lifespan: swallowed %s: %s",
+                        type(exc).__name__,
+                        exc,
+                        exc_info=True,
+                    )
                     pass
 
                 if _pg_dsn:
@@ -4357,7 +4547,8 @@ def make_lifespan(
                             except Exception:
                                 logging.getLogger(__name__).warning(
                                     "C6: could not inject shard ownership into the "
-                                    "multi-search singleton at startup"
+                                    "multi-search singleton at startup",
+                                    exc_info=True,
                                 )
                             # http_client_factory is set later in startup
                             # (_apply_fault_injection_state), after this cluster block,
@@ -4419,7 +4610,13 @@ def make_lifespan(
                                             )
                                             for r in grm.list_golden_repos()
                                         ]
-                                    except Exception:
+                                    except Exception as exc:
+                                        logger.warning(
+                                            "_list_shardable_repos: swallowed %s: %s",
+                                            type(exc).__name__,
+                                            exc,
+                                            exc_info=True,
+                                        )
                                         return []
 
                                 def _warm_repo(alias: str) -> None:
@@ -4447,7 +4644,8 @@ def make_lifespan(
                                 _cluster_services.append(("shard_prewarm", _prewarm))
                             except Exception:
                                 logging.getLogger(__name__).warning(
-                                    "C6: could not start shard prewarm service"
+                                    "C6: could not start shard prewarm service",
+                                    exc_info=True,
                                 )
                         except Exception:
                             logging.getLogger(__name__).exception(
@@ -4535,7 +4733,13 @@ def make_lifespan(
 
                     # Pod-pull dispatch executors (PR #1424 H2), one per
                     # POD_PULL_OPS op: see server/services/pod_pull_dispatch.py.
-                    _index_dispatch = build_index_dispatch(golden_repo_manager)
+                    # _refresh_sched is the same scheduler the leader-only
+                    # DistributedJobWorkerService was handed above; the leader
+                    # excludes the refresh op via exclude_types=POD_PULL_OPS,
+                    # so the two loops stay disjoint.
+                    _index_dispatch = build_index_dispatch(
+                        golden_repo_manager, refresh_scheduler=_refresh_sched
+                    )
                     # M3: fail loudly if a pod-pull op ever lacks an executor (or
                     # vice versa) instead of silently claiming an unrunnable row.
                     validate_dispatch_covers(_index_dispatch, POD_PULL_OPS)
@@ -4952,47 +5156,56 @@ def make_lifespan(
                     # On any detection failure the value stays None, which disables NFS
                     # volume reporting gracefully (non-fatal degradation by design).
                     _nfs_validator_for_health: Any = None
-                    try:
-                        import psutil as _nfs_psutil
-
-                        _gr_resolved = Path(golden_repos_dir).resolve()
-                        # Find the most specific (longest mountpoint) NFS partition
-                        # that contains the golden repos directory. Use
-                        # Path.is_relative_to() for boundary-safe containment so
-                        # /mnt/repos-backup is not matched by mountpoint /mnt/repos.
-                        _best_nfs_part = None
-                        _best_nfs_len = 0
-                        for _nfs_part in _nfs_psutil.disk_partitions(all=True):
-                            if _nfs_part.fstype not in ("nfs", "nfs4"):
-                                continue
-                            if not _gr_resolved.is_relative_to(
-                                Path(_nfs_part.mountpoint)
-                            ):
-                                continue
-                            if len(_nfs_part.mountpoint) > _best_nfs_len:
-                                _best_nfs_part = _nfs_part
-                                _best_nfs_len = len(_nfs_part.mountpoint)
-                        if _best_nfs_part is not None:
-                            from code_indexer.server.storage.shared.nfs_validator import (
-                                NfsMountValidator,
-                            )
-
-                            _nfs_validator_for_health = NfsMountValidator(
-                                _best_nfs_part.mountpoint
-                            )
-                            logger.info(
-                                "Story #1002: NFS golden repo volume detected at %s"
-                                " (fstype=%s)",
-                                _best_nfs_part.mountpoint,
-                                _best_nfs_part.fstype,
-                                extra={"correlation_id": get_correlation_id()},
-                            )
-                    except Exception as _nfs_err:
-                        # Detection failure is non-fatal: NFS volume reporting is
-                        # disabled for this startup, local volumes still visible.
-                        logger.debug(
-                            "Could not detect NFS mount for golden repos: %s", _nfs_err
+                    _volume_skip = golden_volume_monitoring_skip_reason(_mount_config)
+                    if _volume_skip is not None:
+                        # issue-64616: see golden_volume_monitoring_skip_reason.
+                        logger.info(
+                            "Story #1002: golden repo volume monitoring skipped: %s",
+                            _volume_skip,
                         )
+                    else:
+                        try:
+                            import psutil as _nfs_psutil
+
+                            _gr_resolved = Path(golden_repos_dir).resolve()
+                            # Find the most specific (longest mountpoint) NFS partition
+                            # that contains the golden repos directory. Use
+                            # Path.is_relative_to() for boundary-safe containment so
+                            # /mnt/repos-backup is not matched by mountpoint /mnt/repos.
+                            _best_nfs_part = None
+                            _best_nfs_len = 0
+                            for _nfs_part in _nfs_psutil.disk_partitions(all=True):
+                                if _nfs_part.fstype not in ("nfs", "nfs4"):
+                                    continue
+                                if not _gr_resolved.is_relative_to(
+                                    Path(_nfs_part.mountpoint)
+                                ):
+                                    continue
+                                if len(_nfs_part.mountpoint) > _best_nfs_len:
+                                    _best_nfs_part = _nfs_part
+                                    _best_nfs_len = len(_nfs_part.mountpoint)
+                            if _best_nfs_part is not None:
+                                from code_indexer.server.storage.shared.nfs_validator import (
+                                    NfsMountValidator,
+                                )
+
+                                _nfs_validator_for_health = NfsMountValidator(
+                                    _best_nfs_part.mountpoint
+                                )
+                                logger.info(
+                                    "Story #1002: NFS golden repo volume detected at %s"
+                                    " (fstype=%s)",
+                                    _best_nfs_part.mountpoint,
+                                    _best_nfs_part.fstype,
+                                    extra={"correlation_id": get_correlation_id()},
+                                )
+                        except Exception as _nfs_err:
+                            # Detection failure is non-fatal: NFS volume reporting is
+                            # disabled for this startup, local volumes still visible.
+                            logger.debug(
+                                "Could not detect NFS mount for golden repos: %s",
+                                _nfs_err,
+                            )
                     app.state.nfs_validator = _nfs_validator_for_health
 
                     # Story #527: Initialize HealthCheckService singleton with
@@ -5095,6 +5308,10 @@ def make_lifespan(
                     f"Failed to start cluster services: {e}",
                     extra={"correlation_id": get_correlation_id()},
                 )
+            finally:
+                # issue-66188: release SCIP reconcile's startup hold once cluster
+                # service initialization has completed (success, no-op, or error).
+                app.state.scip_reconcile_leader_gate_ready = True
 
         # Issue #1507: Solo/SQLite mode has no cluster to sync SSH keys across,
         # but a DB-registered key can still be missing from ~/.ssh/ (fresh
@@ -5143,7 +5360,11 @@ def make_lifespan(
                 if _nm_cfg_path.exists():
                     with open(_nm_cfg_path) as _nm_f:
                         _nm_cfg = _nm_json.load(_nm_f)
-                        _nm_node_id = _nm_cfg.get("cluster", {}).get("node_id") or None
+                        from code_indexer.server.utils.cluster_node_id import (
+                            configured_node_id,
+                        )
+
+                        _nm_node_id = configured_node_id(_nm_cfg) or None
             except Exception as e:
                 logger.debug(f"Could not read node_id from config.json: {e}")
 
@@ -5391,6 +5612,80 @@ def make_lifespan(
                 exc_info=True,
             )
 
+        # IndexStore (delegated): this pod's sweep of leftover checkouts of
+        # deactivated copies / removed golden repos. Every pod; none locally.
+        # Non-fatal: a failure leaves leftovers on disk, never removes more.
+        try:
+            from code_indexer.server.startup.index_store_wiring import (
+                start_checkout_sweeper,
+            )
+
+            from code_indexer.server.services.config_service import (
+                get_config_service as _sweep_config_service,
+            )
+
+            start_checkout_sweeper(
+                app, _sweep_config_service().get_config().resource_config
+            )
+        except Exception as e:
+            app.state.checkout_sweeper = None
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-IS01",
+                    f"IndexStore checkout sweep failed to start: {e}",
+                ),
+                exc_info=True,
+            )
+
+        # IndexStore (delegated): this pod's served-index cache -- LRU eviction
+        # of the checkouts it served, by disk usage. Every pod; none locally.
+        # Invalid watermarks fail startup (a pod that cannot bound its disk
+        # fills it); any other failure is logged and leaves eviction off.
+        try:
+            from code_indexer.server.startup.index_store_wiring import (
+                start_served_index_cache,
+            )
+            from code_indexer.server.services.config_service import (
+                get_config_service as _cache_config_service,
+            )
+
+            start_served_index_cache(
+                app, _cache_config_service().get_config().resource_config
+            )
+        except ValueError:
+            raise
+        except Exception as e:
+            app.state.served_index_cache = None
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-IS02",
+                    f"Served-index cache failed to start: {e}",
+                ),
+                exc_info=True,
+            )
+
+        # Content seam step 5a: the control-plane metadata outbox sweeper.
+        # Leader-gated (one sweeper per fleet); replays alias / write-mode
+        # changes to the old files during the rollback window, and exports
+        # cidx_metadata_outbox_depth. Non-fatal: a failure here leaves rows in
+        # the outbox (visible, never dropped), it must not abort startup.
+        try:
+            from code_indexer.server.startup.control_plane_metadata_wiring import (
+                start_metadata_outbox_sweeper,
+            )
+
+            start_metadata_outbox_sweeper(app, telemetry_manager)
+        except Exception as e:
+            app.state.metadata_outbox_sweeper = None
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-5A01",
+                    f"Metadata outbox sweeper failed to start (rows stay in the "
+                    f"outbox): {e}",
+                ),
+                exc_info=True,
+            )
+
         # Story #1290: startup blank-out sweep — hard-delete legacy/version<2
         # temporal collections (AC19/AC20) for every golden repo. Replaces the
         # old Story #1172 background HNSW-extraction migration (deleted along
@@ -5474,7 +5769,15 @@ def make_lifespan(
 
         start_healthz_refresher()
 
+        # Feature add-ons' on_startup, last, once every platform service is
+        # up. A failing hook stops startup.
+        await start_features(app)
+
         yield  # Server is now running
+
+        # Feature add-ons' on_shutdown first, in reverse dependency order,
+        # while the platform services they use are still running.
+        await stop_features(app)
 
         stop_healthz_refresher()
         await _stop_analysis_agent_credential_migration(app)
@@ -5572,6 +5875,38 @@ def make_lifespan(
                 _see_stop_exc,
             )
 
+        # Issue #1241 P1.3: drain the audit-log async writer on shutdown so no
+        # enqueued audit records are lost on graceful restart/stop.
+        # Non-fatal LOG+RECOVER — never abort the remaining shutdown chain.
+        try:
+            _audit_svc = getattr(app.state, "audit_service", None)
+            if _audit_svc is not None:
+                _audit_svc.stop()
+        except Exception as _audit_stop_exc:
+            logger.warning(
+                "Issue #1241: failed to drain audit-log writer during shutdown: %s",
+                _audit_stop_exc,
+            )
+
+        # Shutdown: Stop the issue-65484 periodic registry reconcile loop so it does
+        # not outlive the lifespan. cancel() unblocks its asyncio.sleep and the
+        # coroutine re-raises CancelledError; non-fatal if it already finished.
+        _reconcile_task = getattr(app.state, "registry_reconcile_task", None)
+        if _reconcile_task is not None:
+            try:
+                _reconcile_task.cancel()
+            except Exception:
+                pass
+
+        # Shutdown: Stop the semantic self-heal backfill loop (same rationale). Created
+        # unconditionally (the enabled gate is checked inside the loop), so cancel it
+        # unconditionally too — its only exit path is CancelledError.
+        _semantic_backfill_task = getattr(app.state, "semantic_backfill_task", None)
+        if _semantic_backfill_task is not None:
+            try:
+                _semantic_backfill_task.cancel()
+            except Exception:
+                pass
         # Story S12: stop this worker's stall watchdog (cancels the faulthandler
         # timer, removes its armed files) before the log listener drains, so a
         # stall it reports while stopping is still logged. The join runs in a
@@ -5629,8 +5964,6 @@ def make_lifespan(
 
         # Story #1009: Shut down the MCP dispatch pool on server shutdown.
         _mcp_executor.shutdown(wait=False)
-        # Bug #1070: Shut down the dedicated xray executor.
-        _xray_executor.shutdown(wait=False)
         # perf: Shut down the shared query executor (mirror of the two above).
         _query_executor.shutdown(wait=False)
         # Bug #1800: dispose the discovery branch-fetch pool -- the one
@@ -5799,6 +6132,36 @@ def make_lifespan(
                     ),
                     exc_info=True,
                 )
+
+        # Shutdown: Stop the IndexStore checkout sweep.
+        try:
+            from code_indexer.server.startup.index_store_wiring import (
+                stop_checkout_sweeper,
+            )
+
+            stop_checkout_sweeper(app)
+        except Exception as e:
+            logger.error("Error stopping checkout sweep: %s", e, exc_info=True)
+
+        # Shutdown: Stop the served-index cache.
+        try:
+            from code_indexer.server.startup.index_store_wiring import (
+                stop_served_index_cache,
+            )
+
+            stop_served_index_cache(app)
+        except Exception as e:
+            logger.error("Error stopping served-index cache: %s", e, exc_info=True)
+
+        # Shutdown: Stop the metadata outbox sweeper (content seam step 5a).
+        try:
+            from code_indexer.server.startup.control_plane_metadata_wiring import (
+                stop_metadata_outbox_sweeper,
+            )
+
+            stop_metadata_outbox_sweeper(app)
+        except Exception as e:
+            logger.error("Error stopping metadata outbox sweeper: %s", e, exc_info=True)
 
         # Shutdown: Stop global repos background services BEFORE other cleanup
         logger.info(
@@ -6166,26 +6529,6 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-029",
                         f"Error stopping cidx-meta refresh debouncer: {e}",
-                    ),
-                    exc_info=True,
-                )
-
-        # Shutdown: Stop dependency map scheduler (Story #193)
-        dependency_map_service_state = getattr(
-            app.state, "dependency_map_service", None
-        )
-        if dependency_map_service_state is not None:
-            try:
-                dependency_map_service_state.stop_scheduler()
-                logger.info(
-                    "Dependency map scheduler stopped",
-                    extra={"correlation_id": get_correlation_id()},
-                )
-            except Exception as e:
-                logger.error(
-                    format_error_log(
-                        "APP-GENERAL-028",
-                        f"Error stopping dependency map scheduler: {e}",
                     ),
                     exc_info=True,
                 )

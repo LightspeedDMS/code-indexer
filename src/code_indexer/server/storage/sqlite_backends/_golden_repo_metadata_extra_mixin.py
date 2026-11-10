@@ -95,7 +95,7 @@ class _GoldenRepoMetadataExtraMixin:
         cursor = conn.execute(
             """SELECT alias, repo_url, default_branch, clone_path, created_at,
                       enable_temporal, temporal_options, category_id, category_auto_assigned,
-                      COALESCE(wiki_enabled, 0)
+                      COALESCE(wiki_enabled, 0), workspace_id
                FROM golden_repos_metadata"""
         )
 
@@ -113,6 +113,7 @@ class _GoldenRepoMetadataExtraMixin:
                     "category_id": row[7],
                     "category_auto_assigned": bool(row[8]),
                     "wiki_enabled": bool(row[9]),
+                    "workspace_id": row[10],
                 }
             )
 

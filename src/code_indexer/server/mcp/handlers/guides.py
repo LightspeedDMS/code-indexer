@@ -1,7 +1,8 @@
 """Guide and analytics handlers for CIDX MCP server.
 
-Covers: quick reference, first-time user guide, tool categories,
-Langfuse trace start/end, and wiki article analytics.
+Covers: quick reference, first-time user guide, tool categories and
+Langfuse trace start/end. (Wiki article analytics is the cidx-wiki
+feature's tool: ``cidx_wiki.server.mcp.analytics``.)
 """
 
 from __future__ import annotations
@@ -23,30 +24,16 @@ from code_indexer.server.services.cidx_meta_access import (
 )
 from code_indexer.server.services.cidx_meta_access.catalog_articles import (
     catalog_decider,
-    visible_articles,
 )
 from code_indexer.server.services.config_service import get_config_service
-from code_indexer.server.services.constants import is_internal_meta_repo
 from code_indexer.server.services.repo_access_guard import normalize_repo_alias
 
 from . import _utils
 from ._utils import (
-    _coerce_int,
-    _get_wiki_enabled_repos,
     _mcp_response,
 )
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Wiki Analytics constants
-# ---------------------------------------------------------------------------
-
-# Minimum search query length to trigger CIDX search filter
-_WIKI_ANALYTICS_MIN_QUERY_LENGTH = 2
-# Max CIDX results to use as path filter (100 is sufficient for wiki article lists)
-_WIKI_ANALYTICS_MAX_SEARCH_RESULTS = 100
-
 
 # ---------------------------------------------------------------------------
 # Private helpers
@@ -159,84 +146,28 @@ def _build_dependency_map_section(
     )
 
 
-def _get_wiki_cache_for_handler():
-    """Return a WikiCache instance using golden_repo_manager.db_path.
+def _dependency_map_read_root(cidx_meta_path: Path) -> Path:
+    """Where the dependency map is read: cidx-meta itself, or -- under a
+    delegated content backend -- the synced read mirror of its shared content.
 
-    Instantiates WikiCache on each call (lightweight - no I/O until a method
-    is called). Returns None when golden_repo_manager is unavailable.
+    The section is an optional hint, so a mirror that cannot sync is logged
+    at ERROR and the section omitted (an empty mirror root has no map); the
+    rest of the quick reference is still served.
     """
-    from code_indexer.server.wiki.wiki_cache import WikiCache
-    from code_indexer.server.utils.registry_factory import (
-        resolve_backend_registry_attr,
+    from code_indexer.server.services.cidx_meta_content import (
+        CidxMetaUnavailableError,
+    )
+    from code_indexer.server.services.cidx_meta_read_mirror import (
+        MIRROR_DIRNAME,
+        synced_read_root,
     )
 
-    grm = getattr(_utils.app_module, "golden_repo_manager", None)
-    if grm is None:
-        return None
-    db_path = getattr(grm, "db_path", None)
-    if not db_path:
-        return None
-    # Bug #1665: resolve the shared PostgreSQL wiki_cache backend in
-    # cluster mode so this handler sees the same store regardless of which
-    # node handles the request.
-    wiki_backend, _ = resolve_backend_registry_attr(
-        "wiki_cache", caller_name="guides._get_wiki_cache_for_handler"
-    )
-    return WikiCache(db_path, storage_backend=wiki_backend)
-
-
-def _wiki_analytics_filter_by_search(
-    wiki_alias: str, search_query: str, search_mode: str, username: str
-) -> Optional[set]:
-    """Filter wiki article paths via CIDX search (AC4).
-
-    Searches the wiki's GOLDEN repository (``{wiki_alias}-global``), never
-    a user activation that happens to carry the wiki's bare name.
-
-    Returns a set of matching file_paths, or None if search was not performed.
-    Returns an empty set when search runs but finds no matches.
-    Raises RuntimeError if semantic_query_manager is unavailable.
-    """
-    if not search_query or len(search_query) < _WIKI_ANALYTICS_MIN_QUERY_LENGTH:
-        return None
-    sqm = getattr(_utils.app_module, "semantic_query_manager", None)
-    if sqm is None:
-        raise RuntimeError("semantic_query_manager not available for search filter")
-    result = sqm.query_user_repositories(
-        username=username,
-        query_text=search_query,
-        repository_alias=f"{wiki_alias}-global",
-        search_mode=search_mode,
-        limit=_WIKI_ANALYTICS_MAX_SEARCH_RESULTS,
-        file_extensions=[".md"],
-    )
-    search_results = result.get("results", [])
-    return {r.get("file_path", "") for r in search_results}
-
-
-def _wiki_analytics_build_articles(all_views: list, wiki_alias: str) -> list:
-    """Transform view count records into article response dicts (AC2).
-
-    Derives human-readable title from filename: hyphens and underscores become
-    spaces, result is title-cased. Strips .md extension from wiki_url path.
-    """
-    articles = []
-    for v in all_views:
-        path = v["article_path"]
-        path_no_ext = path[:-3] if path.endswith(".md") else path
-        last_segment = path_no_ext.rsplit("/", 1)[-1]
-        title = last_segment.replace("-", " ").replace("_", " ").title()
-        articles.append(
-            {
-                "title": title,
-                "path": path,
-                "real_views": v["real_views"],
-                "first_viewed_at": v["first_viewed_at"],
-                "last_viewed_at": v["last_viewed_at"],
-                "wiki_url": f"/wiki/{wiki_alias}/{path_no_ext}",
-            }
-        )
-    return articles
+    try:
+        mirror_root = synced_read_root(cidx_meta_path)
+    except CidxMetaUnavailableError as exc:
+        logger.error("quick_reference: dependency map unavailable: %s", exc)
+        return cidx_meta_path.parent / MIRROR_DIRNAME / "unavailable"
+    return mirror_root if mirror_root is not None else cidx_meta_path
 
 
 # ---------------------------------------------------------------------------
@@ -392,7 +323,7 @@ def quick_reference(
                 else catalog_decider(cidx_meta_path, vis, access_service)
             )
             dependency_map_section = _build_dependency_map_section(
-                cidx_meta_path, decide
+                _dependency_map_read_root(cidx_meta_path), decide
             )
             if dependency_map_section:
                 response["dependency_map"] = dependency_map_section
@@ -758,110 +689,6 @@ def handle_end_trace(
         return _mcp_response({"status": "error", "message": str(e)})
 
 
-def handle_wiki_article_analytics(params: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Query wiki article view analytics (Story #293).
-
-    AC2: Returns title, path, real_views, first_viewed_at, last_viewed_at, wiki_url.
-    AC3: sort_by most_viewed=DESC, least_viewed=ASC; tie-break alphabetical by path.
-    AC4: Optional search_query filters via CIDX; results still sorted by views.
-    AC5: Returns explicit error for non-wiki-enabled repos.
-    AC6: Permission enforced by MCP middleware via tool doc required_permission.
-    """
-    try:
-        repo_alias = params.get("repo_alias", "")
-        sort_by = params.get("sort_by", "most_viewed")
-        if sort_by not in ("most_viewed", "least_viewed"):
-            sort_by = "most_viewed"
-        limit = _coerce_int(params.get("limit"), 20)
-        limit = max(1, min(limit, 500))
-        search_query = params.get("search_query")
-        search_mode = params.get("search_mode", "semantic")
-
-        # Strip -global suffix to get base alias for wiki_enabled check
-        wiki_alias = repo_alias[:-7] if repo_alias.endswith("-global") else repo_alias
-
-        # AC5: Reject non-wiki-enabled repos with explicit error
-        if wiki_alias not in _get_wiki_enabled_repos():
-            return _mcp_response(
-                {
-                    "success": False,
-                    "error": "Wiki is not enabled for this repository",
-                }
-            )
-
-        # AC4: Optional search filter - raises on sqm unavailability
-        article_paths_filter = _wiki_analytics_filter_by_search(
-            wiki_alias, search_query or "", search_mode, user.username
-        )
-        if article_paths_filter is not None and not article_paths_filter:
-            return _mcp_response(
-                {
-                    "success": True,
-                    "articles": [],
-                    "total_count": 0,
-                    "repo_alias": repo_alias,
-                    "sort_by": sort_by,
-                    "wiki_enabled": True,
-                }
-            )
-
-        wiki_cache = _get_wiki_cache_for_handler()
-        if wiki_cache is None:
-            return _mcp_response(
-                {
-                    "success": False,
-                    "error": "Wiki cache not available",
-                }
-            )
-
-        all_views = wiki_cache.get_all_view_counts(wiki_alias)
-
-        if article_paths_filter is not None:
-            all_views = [
-                v for v in all_views if v["article_path"] in article_paths_filter
-            ]
-        if is_internal_meta_repo(wiki_alias):
-            access_service = _utils._get_access_filtering_service()
-            vis = resolve_meta_visibility(user.username, access_service)
-            if not vis.unrestricted:
-                catalog_root = Path(
-                    _utils.app_module.app.state.dependency_map_service.cidx_meta_read_path
-                )
-                decide = catalog_decider(catalog_root, vis, access_service)
-                all_views = visible_articles(
-                    all_views, lambda v: str(v["article_path"]), decide
-                )
-
-        # AC3: Sort with alphabetical tie-breaking
-        if sort_by == "least_viewed":
-            all_views.sort(key=lambda x: (x["real_views"], x["article_path"]))
-        else:
-            all_views.sort(key=lambda x: (-x["real_views"], x["article_path"]))
-
-        all_views = all_views[:limit]
-        articles = _wiki_analytics_build_articles(all_views, wiki_alias)
-
-        return _mcp_response(
-            {
-                "success": True,
-                "articles": articles,
-                "total_count": len(articles),
-                "repo_alias": repo_alias,
-                "sort_by": sort_by,
-                "wiki_enabled": True,
-            }
-        )
-
-    except Exception as e:
-        logger.warning(
-            format_error_log(
-                "WIKI-ANALYTICS-001",
-                f"Error in handle_wiki_article_analytics: {e}",
-            )
-        )
-        return _mcp_response({"success": False, "error": str(e)})
-
-
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
@@ -912,4 +739,3 @@ def _register(registry: dict) -> None:
     registry["dependency_analysis_workflow"] = dependency_analysis_workflow
     registry["start_trace"] = handle_start_trace
     registry["end_trace"] = handle_end_trace
-    registry["wiki_article_analytics"] = handle_wiki_article_analytics

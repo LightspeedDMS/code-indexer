@@ -62,7 +62,6 @@ def validate_key(raw: bytes, source: str) -> bytes:
 def _create_exclusively(path: Path) -> None:
     """Hard-link a complete new key file into *path* unless one exists."""
     from code_indexer.server.services.locked_secret_file import fsync_dir, write_all
-    from code_indexer.utils.file_locking import nfs_safe_link_exclusive
 
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -73,7 +72,7 @@ def _create_exclusively(path: Path) -> None:
         finally:
             os.close(fd)
         try:
-            nfs_safe_link_exclusive(tmp, path)
+            os.link(tmp, path)
         except FileExistsError:
             pass  # a concurrent creator won; its key is read below
     finally:
@@ -141,9 +140,22 @@ def load_or_create_cluster_key(pool: Any) -> bytes:
     return validate_key(value.encode("ascii"), f"cluster_secrets.{CLUSTER_KEY_NAME}")
 
 
-# Every node seen within this window keeps the gate closed until it advertises
-# the capability, so a paused or briefly stopped older node is never ignored.
-NODE_SEEN_WINDOW_SECONDS = 24 * 3600
+# Liveness for the gate is the heartbeat AGE of a node still marked online,
+# not the presence of its cluster_nodes row. A node heartbeating (10 s
+# interval) within this window keeps the gate closed until it advertises the
+# capability, so a paused or stalled older node is not ignored. A node that
+# shut down cleanly (status 'offline') never counts: if it comes back it
+# re-registers online and closes the gate again on the next check.
+#
+# Fork (EKS, verified on tools-test 2026-10-26): every pod has its OWN
+# server dir (per-pod RWO volume) holding its own ``.encryption_key_salt``
+# (six pods, six distinct salts) and no ``.jwt_secret``. A legacy-format
+# write is therefore readable only by the pod that wrote it, so holding the
+# gate closed for a pod that is gone (upstream counted every row seen in the
+# last 24 h, offline ones included) bought no compatibility and left every
+# stored-secret write pod-specific for up to a day after a rollout or
+# scale-down. The v2 cluster key is the only cross-pod readable format here.
+NODE_SEEN_WINDOW_SECONDS = 15 * 60
 # A node's capability stamp is written by the same statement as its heartbeat;
 # an older version heartbeats without refreshing it, so a stamp older than the
 # node's own last heartbeat (minus this slack) means "not capable".
@@ -164,15 +176,16 @@ FROM (
            ELSE FALSE
          END AS capable
   FROM cluster_nodes
-  WHERE last_heartbeat >= NOW() - %s * INTERVAL '1 second'
+  WHERE status = 'online'
+    AND last_heartbeat >= NOW() - %s * INTERVAL '1 second'
 ) AS seen
 """
 
 
 def cluster_v2_writes_allowed(pool: Any, node_id: Optional[str] = None) -> bool:
-    """True only when this node's own row is capable and every node seen in
-    the last NODE_SEEN_WINDOW_SECONDS advertises ``token_key_v2`` with a
-    current stamp. Fails closed: no node id (defaults to the registered local
+    """True only when this node's own row is capable and every node online
+    with a heartbeat in the last NODE_SEEN_WINDOW_SECONDS advertises
+    ``token_key_v2`` with a current stamp. Fails closed: no node id (defaults to the registered local
     node), no rows, or any query error means legacy writes."""
     from psycopg.rows import tuple_row
 

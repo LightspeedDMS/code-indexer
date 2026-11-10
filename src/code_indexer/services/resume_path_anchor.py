@@ -4,10 +4,17 @@ and by the server's reader of recorded failures (Bug #2125), so both treat
 a stored path exactly alike."""
 
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Callable, Optional
+
+if TYPE_CHECKING:
+    from ..indexing.repo_manifest import RepoManifest
 
 
-def reanchor_resume_path(stored_path: str, codebase_dir: Path) -> Path:
+def reanchor_resume_path(
+    stored_path: str,
+    codebase_dir: Path,
+    manifest: Optional["RepoManifest"] = None,
+) -> Path:
     """Re-anchor a stored resume path onto the CURRENT walk root.
 
     The failure retry reads file paths persisted by a PRIOR run
@@ -38,10 +45,33 @@ def reanchor_resume_path(stored_path: str, codebase_dir: Path) -> Path:
     Args:
         stored_path: Path string as persisted by a prior run.
         codebase_dir: The current walk root (``config.codebase_dir``).
+        manifest: the pass's delegated manifest, which answers "exists" for a
+            repository not on this machine; None asks the disk.
 
     Returns:
         A Path re-anchored under ``codebase_dir`` when possible.
     """
+    return _reanchor(
+        stored_path,
+        codebase_dir,
+        (lambda path: path in manifest)
+        if manifest is not None
+        else (lambda path: path.exists()),
+    )
+
+
+def reanchor_resume_path_lexically(stored_path: str, codebase_dir: Path) -> Path:
+    """:func:`reanchor_resume_path` with no existence answers at all, for a
+    caller whose repository is not on this machine and that holds no pass
+    manifest (the refresh counting what a delegated child recorded as
+    failed): a stale prefix maps to its FIRST leaf match, the documented
+    fallback, and nothing on this disk is consulted."""
+    return _reanchor(stored_path, codebase_dir, lambda path: False)
+
+
+def _reanchor(
+    stored_path: str, codebase_dir: Path, present: Callable[[Path], bool]
+) -> Path:
     candidate = Path(stored_path)
 
     # Relative stored path -> join onto the current walk root (legacy).
@@ -69,7 +99,7 @@ def reanchor_resume_path(stored_path: str, codebase_dir: Path) -> Path:
         if parts[index] == leaf:
             tail = parts[index + 1 :]
             anchored = codebase_dir.joinpath(*tail) if tail else codebase_dir
-            if anchored.exists():
+            if present(anchored):
                 return anchored
             if first_match is None:
                 first_match = anchored

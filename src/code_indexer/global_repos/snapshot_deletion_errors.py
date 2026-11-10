@@ -24,50 +24,19 @@ Two types are enough to fix that, so there are exactly two.
 
 Placement
 ---------
-This is a dependency-free leaf module and it lives under ``global_repos``
-rather than ``server/storage/shared`` deliberately: ``cleanup_manager``
-is CLI-reachable, and importing ``code_indexer.server.storage.shared.*``
-would drag ``database_manager`` and ``snapshot_manager`` (hence the
-server telemetry stack) into its import graph -- the exact regression
-class Bug #1468 exists to prevent.
+The types are part of the clone seam's delete contract and live in the SDK
+(``cidx_sdk.seams.clone``), so a clone backend raises them without importing
+the core. This module re-exports them, so existing imports and ``except``
+clauses see the same classes. It stays a dependency-free leaf under
+``global_repos``: ``cleanup_manager`` is CLI-reachable, and importing
+``code_indexer.server.storage.shared.*`` would drag the server telemetry
+stack into its import graph (Bug #1468).
 """
 
 from __future__ import annotations
 
-from typing import Optional
-
-
-class SnapshotDeleteError(Exception):
-    """A versioned snapshot could not be deleted.
-
-    ``errno_name`` and ``detail`` carry the backend's OWN reported cause
-    when it supplied one (the CoW daemon reports both over HTTP; the
-    local backend reports the kernel errno directly), so the reason
-    appears in this side's log instead of only on the storage host.
-    """
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        errno_name: Optional[str] = None,
-        detail: Optional[str] = None,
-    ) -> None:
-        self.errno_name = errno_name
-        self.detail = detail
-        super().__init__(message)
-
-
-class SnapshotInUseError(SnapshotDeleteError):
-    """The delete was refused because something still holds the snapshot.
-
-    This is "not yet", not "broken": the identical delete succeeds once
-    the holder lets go. Callers must therefore retry it later WITHOUT
-    charging the attempt to a failure budget -- charging it is what made
-    a still-referenced snapshot get abandoned after five attempts and
-    leak its disk forever.
-
-    Being a subclass of :class:`SnapshotDeleteError` means a caller that
-    only cares that "the delete did not happen" needs no change; a caller
-    that distinguishes the two MUST catch this one first.
-    """
+from cidx_sdk.seams.clone import (
+    SnapshotDeleteError as SnapshotDeleteError,
+    SnapshotInUseError as SnapshotInUseError,
+    remove_tree_already_gone_ok as remove_tree_already_gone_ok,
+)

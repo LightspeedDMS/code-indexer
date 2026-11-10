@@ -25,6 +25,7 @@ import anyio.to_thread
 if TYPE_CHECKING:
     pass
 
+from cidx_sdk.tool_args import coerce_int
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.clients.ci_identifiers import (
     InvalidCIIdentifierError,
@@ -37,7 +38,6 @@ from code_indexer.server.telemetry.correlation_bridge import (
 )
 
 from ._utils import (
-    _coerce_int,
     _mcp_response,
     _list_global_repos,
     _get_global_repo,
@@ -557,7 +557,7 @@ async def handle_gh_actions_list_runs(
         # Extract optional parameters
         branch = args.get("branch")
         status = args.get("status")
-        limit = _coerce_int(args.get("limit"), 10)
+        limit = coerce_int(args.get("limit"), 10)
 
         # Create client and list runs
         client = GitHubActionsClient(token)
@@ -1181,7 +1181,7 @@ async def handle_gitlab_ci_list_pipelines(
         # Extract optional parameters
         ref = args.get("ref")
         status = args.get("status")
-        limit = _coerce_int(args.get("limit"), 10)
+        limit = coerce_int(args.get("limit"), 10)
 
         credential, error_resp = await _cicd_off_loop(
             _resolve_legacy_ci_request,
@@ -2117,7 +2117,7 @@ async def handle_ci_list_runs(args: Dict[str, Any], user: Any) -> Dict[str, Any]
 
     branch = args.get("branch")
     status = args.get("status")
-    limit = _coerce_int(args.get("limit"), DEFAULT_CI_RUN_LIMIT)
+    limit = coerce_int(args.get("limit"), DEFAULT_CI_RUN_LIMIT)
 
     try:
         if forge_type == "github":

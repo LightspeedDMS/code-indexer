@@ -23,6 +23,9 @@ from code_indexer.server.services.query_admission_gate import (
 )
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
 from code_indexer.server.repositories.golden_repo_manager import GoldenRepoNotFoundError
+from code_indexer.server.repositories.repository_listing_manager import (
+    RepositoryStatisticsUnavailableError,
+)
 from code_indexer.config import write_json_atomic
 from code_indexer.server.services.repository_health_aggregator import (
     compute_repository_health,
@@ -38,6 +41,12 @@ from code_indexer.global_repos.alias_manager import AliasManager
 from code_indexer.global_repos.global_registry import GlobalRegistry
 
 from . import _utils
+from ._global_clone import published_global_clone_path
+from code_indexer.server.services.repo_access_guard import (
+    AccessFilteringServiceUnavailableError,
+    RepoAccessDeniedError,
+    require_repo_access,
+)
 from ._utils import (
     _admin_role_first,
     _admin_role_required_response,
@@ -437,13 +446,38 @@ def check_hnsw_health(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
         force_refresh = params.get("force_refresh", False)
 
-        repo = _utils.app_module.golden_repo_manager.get_golden_repo(repository_alias)
-        if not repo:
+        # Enforce repo access before resolving anything. This handler previously
+        # accepted a bare alias with no check at all; the guard normalises the
+        # "-global" suffix itself, bypasses for admins, and fails CLOSED when the
+        # access service is unwired.
+        try:
+            require_repo_access(
+                _get_access_filtering_service(),
+                user.username,
+                repository_alias,
+            )
+        except RepoAccessDeniedError as access_err:
+            return _mcp_response({"success": False, "error": str(access_err)})
+        except AccessFilteringServiceUnavailableError:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": "Access filtering unavailable; refusing repository access",
+                }
+            )
+
+        _grm = _utils.app_module.golden_repo_manager
+        repo = _grm.get_golden_repo(repository_alias)
+        clone_path = Path(repo.clone_path) if repo else None
+        if clone_path is None:
+            # list_repositories publishes a globally-activated repo as
+            # "<alias>-global", but the golden repo is registered under the bare
+            # alias -- so the published alias would otherwise be rejected here.
+            clone_path = published_global_clone_path(repository_alias, _grm)
+        if clone_path is None:
             return _mcp_response(
                 {"success": False, "error": f"Repository not found: {repository_alias}"}
             )
-
-        clone_path = Path(repo.clone_path)
         index_base_path = clone_path / ".code-indexer" / "index"
 
         if _utils.app_module.background_job_manager is None:
@@ -548,6 +582,8 @@ def get_all_repositories_status(params: Dict[str, Any], user: User) -> Dict[str,
                     )
                 )
                 status_summary.append(details)
+            except RepositoryStatisticsUnavailableError:
+                raise  # delegated backend failure: never drop the repo silently
             except Exception as detail_err:
                 logger.debug(
                     "Skipping repo %s in status summary: %s",
@@ -859,8 +895,10 @@ def _resolve_branch_repo_path(repository_alias: str, user: User) -> tuple:
             )
         except GoldenRepoNotFoundError:
             # Fall back to whatever AliasManager recorded for this alias.
+            # The aliases live under golden-repos/aliases -- this used to pass
+            # the golden-repos root itself, so the fallback never found one.
             golden_repos_dir = _get_golden_repos_dir()
-            alias_manager = AliasManager(golden_repos_dir)
+            alias_manager = AliasManager(str(Path(golden_repos_dir) / "aliases"))
             target_path = alias_manager.read_alias(repository_alias) or ""
 
         if not target_path:
@@ -1061,6 +1099,79 @@ def remove_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     except Exception as e:
         logger.warning("remove_golden_repo failed: %s", e, exc_info=True)
         return _mcp_response({"success": False, "error": str(e)})
+
+
+@_admin_role_first
+@require_mcp_elevation()
+def rename_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """Rename a golden repository's alias (admin only; elevation-gated like
+    REST POST /api/admin/golden-repos/{alias}/rename; issue-64616)."""
+    alias = params.get("alias", "")
+    new_alias = params.get("new_alias", "")
+    if not alias or not new_alias:
+        return _mcp_response(
+            {
+                "success": False,
+                "error": "Missing required parameters: 'alias' and 'new_alias'",
+            }
+        )
+    try:
+        job_id = _utils.app_module.golden_repo_manager.rename_golden_repo(
+            alias,
+            new_alias,
+            repo_url=params.get("repo_url") or None,
+            branch=params.get("branch") or None,
+            submitter_username=user.username,
+        )
+        return _mcp_response(
+            {
+                "success": True,
+                "job_id": job_id,
+                "message": (
+                    f"Rename of '{alias}' to '{new_alias}' started. "
+                    "Use get_job_details to poll."
+                ),
+            }
+        )
+    except Exception as e:
+        logger.warning("rename_golden_repo failed: %s", e, exc_info=True)
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+@_admin_role_first
+@require_mcp_elevation()
+def sync_golden_catalog(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """Run the golden catalog / workspace registration sync once (admin only;
+    elevation-gated like REST POST /api/admin/golden-catalog/sync)."""
+    from code_indexer.server.services.golden_repo_audited_ops import (
+        request_golden_catalog_sync,
+    )
+
+    dry_run = params.get("dry_run", True)
+    scope = params.get("scope", "all")
+    if not isinstance(dry_run, bool):
+        return _mcp_response({"success": False, "error": "dry_run must be a boolean"})
+    try:
+        job_id = request_golden_catalog_sync(
+            _utils.app_module.golden_repo_manager,
+            actor=user.username,
+            scope=str(scope),
+            dry_run=dry_run,
+        )
+    except Exception as e:
+        logger.warning("sync_golden_catalog failed: %s", e, exc_info=True)
+        return _mcp_response({"success": False, "error": str(e)})
+    return _mcp_response(
+        {
+            "success": True,
+            "job_id": job_id,
+            "message": (
+                f"Golden catalog sync ({scope}, "
+                f"{'dry run' if dry_run else 'apply'}) started. "
+                "Use get_job_details to poll."
+            ),
+        }
+    )
 
 
 @_admin_role_first
@@ -1482,9 +1593,13 @@ def _resolve_golden_repo_path(alias: str) -> Optional[str]:
     """
     golden_repos_dir = _get_golden_repos_dir()
     alias_manager = AliasManager(str(Path(golden_repos_dir) / "aliases"))
+    resolved_alias = alias
     resolved: Optional[str] = alias_manager.read_alias(alias)
     if resolved is None and not alias.endswith("-global"):
-        resolved = alias_manager.read_alias(alias + "-global")
+        resolved_alias = alias + "-global"
+        resolved = alias_manager.read_alias(resolved_alias)
+    if resolved is not None:
+        alias_manager.ensure_served_here(resolved_alias, resolved)
     return resolved
 
 
@@ -1695,6 +1810,7 @@ def _post_provider_index_snapshot(
                 alias_name=repo_alias,
                 new_target=new_snapshot,
                 old_target=old_snapshot_path,
+                **scheduler.published_swap_extra(repo_alias, new_snapshot),
             )
         except ValueError as swap_exc:
             import shutil as _shutil
@@ -1870,6 +1986,8 @@ def _run_provider_subprocess(
     phase_name: str,
     index_types: list,
     progress_callback,
+    golden_repo_alias: Optional[str] = None,
+    job_id: Optional[str] = None,
 ) -> tuple:
     """Run cidx index subprocess with progress reporting.
 
@@ -1921,7 +2039,10 @@ def _run_provider_subprocess(
     )
 
     env_with_stats = build_embedding_stats_child_env(
-        get_config_service().get_config(), base_env=env
+        get_config_service().get_config(),
+        base_env=env,
+        golden_repo_alias=golden_repo_alias,
+        job_id=job_id,
     )
     sanitized_env = build_cidx_subprocess_env(env_with_stats)
     # Bug #1575 Part C independent re-review: this is the SHARED
@@ -2026,6 +2147,8 @@ def _provider_index_job(
         "semantic",
         ["semantic"],
         progress_callback,
+        golden_repo_alias=repo_alias,
+        job_id=job_id,
     )
 
     if success and is_versioned and actual_path != repo_path:
@@ -2360,6 +2483,8 @@ def _register(registry: dict) -> None:
     registry["check_hnsw_health"] = check_hnsw_health
     registry["add_golden_repo"] = add_golden_repo
     registry["remove_golden_repo"] = remove_golden_repo
+    registry["rename_golden_repo"] = rename_golden_repo
+    registry["sync_golden_catalog"] = sync_golden_catalog
     registry["refresh_golden_repo"] = refresh_golden_repo
     registry["change_golden_repo_branch"] = change_golden_repo_branch
     registry["get_all_repositories_status"] = get_all_repositories_status

@@ -36,6 +36,7 @@ from typing import (
 from queue import Queue, Empty
 import threading
 
+from ..indexing import file_facts
 from ..indexing.processor import ProcessingStats
 from ..services.git_aware_processor import GitAwareDocumentProcessor
 from .vector_calculation_manager import VectorCalculationManager
@@ -51,6 +52,19 @@ from ..storage.filesystem_vector_store import FilesystemVectorStore
 
 logger = logging.getLogger(__name__)
 
+
+def multimodal_indexing_enabled() -> bool:
+    """issue-65484: whether to build the multimodal (image) index during indexing.
+
+    cidx builds a multimodal (voyage-multimodal-3 / embed-v4.0) image index in
+    parallel with the code index on every run, embedding images in markdown/etc.
+    On deployments that never issue multimodal (image) queries this is pure vendor
+    spend — tools-test showed ~13k multimodal embeds/day with ZERO image searches
+    over 7 days. Default ON (unchanged behavior); set
+    CIDX_MULTIMODAL_INDEXING_ENABLED=false to skip building it. The query path
+    already no-ops when the multimodal collection is absent, so search is unaffected.
+    """
+    return os.getenv("CIDX_MULTIMODAL_INDEXING_ENABLED", "true").lower() != "false"
 
 def _raise_if_fatal_store_error(exc: BaseException, what: str) -> None:
     # ^ invariant fatal chunk-store failure => typed ChunkStoreUnavailableError => exit 86/87/89; lock contention returns to the caller
@@ -70,6 +84,7 @@ __all__ = [
     "FileProcessingResult",
     "BranchIndexingResult",
     "FileStatus",  # Export unified FileStatus enum
+    "multimodal_indexing_enabled",
 ]
 
 
@@ -332,6 +347,107 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
         fts_manager: Optional[Any] = None,
     ) -> ProcessingStats:
         """Process files with maximum throughput using pre-queued chunks."""
+        # The manifest describes the repository as of NOW, and this instance is
+        # reused across passes (watch mode, the reprocess pass), so it is built
+        # here rather than in __init__ and dropped again on the way out. A
+        # manifest held between passes would serve the hash a file had before it
+        # was edited. No-op unless a delegated backend is configured.
+        #
+        # Inside smart_index the pass is already open -- it was opened around
+        # discovery -- and this one joins it, so the files are read against the
+        # snapshot they were discovered from. Called on its own (watch mode, the
+        # branch-change path), it opens and closes its own.
+        owns_pass = not getattr(self, "manifest_pass_open", False)
+        if owns_pass:
+            self.begin_manifest_pass()
+        try:
+            return self._process_files_high_throughput(
+                files,
+                vector_thread_count,
+                batch_size,
+                progress_callback,
+                slot_tracker,
+                fts_manager,
+            )
+        finally:
+            if owns_pass:
+                self.end_manifest_pass()
+
+    def _exists_in_this_pass(self, file_path: Path) -> bool:
+        """Whether a file exists, as this pass sees the repository.
+
+        The pass's delegated manifest when there is one -- the repository is not
+        on this machine, so a local ``exists()`` is False for every file and a
+        reconcile would re-index nothing after clearing what it meant to replace.
+        Otherwise the local filesystem, exactly as before.
+        """
+        manifest = getattr(self, "repo_manifest", None)
+        if manifest is not None:
+            return file_path in manifest
+        return file_path.exists()
+
+    def _build_content_source(self, files: List[Path]) -> Optional[Any]:
+        """A prefetcher serving this pass's bytes, or None to read the disk.
+
+        Only when a delegated manifest was built for this pass -- the same
+        condition under which the hash phase already takes blob hashes from it.
+        Planned over the whole submission list in order, so batches line up with
+        the order the workers drain the pool.
+        """
+        manifest = getattr(self, "repo_manifest", None)
+        if manifest is None:
+            return None
+        from ..indexing.content_prefetcher import ContentPrefetcher
+
+        root = Path(self.config.codebase_dir)
+        rel_paths = []
+        for file_path in files:
+            try:
+                rel_paths.append(Path(file_path).relative_to(root).as_posix())
+            except ValueError:
+                # Outside the root: the prefetcher refuses it at take() time,
+                # which fails that one file rather than reading the disk.
+                continue
+        return ContentPrefetcher(
+            self.content_backend,
+            root,
+            rel_paths,
+            size_of=manifest.size,
+            expected_blob_sha=manifest.blob_sha,
+        )
+
+    def _build_image_source(self, multimodal_client: Optional[Any]) -> Optional[Any]:
+        """Image bytes through the content seam, or None to read the disk.
+
+        Under the same condition as ``_build_content_source`` -- a delegated
+        manifest for this pass -- and only when there is a multimodal client to
+        want images at all. Without it every image reference was checked with a
+        local ``exists()``, False on a pod without the repository, and silently
+        dropped.
+        """
+        manifest = getattr(self, "repo_manifest", None)
+        if manifest is None or multimodal_client is None:
+            return None
+        from ..indexing.content_prefetcher import ImagePrefetcher
+        from .multimodal_utils import SUPPORTED_MEDIA_TYPES
+
+        return ImagePrefetcher(
+            self.content_backend,
+            Path(self.config.codebase_dir),
+            manifest,
+            SUPPORTED_MEDIA_TYPES,
+        )
+
+    def _process_files_high_throughput(
+        self,
+        files: List[Path],
+        vector_thread_count: int,
+        batch_size: int = 50,
+        progress_callback: Optional[Callable] = None,
+        slot_tracker: Optional[CleanSlotTracker] = None,
+        fts_manager: Optional[Any] = None,
+    ) -> ProcessingStats:
+        """The pass itself. Split out so the manifest's lifetime is a try/finally."""
 
         # Create local slot tracker for this processing phase
         local_slot_tracker = CleanSlotTracker(max_slots=vector_thread_count + 2)
@@ -350,11 +466,14 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
         # Initialize file processing rate tracking for files/s metric
         self._initialize_file_rate_tracking()
 
-        # Create multimodal client for image+text embedding support
+        # Create multimodal client for image+text embedding support (issue-65484: only
+        # when multimodal indexing is enabled — otherwise no image index is built and
+        # no multimodal vendor calls are made).
         multimodal_client: Optional[Any] = None
         provider_name = self.embedding_provider.get_provider_name()
+        _mm_enabled = multimodal_indexing_enabled()
 
-        if provider_name == "voyage-ai" and os.getenv("VOYAGE_API_KEY"):
+        if _mm_enabled and provider_name == "voyage-ai" and os.getenv("VOYAGE_API_KEY"):
             from ..config import VoyageAIConfig, VOYAGE_MULTIMODAL_MODEL
             from .voyage_multimodal import VoyageMultimodalClient
 
@@ -363,7 +482,7 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                 api_endpoint="https://api.voyageai.com/v1/multimodalembeddings",
             )
             multimodal_client = VoyageMultimodalClient(voyage_config)
-        elif provider_name == "cohere":
+        elif _mm_enabled and provider_name == "cohere":
             from ..config import CohereConfig
             from .cohere_multimodal import CohereMultimodalClient
 
@@ -387,6 +506,9 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                 codebase_dir=self.config.codebase_dir,
                 fts_manager=fts_manager,
                 multimodal_client=multimodal_client,
+                manifest=self.repo_manifest,
+                content_source=self._build_content_source(files),
+                image_source=self._build_image_source(multimodal_client),
                 fts_write_failures=self._fts_write_failures,
             ) as file_manager:
                 # Bug #1746 Change 4 (M1 fix): preflight the target chunk
@@ -459,7 +581,9 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                         slot_id = None
                         try:
                             # Get file size for slot tracking
-                            file_size = file_path.stat().st_size
+                            file_size = file_facts.file_size(
+                                file_path, self.repo_manifest
+                            )
 
                             # Acquire slot with FileData for display
                             file_data = FileData(
@@ -477,8 +601,14 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
 
                             # Calculate hash and metadata
                             try:
+                                # No file read here. The blob hash comes from the
+                                # manifest when it can vouch for the file, and the
+                                # sha256 is deferred to the chunking worker, which
+                                # has to read the bytes anyway. This phase keeps
+                                # its per-file progress and its KB/s, both of which
+                                # are driven by stat() above, not by reading.
                                 file_metadata = self.file_identifier.get_file_metadata(
-                                    file_path
+                                    file_path, defer_content_hash=True
                                 )
 
                                 # Store results thread-safely
@@ -811,11 +941,16 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                         if file_result.success:
                             stats.files_processed += 1
                             stats.chunks_created += file_result.chunks_processed
+                            stats.multimodal_chunks_failed += (
+                                file_result.multimodal_chunks_failed
+                            )
                             completed_files += 1
 
                             # Track source bytes for KB/s calculation when file completes
                             try:
-                                file_size = file_result.file_path.stat().st_size
+                                file_size = file_facts.file_size(
+                                    file_result.file_path, self.repo_manifest
+                                )
                                 self._add_source_bytes_processed(file_size)
                             except Exception as e:
                                 logger.warning(
@@ -924,6 +1059,12 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
 
         stats.end_time = time.time()
         stats.failed_paths = frozenset(_failed_relative_paths)
+        if stats.multimodal_chunks_failed:
+            logger.warning(
+                "%d image chunk(s) got no multimodal embedding (no resolvable "
+                "image, or the provider failed); their text is indexed",
+                stats.multimodal_chunks_failed,
+            )
         # stats.files_processed already updated during processing
         logger.info(
             f"High-throughput processing completed: "
@@ -970,73 +1111,6 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
             )
 
         return stats
-
-    def _create_vector_point(
-        self, chunk_task: ChunkTask, embedding: List[float]
-    ) -> Dict[str, Any]:
-        """Create vector point from chunk task and embedding."""
-
-        # Use existing metadata creation logic
-        metadata_info = None
-        if chunk_task.file_metadata["git_available"]:
-            metadata_info = {
-                "commit_hash": chunk_task.file_metadata.get("commit_hash"),
-                "branch": chunk_task.file_metadata.get("branch"),
-                "git_hash": chunk_task.file_metadata.get("git_hash"),
-            }
-        else:
-            metadata_info = {
-                "file_mtime": chunk_task.file_metadata.get("file_mtime"),
-                "file_size": chunk_task.file_metadata.get("file_size"),
-            }
-
-        # Import here to avoid circular imports
-        from .metadata_schema import GitAwareMetadataSchema
-
-        # Create payload
-        payload = GitAwareMetadataSchema.create_git_aware_metadata(
-            path=self._normalize_path_for_storage(chunk_task.file_path),
-            content=chunk_task.chunk_data["text"],
-            language=chunk_task.chunk_data["file_extension"],
-            file_size=chunk_task.file_path.stat().st_size,
-            chunk_index=chunk_task.chunk_data["chunk_index"],
-            total_chunks=chunk_task.chunk_data["total_chunks"],
-            project_id=chunk_task.file_metadata["project_id"],
-            file_hash=chunk_task.file_metadata["file_hash"],
-            git_metadata=(
-                metadata_info if chunk_task.file_metadata["git_available"] else None
-            ),
-            line_start=chunk_task.chunk_data.get("line_start"),
-            line_end=chunk_task.chunk_data.get("line_end"),
-            # Issue #2013: the file READ time (None -> schema default "now").
-            indexed_timestamp=chunk_task.file_metadata.get("content_read_timestamp"),
-        )
-
-        # Add filesystem metadata for non-git projects
-        if not chunk_task.file_metadata["git_available"] and metadata_info:
-            if "file_mtime" in metadata_info:
-                payload["filesystem_mtime"] = metadata_info["file_mtime"]
-            if "file_size" in metadata_info:
-                payload["filesystem_size"] = metadata_info["file_size"]
-
-        # Create point ID
-        point_id = self._create_point_id(
-            chunk_task.file_metadata, chunk_task.chunk_data["chunk_index"]
-        )
-        payload["point_id"] = point_id
-        payload["unique_key"] = self._create_unique_key(
-            chunk_task.file_metadata, chunk_task.chunk_data["chunk_index"]
-        )
-
-        # Create vector point
-        point = self.vector_store_client.create_point(
-            point_id=point_id,
-            vector=embedding,
-            payload=payload,
-            embedding_model=self.embedding_provider.get_current_model(),
-        )
-        # Ensure we return a Dict[str, Any] as expected
-        return dict(point) if point else {}
 
     # =============================================================================
     # BRANCH-AWARE HIGH-THROUGHPUT PROCESSING
@@ -1116,7 +1190,7 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
             absolute_changed_files = []
             for rel_path in changed_files:
                 abs_path = self.config.codebase_dir / rel_path
-                if abs_path.exists():
+                if self._exists_in_this_pass(abs_path):
                     absolute_changed_files.append(abs_path)
 
             # This is the single choke point every relative-path-list
@@ -1370,95 +1444,6 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                 logger.warning(
                     f"Failed to check content existence for {content_id}: {e}"
                 )
-                return False
-
-    def _get_file_commit_thread_safe(self, file_path: str) -> str:
-        """Thread-safe version of getting file commit hash."""
-        import subprocess
-        import time
-
-        try:
-            # Check if this is a git repository
-            is_git_repo = self._is_git_repository_thread_safe()
-
-            if not is_git_repo:
-                # For non-git projects, always use timestamp-based IDs for consistency
-                try:
-                    file_path_obj = self.config.codebase_dir / file_path
-                    file_stat = file_path_obj.stat()
-                    return f"working_dir_{file_stat.st_mtime}_{file_stat.st_size}"
-                except Exception:
-                    return f"working_dir_{time.time()}_error"
-
-            # For git repositories, use git-aware logic
-            if self._file_differs_from_committed_version_thread_safe(file_path):
-                # File has working directory changes
-                try:
-                    file_path_obj = self.config.codebase_dir / file_path
-                    file_stat = file_path_obj.stat()
-                    return f"working_dir_{file_stat.st_mtime}_{file_stat.st_size}"
-                except Exception:
-                    return f"working_dir_{time.time()}_error"
-
-            # File matches committed version - use commit hash
-            with self._git_lock:
-                try:
-                    result = subprocess.run(
-                        ["git", "log", "-1", "--format=%H", "--", file_path],
-                        cwd=self.config.codebase_dir,
-                        capture_output=True,
-                        text=True,
-                        timeout=10,
-                    )
-                    commit = result.stdout.strip() if result.returncode == 0 else ""
-                    return commit if commit else "unknown"
-                except subprocess.TimeoutExpired:
-                    logger.warning(f"Git log timeout for {file_path}")
-                    return "unknown"
-                except Exception as e:
-                    logger.warning(f"Git log failed for {file_path}: {e}")
-                    return "unknown"
-        except Exception:
-            return "unknown"
-
-    def _file_differs_from_committed_version_thread_safe(self, file_path: str) -> bool:
-        """Thread-safe check if working directory file differs from committed version."""
-        import subprocess
-
-        with self._git_lock:
-            try:
-                result = subprocess.run(
-                    ["git", "diff", "--quiet", "HEAD", "--", file_path],
-                    cwd=self.config.codebase_dir,
-                    capture_output=True,
-                    timeout=10,
-                )
-                return result.returncode != 0
-            except subprocess.TimeoutExpired:
-                logger.warning(f"Git diff timeout for {file_path}")
-                return False
-            except Exception as e:
-                logger.warning(f"Git diff failed for {file_path}: {e}")
-                return False
-
-    def _is_git_repository_thread_safe(self) -> bool:
-        """Thread-safe check if current directory is a git repository."""
-        import subprocess
-
-        with self._git_lock:
-            try:
-                result = subprocess.run(
-                    ["git", "rev-parse", "--git-dir"],
-                    cwd=self.config.codebase_dir,
-                    capture_output=True,
-                    timeout=5,
-                )
-                return result.returncode == 0
-            except subprocess.TimeoutExpired:
-                logger.warning("Git rev-parse timeout")
-                return False
-            except Exception as e:
-                logger.warning(f"Git rev-parse failed: {e}")
                 return False
 
     def _fetch_file_content_points(

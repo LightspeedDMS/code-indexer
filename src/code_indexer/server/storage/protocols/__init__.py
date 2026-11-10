@@ -26,6 +26,7 @@ from .api_metrics_backend import ApiMetricsBackend
 from .audit_log_backend import AuditLogBackend
 from .background_jobs_backend import BackgroundJobsBackend
 from .ci_tokens_backend import CITokensBackend
+from .control_plane_metadata_backend import ControlPlaneMetadataBackend
 from .dependency_map_tracking_backend import DependencyMapTrackingBackend
 from .description_refresh_tracking_backend import DescriptionRefreshTrackingBackend
 from .diagnostics_backend import DiagnosticsBackend
@@ -43,7 +44,6 @@ from .query_embedding_cache_backend import QueryEmbeddingCacheBackend
 from .refresh_token_backend import RefreshTokenBackend
 from .repo_category_backend import RepoCategoryBackend
 from .research_sessions_backend import ResearchSessionsBackend
-from .scip_audit_backend import SCIPAuditBackend
 from .self_monitoring_backend import SelfMonitoringBackend
 from .sessions_backend import SessionsBackend
 from .ssh_keys_backend import SSHKeysBackend
@@ -56,6 +56,7 @@ __all__ = [
     "AuditLogBackend",
     "BackgroundJobsBackend",
     "CITokensBackend",
+    "ControlPlaneMetadataBackend",
     "DependencyMapTrackingBackend",
     "DescriptionRefreshTrackingBackend",
     "DiagnosticsBackend",
@@ -73,7 +74,6 @@ __all__ = [
     "RefreshTokenBackend",
     "RepoCategoryBackend",
     "ResearchSessionsBackend",
-    "SCIPAuditBackend",
     "SelfMonitoringBackend",
     "SessionsBackend",
     "SSHKeysBackend",

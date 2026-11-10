@@ -5,6 +5,7 @@ Manages manual re-indexing operations for activated repositories,
 supporting semantic, FTS, temporal, and SCIP indexes.
 """
 
+from code_indexer.server.services.served_index_cache import reads_served_indexes
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
@@ -25,9 +26,13 @@ if TYPE_CHECKING:
 from code_indexer.config import Config
 
 from ..repositories.background_jobs import BackgroundJobManager
-from ..repositories.activated_repo_manager import ActivatedRepoManager
+from ..repositories.activated_repo_manager import (
+    ActivatedRepoError,
+    ActivatedRepoManager,
+)
 from .config_service import get_config_service
 from .repository_health_aggregator import discover_health_collections
+from .fts_index_builder import FTS_INDEX_DIRNAME
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 from code_indexer.utils.subprocess_diagnostics import (
     format_completed_process_diagnostic,
@@ -248,7 +253,18 @@ class ActivatedRepoIndexManager:
                 "Security violation: Repository path escapes data directory"
             )
 
-        if not os.path.exists(repo_path):
+        delegated = self._index_is_delegated()
+        if delegated:
+            # Mount-less pod: the copy is not on this disk. Its presence is the
+            # registry's answer for THIS user (checked before anything else is
+            # touched); the index is fetched and published by the job itself.
+            if not self.activated_repo_manager.user_has_activated_repo(
+                username, repo_alias
+            ):
+                raise FileNotFoundError(
+                    f"Repository '{repo_alias}' not found for user '{username}'"
+                )
+        elif not os.path.exists(repo_path):
             raise FileNotFoundError(f"Repository directory not found: {repo_path}")
 
         # Check for concurrent reindex jobs to prevent resource conflicts
@@ -290,6 +306,9 @@ class ActivatedRepoIndexManager:
             repo_path,  # *args[1] -> worker's positional repo_path
             index_types,  # *args[2] -> worker's positional index_types
             clear,  # *args[3] -> worker's positional clear
+            # *args[4] -> the owner whose registered copy the job serves from
+            # and publishes to the IndexStore (delegated only; absent locally)
+            *([username] if delegated else []),
             submitter_username=username,
             repo_alias=repo_alias,  # submit_job tracking kwarg (keyword-only, no conflict with positional)
         )
@@ -302,6 +321,7 @@ class ActivatedRepoIndexManager:
 
         return job_id
 
+    @reads_served_indexes
     def get_index_status(
         self,
         repo_alias: str,
@@ -332,8 +352,49 @@ class ActivatedRepoIndexManager:
                 )
             raise
 
-        repo_path = Path(repo_path_str)
+        if self._index_is_delegated():
+            # The registry gate for THIS user, then this pod holds the
+            # recorded index version (a failure raises, never "not found").
+            try:
+                repo_path_str = self.activated_repo_manager.serve_index_here(
+                    username, repo_alias
+                )
+            except ActivatedRepoError as e:
+                if "not found" in str(e).lower():
+                    raise FileNotFoundError(
+                        f"Repository '{repo_alias}' not found for user '{username}'"
+                    )
+                raise
 
+        return self.get_index_status_for_path(
+            Path(repo_path_str), repo_alias=repo_alias, username=username
+        )
+
+    def _index_is_delegated(self) -> bool:
+        """True under ``index_store_backend: delegated``: an activated copy's
+        index is published, and served on any pod from the IndexStore."""
+        from code_indexer.server.startup.index_store_wiring import (
+            server_index_store,
+        )
+
+        return not server_index_store().is_local
+
+    def get_index_status_for_path(
+        self,
+        repo_path: Path,
+        repo_alias: str,
+        username: str,
+    ) -> Dict[str, Any]:
+        """Index status for an explicit repository path.
+
+        Split out of :meth:`get_index_status` so a caller that has already
+        resolved the path -- a globally-activated repo lives under the golden
+        clone, not under ``activated-repos/<user>/`` -- can reuse the same
+        per-index-type reporting instead of reimplementing it.
+
+        Raises:
+            FileNotFoundError: If the directory does not exist.
+        """
         if not repo_path.exists():
             raise FileNotFoundError(f"Repository directory not found: {repo_path}")
 
@@ -353,10 +414,37 @@ class ActivatedRepoIndexManager:
         repo_path: str,
         index_types: List[str],
         clear: bool,
+        owner: Optional[str] = None,
+        progress_callback: Optional[Callable[..., None]] = None,
+    ) -> Dict[str, Any]:
+        """``_run_indexing_job`` with the copy's checkout pinned: the served-index
+        cache never evicts an index while it is rebuilt in place."""
+        from code_indexer.server.services.served_index_cache import (
+            pinned_served_index,
+        )
+
+        with pinned_served_index(repo_path):
+            return self._run_indexing_job(
+                repo_alias, repo_path, index_types, clear, owner, progress_callback
+            )
+
+    def _run_indexing_job(
+        self,
+        repo_alias: str,
+        repo_path: str,
+        index_types: List[str],
+        clear: bool,
+        owner: Optional[str] = None,
         progress_callback: Optional[Callable[..., None]] = None,
     ) -> Dict[str, Any]:
         """
         Execute indexing job for specified index types.
+
+        ``owner`` (delegated IndexStore only): the user whose registered copy
+        this is -- the job first makes this pod hold the copy's recorded index
+        version, and after a fully successful run publishes the result on top
+        of it and records the new version. A failed fetch or publish fails the
+        job with its cause.
 
         Story #482 PATH E: Uses ProgressPhaseAllocator for dynamic phase-aware
         progress reporting instead of hardcoded 10/50/90 milestones.
@@ -377,6 +465,12 @@ class ActivatedRepoIndexManager:
         from code_indexer.services.progress_phase_allocator import (
             ProgressPhaseAllocator,
         )
+
+        if owner is not None:
+            try:
+                self.activated_repo_manager.serve_index_here(owner, repo_alias)
+            except Exception as e:
+                return self._index_store_failure(repo_alias, "fetch", e)
 
         # Build allocator for phase-aware progress (Story #482 PATH E)
         file_count, commit_count = gather_repo_metrics(repo_path)
@@ -415,7 +509,12 @@ class ActivatedRepoIndexManager:
                 update_progress(percent, message)
 
             results = self._execute_all_index_types(
-                repo_path, index_types, clear, phase_update, allocator
+                repo_path,
+                index_types,
+                clear,
+                phase_update,
+                allocator,
+                repo_alias=repo_alias,
             )
 
             # Determine overall success
@@ -428,6 +527,12 @@ class ActivatedRepoIndexManager:
                 message = f"Successfully reindexed all types: {', '.join(index_types)}"
             else:
                 message = f"Reindex completed with failures: {', '.join(failed_types)}"
+
+            if all_success and owner is not None:
+                try:
+                    self.activated_repo_manager.publish_index(owner, repo_alias)
+                except Exception as e:
+                    return self._index_store_failure(repo_alias, "publish", e)
 
             update_progress(100, message, phase="complete")
 
@@ -466,6 +571,26 @@ class ActivatedRepoIndexManager:
                 "error": str(e),
             }
 
+    def _index_store_failure(
+        self, repo_alias: str, step: str, error: Exception
+    ) -> Dict[str, Any]:
+        """The job result when the copy's index could not be fetched from, or
+        published to, the IndexStore -- a failed job carrying the cause."""
+        error_msg = (
+            f"Failed to {step} the index of '{repo_alias}' "
+            f"(IndexStore): {type(error).__name__}: {error}"
+        )
+        self.logger.error(
+            format_error_log("SVC-MIGRATE-009", error_msg),
+            extra=get_log_extra("SVC-MIGRATE-009"),
+        )
+        return {
+            "success": False,
+            "message": error_msg,
+            "results": {},
+            "error": error_msg,
+        }
+
     #: Bug #1978: per-type and overall caps on the summarized job "error"
     #: field -- a verbose subprocess diagnostic (the common case for a
     #: permission or provider failure) must reach the job record, but never
@@ -502,6 +627,7 @@ class ActivatedRepoIndexManager:
         clear: bool,
         update_progress: Callable,
         allocator=None,
+        repo_alias: Optional[str] = None,
     ) -> Dict[str, Dict[str, Any]]:
         """
         Execute indexing for all requested index types.
@@ -552,7 +678,9 @@ class ActivatedRepoIndexManager:
             )
 
             try:
-                result = self._execute_single_index_type(repo_path, index_type, clear)
+                result = self._execute_single_index_type(
+                    repo_path, index_type, clear, repo_alias=repo_alias
+                )
                 results[index_type] = result
 
                 if not result.get("success", False):
@@ -577,7 +705,11 @@ class ActivatedRepoIndexManager:
         return results
 
     def _execute_single_index_type(
-        self, repo_path: str, index_type: str, clear: bool
+        self,
+        repo_path: str,
+        index_type: str,
+        clear: bool,
+        repo_alias: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Execute indexing for a single index type.
@@ -586,18 +718,25 @@ class ActivatedRepoIndexManager:
             repo_path: Repository path
             index_type: Index type to process
             clear: Clear flag
+            repo_alias: Repository alias (issue-65021) — threaded so the SCIP step
+                can resolve the golden-repo workspace_id under the delegated
+                backend. Optional so existing 3-arg callers keep working.
 
         Returns:
             Result dictionary
         """
         if index_type == "semantic":
-            return self._execute_semantic_indexing(repo_path, clear)
+            return self._execute_semantic_indexing(
+                repo_path, clear, repo_alias=repo_alias
+            )
         elif index_type == "fts":
-            return self._execute_fts_indexing(repo_path, clear)
+            return self._execute_fts_indexing(repo_path, clear, repo_alias=repo_alias)
         elif index_type == "temporal":
-            return self._execute_temporal_indexing(repo_path, clear)
+            return self._execute_temporal_indexing(
+                repo_path, clear, repo_alias=repo_alias
+            )
         elif index_type == "scip":
-            return self._execute_scip_indexing(repo_path, clear)
+            return self._execute_scip_indexing(repo_path, clear, repo_alias=repo_alias)
         else:
             return {"success": False, "error": f"Unknown index type: {index_type}"}
 
@@ -638,6 +777,7 @@ class ActivatedRepoIndexManager:
         env: Optional[dict] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
         poll_interval: float = SHORT_POLL_SECONDS,
+        golden_repo_alias: Optional[str] = None,
     ) -> "subprocess.CompletedProcess[str]":
         """Run a cidx subprocess with provider-config seeding and health-event draining.
 
@@ -680,6 +820,10 @@ class ActivatedRepoIndexManager:
         CIDX_EMBEDDING_STATS_BOOTSTRAP_DIR is merged in here ONCE,
         unconditionally (both storage modes), before the existing
         build_cidx_subprocess_env() PYTHONPATH sanitization.
+
+        issue-66105: golden_repo_alias is threaded through to
+        build_embedding_stats_child_env for per-repo VoyageAI cost
+        correlation. node_id is auto-resolved from server_config.
         """
         from code_indexer.server.storage.postgres.embedding_stats_child_wiring import (
             build_embedding_stats_child_env,
@@ -689,7 +833,9 @@ class ActivatedRepoIndexManager:
         )
 
         env_with_stats = build_embedding_stats_child_env(
-            get_config_service().get_config(), base_env=env
+            get_config_service().get_config(),
+            base_env=env,
+            golden_repo_alias=golden_repo_alias,
         )
         resolved_env = build_cidx_subprocess_env(env_with_stats)
         # Bug #1575 Part C independent re-review: this is the SHARED
@@ -753,6 +899,7 @@ class ActivatedRepoIndexManager:
         repo_path: str,
         clear: bool,
         cancel_check: Optional[Callable[[], bool]] = None,
+        repo_alias: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Execute semantic indexing using SmartIndexer.
 
@@ -787,6 +934,7 @@ class ActivatedRepoIndexManager:
                 args,
                 repo_path,
                 cancel_check=cancel_check,
+                golden_repo_alias=repo_alias,
             )
 
             if result.returncode != 0:
@@ -902,7 +1050,12 @@ class ActivatedRepoIndexManager:
                 f"Branch-delta reindex failed for '{repo_path}': {error_detail}"
             )
 
-    def _execute_fts_indexing(self, repo_path: str, clear: bool) -> Dict[str, Any]:
+    def _execute_fts_indexing(
+        self,
+        repo_path: str,
+        clear: bool,
+        repo_alias: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Execute FTS indexing using TantivyIndexManager.
 
         Bug #1419: guards against running on a repo with no
@@ -930,6 +1083,7 @@ class ActivatedRepoIndexManager:
             result = self._run_subprocess_with_telemetry(
                 args,
                 repo_path,
+                golden_repo_alias=repo_alias,
             )
 
             if result.returncode != 0:
@@ -946,7 +1100,12 @@ class ActivatedRepoIndexManager:
         except Exception as e:
             return {"success": False, "error": f"FTS indexing error: {str(e)}"}
 
-    def _execute_temporal_indexing(self, repo_path: str, clear: bool) -> Dict[str, Any]:
+    def _execute_temporal_indexing(
+        self,
+        repo_path: str,
+        clear: bool,
+        repo_alias: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Execute temporal indexing using GitCommitIndexer.
 
         Bug #1313 round-4 (Finding 3): in postgres/cluster mode, hand the
@@ -991,6 +1150,7 @@ class ActivatedRepoIndexManager:
                 args,
                 repo_path,
                 env=_temporal_env,
+                golden_repo_alias=repo_alias,
             )
 
             if result.returncode != 0:
@@ -1007,15 +1167,51 @@ class ActivatedRepoIndexManager:
         except Exception as e:
             return {"success": False, "error": f"Temporal indexing error: {str(e)}"}
 
-    def _execute_scip_indexing(self, repo_path: str, clear: bool) -> Dict[str, Any]:
-        """Execute SCIP indexing using cidx scip generate."""
-        try:
-            args = ["cidx", "scip", "generate", "--project", repo_path]
-            if clear:
-                args.append("--clear")
+    def _execute_scip_indexing(
+        self, repo_path: str, clear: bool, repo_alias: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Execute SCIP indexing through the ``scip`` index builder.
 
+        The cidx-scip feature's builder (``Feature.index_builders()``) routes
+        the build. An activated (per-user) repository always builds locally
+        (``cidx scip generate --project <path> [--clear]``, run here): the
+        delegated backend cannot address a per-user checkout (issue-65021
+        CRITICAL-2). A builder answer other than ``run_locally`` is reported
+        as success with its status, so the enclosing reindex job is never
+        failed by SCIP. With no builder (the feature is not enabled) the step
+        is skipped the same way.
+        """
+        from cidx_sdk import IndexBuildRequest
+        from cidx_sdk.feature import INDEX_BUILD_RUN_LOCALLY
+
+        from code_indexer.kernel.index_builders import SCIP_INDEX_TYPE, index_builder
+
+        builder = index_builder(SCIP_INDEX_TYPE)
+        if builder is None:
+            return {
+                "success": True,
+                "message": "SCIP indexing skipped: the scip feature is not enabled",
+            }
+        # issue-65021 CRITICAL-2: ``repo_alias`` is an ACTIVATED (per-user) alias,
+        # NOT a golden alias (activated=True). MAJOR-5: ``clear`` reaches the
+        # builder so a delegated rebuild cannot be answered FRESH.
+        outcome = builder.build(
+            IndexBuildRequest(
+                alias=repo_alias or "",
+                repo_root=repo_path,
+                clear=clear,
+                activated=True,
+            )
+        )
+        if outcome.status != INDEX_BUILD_RUN_LOCALLY:
+            return {
+                "success": True,
+                "message": f"SCIP delegated backend: {outcome.status}",
+            }
+
+        try:
             result = subprocess.run(
-                args,
+                list(outcome.command),
                 cwd=repo_path,
                 capture_output=True,
                 text=True,
@@ -1325,7 +1521,7 @@ class ActivatedRepoIndexManager:
 
     def _get_fts_status(self, repo_path: Path) -> Dict[str, Any]:
         """Get FTS index status."""
-        fts_dir = repo_path / ".code-indexer" / "tantivy"
+        fts_dir = repo_path / ".code-indexer" / FTS_INDEX_DIRNAME
 
         if not fts_dir.exists():
             return {"status": "not_indexed"}
@@ -1360,6 +1556,7 @@ class ActivatedRepoIndexManager:
                     "SVC-MIGRATE-006", "Failed to read FTS index status: {e}"
                 ),
                 extra=get_log_extra("SVC-MIGRATE-006"),
+                exc_info=True,
             )
             return {"status": "not_indexed"}
 
@@ -1404,6 +1601,19 @@ class ActivatedRepoIndexManager:
         golden_repos_dir = (
             Path(self.activated_repo_manager.activated_repos_dir).parent
             / "golden-repos"
+        )
+        from code_indexer.server.services.temporal_index_store import (
+            require_temporal_answerable,
+        )
+
+        # Raises TemporalNotServedHereError rather than reading "absent" on a
+        # pod that cannot tell (issue-64616); _get_temporal_status reports it.
+        require_temporal_answerable(
+            golden_repos_dir,
+            golden_repo_alias,
+            golden_repo_manager=getattr(
+                self.activated_repo_manager, "golden_repo_manager", None
+            ),
         )
         temporal_status = get_temporal_repo_status(
             golden_repos_dir=golden_repos_dir,
@@ -1470,9 +1680,16 @@ class ActivatedRepoIndexManager:
 
         resolved_via_sister = False
         if temporal_dir is None or not temporal_dir.exists():
-            resolved_temporal_dir = self._resolve_relocated_temporal_dir(
-                index_dir, repo_alias, username
+            from code_indexer.server.services.temporal_index_store import (
+                TemporalNotServedHereError,
             )
+
+            try:
+                resolved_temporal_dir = self._resolve_relocated_temporal_dir(
+                    index_dir, repo_alias, username
+                )
+            except TemporalNotServedHereError as not_here:
+                return {"status": "not_served_here", "error": str(not_here)}
             if resolved_temporal_dir is None:
                 return {"status": "not_indexed"}
             temporal_dir = resolved_temporal_dir
@@ -1519,8 +1736,21 @@ class ActivatedRepoIndexManager:
                     "SVC-MIGRATE-007", "Failed to read temporal index metadata: {e}"
                 ),
                 extra=get_log_extra("SVC-MIGRATE-007"),
+                exc_info=True,
             )
             return {"status": "not_indexed"}
+
+    @staticmethod
+    def _scip_project_name(scip_dir: Path, db_file: Path) -> str:
+        """Project a SCIP database belongs to: its directory under ``scip/``.
+
+        A database directly in ``scip/`` has no project directory, so it keeps
+        the name derived from its file name.
+        """
+        relative_dir = db_file.parent.relative_to(scip_dir)
+        if relative_dir == Path("."):
+            return db_file.stem.replace(".scip", "")
+        return relative_dir.as_posix()
 
     def _get_scip_status(self, repo_path: Path) -> Dict[str, Any]:
         """Get SCIP index status."""
@@ -1529,8 +1759,9 @@ class ActivatedRepoIndexManager:
         if not scip_dir.exists():
             return {"status": "not_indexed", "project_count": 0}
 
-        # Check for .scip.db files
-        scip_files = list(scip_dir.glob("*.scip.db"))
+        # One database per project, nested under the project's own path
+        # (scip/<project path>/index.scip.db), so the search must recurse.
+        scip_files = list(scip_dir.rglob("*.scip.db"))
 
         if not scip_files:
             return {"status": "not_indexed", "project_count": 0}
@@ -1544,7 +1775,7 @@ class ActivatedRepoIndexManager:
 
             # Count projects and extract names
             project_count = len(scip_files)
-            projects = [f.stem.replace(".scip", "") for f in scip_files]
+            projects = [self._scip_project_name(scip_dir, f) for f in scip_files]
 
             return {
                 "status": "SUCCESS",

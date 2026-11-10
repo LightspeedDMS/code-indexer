@@ -74,26 +74,6 @@ class EmbeddingProviderFactory:
             return f"{base_name}_{model_slug}"
 
     @staticmethod
-    def generate_project_id(codebase_dir: str) -> str:
-        """Generate a project identifier from codebase directory.
-
-        Args:
-            codebase_dir: Path to the codebase directory
-
-        Returns:
-            Short hash-based project identifier for collection naming
-        """
-        import hashlib
-        from pathlib import Path
-
-        # Use absolute path for consistent hashing
-        abs_path = str(Path(codebase_dir).resolve())
-
-        # Generate short hash (8 characters should be sufficient for project isolation)
-        hash_obj = hashlib.sha256(abs_path.encode())
-        return hash_obj.hexdigest()[:8]
-
-    @staticmethod
     def get_provider_model_info(
         config: Config, provider_name: Optional[str] = None
     ) -> Dict[str, Any]:

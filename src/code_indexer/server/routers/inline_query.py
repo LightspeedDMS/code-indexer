@@ -7,6 +7,7 @@ Part of the inline_routes.py modularization effort. Contains 1 route handler:
 Zero behavior change: same path, method, response models, and handler logic.
 """
 
+from code_indexer.server.services.served_index_cache import reads_served_indexes
 import logging
 import sys
 import time
@@ -43,6 +44,7 @@ from code_indexer.server.mcp.reranking import (
     calculate_overfetch_limit as _rest_calculate_overfetch_limit,
     extract_rerank_document as _rest_extract_rerank_document,
 )
+from code_indexer.server.services.activated_index_store import serve_activated_index
 from code_indexer.server.cache.handle_binding import reset_handle_binding
 from code_indexer.server.services.cidx_meta_access import bind_catalog_handles
 from code_indexer.server.services.cidx_meta_access.catalog_fulltext import (
@@ -88,6 +90,14 @@ _REST_DEFAULT_OVERFETCH_MULTIPLIER = 5
 
 # Module-level logger
 logger = logging.getLogger(__name__)
+
+
+class _InvalidFTSQuery(Exception):
+    """``TantivyIndexManager.search()`` rejected the request's input (its
+    ``ValueError``): a bad request, not a server fault. Raised for the search
+    call ONLY, so a ``ValueError`` elsewhere in the FTS block (e.g. pydantic
+    validation while building a result) stays a server error."""
+
 
 # Story #2117: the tool and door every POST /api/query search event carries.
 REST_QUERY_ORIGIN = SearchOrigin(tool="POST /api/query", door="rest")
@@ -244,7 +254,10 @@ def _resolve_temporal_repo_path_rest(
     from pathlib import Path as PathLib
 
     if repository_alias.endswith("-global"):
-        from code_indexer.global_repos.alias_manager import AliasManager
+        from code_indexer.global_repos.alias_manager import (
+            AliasManager,
+            resolve_alias_or_index_path,
+        )
 
         # Story #2117: refusals before the repository resolved carry a
         # rejection code, so they are not recorded as searches.
@@ -263,8 +276,18 @@ def _resolve_temporal_repo_path_rest(
                     "error_code": SERVICE_UNAVAILABLE_CODE,
                 },
             )
+        # Bug #1315: look up repo_entry for index_path fallback
+        repo_entry = None
+        backend_registry = getattr(app.state, "backend_registry", None)
+        if backend_registry:
+            try:
+                repo_entry = backend_registry.global_repos.get_repo(repository_alias)
+            except Exception:
+                pass
         alias_manager = AliasManager(str(PathLib(golden_repos_dir) / "aliases"))
-        resolved_path = alias_manager.read_alias(repository_alias)
+        resolved_path = resolve_alias_or_index_path(
+            alias_manager, alias_name=repository_alias, repo_entry=repo_entry
+        )
         if not resolved_path:
             return None, JSONResponse(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -481,6 +504,7 @@ def register_query_routes(
     """
 
     @app.post("/api/query")
+    @reads_served_indexes
     def semantic_query(
         request: SemanticQueryRequest,
         raw_request: Request,
@@ -781,7 +805,10 @@ def register_query_routes(
                     # Construct path - different for global vs user repos
                     if repo.get("is_global"):
                         # Global repos: use AliasManager to resolve versioned snapshot path
-                        from code_indexer.global_repos.alias_manager import AliasManager
+                        from code_indexer.global_repos.alias_manager import (
+                            AliasManager,
+                            resolve_alias_or_index_path,
+                        )
 
                         golden_repos_dir = getattr(app.state, "golden_repos_dir", None)
                         if not golden_repos_dir:
@@ -789,10 +816,28 @@ def register_query_routes(
                                 f"golden_repos_dir not configured, skipping global repo {repo['user_alias']}"
                             )
                             continue
+                        # Bug #1315: look up repo_entry for index_path fallback
+                        omni_repo_entry = None
+                        omni_backend_registry = getattr(
+                            app.state, "backend_registry", None
+                        )
+                        if omni_backend_registry:
+                            try:
+                                omni_repo_entry = (
+                                    omni_backend_registry.global_repos.get_repo(
+                                        repo["user_alias"]
+                                    )
+                                )
+                            except Exception:
+                                pass
                         alias_manager = AliasManager(
                             str(PathLib(golden_repos_dir) / "aliases")
                         )
-                        resolved_path = alias_manager.read_alias(repo["user_alias"])
+                        resolved_path = resolve_alias_or_index_path(
+                            alias_manager,
+                            alias_name=repo["user_alias"],
+                            repo_entry=omni_repo_entry,
+                        )
                         if not resolved_path:
                             logger.warning(
                                 f"Failed to resolve alias path for {repo['user_alias']}, skipping"
@@ -807,6 +852,13 @@ def register_query_routes(
                             _activations.get_activated_repo_path(
                                 current_user.username, repo["user_alias"]
                             )
+                        )
+                        # Delegated IndexStore: the copy's index on this pod
+                        # first, so its FTS index is judged, not its absence.
+                        serve_activated_index(
+                            activated_repo_manager,
+                            current_user.username,
+                            repo["user_alias"],
                         )
                     if repo_path is None:
                         continue
@@ -942,12 +994,46 @@ def register_query_routes(
                             _fts_status = "success"
                             _fts_matches_count = len(fts_raw_results)
 
+                        except _InvalidFTSQuery as e:
+                            # Client-side input errors from tantivy_manager.search():
+                            # an unbuildable regex (anchors ^ $, word boundaries \b
+                            # and other constructs the term-level DFA engine
+                            # rejects), or an invalid edit_distance / regex+fuzzy
+                            # combination. Bad requests, not server faults -> 400.
+                            # (Added by 451e77c; lost in the v12.78.0 snapshot.)
+                            logger.warning(
+                                format_error_log(
+                                    "APP-GENERAL-033",
+                                    f"FTS search rejected input: {e}",
+                                ),
+                                extra={"correlation_id": get_correlation_id()},
+                            )
+                            if request.search_mode == "fts":
+                                raise HTTPException(
+                                    status_code=status.HTTP_400_BAD_REQUEST,
+                                    detail={
+                                        "error": "Invalid FTS query",
+                                        "message": str(e),
+                                        "suggestion": (
+                                            "FTS regex is term-level and "
+                                            "case-insensitive: anchors (^ $) and "
+                                            "word boundaries (\\b) are not "
+                                            "supported, and patterns cannot match "
+                                            "across whitespace; use lowercase "
+                                            "token patterns."
+                                        ),
+                                    },
+                                )
+                            # For hybrid mode, continue with semantic only
+                            search_mode_actual = "semantic"
+
                         except Exception as e:
                             logger.error(
                                 format_error_log(
                                     "APP-GENERAL-033",
                                     f"FTS search failed: {e}",
                                 ),
+                                extra={"correlation_id": get_correlation_id()},
                                 exc_info=True,
                             )
                             if request.search_mode == "fts":

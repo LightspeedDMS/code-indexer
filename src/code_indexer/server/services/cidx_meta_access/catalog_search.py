@@ -65,6 +65,7 @@ from .visibility import (
     meta_identity,
     unrestricted_caller,
 )
+from code_indexer.utils.index_store import index_root
 
 logger = logging.getLogger(__name__)
 
@@ -434,7 +435,7 @@ def _catalog_fulltext_page(
     if terms is None:
         raise_fulltext_refusal()
     root = Path(repo_path)
-    if not (root / ".code-indexer" / "tantivy_index").exists():
+    if not (index_root(root) / "tantivy_index").exists():
         run(limit, "fts", None, rematch.query)
     rows = catalog_fulltext_rows(
         root, rematch.options, terms, scope.get(), limit, rematch.edit_distance

@@ -2,10 +2,15 @@
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Set, Union
 
-from code_indexer.services.resume_path_anchor import reanchor_resume_path
+from code_indexer.services.chunk_coverage import recorded_coverage_version
+from code_indexer.services.resume_path_anchor import (
+    reanchor_resume_path,
+    reanchor_resume_path_lexically,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +21,9 @@ class IndexState(NamedTuple):
     source: str  # metadata file name, e.g. "metadata-cohere.json"
     status: Optional[str]
     current_commit: Optional[str]
+    #: issue-64616: chunk routing version the stored files were checked
+    #: against (chunk_coverage); 0 for an index older than the check.
+    chunk_coverage_version: int = 0
 
 
 def read_index_states(clone_path: Union[str, Path]) -> List[IndexState]:
@@ -32,6 +40,9 @@ def read_index_states(clone_path: Union[str, Path]) -> List[IndexState]:
             source=path.name,
             status=_read_key_from_file(path, "status"),
             current_commit=_read_key_from_file(path, "current_commit"),
+            chunk_coverage_version=recorded_coverage_version(
+                _load_metadata_object(path) or {}
+            ),
         )
         for path in _metadata_paths(clone_path)
     ]
@@ -43,6 +54,11 @@ class RecordedFailures(NamedTuple):
     known: bool
     failed_files: int
     retryable_paths: int
+    #: Failures a provider COUNTED but recorded no path for (``failed_files``
+    #: above the length of its ``failed_file_paths``), summed over providers.
+    #: No path means no per-file retry can reach them: a full reconcile of
+    #: the repository is owed instead (issue-64616).
+    unattributed: int = 0
 
 
 _UNKNOWN_FAILURES = RecordedFailures(known=False, failed_files=0, retryable_paths=0)
@@ -60,6 +76,8 @@ def read_recorded_failures(clone_path: Union[str, Path]) -> RecordedFailures:
       (the stored strings are absolute and may carry another mount
       prefix), still exist as files inside it -- the only files the next
       run can retry, so the only reason to schedule a retry;
+    - ``unattributed``: per provider, how far its ``failed_files`` counter
+      exceeds its recorded paths -- failures no path-based retry reaches;
     - ``known``: False when a metadata file is unreadable or not an object,
       or one of the two fields is present but malformed (logged); never
       read as "no failure".
@@ -67,6 +85,7 @@ def read_recorded_failures(clone_path: Union[str, Path]) -> RecordedFailures:
     Missing fields count as no failure. Never raises."""
     paths: Set[str] = set()
     largest_count = 0
+    unattributed = 0
     for metadata_path in _metadata_paths(clone_path):
         data = _load_metadata_object(metadata_path)
         if data is None:
@@ -82,20 +101,34 @@ def read_recorded_failures(clone_path: Union[str, Path]) -> RecordedFailures:
                 "metadata_reader: malformed failed-file fields in %s", metadata_path
             )
             return _UNKNOWN_FAILURES
-        paths.update(str(p) for p in recorded)
+        provider_paths = {str(p) for p in recorded}
+        paths.update(provider_paths)
         largest_count = max(largest_count, count)
+        unattributed += max(0, count - len(provider_paths))
     return RecordedFailures(
         known=True,
         failed_files=max(len(paths), largest_count),
         retryable_paths=_count_retryable(paths, Path(clone_path)),
+        unattributed=unattributed,
     )
 
 
 def _count_retryable(stored_paths: Set[str], clone_path: Path) -> int:
     """Recorded paths that exist as files inside *clone_path*, re-anchored
-    exactly as the indexer's own retry re-anchors them."""
+    exactly as the indexer's own retry re-anchors them.
+
+    Under a delegated content backend the repository is not on this pod, so
+    this disk would call every recorded file gone and no retry would ever be
+    scheduled. There the recorded paths that re-anchor inside the repository
+    count: the retry run itself asks the pass manifest which still exist."""
     if not stored_paths:
         return 0
+    from code_indexer.server.startup.content_backend_wiring import (
+        is_content_seam_delegated,
+    )
+
+    if is_content_seam_delegated():
+        return _count_retryable_without_disk(stored_paths, clone_path)
     root = clone_path.resolve()
     retryable = 0
     for stored in stored_paths:
@@ -105,6 +138,17 @@ def _count_retryable(stored_paths: Set[str], clone_path: Path) -> int:
         except OSError:
             continue
         if resolved.is_relative_to(root) and resolved.is_file():
+            retryable += 1
+    return retryable
+
+
+def _count_retryable_without_disk(stored_paths: Set[str], clone_path: Path) -> int:
+    """_count_retryable for a repository not on this pod: lexical only."""
+    root = Path(os.path.normpath(clone_path))
+    retryable = 0
+    for stored in stored_paths:
+        candidate = Path(os.path.normpath(reanchor_resume_path_lexically(stored, root)))
+        if candidate != root and candidate.is_relative_to(root):
             retryable += 1
     return retryable
 

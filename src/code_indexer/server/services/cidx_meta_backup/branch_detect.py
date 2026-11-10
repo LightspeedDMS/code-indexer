@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 from typing import Callable, Optional
 
 from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
-from code_indexer.server.utils.cancellable_subprocess import run_with_cancel
+from code_indexer.utils.git_runner import run_git_command
 
 
 def detect_default_branch(
@@ -21,10 +22,12 @@ def detect_default_branch(
     cancellation is not a detection failure).
     """
     try:
-        result = run_with_cancel(
+        # Through the git seam chokepoint (issue-64678), like every other git
+        # call cidx-meta backup makes; a read, so it runs locally.
+        result = run_git_command(
             ["git", "remote", "show", "origin"],
-            cancel_check,
-            cwd=cidx_meta_path,
+            cwd=Path(cidx_meta_path),
+            cancel_check=cancel_check,
             capture_output=True,
             text=True,
             timeout=timeout,

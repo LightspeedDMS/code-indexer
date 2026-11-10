@@ -41,6 +41,7 @@ from ...storage.shared.snapshot_paths import is_versioned_snapshot
 from ..cidx_meta_backup.paths import get_cidx_meta_path
 from ..constants import CIDX_META_REPO_GLOBAL, is_internal_meta_repo
 from .visibility import names_activation
+from code_indexer.utils.index_store import index_root
 
 logger = logging.getLogger(__name__)
 
@@ -255,7 +256,7 @@ def composite_component_paths(path: str) -> Optional[List[str]]:
     proxy configuration on disk), ``[]`` when it is not one, None when that
     configuration cannot be read or names a component that is not a plain
     directory name (then answered as the catalog)."""
-    config = Path(path) / ".code-indexer" / "config.json"
+    config = index_root(path) / "config.json"
     try:
         with open(config, "rb") as handle:
             raw = handle.read(_MAX_PROXY_CONFIG_BYTES + 1)

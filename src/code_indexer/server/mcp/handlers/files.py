@@ -4,6 +4,7 @@ Domain module for file operation handlers. Part of the handlers package
 modularization (Story #496).
 """
 
+from cidx_sdk.tool_args import coerce_int
 from code_indexer.server.telemetry.correlation_bridge import (
     get_current_correlation_id as get_correlation_id,
 )
@@ -12,6 +13,7 @@ import logging
 from typing import Dict, Any, Optional, Tuple
 from pathlib import Path
 
+from code_indexer.global_repos.write_mode_markers import WriteModeMarkers
 from code_indexer.server.auth.user_manager import User
 from . import _utils
 from code_indexer.server.services.cidx_meta_access.catalog_requests import (
@@ -47,7 +49,6 @@ from code_indexer.server.logging_utils import format_error_log
 from ._utils import (
     CapBreach,
     cap_breach_response,
-    _coerce_int,
     _expand_wildcard_patterns,
     _get_access_filtering_service,
     _get_available_repos,
@@ -99,9 +100,7 @@ def _is_write_mode_active(repo_alias: str, golden_repos_dir: Optional[str]) -> b
     """Return True if a write-mode marker exists for repo_alias."""
     if not golden_repos_dir:
         return False
-    alias = _write_mode_strip_global(repo_alias)
-    marker_file = Path(golden_repos_dir) / ".write_mode" / f"{alias}.json"
-    return marker_file.exists()
+    return WriteModeMarkers(golden_repos_dir).exists(repo_alias)
 
 
 def _start_auto_watch_if_needed(
@@ -166,6 +165,20 @@ def _start_auto_watch_if_needed(
     """
     from code_indexer.server.services.file_crud_service import file_crud_service
     from code_indexer.server.services.auto_watch_manager import auto_watch_manager
+    from code_indexer.server.startup.content_backend_wiring import (
+        is_content_seam_delegated,
+    )
+
+    if is_content_seam_delegated():
+        # Content seam: the repository is not on this pod, so there is no
+        # directory here to probe or watch (AutoWatchManager.start_watch
+        # refuses a delegated backend too). Changes reach a delegated index
+        # through re-index, never through a local inotify watch.
+        logger.debug(
+            f"Skipping auto-watch for {repository_alias}: delegated content backend",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return
 
     try:
         if file_crud_service.is_write_exception(repository_alias):
@@ -233,17 +246,19 @@ def _start_auto_watch_if_needed(
         )
 
 
-def _invalidate_wiki_cache(repository_alias: str, file_path: str) -> None:
-    """Fire-and-forget wiki cache invalidation for file changes (Story #304)."""
+def _announce_file_changed(repository_alias: str, file_path: str) -> None:
+    """Fire-and-forget: tell features *file_path* of the repository changed
+    (``repository_events``; the wiki drops its render cache for markdown,
+    Story #304)."""
     try:
-        from code_indexer.server.wiki.wiki_cache_invalidator import (
-            wiki_cache_invalidator,
+        from code_indexer.server.features.repository_events import (
+            publish_content_changed,
         )
 
-        wiki_cache_invalidator.invalidate_for_file_change(repository_alias, file_path)
+        publish_content_changed(repository_alias, file_path)
     except Exception as e:
         logger.debug(
-            f"Wiki cache invalidation skipped for {file_path}: {e}",
+            f"Repository content event skipped for {file_path}: {e}",
             extra={"correlation_id": get_correlation_id()},
         )
 
@@ -343,10 +358,21 @@ def _resolve_global_repo_target(
             error_envelope.update(extra_error_fields)
         return None, _mcp_response(error_envelope)
 
-    from code_indexer.global_repos.alias_manager import AliasManager
+    from code_indexer.global_repos.alias_manager import (
+        AliasManager,
+        resolve_alias_or_index_path,
+    )
 
+    # Bug #1315 / issue-66336: fall back to the registry row's own index_path when
+    # the alias pointer file is missing/unreadable, mirroring search.py's resolver
+    # (and the other 5 sites) so file-listing and search behave identically for
+    # -global repos. A golden-repo-seeder refresh can transiently empty
+    # golden-repos/aliases/, which previously 404'd list_files/browse_directory
+    # while search/scip (already using this helper) kept resolving.
     alias_manager = AliasManager(str(Path(golden_repos_dir) / "aliases"))
-    target_path = alias_manager.read_alias(repository_alias)
+    target_path = resolve_alias_or_index_path(
+        alias_manager, alias_name=repository_alias, repo_entry=repo_entry
+    )
 
     if not target_path:
         available_repos = _get_available_repos(user)
@@ -420,6 +446,7 @@ def _judge(alias: Any, served_path: Optional[str], user: User) -> CatalogFileAcc
 def _pattern_writer(user: User) -> PatternWriter:
     """The caller of a file write, for the X-Ray pattern rule."""
     return PatternWriter.of(user, _get_access_filtering_service())
+
 
 
 def _golden_dir_or_none() -> Optional[str]:
@@ -513,12 +540,12 @@ def _parse_pagination_params(params: Dict[str, Any]) -> Any:
     offset = (
         0
         if _offset_invalid
-        else (_coerce_int(_offset_raw, 0) if _offset_raw is not None else None)
+        else (coerce_int(_offset_raw, 0) if _offset_raw is not None else None)
     )
     limit = (
         0
         if _limit_invalid
-        else (_coerce_int(_limit_raw, 0) if _limit_raw is not None else None)
+        else (coerce_int(_limit_raw, 0) if _limit_raw is not None else None)
     )
 
     if offset is not None and offset < _MIN_LIMIT:
@@ -846,6 +873,7 @@ def list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             page=_DEFAULT_PAGE,
             limit=_MAX_MCP_FILE_LIMIT,
             path_pattern=final_path_pattern,
+            indexed_only=bool(params.get("indexed_only", False)),
             direct_children_of=direct_children_of,
         )
 
@@ -1048,7 +1076,7 @@ def _recover_file_content_via_global(
 
 def _normalize_browse_params(params: Dict[str, Any]) -> Dict[str, Any]:
     """Extract, validate, and normalize browse_directory parameters."""
-    limit = _coerce_int(params.get("limit"), _MAX_MCP_FILE_LIMIT)
+    limit = coerce_int(params.get("limit"), _MAX_MCP_FILE_LIMIT)
     if limit < _MIN_LIMIT:
         limit = _MIN_LIMIT
     elif limit > _MAX_MCP_FILE_LIMIT:
@@ -1066,6 +1094,7 @@ def _normalize_browse_params(params: Dict[str, Any]) -> Dict[str, Any]:
         "language": params.get("language"),
         "limit": limit,
         "sort_by": sort_by,
+        "indexed_only": bool(params.get("indexed_only", False)),
     }
 
 
@@ -1135,6 +1164,7 @@ def browse_directory(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             path_pattern=final_path_pattern,
             language=bp["language"],
             sort_by=bp["sort_by"],
+            indexed_only=bp["indexed_only"],
             direct_children_of=direct_children_of,
         )
 
@@ -1273,7 +1303,8 @@ def handle_create_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             repository_alias, user, "MCP-GENERAL-041", file_path
         )
 
-        _invalidate_wiki_cache(repository_alias, file_path)
+        _announce_file_changed(repository_alias, file_path)
+        _reindex_after_write(result, repository_alias, user, file_path)
         return _mcp_response(result)
     except Exception as e:
         return _handle_crud_exception(e, "create", "handle_create_file")
@@ -1319,7 +1350,8 @@ def handle_edit_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             repository_alias, user, "MCP-GENERAL-046", file_path
         )
 
-        _invalidate_wiki_cache(repository_alias, file_path)
+        _announce_file_changed(repository_alias, file_path)
+        _reindex_after_write(result, repository_alias, user, file_path)
         return _mcp_response(result)
     except Exception as e:
         return _handle_crud_exception(e, "edit", "handle_edit_file")
@@ -1349,7 +1381,8 @@ def handle_delete_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             repository_alias, user, "MCP-GENERAL-052", file_path
         )
 
-        _invalidate_wiki_cache(repository_alias, file_path)
+        _announce_file_changed(repository_alias, file_path)
+        _reindex_after_write(result, repository_alias, user, file_path)
         return _mcp_response(result)
     except Exception as e:
         return _handle_crud_exception(e, "delete", "handle_delete_file")
@@ -1460,9 +1493,8 @@ def handle_exit_write_mode(params: Dict[str, Any], user: User) -> Dict[str, Any]
         assert alias is not None
 
         golden_repos_dir = Path(_get_golden_repos_dir())
-        marker_file = golden_repos_dir / ".write_mode" / f"{alias}.json"
 
-        if not marker_file.exists():
+        if not WriteModeMarkers(golden_repos_dir).exists(alias):
             logger.warning(
                 f"exit_write_mode: no marker for '{repo_alias}' — not in write mode"
             )
@@ -1491,13 +1523,14 @@ def handle_exit_write_mode(params: Dict[str, Any], user: User) -> Dict[str, Any]
             return _mcp_response(outcome)
         logger.info(f"exit_write_mode: write mode exited for '{repo_alias}'")
 
-        # Story #304 AC9: Best-effort wiki cache invalidation after write mode exit
+        # Story #304 AC9: the refresh may have changed any file; features
+        # (the wiki's render cache) are told, best-effort.
         try:
-            from code_indexer.server.wiki.wiki_cache_invalidator import (
-                wiki_cache_invalidator,
+            from code_indexer.server.features.repository_events import (
+                publish_content_changed,
             )
 
-            wiki_cache_invalidator.invalidate_repo(repo_alias)
+            publish_content_changed(repo_alias, None)
         except Exception as e:
             logger.debug(f"Wiki cache invalidation skipped for exit_write_mode: {e}")
         return _mcp_response(outcome)
@@ -1520,7 +1553,7 @@ def handle_directory_tree(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     if not _admission.allowed:
         return _mcp_response(memory_pressure_mcp_payload(_admission))
 
-    from code_indexer.global_repos.directory_explorer import DirectoryExplorerService
+    from code_indexer.server.services.file_service import directory_explorer_for
 
     repository_alias = args.get("repository_alias")
     if not repository_alias:
@@ -1552,7 +1585,7 @@ def handle_directory_tree(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 )
             )
         args["repository_alias"] = served.alias
-        files_per_dir = _coerce_int(
+        files_per_dir = coerce_int(
             args.get("max_files_per_dir"), _DEFAULT_MAX_FILES_PER_DIR
         )
         view = served_tree_view(
@@ -1568,9 +1601,10 @@ def handle_directory_tree(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         base = args.get("path") or ""
         if view is not None:
             base = catalog_tree_root(view, base)
-        result = DirectoryExplorerService(Path(served.path)).generate_tree(
+        service = directory_explorer_for(served.path, path=base or None)
+        result = service.generate_tree(
             path=base or None,
-            max_depth=_coerce_int(args.get("max_depth"), _DEFAULT_TREE_DEPTH),
+            max_depth=coerce_int(args.get("max_depth"), _DEFAULT_TREE_DEPTH),
             max_files_per_dir=UNSCANNED_LIMIT if visibility else files_per_dir,
             include_patterns=args.get("include_patterns"),
             exclude_patterns=args.get("exclude_patterns"),
@@ -1629,3 +1663,17 @@ def _register(registry: dict) -> None:
     registry["enter_write_mode"] = handle_enter_write_mode
     registry["exit_write_mode"] = handle_exit_write_mode
     registry["directory_tree"] = handle_directory_tree
+
+
+def _reindex_after_write(
+    result: Dict[str, Any], repository_alias: str, user: User, file_path: str
+) -> None:
+    """Under a delegated content backend no watcher sees the write (the copy
+    is not on this pod): enqueue the activated copy's reindex and add the
+    outcome to ``result`` as ``reindex``. A no-op under the local backend,
+    where ``_start_auto_watch_if_needed`` re-indexes."""
+    from code_indexer.server.services.activated_write_reindex import (
+        attach_reindex_outcome,
+    )
+
+    attach_reindex_outcome(result, user.username, repository_alias, [file_path])
