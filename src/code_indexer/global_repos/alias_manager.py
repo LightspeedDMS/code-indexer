@@ -16,7 +16,7 @@ import threading
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, DefaultDict, Dict, Optional, Tuple
+from typing import Any, DefaultDict, Dict, Optional, Set, Tuple
 
 from code_indexer.global_repos.control_plane_metadata import (
     KIND_ALIAS,
@@ -326,6 +326,18 @@ class AliasManager:
             if pointer is not None:
                 pointers[name] = pointer
         return pointers
+
+    def alias_held_paths(self) -> Set[str]:
+        """Every current or previous target path any alias points at,
+        normalized (``os.path.normpath``). Used by CleanupManager to decide
+        which index/snapshot paths are still reachable through an alias and
+        must never be deleted."""
+        held: Set[str] = set()
+        for target_path, previous_path in self.list_pointers().values():
+            held.add(os.path.normpath(target_path))
+            if previous_path:
+                held.add(os.path.normpath(previous_path))
+        return held
 
     def create_alias(
         self,
